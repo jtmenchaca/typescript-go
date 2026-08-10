@@ -36,3 +36,19 @@ const watInline = () => /* inline explanatory comment */ thing?.nested?.conditio
 >"pass" : "pass"
 >"fail" : "fail"
 
+declare const o: { a?: number[] };
+>o : { a?: number[]; }
+>a : number[] | undefined
+
+export const f = () =>
+>f : () => number | undefined
+>() =>    // comment    o.a?.length : () => number | undefined
+
+    // comment
+    o.a?.length;
+>o.a?.length : number | undefined
+>o.a : number[] | undefined
+>o : { a?: number[]; }
+>a : number[] | undefined
+>length : number | undefined
+
