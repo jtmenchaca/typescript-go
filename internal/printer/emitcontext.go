@@ -9,6 +9,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/collections"
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
 // Stores side-table information used during transformation that can be read by the printer to customize emit
@@ -907,6 +908,15 @@ func (c *EmitContext) VisitFunctionBody(node *ast.BlockOrExpression, visitor *as
 	if !ast.IsBlock(updated) {
 		returnStatement := c.Factory.NewReturnStatement(updated)
 		returnStatement.Loc = updated.Loc
+		parseNode := c.ParseNode(updated)
+		sourceFile := ast.GetSourceFileOfNode(parseNode)
+		if sourceFile != nil {
+			tokenPos := scanner.GetTokenPosOfNode(parseNode, sourceFile, false /*includeJSDoc*/)
+			if tokenPos > parseNode.Pos() &&
+				scanner.GetECMALineOfPosition(sourceFile, parseNode.Pos()) == scanner.GetECMALineOfPosition(sourceFile, tokenPos) {
+				c.AddEmitFlags(returnStatement, EFNoLeadingComments)
+			}
+		}
 		c.AddEmitFlags(updated, EFNoComments)
 		statements := c.MergeEnvironment([]*ast.Statement{returnStatement}, declarations)
 		return c.Factory.NewBlock(c.Factory.NewNodeList(statements), false /*multiLine*/)
