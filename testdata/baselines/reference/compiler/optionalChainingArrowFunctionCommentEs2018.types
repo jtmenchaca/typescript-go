@@ -24,3 +24,15 @@ const wat = () =>
 >"pass" : "pass"
 >"fail" : "fail"
 
+const watInline = () => /* inline explanatory comment */ thing?.nested?.condition ? "pass" : "fail";
+>watInline : () => "fail" | "pass"
+>() => /* inline explanatory comment */ thing?.nested?.condition ? "pass" : "fail" : () => "fail" | "pass"
+>thing?.nested?.condition ? "pass" : "fail" : "fail" | "pass"
+>thing?.nested?.condition : boolean
+>thing?.nested : { condition: boolean; }
+>thing : { nested: { condition: boolean; }; }
+>nested : { condition: boolean; }
+>condition : boolean
+>"pass" : "pass"
+>"fail" : "fail"
+

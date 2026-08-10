@@ -7,10 +7,18 @@ const thing = { nested: { condition: true } };
 >condition : Symbol(condition, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 25))
 
 const wat = () =>
->wat : Symbol(wat, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 1, 5))
+>wat : Symbol(wat, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 2, 5))
 
     // explanatory comment
     thing?.nested?.condition ? "pass" : "fail";
+>thing?.nested?.condition : Symbol(condition, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 25))
+>thing?.nested : Symbol(nested, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 15))
+>thing : Symbol(thing, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 5))
+>nested : Symbol(nested, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 15))
+>condition : Symbol(condition, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 25))
+
+const watInline = () => /* inline explanatory comment */ thing?.nested?.condition ? "pass" : "fail";
+>watInline : Symbol(watInline, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 6, 5))
 >thing?.nested?.condition : Symbol(condition, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 25))
 >thing?.nested : Symbol(nested, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 15))
 >thing : Symbol(thing, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 5))
