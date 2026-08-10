@@ -911,10 +911,9 @@ func (c *EmitContext) VisitFunctionBody(node *ast.BlockOrExpression, visitor *as
 		parseNode := c.ParseNode(updated)
 		sourceFile := ast.GetSourceFileOfNode(parseNode)
 		if sourceFile != nil {
-			tokenPos := scanner.GetTokenPosOfNode(parseNode, sourceFile, false /*includeJSDoc*/)
-			if tokenPos > parseNode.Pos() &&
-				scanner.GetECMALineOfPosition(sourceFile, parseNode.Pos()) == scanner.GetECMALineOfPosition(sourceFile, tokenPos) {
+			for range scanner.GetTrailingCommentRanges(c.Factory.AsNodeFactory(), sourceFile.Text(), parseNode.Pos()) {
 				c.AddEmitFlags(returnStatement, EFNoLeadingComments)
+				break
 			}
 		}
 		c.AddEmitFlags(updated, EFNoComments)

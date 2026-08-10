@@ -36,6 +36,20 @@ const watInline = () => /* inline explanatory comment */ thing?.nested?.conditio
 >"pass" : "pass"
 >"fail" : "fail"
 
+const watInlineMultiline = () => /* inline
+>watInlineMultiline : () => "fail" | "pass"
+>() => /* inlineexplanatory comment */ thing?.nested?.condition ? "pass" : "fail" : () => "fail" | "pass"
+
+explanatory comment */ thing?.nested?.condition ? "pass" : "fail";
+>thing?.nested?.condition ? "pass" : "fail" : "fail" | "pass"
+>thing?.nested?.condition : boolean
+>thing?.nested : { condition: boolean; }
+>thing : { nested: { condition: boolean; }; }
+>nested : { condition: boolean; }
+>condition : boolean
+>"pass" : "pass"
+>"fail" : "fail"
+
 declare const o: { a?: number[] };
 >o : { a?: number[]; }
 >a : number[] | undefined

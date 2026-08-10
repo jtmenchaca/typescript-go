@@ -25,18 +25,28 @@ const watInline = () => /* inline explanatory comment */ thing?.nested?.conditio
 >nested : Symbol(nested, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 15))
 >condition : Symbol(condition, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 25))
 
+const watInlineMultiline = () => /* inline
+>watInlineMultiline : Symbol(watInlineMultiline, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 8, 5))
+
+explanatory comment */ thing?.nested?.condition ? "pass" : "fail";
+>thing?.nested?.condition : Symbol(condition, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 25))
+>thing?.nested : Symbol(nested, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 15))
+>thing : Symbol(thing, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 5))
+>nested : Symbol(nested, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 15))
+>condition : Symbol(condition, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 0, 25))
+
 declare const o: { a?: number[] };
->o : Symbol(o, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 8, 13))
->a : Symbol(a, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 8, 18))
+>o : Symbol(o, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 11, 13))
+>a : Symbol(a, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 11, 18))
 
 export const f = () =>
->f : Symbol(f, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 10, 12))
+>f : Symbol(f, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 13, 12))
 
     // comment
     o.a?.length;
 >o.a?.length : Symbol(Array.length, Decl(lib.es5.d.ts, --, --))
->o.a : Symbol(a, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 8, 18))
->o : Symbol(o, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 8, 13))
->a : Symbol(a, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 8, 18))
+>o.a : Symbol(a, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 11, 18))
+>o : Symbol(o, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 11, 13))
+>a : Symbol(a, Decl(optionalChainingArrowFunctionCommentEs2018.ts, 11, 18))
 >length : Symbol(Array.length, Decl(lib.es5.d.ts, --, --))
 

@@ -8,6 +8,9 @@ const wat = () =>
 
 const watInline = () => /* inline explanatory comment */ thing?.nested?.condition ? "pass" : "fail";
 
+const watInlineMultiline = () => /* inline
+explanatory comment */ thing?.nested?.condition ? "pass" : "fail";
+
 declare const o: { a?: number[] };
 
 export const f = () =>
