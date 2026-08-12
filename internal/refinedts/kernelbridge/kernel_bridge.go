@@ -20,8 +20,41 @@ import "os"
 // DylibPath is the native kernel's default location, relative to this
 // package — the same path instantiate_kernel_test.go already uses.
 // Exported so callers outside this package (and this package's own
-// tests) share one spelling of where the kernel lives.
+// tests) share one spelling of where the kernel lives. Correct only
+// when the process's cwd IS this package's directory, which `go test`
+// arranges for every package that imports it (they all happen to sit
+// at the same tree depth, internal/refinedts/<pkg>) — never true for a
+// built binary run from an arbitrary cwd. Binaries must resolve
+// through ResolveDylibPath instead.
 const DylibPath = "../../../../refined-ts-lean/native/build/librefinedts_kernel.dylib"
+
+// explicitDylibPath is the caller-stated dylib location — a plain
+// setter, never an environment variable (the standing rule: behavior
+// is configured by arguments, not ambient process state). Binaries
+// pass it from a -kernel flag or derive it from their own layout.
+var explicitDylibPath string
+
+// SetDylibPath states where the native kernel dylib lives, for a
+// process whose cwd does not sit at this package.
+func SetDylibPath(path string) {
+	explicitDylibPath = path
+}
+
+// ResolveDylibPath is the binary-safe way to find the native kernel:
+// the caller-stated path when set (SetDylibPath), else DylibPath's
+// relative spelling for a process whose cwd already sits at this
+// package (the `go test` case), else "", meaning the caller falls
+// back to running with no kernel (every kernel question then
+// declines, exactly as though the dylib were genuinely absent).
+func ResolveDylibPath() string {
+	if explicitDylibPath != "" {
+		return explicitDylibPath
+	}
+	if KernelArtifactsPresent(DylibPath) {
+		return DylibPath
+	}
+	return ""
+}
 
 // KernelArtifactsPresent is kernelArtifactsPresent in the TS source,
 // narrowed to the native-only substrate: true when the dylib at path

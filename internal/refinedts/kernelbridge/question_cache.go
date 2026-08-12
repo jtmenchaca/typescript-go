@@ -262,8 +262,12 @@ func storeSalt() string {
 }
 
 func storePath() string {
-	home := os.Getenv("HOME")
-	if home == "" {
+	// os.UserHomeDir, not a direct env read — the platform's own API
+	// for the home directory (the TS twin reads process.env.HOME; the
+	// standing no-env-variables rule is about behavior knobs, and the
+	// sanctioned platform call is the closest Go spelling)
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
 		home = "/tmp"
 	}
 	return filepath.Join(home, ".cache", "refinedts", "questions-go-v1.json")

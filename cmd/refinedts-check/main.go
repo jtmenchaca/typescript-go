@@ -13,31 +13,39 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/microsoft/typescript-go/internal/locale"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/service"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
 func main() {
-	var files []string
-	for _, arg := range os.Args[1:] {
-		if len(arg) > 0 && arg[0] == '-' {
-			continue
-		}
-		files = append(files, arg)
-	}
+	surfaceFlag := flag.String("surface", "",
+		"path to refined-ts-typescript/surface/z.ts (default: derived from this binary's location)")
+	kernelFlag := flag.String("kernel", "",
+		"path to librefinedts_kernel.dylib (default: derived from this binary's location)")
+	flag.Parse()
+	files := flag.Args()
 	if len(files) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: refinedts-check <file.ts> [...]")
+		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] <file.ts> [...]")
 		os.Exit(2)
 	}
 
-	surfacePath, err := surfaceZPath()
+	surfacePath, err := surfaceZPath(*surfaceFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if *kernelFlag != "" {
+		kernelbridge.SetDylibPath(*kernelFlag)
+	} else if derived, ok := repoRelative(
+		"refined-ts-lean/native/build/librefinedts_kernel.dylib"); ok {
+		kernelbridge.SetDylibPath(derived)
 	}
 
 	fired := false
@@ -131,20 +139,48 @@ func lineOf(lineStarts []int, pos int) int {
 	return lo + 1
 }
 
+// repoRelative resolves a path relative to packages/refinedts/, first
+// against this binary's own location (os.Executable — the Go stand-in
+// for import.meta.url; the built binary sits inside refined-ts-go),
+// then against the working directory's ancestry. ok=false when
+// neither holds the file. No environment variables — behavior is
+// configured by arguments and the binary's own position, never by
+// ambient process state (the standing rule).
+func repoRelative(underRefinedts string) (string, bool) {
+	var roots []string
+	if exe, err := os.Executable(); err == nil {
+		// <repo>/packages/refinedts/refined-ts-go/<binary>
+		roots = append(roots, filepath.Join(filepath.Dir(exe), ".."))
+		// <repo>/packages/refinedts/refined-ts-go/cmd/refinedts-check/<binary>
+		roots = append(roots, filepath.Join(filepath.Dir(exe), "..", "..", ".."))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		for dir := cwd; ; dir = filepath.Dir(dir) {
+			roots = append(roots, filepath.Join(dir, "packages", "refinedts"))
+			if dir == filepath.Dir(dir) {
+				break
+			}
+		}
+	}
+	for _, root := range roots {
+		candidate := filepath.Join(root, underRefinedts)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
 // surfaceZPath is the real on-disk path to refined-ts-typescript's
 // surface/z.ts — ProgramFromDisk's recognition anchor, mirroring the
 // TS source's `new URL("../surface/z.ts", import.meta.url).pathname`.
-// Go has no import.meta.url; the path is derived from this binary's
-// known position in the repo tree (cmd/refinedts-check, two levels
-// under refined-ts-go) via an environment override for portability,
-// falling back to the repo-relative path used throughout this port.
-func surfaceZPath() (string, error) {
-	if override := os.Getenv("REFINEDTS_SURFACE_PATH"); override != "" {
-		return override, nil
+// Stated by -surface, else derived from the binary's own location.
+func surfaceZPath(flagValue string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
 	}
-	const relative = "../../../refined-ts-typescript/surface/z.ts"
-	if _, err := os.Stat(relative); err == nil {
-		return relative, nil
+	if derived, ok := repoRelative("refined-ts-typescript/surface/z.ts"); ok {
+		return derived, nil
 	}
-	return "", fmt.Errorf("cannot locate refined-ts-typescript/surface/z.ts — set REFINEDTS_SURFACE_PATH")
+	return "", fmt.Errorf("cannot locate refined-ts-typescript/surface/z.ts — pass -surface")
 }
