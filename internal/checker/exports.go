@@ -357,3 +357,27 @@ func (c *Checker) GetWidenedType(t *Type) *Type {
 func (c *Checker) CompareSymbols(s1, s2 *ast.Symbol) int {
 	return c.compareSymbols(s1, s2)
 }
+
+// GetConstraintOfType wraps getConstraintOfType: the constraint of a
+// type parameter, indexed access, or conditional type, falling back to
+// the type's base constraint -- the general form behind
+// ts.Type.prototype.getConstraint().
+func (c *Checker) GetConstraintOfType(t *Type) *Type {
+	return c.getConstraintOfType(t)
+}
+
+// SymbolInDefaultLib reports whether a symbol declares in the
+// checker's default library (the global Number, Math, ...). Symbols,
+// never names -- a local `const Math = ...` is not the library, and
+// neither is a user-written declaration file.
+func (c *Checker) SymbolInDefaultLib(symbol *ast.Symbol) bool {
+	if symbol == nil {
+		return false
+	}
+	for _, d := range symbol.Declarations {
+		if c.program.IsSourceFileDefaultLibrary(ast.GetSourceFileOfNode(d).Path()) {
+			return true
+		}
+	}
+	return false
+}

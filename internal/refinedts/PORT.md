@@ -60,13 +60,38 @@ of the TS tree's own import graph).
 - `string | null` and friends → the zero value with a comment when
   the zero value is unambiguous (a typeof word is never ""); the
   `(T, bool)` pair otherwise. Never a *string.
-- The TS tree's `FlowContext` / `CheckerProgram` / CheckerHost
-  adapter layer is NOT ported: where TS reads `ctx.p.host`, the Go
-  code types directly against `*checker.Checker`. The whole point of
-  the port is that the host IS the checker, in-process. When a
-  ported module needs program-level context beyond the checker, that
-  is a design note for the report, not a reason to rebuild the
-  adapter.
+- The CheckerHost/oracle ADAPTER dies in the port: where TS reads
+  `ctx.p.host` for type/symbol answers, Go code calls
+  `*checker.Checker` directly. The whole point of the port is that
+  the host IS the checker, in-process. But `FlowContext` itself DOES
+  port (as `evaluation`'s context struct): it is the walk's context —
+  the kernel handle, the diagnostic report sink, declared statements,
+  program facts — not just a host wrapper. Its host FIELD is replaced
+  by `*checker.Checker`; the rest carries over 1:1. Until evaluation/
+  lands, a module needing FlowContext is blocked (report it), never
+  stubbed.
+- The port-order table is a guide, not the truth: comparison/ imports
+  FlowContext from evaluation/ (a forward dependency the TS layering
+  tolerates because it is type-only there). When your directory's
+  imports contradict the order, trust the imports and report it.
+- A type from a LATER directory that this directory only compares by
+  identity (never reads fields of) → an opaque comparable stand-in
+  (`type FooRef = *struct{}` or an interface{}) with a comment naming
+  the real type and where it lives — never a copied shape, never an
+  import that inverts the dependency order. (Precedent:
+  abstractdomain's ObjectAnnotationRef.) Functions that DO read the
+  foreign shape stay unported and go in the report.
+- A TS branch that is unreachable by the code's own invariant (e.g.
+  reading undefined off an empty array where the constructor already
+  collapsed that case) → the "not determined" answer plus a comment;
+  do not build Go machinery to imitate undefined.
+- `encoding/json.Marshal` SORTS `map[string]any` keys alphabetically —
+  it cannot reproduce a TS `JSON.stringify(objectLiteral)` field
+  order. A wire string that must match the TS bytes exactly is built
+  by hand as an ordered string (see kernelbridge/wire_format.go); the
+  map form is only for order-insensitive uses. Also: JS stringifies
+  ±Infinity/NaN as `null`; encoding/json panics — mirror the JS
+  (kernel_asks.go's jsonNumberString).
 - Do NOT add improvements, generalizations, or helpers. 1:1.
 - A TS filename ending in a Go GOOS/GOARCH suffix (`_windows`,
   `_linux`, `_darwin`, `_386`, `_amd64`, `_arm64`, …, or one of those
@@ -82,6 +107,18 @@ of the TS tree's own import graph).
   matched TS behavior by hand (an explicit post-match character check,
   a second pass, …) and say so in the report rather than silently
   dropping the constraint.
+
+## Cross-cutting seams already in the Go tree
+
+- `internal/refinedts/tracing` — the tracing seam (service/tracing.ts
+  + trace_state.ts, ported). Where TS imports span/count/recording
+  from `../service/tracing.ts`, import this package and call
+  `tracing.Span(name, func() T { … }, tracing.GrainStep)`,
+  `tracing.Count`, `tracing.CountBy`, `tracing.Recording`,
+  `tracing.Clock`. No `// tracing:` stubs — use the real seam.
+- `internal/refinedts/kernelbridge` — `NativeKernel` (cgo dylib
+  loader) with `Call1(symbol, input)` / `Call2(symbol, a, b)`; the
+  higher asks layer is being ported on top of it.
 
 ## The tsgo API surface (what the checker layer uses)
 
@@ -114,6 +151,26 @@ Package `internal/ast`:
   `ast.IsBinaryExpression(node)`, `ast.IsIdentifier(node)`, etc.
 - Downcasts mirror them: `node.AsBinaryExpression()`, and fields are
   Go-exported: `.OperatorToken.Kind`, `.Left`, `.Right`.
+- The SAME pattern covers every TypeNode variant: `LiteralTypeNode`,
+  `ArrayTypeNode`, `TypeOperatorNode`, `TypeReferenceNode`,
+  `UnionTypeNode`, `TypeLiteralNode`, `ParenthesizedTypeNode`,
+  `PropertySignatureDeclaration`, `EnumDeclaration`/`EnumMember`,
+  `TypeAliasDeclaration`, `InterfaceDeclaration` — struct shapes,
+  `As*()` downcasts, and `Is*()` predicates all in ast_generated.go.
+- Numeric-literal TEXT (an enum initializer's `.text`, a literal type
+  node's digits) parses with `internal/jsnum.FromString` — the
+  checker's own ECMA StringToNumber — never `strconv.ParseFloat`,
+  which diverges on hex/exponent forms.
+
+## Building a program in a test
+
+The canonical recipe is `internal/checker/checker_test.go`:
+`compiler.NewProgram` over a `vfstest.FromMap` filesystem, then
+`program.GetTypeChecker(ctx)`. `typereading/read_type_test.go` in
+this tree is a live example sized to our needs — copy its helper
+rather than reinventing it. (The TS tests' `programFromSource` with
+the surface/zod virtual files is service-tier; port tests against
+plain TS sources until service/ lands.)
 - Kinds: `ast.KindPlusToken`, `ast.KindBinaryExpression`, … —
   NOTE: tsgo SyntaxKind NUMBERING differs from tsc's; never port a
   numeric kind literal, always the named constant.
