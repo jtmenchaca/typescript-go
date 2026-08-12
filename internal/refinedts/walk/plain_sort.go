@@ -65,12 +65,22 @@ func mustJSON(v any) string {
 // already say.
 func AddsNothingSet(set refinementsets.RefinedSet) bool {
 	for _, form := range set.Forms {
-		isAtLeastNegInf := form.Form == refinementsets.FormAtLeast && math.IsInf(form.A, -1)
-		matchesStringGround := mustJSON(form) == stringGroundFormJSON
-		isStarOfGround := form.Form == refinementsets.FormStar && AddsNothingSet(*form.A_)
-		if !(isAtLeastNegInf || matchesStringGround || isStarOfGround) {
-			return false
+		// LAZY, matching the TS `||`: an atLeast(-Infinity) form never
+		// reaches mustJSON below — encoding/json panics on ±Inf/NaN
+		// (unlike JS's JSON.stringify, which prints `null`; PORT.md's
+		// convention), so evaluating every branch eagerly (as this
+		// file did before) crashed on exactly the form this first
+		// branch exists to short-circuit past.
+		if form.Form == refinementsets.FormAtLeast && math.IsInf(form.A, -1) {
+			continue
 		}
+		if mustJSON(form) == stringGroundFormJSON {
+			continue
+		}
+		if form.Form == refinementsets.FormStar && AddsNothingSet(*form.A_) {
+			continue
+		}
+		return false
 	}
 	return true
 }
