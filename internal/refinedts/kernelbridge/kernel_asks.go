@@ -48,8 +48,8 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 	ask1, ask2 := input.Ask1, input.Ask2
 
 	member := func(set refinementsets.RefinedSet, tuple []float64) bool {
-		key, _ := CanonicalPairOfSetAndTuple(set, tuple)
-		raw, err := ask2("member", "kernel_member", EncodeSet(set), EncodeTuple(tuple), key)
+		key, hasKey := CanonicalPairOfSetAndTuple(set, tuple)
+		raw, err := ask2WithOptionalKey(ask2, "member", "kernel_member", EncodeSet(set), EncodeTuple(tuple), key, hasKey)
 		if err != nil {
 			panic(err.Error())
 		}

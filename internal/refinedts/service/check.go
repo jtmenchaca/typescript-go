@@ -156,9 +156,11 @@ func run(p *program.CheckerProgram) CheckResult {
 	}
 	kernel := kernelbridge.KernelIfLoaded()
 	if kernel == nil {
-		loaded, err := kernelbridge.LoadKernel(kernelbridge.DylibPath)
-		if err == nil {
-			kernel = loaded
+		if dylibPath := kernelbridge.ResolveDylibPath(); dylibPath != "" {
+			loaded, err := kernelbridge.LoadKernel(dylibPath)
+			if err == nil {
+				kernel = loaded
+			}
 		}
 	}
 	// the operator transfers and the condition narrowings pose their
