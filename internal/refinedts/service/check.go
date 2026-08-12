@@ -11,18 +11,16 @@
 // Ported to a single-process, single-run shape only:
 //
 //   - checkFilesParallel/batch_worker.ts (worker-isolate batching) is
-//     SKIPPED — Go has no JS-isolate analog here and the task scopes
-//     this port to single-process.
-//   - programFacts' INCREMENTAL CACHE (annotations/incremental_file_cache.ts,
-//     the SourceFile-keyed WeakMap + interface-hash invalidation) is
-//     NOT ported: it is its own genuinely blocked port task per that
-//     file's header (needs a coordinator to wire CompileFileFacts
-//     through the cache) and out of this unit's scope. Run below
-//     COMPILES every reachable file's facts fresh on every check —
-//     the same merge order and the same reporting-only-for-the-entry
-//     rule as the TS source's programFacts, just without the
-//     cross-check memoization. Functionally faithful for one check;
-//     slower across repeated checks of an unchanged tree.
+//     SKIPPED — Go's answer to parallel checking is tsgo's own
+//     checker pool, which CheckFiles' one bulk GetSemanticDiagnostics
+//     call already rides; the walk's own parallelization is
+//     parallel-sweep-audit.md's queue (walk-scoped package state must
+//     move into context first).
+//   - programFacts' INCREMENTAL CACHE (annotations/incremental_file_cache.ts)
+//     ports as programFactsCached's caller-held store: CheckFiles
+//     holds one map for a whole sweep, so each file's facts compile
+//     once per sweep; a single CheckFile passes nil and compiles
+//     fresh, functionally identical either way.
 //   - the tsgo-oracle span/tracing wiring (flushSpanLedger,
 //     span/spanAsync's tsgo-specific ledger) has no Go twin — this
 //     tree's checker is always in-process (PORT.md's adapter rule);
@@ -35,7 +33,12 @@
 package service
 
 import (
+	"context"
+	"fmt"
+	"path/filepath"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
@@ -85,6 +88,108 @@ func CheckFile(entryFilePath string, surfacePath string) (CheckResult, error) {
 	return run(p), nil
 }
 
+// CheckFiles is checkFiles in the TS source: batch mode — many
+// entries over ONE program per covering tsconfig, so program
+// construction is paid once per project and each entry still gets
+// exactly its own diagnostics. Two things ride tsgo's own machinery
+// rather than the per-entry path:
+//
+//   - shape diagnostics for the WHOLE group come from one
+//     GetSemanticDiagnostics(ctx, nil) call — the same grouped
+//     checker-pool parallel path the tsgo CLI's own --noEmit check
+//     takes — bucketed per file afterward;
+//   - the refinement walk holds ONE checker lease across every entry
+//     (types from different checkers must never mix — the pool's own
+//     rule), with per-file facts compiled once per sweep through
+//     programFactsCached's shared store.
+//
+// The result map is keyed by the caller's own entryPaths spellings; a
+// path whose file did not parse into its group's program has no row.
+func CheckFiles(entryPaths []string, surfacePath string) map[string]CheckResult {
+	results := make(map[string]CheckResult, len(entryPaths))
+	if len(entryPaths) == 0 {
+		return results
+	}
+	// one program PER PROJECT: entries grouped by their covering
+	// tsconfig — one program with the first entry's options resolving
+	// every other package's imports lands on built node_modules types
+	// and loses the imported function bodies (the TS source measured
+	// the vanished refutations on nest).
+	type entryRow struct {
+		given    string // the caller's spelling — the result key
+		resolved string // absolute — the program's file name
+	}
+	groups := map[string][]entryRow{}
+	var groupOrder []string
+	for _, given := range entryPaths {
+		resolved, err := filepath.Abs(given)
+		if err != nil {
+			resolved = given
+		}
+		key := CoveringProjectCached(resolved).ConfigPath
+		if _, seen := groups[key]; !seen {
+			groupOrder = append(groupOrder, key)
+		}
+		groups[key] = append(groups[key], entryRow{given: given, resolved: resolved})
+	}
+	for _, key := range groupOrder {
+		group := groups[key]
+		resolved := make([]string, len(group))
+		for i, row := range group {
+			resolved[i] = row.resolved
+		}
+		p := ProgramFromDiskMany(resolved)
+		shapeByFile := map[*ast.SourceFile][]*ast.Diagnostic{}
+		if shapeDiagnosticsIncluded {
+			for _, d := range p.GetSemanticDiagnostics(context.Background(), nil) {
+				if d.File() != nil {
+					shapeByFile[d.File()] = append(shapeByFile[d.File()], d)
+				}
+			}
+		}
+		kernel := setupKernel()
+		factsStore := &sweepFactsStore{held: map[*ast.SourceFile]*walk.FileFacts{}}
+		// one goroutine per entry, each walking on the checker the
+		// POOL assigned to its file (the same checker that just
+		// shape-checked it — warm caches), held exclusively for the
+		// walk's duration. Types from different checkers never mix
+		// within one walk; parallel width is the pool's checker count
+		// (BuiltProgram sizes it to the machine).
+		var wg sync.WaitGroup
+		var resultsMu sync.Mutex
+		for _, row := range group {
+			entry := p.GetSourceFile(row.resolved)
+			if entry == nil {
+				continue
+			}
+			entryFile := entry.AsSourceFile()
+			wg.Add(1)
+			go func(given string, entryFile *ast.SourceFile) {
+				defer wg.Done()
+				c, release := p.GetTypeCheckerForFileExclusive(context.Background(), entryFile)
+				defer release()
+				view := &program.CheckerProgram{
+					Program:      p,
+					Checker:      c,
+					Entry:        entryFile,
+					SurfacePaths: map[string]bool{surfacePath: true},
+					// the lease is released by this goroutine's defer;
+					// the view never owns it
+					Done: nil,
+				}
+				result := tracing.TraceFile(given, func() CheckResult {
+					return runRefinements(view, shapeByFile[entryFile], kernel, factsStore)
+				})
+				resultsMu.Lock()
+				results[given] = result
+				resultsMu.Unlock()
+			}(row.given, entryFile)
+		}
+		wg.Wait()
+	}
+	return results
+}
+
 // shapeDiagnosticsIncluded is the TS source's shapeDiagnosticsIncluded
 // mutable flag: whether run asks for the entry's own semantic
 // diagnostics. On by default.
@@ -95,10 +200,9 @@ func SetShapeDiagnostics(included bool) {
 	shapeDiagnosticsIncluded = included
 }
 
-// programFacts is programFacts in the TS source, WITHOUT the
-// incremental cache (see file header): every reachable file's facts
-// compile fresh, merged in reachableFiles' import order, with
-// reporting (emptiness diagnostics) only for the entry.
+// programFactsCached is programFacts in the TS source: every
+// reachable file's facts, merged in reachableFiles' import order,
+// with reporting (emptiness diagnostics) only for the entry.
 type programFactsResult struct {
 	registry         annotations.AnnotationRegistry
 	objects          annotations.ObjectRegistry
@@ -106,7 +210,17 @@ type programFactsResult struct {
 	entryDiagnostics []assignability.RefinementDiagnostic
 }
 
-func programFacts(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKernel) programFactsResult {
+// The `cache` parameter is incremental_file_cache.ts's factsCache
+// made caller-held: the sweep's lifetime stands in for the WeakMap's
+// GC lifetime (the caller drops the map when the sweep ends), and nil
+// is the uncached single-check regime. The TS validity rule carries
+// over whole: a hit must hold diagnostics when the file IS the entry,
+// and every imported interface must still MEAN the same thing; an
+// entry recompile serves diagnostics, not a new interface — the cache
+// keeps the first compile's facts and hash, the fresh diagnostics
+// ride along (the anti-cascade rule the TS source traced to its
+// root).
+func programFactsCached(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKernel, cache *sweepFactsStore) programFactsResult {
 	merged := walk.FileFactsMerged{
 		Registry:  annotations.AnnotationRegistry{},
 		Objects:   annotations.ObjectRegistry{},
@@ -118,6 +232,35 @@ func programFacts(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKerne
 	files := annotations.ReachableFiles(p)
 	for _, file := range files {
 		reporting := file == p.Entry
+		var held *walk.FileFacts
+		if cache != nil {
+			held = cache.get(file)
+		}
+		valid := held != nil && (!reporting || held.HasDiagnostics)
+		if valid {
+			for name, hash := range held.ImportHashes {
+				if currentHash[name] != hash {
+					valid = false
+					break
+				}
+			}
+		}
+		if valid {
+			for symbol, a := range held.Annotations {
+				merged.Registry[symbol] = a
+			}
+			for symbol, o := range held.Objects {
+				merged.Objects[symbol] = o
+			}
+			for symbol, c := range held.Contracts {
+				merged.Contracts[symbol] = c
+			}
+			currentHash[file.FileName()] = held.InterfaceHash
+			if reporting {
+				entryDiagnostics = held.Diagnostics
+			}
+			continue
+		}
 		importHashes := map[string]string{}
 		for _, imported := range annotations.ImportedUserFiles(p, file) {
 			if hash, ok := currentHash[imported.FileName()]; ok {
@@ -134,7 +277,26 @@ func programFacts(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKerne
 		for symbol, c := range facts.Contracts {
 			merged.Contracts[symbol] = c
 		}
-		currentHash[file.FileName()] = facts.InterfaceHash
+		if cache != nil {
+			// the TS miss-classification precedence: an already-cached
+			// file recompiled AS the entry keeps its first hash and
+			// facts (even over a hash mismatch — TS classifies
+			// entryDiagnostics before hashMismatch); everything else
+			// caches the fresh compile whole
+			if held != nil && reporting && !held.HasDiagnostics {
+				updated := *held
+				updated.Diagnostics = facts.Diagnostics
+				updated.HasDiagnostics = facts.HasDiagnostics
+				cache.put(file, &updated)
+				currentHash[file.FileName()] = held.InterfaceHash
+			} else {
+				fresh := facts
+				cache.put(file, &fresh)
+				currentHash[file.FileName()] = facts.InterfaceHash
+			}
+		} else {
+			currentHash[file.FileName()] = facts.InterfaceHash
+		}
 		if reporting {
 			entryDiagnostics = facts.Diagnostics
 		}
@@ -154,6 +316,13 @@ func run(p *program.CheckerProgram) CheckResult {
 	if shapeDiagnosticsIncluded {
 		shape = ShapeDiagnostics(p)
 	}
+	return runRefinements(p, shape, setupKernel(), nil)
+}
+
+// loadedKernel is run's kernel-acquisition step, shared with the batch
+// runner: the already-loaded kernel, or one loaded from the resolved
+// dylib path, or nil.
+func loadedKernel() *kernelbridge.RefinedTSKernel {
 	kernel := kernelbridge.KernelIfLoaded()
 	if kernel == nil {
 		if dylibPath := kernelbridge.ResolveDylibPath(); dylibPath != "" {
@@ -163,10 +332,55 @@ func run(p *program.CheckerProgram) CheckResult {
 			}
 		}
 	}
-	// the operator transfers and the condition narrowings pose their
-	// questions through this kernel
+	return kernel
+}
+
+// setupKernel loads the kernel and points the operator transfers and
+// the condition narrowings at it. The two hooks are package-level
+// writes, so this runs ONCE per run or per sweep — never inside a
+// concurrent per-entry path.
+func setupKernel() *kernelbridge.RefinedTSKernel {
+	kernel := loadedKernel()
 	walk.SetTransferKernel(kernel)
 	narrowing.SetNarrowKernel(kernel)
+	return kernel
+}
+
+// sweepFactsStore is incremental_file_cache.ts's factsCache made
+// sweep-shared: CheckFiles' entries compile and merge facts from many
+// goroutines at once, so lookups and inserts lock. Compiles happen
+// OUTSIDE the lock — two entries may compile the same file
+// concurrently; the duplicate work is benign (facts are
+// deterministic) and the last insert wins.
+type sweepFactsStore struct {
+	mu   sync.Mutex
+	held map[*ast.SourceFile]*walk.FileFacts
+}
+
+func (s *sweepFactsStore) get(file *ast.SourceFile) *walk.FileFacts {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.held[file]
+}
+
+func (s *sweepFactsStore) put(file *ast.SourceFile, facts *walk.FileFacts) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.held[file] = facts
+}
+
+// runRefinements is run's refinement half: passes 1–3 over an entry
+// whose shape diagnostics and kernel the caller already holds.
+// `factsCache` is nil for a single check; the batch runner hands one
+// store across every entry of a sweep (programFactsCached).
+func runRefinements(p *program.CheckerProgram, shape []*ast.Diagnostic, kernel *kernelbridge.RefinedTSKernel, factsCache *sweepFactsStore) CheckResult {
+	detail := tracing.BeginFileDetail(p.Entry.FileName())
+	tracing.BindFileDetail(detail)
+	defer tracing.BindFileDetail(nil)
+	entryStarted := time.Now()
+	defer func() {
+		tracing.EndFileDetail(detail, float64(time.Since(entryStarted))/float64(time.Millisecond))
+	}()
 
 	var refinements []assignability.RefinementDiagnostic
 	// one finding per (span, code, message): a correlation pass walks
@@ -183,16 +397,20 @@ func run(p *program.CheckerProgram) CheckResult {
 	}
 
 	// ── passes 1 and 2: per-FILE facts ────────────────────────────
-	facts := programFacts(p, kernel)
+	tFacts := time.Now()
+	facts := programFactsCached(p, kernel, factsCache)
+	detail.NotePhase("facts", tFacts)
 	for _, d := range facts.entryDiagnostics {
 		report(d)
 	}
 
 	// ── pass 1b: each object's graph is checked as a specification ──
+	tObj := time.Now()
 	tracing.Span("pass1b.objectGraphs", func() any {
 		checkObjectGraphs(p, facts.objects, kernel, report)
 		return nil
 	}, tracing.GrainStep)
+	detail.NotePhase("objectGraphs", tObj)
 
 	// ── pass 3: facts flow; the kernel judges ────────────────────────
 	ctx := &walk.FlowContext{
@@ -205,6 +423,7 @@ func run(p *program.CheckerProgram) CheckResult {
 		Aliases:   dataflowfacts.NewAliasClasses(),
 		Declared:  map[string]*annotations.DeclaredRefinement{},
 	}
+	tTop := time.Now()
 	tracing.Span("pass3.topLevel", func() any {
 		topLevelCtx := *ctx
 		// top-level call sites record their environments too — the
@@ -219,23 +438,28 @@ func run(p *program.CheckerProgram) CheckResult {
 		walk.AnalyzeStatements(&topLevelCtx, walk.Env{}, statements, nil)
 		return nil
 	}, tracing.GrainStep)
+	detail.NotePhase("topLevel", tTop)
 
 	// each BODY walks once. Bodies walk OUTERMOST-FIRST: an enclosing
 	// body's walk records the call-site snapshots its inner functions'
 	// call-site joins consume, so the encloser must have walked before
 	// the enclosed asks.
+	tBodies := time.Now()
 	tracing.Span("pass3.contractBodies", func() any {
-		walkContractBodies(ctx, p, facts.contracts, kernel)
+		walkContractBodies(ctx, p, facts.contracts, kernel, detail)
 		return nil
 	}, tracing.GrainStep)
+	detail.NotePhase("bodies", tBodies)
 
 	sort.SliceStable(refinements, func(i, j int) bool { return refinements[i].Start < refinements[j].Start })
 	// newly earned kernel answers persist — theorems survive the
 	// process (boundary/kernel.ts)
+	tFlush := time.Now()
 	tracing.Span("flushQuestionStore", func() any {
 		kernelbridge.FlushQuestionStore()
 		return nil
 	}, tracing.GrainStep)
+	detail.NotePhase("flush", tFlush)
 	// the TS source's flushSpanLedger (tsgo span asks) has no Go
 	// twin — this tree's checker is always in-process, so there is no
 	// out-of-process span ledger to flush.
@@ -370,6 +594,7 @@ func walkContractBodies(
 	p *program.CheckerProgram,
 	contracts map[*ast.Symbol]*walk.FunctionContract,
 	kernel *kernelbridge.RefinedTSKernel,
+	detail *tracing.FileDetail,
 ) {
 	walked := map[*ast.Node]bool{}
 	var ordered []*walk.FunctionContract
@@ -383,11 +608,15 @@ func walkContractBodies(
 		walked[contract.Declaration] = true
 		ordered = append(ordered, contract)
 	}
-
-	position := map[*ast.Node]int{}
-	for i, contract := range ordered {
-		position[contract.Declaration] = i
-	}
+	// the contracts map ranges in Go's randomized order; the TS
+	// source's Map iterates in insertion (source) order. Sorting by
+	// declaration position keeps the schedule deterministic run to
+	// run — and a join a schedule never warms is demand-filled at the
+	// ask (call_site_snapshot_fill.go), so the order is a warmth
+	// optimization, never a correctness lever.
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Declaration.Pos() < ordered[j].Declaration.Pos()
+	})
 
 	// callee edges by SPELLED NAME — a name that names exactly one
 	// entry-file function declaration is that function; an ambiguous
@@ -412,6 +641,19 @@ func walkContractBodies(
 		}
 	}
 
+	position := map[*ast.Node]int{}
+	for i, contract := range ordered {
+		position[contract.Declaration] = i
+	}
+
+	noteCallee := func(edges map[*ast.Node]bool, from *ast.Node, name string) {
+		callee, ok := byName[name]
+		if !ok || callee == from || edges[callee] {
+			return
+		}
+		edges[callee] = true
+	}
+
 	calleeEdges := map[*ast.Node]map[*ast.Node]bool{}
 	inDegree := map[*ast.Node]int{}
 	for _, contract := range ordered {
@@ -424,11 +666,7 @@ func walkContractBodies(
 			if ast.IsCallExpression(node) {
 				expr := node.AsCallExpression().Expression
 				if ast.IsIdentifier(expr) {
-					callee, ok := byName[expr.Text()]
-					if ok && callee != contract.Declaration && !edges[callee] {
-						edges[callee] = true
-						inDegree[callee] = inDegree[callee] + 1
-					}
+					noteCallee(edges, contract.Declaration, expr.Text())
 				}
 			}
 			node.ForEachChild(func(child *ast.Node) bool {
@@ -437,6 +675,9 @@ func walkContractBodies(
 			})
 		}
 		scan(contract.Declaration)
+		for callee := range edges {
+			inDegree[callee] = inDegree[callee] + 1
+		}
 		calleeEdges[contract.Declaration] = edges
 	}
 
@@ -500,11 +741,28 @@ func walkContractBodies(
 		}
 		var initialStates map[string]abstractdomain.AbstractValue
 		if needsCallSiteJoin {
+			tJoin := time.Now()
 			env, ok := walk.CallSiteBindings(walk.CallSiteCtx{P: p, Registry: ctx.Registry, Objects: ctx.Objects, Contracts: contracts, Kernel: kernel}, declaration)
+			detail.NotePhase("callSiteJoin", tJoin)
 			if ok {
 				initialStates = env
 			}
 		}
+		tFn := time.Now()
 		walk.AnalyzeFunction(ctx, contract, initialStates)
+		detail.NoteContract(contractLabel(contract), tFn)
 	}
+}
+
+// contractLabel names a contract for the slow-contract table: the
+// spelled function/method name when present, otherwise kind@pos.
+func contractLabel(contract *walk.FunctionContract) string {
+	declaration := contract.Declaration
+	if declaration == nil {
+		return "<nil>"
+	}
+	if name := declaration.Name(); name != nil && ast.IsIdentifier(name) {
+		return name.Text()
+	}
+	return fmt.Sprintf("%s@%d", declaration.Kind.String(), declaration.Pos())
 }

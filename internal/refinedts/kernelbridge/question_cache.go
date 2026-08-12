@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
@@ -235,6 +236,12 @@ func (s *questionCacheStore) oldestKey() (string, bool) {
 	return s.order[0], true
 }
 
+// questionCacheMu guards questionCache, dirtyAnswers, and storeLoaded —
+// one goroutine per entry file now shares this store (parallel sweep),
+// where the TS/single-goroutine original had no concurrent writer.
+// Every read or write path below (loadQuestionStore, FlushQuestionStore,
+// ClearQuestionCache, AskCached, remember) takes the lock.
+var questionCacheMu sync.Mutex
 var questionCache = newQuestionCacheStore()
 var dirtyAnswers = 0
 var storeLoaded = false
@@ -285,7 +292,13 @@ type storedFile struct {
 	Entries [][2]json.RawMessage `json:"entries"`
 }
 
+// loadQuestionStore takes questionCacheMu itself (rather than relying on
+// AskCached's caller) because it does file I/O — holding the lock across
+// that I/O keeps two goroutines from both reading the disk store and
+// double-inserting the same entries the first time each is asked.
 func loadQuestionStore() {
+	questionCacheMu.Lock()
+	defer questionCacheMu.Unlock()
 	if storeLoaded {
 		return
 	}
@@ -334,7 +347,16 @@ func loadQuestionStore() {
 // FlushQuestionStore is flushQuestionStore in the TS source: write
 // newly earned answers to disk. Called at the end of a check; a run
 // with nothing new writes nothing.
+//
+// Under the parallel sweep this runs once per whole sweep, after every
+// goroutine's asks have finished — no ask is in flight while it runs.
+// It still takes questionCacheMu, both because the "no ask in flight"
+// invariant lives in the caller rather than here, and because the disk
+// write below reads questionCache.order/entries directly and must not
+// race a late writer.
 func FlushQuestionStore() {
+	questionCacheMu.Lock()
+	defer questionCacheMu.Unlock()
 	if dirtyAnswers == 0 {
 		return
 	}
@@ -374,19 +396,22 @@ func FlushQuestionStore() {
 // question regime (a file's first check) instead of the recheck regime
 // where every answer is a hit. Never called by the checker itself.
 func ClearQuestionCache() {
+	questionCacheMu.Lock()
+	defer questionCacheMu.Unlock()
 	questionCache = newQuestionCacheStore()
 }
 
-// AskCached is askCached in the TS source.
+// AskCached is askCached in the TS source. The cache lookup and the
+// cache write each take questionCacheMu for their own short section;
+// compute() (the actual kernel ask) runs OUTSIDE the lock, so
+// concurrent goroutines asking different questions still run their
+// kernel calls in parallel — only the shared cache bookkeeping
+// serializes.
 func AskCached(key string, compute func() (string, error)) (string, error) {
 	loadQuestionStore()
-	if held, ok := questionCache.get(key); ok {
+	if held, ok := lookupQuestionCache(key); ok {
 		tracing.Count("kernel.cacheHit", 0)
 		TraceQuestionLine(fmt.Sprintf("kernel cachehit %s", firstLine(key)))
-		lookedUpAt := tracing.Clock()
-		questionCache.delete(key)
-		questionCache.set(key, held) // LRU refresh
-		tracing.Count("kernel.cacheLookup", tracing.Clock()-lookedUpAt)
 		if held.IsError {
 			return "", fmt.Errorf("%s", held.Err)
 		}
@@ -400,6 +425,9 @@ func AskCached(key string, compute func() (string, error)) (string, error) {
 		ok, err := compute()
 		return computed{ok: ok, err: err}
 	}, tracing.GrainStep)
+	if d := tracing.ActiveFileDetail(); d != nil {
+		d.NoteCount("kernel.ask", 1)
+	}
 	ok, err := answer.ok, answer.err
 	if err != nil {
 		// A decline is a deterministic property of the question and is
@@ -409,22 +437,45 @@ func AskCached(key string, compute func() (string, error)) (string, error) {
 		// so it would outlive the process that hit it.
 		if !strings.Contains(err.Error(), moduleAbortedMarker) {
 			remember(key, QuestionCacheEntry{Err: err.Error(), IsError: true})
-			dirtyAnswers += 1
 		}
 		return "", err
 	}
 	remember(key, QuestionCacheEntry{Ok: ok})
-	dirtyAnswers += 1
 	return ok, nil
 }
 
+// lookupQuestionCache reads the cache and, on a hit, refreshes its LRU
+// order — the same section AskCached inlined before the mutex existed,
+// now under questionCacheMu since two goroutines can hit the same key
+// at once.
+func lookupQuestionCache(key string) (QuestionCacheEntry, bool) {
+	questionCacheMu.Lock()
+	defer questionCacheMu.Unlock()
+	held, ok := questionCache.get(key)
+	if !ok {
+		return QuestionCacheEntry{}, false
+	}
+	lookedUpAt := tracing.Clock()
+	questionCache.delete(key)
+	questionCache.set(key, held) // LRU refresh
+	tracing.Count("kernel.cacheLookup", tracing.Clock()-lookedUpAt)
+	return held, true
+}
+
+// remember stores a freshly computed answer and marks the store dirty.
+// Guarded: concurrent goroutines finishing different novel questions at
+// the same time both touch questionCache's eviction order and
+// dirtyAnswers here.
 func remember(key string, entry QuestionCacheEntry) {
+	questionCacheMu.Lock()
+	defer questionCacheMu.Unlock()
 	if questionCache.size() >= questionCacheCapacity {
 		if oldest, held := questionCache.oldestKey(); held {
 			questionCache.delete(oldest)
 		}
 	}
 	questionCache.set(key, entry)
+	dirtyAnswers += 1
 }
 
 func firstLine(s string) string {

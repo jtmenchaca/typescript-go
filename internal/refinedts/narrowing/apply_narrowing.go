@@ -559,7 +559,7 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 		// (`strings ∩ startsWith("/")` is startsWith("/"); the kernel
 		// decides the containment, this code only asks.)
 		if known.Kind == abstractdomain.KindSet && known.SetKindTag == abstractdomain.SetKindTagNone &&
-			NarrowKernel != nil && len(n.Forms) > 0 && everySequenceForm(n.Forms) {
+			NarrowKernel() != nil && len(n.Forms) > 0 && everySequenceForm(n.Forms) {
 			// C* is the whole string ground: as a CONJUNCT beside other
 			// sequence forms it adds nothing, and dropping a conjunct only
 			// weakens a claim (value ∈ A ∩ C* implies value ∈ A) — while
@@ -686,7 +686,7 @@ func seqSubsetRefusable(a, b refinementsets.RefinedSet) (subset bool, refused bo
 			subset, refused = false, true
 		}
 	}()
-	return NarrowKernel.SeqSubset(a, b), false
+	return NarrowKernel().SeqSubset(a, b), false
 }
 
 // shedRemovedEndpoints is the port of shedRemovedEndpoints in the TS

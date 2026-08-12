@@ -39,6 +39,7 @@ package kernelbridge
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -47,6 +48,13 @@ func nowMs() float64 {
 	return float64(time.Now().UnixNano()) / 1e6
 }
 
+// kernelMu guards kernelInstance/kernelNative — the init-once singleton
+// pair LoadKernel(via AdoptKernel) and Invalidate share. Several
+// goroutines can call LoadKernel at process start (one per entry file
+// racing the first ask); the lock makes the "share one live instance"
+// property actually hold instead of letting each goroutine build its
+// own kernel before the first one is visible.
+var kernelMu sync.Mutex
 var kernelInstance *RefinedTSKernel
 var kernelNative *NativeKernel
 
@@ -65,10 +73,12 @@ func KernelDied(err error) bool {
 // THIS module — a later instance must not be invalidated by an older
 // one's straggling call.
 func Invalidate(dead *RefinedTSKernel) {
+	kernelMu.Lock()
 	if kernelInstance == dead {
 		kernelInstance = nil
 		kernelNative = nil
 	}
+	kernelMu.Unlock()
 	fmt.Fprintln(os.Stderr,
 		"RefinedTS: the kernel aborted (out of memory). It has been "+
 			"invalidated and the next check builds a fresh one — an aborted module "+
@@ -81,6 +91,8 @@ func Invalidate(dead *RefinedTSKernel) {
 // LoadedKernel is loadedKernel in the TS source: the kernel when
 // initialization has already completed.
 func LoadedKernel() *RefinedTSKernel {
+	kernelMu.Lock()
+	defer kernelMu.Unlock()
 	return kernelInstance
 }
 
@@ -94,11 +106,22 @@ func LoadedKernel() *RefinedTSKernel {
 // start-up happen inline — so this is a plain synchronous
 // memoization instead of a promise cache; the "share one live
 // instance" behavior is the same, just without the concurrent-caller
-// coalescing a Promise gives for free. Callers on multiple goroutines
-// racing the first AdoptKernel call could each build a kernel before
-// this notices; the TS code does not have that race. Noted in the
-// port report.
+// coalescing a Promise gives for free.
+//
+// kernelMu is held across the whole check-then-build: goroutines on
+// multiple entry files can all race the first AdoptKernel call at sweep
+// start, and without the lock spanning instantiateKernel() itself, each
+// would see kernelInstance == nil and each would dlopen its own dylib
+// and start its own worker thread — one goroutine ends up sharing the
+// pointers, the rest leak a live kernel + OS thread. Holding the lock
+// across instantiateKernel makes every racing caller after the first
+// block until the winner has stored kernelInstance/kernelNative, then
+// return that same instance instead of building a second one — the
+// same "share one live instance" property the TS Promise memo gives via
+// await-coalescing, achieved here by blocking instead.
 func AdoptKernel(instantiateKernel func() (*RefinedTSKernel, *NativeKernel, error)) (*RefinedTSKernel, error) {
+	kernelMu.Lock()
+	defer kernelMu.Unlock()
 	if kernelInstance != nil {
 		return kernelInstance, nil
 	}

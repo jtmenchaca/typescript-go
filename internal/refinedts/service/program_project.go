@@ -102,13 +102,22 @@ func CoveringProject(entryPath string) CoveringProjectResult {
 
 // findConfigFile is the upward-search half of ts.findConfigFile,
 // narrowed to "tsconfig.json" (the TS source never states a different
-// search name).
+// search name). Walks from searchDir toward the filesystem root; a
+// one-directory Stat would miss every project whose entries live in
+// subfolders (recharts' src/cartesian/*.tsx never saw the root
+// tsconfig's jsx: "react", and shape diagnostics fired TS6142).
 func findConfigFile(searchDir string) (string, bool) {
-	candidate := filepath.Join(searchDir, "tsconfig.json")
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate, true
+	for {
+		candidate := filepath.Join(searchDir, "tsconfig.json")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, true
+		}
+		parent := filepath.Dir(searchDir)
+		if parent == searchDir {
+			return "", false
+		}
+		searchDir = parent
 	}
-	return "", false
 }
 
 // ParsedConfigOf is parsedConfigOf in the TS source: one PARSE per

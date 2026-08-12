@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // QuestionCost mirrors the TS QuestionCost interface.
@@ -40,6 +41,12 @@ type totals struct {
 	worstBytes int
 }
 
+// costsMu guards costTotals, worstQuestions, and questionTrace —
+// instrument-only state, but every goroutine's kernel asks now call
+// RecordQuestion concurrently, and an unguarded map write from two
+// goroutines at once corrupts the map (a genuine crash, not just skew).
+var costsMu sync.Mutex
+
 var costTotals = map[string]*totals{}
 
 // worstQuestions holds the most expensive questions seen, worst first.
@@ -56,6 +63,8 @@ var questionTrace func(line string)
 
 // SetQuestionTrace is setQuestionTrace in the TS source.
 func SetQuestionTrace(trace func(line string)) {
+	costsMu.Lock()
+	defer costsMu.Unlock()
 	questionTrace = trace
 }
 
@@ -63,13 +72,18 @@ func SetQuestionTrace(trace func(line string)) {
 // line to the live trace, if one is set — the seam cache hits report
 // through, since they never reach RecordQuestion.
 func TraceQuestionLine(line string) {
-	if questionTrace != nil {
-		questionTrace(line)
+	costsMu.Lock()
+	trace := questionTrace
+	costsMu.Unlock()
+	if trace != nil {
+		trace(line)
 	}
 }
 
 // RecordQuestion is recordQuestion in the TS source.
 func RecordQuestion(cost QuestionCost) {
+	costsMu.Lock()
+	defer costsMu.Unlock()
 	if questionTrace != nil {
 		questionTrace(fmt.Sprintf("kernel %s %sms %db", cost.Op, msString(cost.Ms), cost.Bytes))
 	}
@@ -115,6 +129,8 @@ type OpTotals struct {
 
 // QuestionCosts is questionCosts in the TS source.
 func QuestionCosts() (byOp map[string]OpTotals, worst []QuestionCost) {
+	costsMu.Lock()
+	defer costsMu.Unlock()
 	byOp = make(map[string]OpTotals, len(costTotals))
 	for op, t := range costTotals {
 		byOp[op] = OpTotals{
@@ -128,6 +144,8 @@ func QuestionCosts() (byOp map[string]OpTotals, worst []QuestionCost) {
 
 // ClearQuestionCosts is clearQuestionCosts in the TS source.
 func ClearQuestionCosts() {
+	costsMu.Lock()
+	defer costsMu.Unlock()
 	costTotals = map[string]*totals{}
 	worstQuestions = nil
 }
@@ -144,8 +162,14 @@ func kbString(b int) string {
 }
 
 // QuestionCostReport is questionCostReport in the TS source: what the
-// questions cost this run.
+// questions cost this run. Guarded like the other readers, even though
+// it is normally called once after a sweep finishes — the report walks
+// costTotals' pointer values (*totals) directly, and a straggling
+// RecordQuestion from a not-quite-finished goroutine would otherwise
+// race those field reads against its own writes.
 func QuestionCostReport() string {
+	costsMu.Lock()
+	defer costsMu.Unlock()
 	type entry struct {
 		op string
 		t  *totals

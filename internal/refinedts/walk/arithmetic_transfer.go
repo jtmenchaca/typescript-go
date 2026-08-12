@@ -59,6 +59,15 @@ const (
 // before any walk. Without one (a unit test that skipped setup),
 // every transfer answers unknown — degraded loudly by the alerts it
 // causes, never wrong.
+//
+// Already goroutine-safe: one process loads one kernel dylib handle,
+// so this is a SINGLETON, not per-check state (see PORT.md's
+// parallel-sweep audit) — the RWMutex here already lets concurrent
+// checks read it while a write is serialized. SetTransferKernel is
+// called once per check today (service's runRefinements, before the
+// walk starts); the parallel-sweep coordinator hoists that call
+// before goroutines spawn, after which every read here (RLock) sees
+// the same already-loaded kernel and no further write races it.
 var (
 	transferKernelMu sync.RWMutex
 	transferKernel   *kernelbridge.RefinedTSKernel
@@ -122,6 +131,9 @@ func KnownOfAnswer(answer kernelbridge.TransferAnswer) abstractdomain.AbstractVa
 	}
 }
 
+// opWire: an immutable op-wire table, written once at load and never
+// after — safe under concurrent reads with no lock (see PORT.md's
+// parallel-sweep audit).
 var opWire = map[NumericOperator]kernelbridge.TransferQuestionOp{
 	OpAdd: kernelbridge.TransferOpAdd,
 	OpSub: kernelbridge.TransferOpSub,

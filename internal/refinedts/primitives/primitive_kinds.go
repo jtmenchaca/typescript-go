@@ -8,6 +8,8 @@
 package primitives
 
 import (
+	"sync"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 )
@@ -92,6 +94,12 @@ func IsStringKind(c *checker.Checker, e *ast.Node) bool {
 // substitute (nodes are per-program here too, so staleness is not a
 // concern within a program's lifetime — the one place true weak-reference
 // GC behavior could not be preserved 1:1).
+//
+// stringLikeMemoMu guards stringLikeMemo — one goroutine per entry file can
+// reach the same node's subexpression from different call paths, so both
+// the read and the write below take the lock (pattern from
+// dataflowfacts/access_paths.go's nestedFunctionsCache).
+var stringLikeMemoMu sync.Mutex
 var stringLikeMemo = make(map[*ast.Node]bool)
 
 // StringLikeSide is stringLikeSide in the TS source. Whether a `+` operand
@@ -102,7 +110,10 @@ var stringLikeMemo = make(map[*ast.Node]bool)
 // quadratic on a 1,000-addition chain. Memoized per node (nodes are
 // per-program, so a WeakMap never goes stale).
 func StringLikeSide(c *checker.Checker, e *ast.Node) bool {
-	if held, ok := stringLikeMemo[e]; ok {
+	stringLikeMemoMu.Lock()
+	held, ok := stringLikeMemo[e]
+	stringLikeMemoMu.Unlock()
+	if ok {
 		return held
 	}
 	var result bool
@@ -115,7 +126,9 @@ func StringLikeSide(c *checker.Checker, e *ast.Node) bool {
 	default:
 		result = (c.GetTypeAtLocation(e).Flags() & checker.TypeFlagsStringLike) != 0
 	}
+	stringLikeMemoMu.Lock()
 	stringLikeMemo[e] = result
+	stringLikeMemoMu.Unlock()
 	return result
 }
 

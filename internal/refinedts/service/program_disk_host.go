@@ -24,6 +24,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/bundled"
@@ -92,6 +93,15 @@ func diskHost(options *core.CompilerOptions) compiler.CompilerHost {
 func BuiltProgram(entryPaths []string) *compiler.Program {
 	first := entryPaths[0]
 	options := OptionsFor(first)
+	// the sweep's parallelism rides the program's OWN checker pool
+	// (tsgo defaults to 4 checkers): one checker per core, so the bulk
+	// shape check and the per-entry walks both spread across the
+	// machine. OptionsFor's result may be cached — clone before
+	// stating the knob.
+	widened := *options
+	checkerCount := runtime.GOMAXPROCS(0)
+	widened.Checkers = &checkerCount
+	options = &widened
 	host := diskHost(options)
 	config := tsoptions.NewParsedCommandLine(options, fileNamesOf(entryPaths), tspath.ComparePathsOptions{
 		UseCaseSensitiveFileNames: true,

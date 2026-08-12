@@ -49,7 +49,7 @@ func narrowRefusable(tree kernelbridge.NarrowTree) (answer kernelbridge.NarrowAn
 			answer, refused = kernelbridge.NarrowAnswer{}, true
 		}
 	}()
-	return NarrowKernel.Narrow(tree), false
+	return NarrowKernel().Narrow(tree), false
 }
 
 // Peeled is peeled in the TS source: parentheses say nothing; `await`
@@ -78,9 +78,11 @@ func Narrowings(
 	if !tracing.Recording(tracing.GrainStep) {
 		return NarrowingsOf(c, condition, isTracked, sideBounds, readElsewhere)
 	}
-	return tracing.Span("narrowings", func() BranchNarrowings {
+	result := tracing.Span("narrowings", func() BranchNarrowings {
 		return NarrowingsOf(c, condition, isTracked, sideBounds, readElsewhere)
 	}, tracing.GrainStep)
+	tracing.Count("narrowings", 0)
+	return result
 }
 
 // NarrowingsOf is narrowingsOf in the TS source.
@@ -234,7 +236,7 @@ func NarrowingsOf(
 	// which the coverage report records by its form
 	anySaid := false
 
-	if NarrowKernel != nil {
+	if NarrowKernel() != nil {
 		var places []dataflowfacts.TrackedPlace
 		CollectPlaces(c, condition, isTracked, &places)
 		for _, place := range places {

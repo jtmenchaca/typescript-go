@@ -17,16 +17,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"runtime/pprof"
 	"strings"
 	"time"
 
 	"github.com/microsoft/typescript-go/internal/locale"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/service"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
 func main() {
+	// the sweep's live set is the program + facts; collecting at every
+	// 2× heap growth (Go's default) spent most of the sweep's CPU in
+	// the collector (pprof 2026-08-12: gcDrain 28% + madvise 27% +
+	// scanObject 21% of samples). Collect at 5× instead, under a hard
+	// memory ceiling so a huge project degrades to more collection,
+	// never to an OOM. Measured on the 260-file recharts list: 3103 ms
+	// at the default, 2642 ms here, 3108 ms with the collector off
+	// (a grow-only heap pays fresh page zeroing with no warm reuse).
+	// Set here, not via GOGC — no environment variables (the standing
+	// rule).
+	debug.SetGCPercent(400)
+	debug.SetMemoryLimit(8 << 30)
+
 	surfaceFlag := flag.String("surface", "",
 		"path to refined-ts-typescript/surface/z.ts (default: derived from this binary's location)")
 	kernelFlag := flag.String("kernel", "",
@@ -35,6 +51,14 @@ func main() {
 		"file holding newline-separated .ts paths to check (joins any positional args)")
 	wallFlag := flag.Bool("wall", false,
 		"print total wall time and file count to stderr when done")
+	traceFlag := flag.Bool("trace", false,
+		"record where refinement time goes and print the attribution report to stderr")
+	traceOutFlag := flag.String("trace-out", "",
+		"write the -trace report to this file instead of stderr")
+	cpuProfileFlag := flag.String("cpuprofile", "",
+		"write a pprof CPU profile to this file (exact attribution, no tracing overhead)")
+	memProfileFlag := flag.String("memprofile", "",
+		"write a pprof allocation profile to this file when the sweep ends")
 	flag.Parse()
 	files := flag.Args()
 	if *listFlag != "" {
@@ -50,7 +74,7 @@ func main() {
 		}
 	}
 	if len(files) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] [-list files.txt] [-wall] <file.ts> [...]")
+		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] [-list files.txt] [-wall] [-trace] [-trace-out path] <file.ts> [...]")
 		os.Exit(2)
 	}
 	startedAt := time.Now()
@@ -67,11 +91,37 @@ func main() {
 		kernelbridge.SetDylibPath(derived)
 	}
 
-	fired := false
-	for _, file := range files {
-		result, err := service.CheckFile(file, surfacePath)
+	if *traceFlag {
+		if *traceOutFlag != "" {
+			tracing.SetWriteTo(*traceOutFlag)
+		}
+		tracing.TraceStart(tracing.GrainStep)
+	}
+	// os.Exit below never runs defers — the profile stops explicitly
+	// before both exit paths
+	stopProfile := func() {}
+	if *cpuProfileFlag != "" {
+		profileFile, err := os.Create(*cpuProfileFlag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", file, err)
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		if err := pprof.StartCPUProfile(profileFile); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		stopProfile = pprof.StopCPUProfile
+	}
+
+	fired := false
+	// every run is batch mode — service.CheckFiles builds ONE program
+	// per covering tsconfig and shares every read-once store across
+	// the entries; one file is a batch of one
+	results := service.CheckFiles(files, surfacePath)
+	for _, file := range files {
+		result, held := results[file]
+		if !held {
+			fmt.Fprintf(os.Stderr, "%s: the entry file did not parse\n", file)
 			fired = true
 			continue
 		}
@@ -127,6 +177,19 @@ func main() {
 	if *wallFlag {
 		fmt.Fprintf(os.Stderr, "WALL %d ms  %d files\n",
 			time.Since(startedAt).Milliseconds(), len(files))
+	}
+	if *traceFlag {
+		tracing.TraceStop()
+		tracing.EmitTraceReport()
+		fmt.Fprintln(os.Stderr, kernelbridge.QuestionCostReport())
+	}
+	stopProfile()
+	if *memProfileFlag != "" {
+		profileFile, err := os.Create(*memProfileFlag)
+		if err == nil {
+			_ = pprof.Lookup("allocs").WriteTo(profileFile, 0)
+			_ = profileFile.Close()
+		}
 	}
 	if fired {
 		os.Exit(1)

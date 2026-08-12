@@ -15,7 +15,10 @@
 // relative to the package) for the convention this mirrors.
 package kernelbridge
 
-import "os"
+import (
+	"os"
+	"sync"
+)
 
 // DylibPath is the native kernel's default location, relative to this
 // package — the same path instantiate_kernel_test.go already uses.
@@ -28,6 +31,12 @@ import "os"
 // through ResolveDylibPath instead.
 const DylibPath = "../../../../refined-ts-lean/native/build/librefinedts_kernel.dylib"
 
+// dylibPathMu guards explicitDylibPath and kernelArtifactPath below —
+// both are set once at process/sweep startup (SetDylibPath, LoadKernel)
+// but read from any goroutine asking a question, so a setter racing a
+// reader needs the same guard a genuine init-once value would.
+var dylibPathMu sync.Mutex
+
 // explicitDylibPath is the caller-stated dylib location — a plain
 // setter, never an environment variable (the standing rule: behavior
 // is configured by arguments, not ambient process state). Binaries
@@ -37,6 +46,8 @@ var explicitDylibPath string
 // SetDylibPath states where the native kernel dylib lives, for a
 // process whose cwd does not sit at this package.
 func SetDylibPath(path string) {
+	dylibPathMu.Lock()
+	defer dylibPathMu.Unlock()
 	explicitDylibPath = path
 }
 
@@ -47,8 +58,11 @@ func SetDylibPath(path string) {
 // back to running with no kernel (every kernel question then
 // declines, exactly as though the dylib were genuinely absent).
 func ResolveDylibPath() string {
-	if explicitDylibPath != "" {
-		return explicitDylibPath
+	dylibPathMu.Lock()
+	path := explicitDylibPath
+	dylibPathMu.Unlock()
+	if path != "" {
+		return path
 	}
 	if KernelArtifactsPresent(DylibPath) {
 		return DylibPath
@@ -68,11 +82,19 @@ func KernelArtifactsPresent(path string) bool {
 // artifact the loaded kernel answers from — what the question store's
 // salt must track, so a rebuilt kernel never serves another build's
 // stored answers. Narrowed to the native-only substrate: always the
-// dylib path handed to LoadKernel.
+// dylib path handed to LoadKernel. Guarded by dylibPathMu — written
+// once per LoadKernel (already serialized by kernelMu at the
+// AdoptKernel call site) but read from question_cache.go's storeSalt
+// under a DIFFERENT lock (questionCacheMu), so the variable itself
+// still needs its own guard against that cross-lock read.
 var kernelArtifactPath string
 
 func init() {
-	kernelArtifactPathFn = func() string { return kernelArtifactPath }
+	kernelArtifactPathFn = func() string {
+		dylibPathMu.Lock()
+		defer dylibPathMu.Unlock()
+		return kernelArtifactPath
+	}
 }
 
 // LoadKernel is loadKernel in the TS source: load, instantiate, and
@@ -89,7 +111,9 @@ func LoadKernel(dylibPath string) (*RefinedTSKernel, error) {
 		if err != nil {
 			return nil, nil, err
 		}
+		dylibPathMu.Lock()
 		kernelArtifactPath = dylibPath
+		dylibPathMu.Unlock()
 		kernel := KernelFromCalls(KernelFromCallsInput{Native: native, InitMs: native.InitMs})
 		return kernel, native, nil
 	})

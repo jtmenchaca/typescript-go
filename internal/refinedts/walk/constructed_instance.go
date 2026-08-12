@@ -8,9 +8,12 @@
 package walk
 
 import (
+	"sync"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/program"
 )
 
 // ErrorConstructors is the Error constructors sharing one shape: the
@@ -33,18 +36,43 @@ var ErrorConstructors = map[string]bool{
 // (prisma's first mutually-recursive constructor pair took a worker
 // down).
 //
-// The TS source's Set<ts.ClassDeclaration> is not concurrency-safe
-// either — one walk threads through it; a plain Go map mirrors that.
-var constructing = map[*ast.Node]bool{}
+// The TS source's Set<ts.ClassDeclaration> is one walk's own recursion
+// guard — PER-CHECK working state, not a fact about the program that
+// outlives it. Under goroutine-per-entry parallelism, two checks can
+// walk overlapping code from different entries at once, so one shared
+// map would let one check's in-progress class silence another's
+// legitimate (non-recursive) construction. constructingSets holds one
+// guard set per check, keyed on ctx.P — the per-check view pointer
+// every FlowContext in a check shares (see PORT.md's parallel-sweep
+// audit) — guarded by constructingMu the way call_site_snapshots.go's
+// snapshotStores guards its own per-program map.
+var (
+	constructingMu   sync.Mutex
+	constructingSets = map[*program.CheckerProgram]map[*ast.Node]bool{}
+)
 
 // ConstructedInstance evaluates what `new declaration(args)` holds.
 func ConstructedInstance(ctx *FlowContext, declaration *ast.Node, argKnowns []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	bare := abstractdomain.KnownObject(nil, nil, false, abstractdomain.TrustProved, false)
-	if constructing[declaration] {
+	constructingMu.Lock()
+	set, ok := constructingSets[ctx.P]
+	if !ok {
+		set = map[*ast.Node]bool{}
+		constructingSets[ctx.P] = set
+	}
+	already := set[declaration]
+	if !already {
+		set[declaration] = true
+	}
+	constructingMu.Unlock()
+	if already {
 		return bare
 	}
-	constructing[declaration] = true
-	defer delete(constructing, declaration)
+	defer func() {
+		constructingMu.Lock()
+		delete(constructingSets[ctx.P], declaration)
+		constructingMu.Unlock()
+	}()
 	return constructedInstanceInner(ctx, declaration, argKnowns, bare)
 }
 

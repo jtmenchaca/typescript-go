@@ -44,14 +44,14 @@ func BoundsOfKnown(known abstractdomain.AbstractValue) (window Window, ok bool) 
 		}
 		return Window{Lo: lo, Hi: hi}, true
 	}
-	if known.Kind == abstractdomain.KindSet && NarrowKernel != nil {
+	if kernel := NarrowKernel(); known.Kind == abstractdomain.KindSet && kernel != nil {
 		defer func() {
 			if recover() != nil {
 				// a refused question — the TS source's try/catch
 				window, ok = Window{}, false
 			}
 		}()
-		bounds := NarrowKernel.Bounds(known.Set)
+		bounds := kernel.Bounds(known.Set)
 		if bounds.Empty {
 			return Window{}, false
 		}

@@ -79,6 +79,7 @@ func Summarize(ctx *FlowContext, contract FunctionContract) EffectSummary {
 		summary = tracing.Span("effectScan", func() EffectSummary {
 			return scanBody(ctx, contract)
 		}, tracing.GrainStep)
+		tracing.Count("effectScan", 0)
 	} else {
 		summary = scanBody(ctx, contract)
 	}

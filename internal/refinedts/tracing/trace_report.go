@@ -97,9 +97,15 @@ type TraceReport struct {
 // sets it once, in an init(), as early as the runtime allows.
 var ProcessStartedAt = time.Now()
 
-// TraceData is traceData in the TS source.
+// TraceData is traceData in the TS source. Reads every shared record
+// under recordsMu so the snapshot is consistent even if a straggler
+// walk goroutine's Leave/Count is still landing while the report is
+// being built (report-building runs after TraceStop, off the hot
+// path, so the lock's cost here is irrelevant).
 func TraceData() TraceReport {
 	now := time.Now()
+	recordsMu.Lock()
+	defer recordsMu.Unlock()
 	entries := make([]*TraceEntry, 0, len(Flat))
 	for _, e := range Flat {
 		entries = append(entries, e)
@@ -171,13 +177,14 @@ var ownerNote = map[Owner]string{
 }
 
 // reportGrain names the current recording grain for the header line,
-// reading GrainLevel backwards from Level — trace_state.go already
-// carries Level (TRACE.grain inlined at "step", per that file's own
-// note); no separate stored name is needed since the three grains
-// map to Level 1:1.
+// reading GrainLevel backwards from the atomic Level — trace_state.go
+// already carries Level (TRACE.grain inlined at "step", per that
+// file's own note); no separate stored name is needed since the three
+// grains map to Level 1:1.
 func reportGrain() Grain {
+	current := CurrentLevel()
 	for grain, level := range GrainLevel {
-		if level == Level {
+		if level == current {
 			return grain
 		}
 	}
@@ -249,6 +256,13 @@ func TraceReportText() string {
 		strconv.FormatFloat(100*attributed/max(data.WallMs, 1e-9), 'f', 1, 64),
 	))
 	sayBlank()
+
+	// The product question first: which entries own the wall, and by
+	// which mechanism — one row each, so no reader has to join the
+	// ranked path list against the per-file blocks below by hand.
+	if details := SnapshotFileDetails(); len(details) > 0 {
+		sayFileGlance(say, sayBlank, details)
+	}
 
 	// Who owns the time — the split a rewrite question turns on.
 	owners := map[Owner]float64{}
@@ -330,9 +344,80 @@ func TraceReportText() string {
 		sayBlank()
 		say(pad("counter", 40) + padLeft("count", 16))
 		say(strings.Repeat("─", 56))
-		sort.Slice(plain, func(i, j int) bool { return plain[i].counter.Calls > plain[j].counter.Calls })
+		// a dotted ledger (inline.unkeyed.<callee>) folds into ONE family
+		// row with its leaders indented under it — the ledger reads as a
+		// total plus its top names instead of rows scattered through the
+		// table by count.
+		type familyRow struct {
+			name    string
+			total   int64
+			members []namedCounter
+		}
+		families := map[string]*familyRow{}
+		var rows []*familyRow
+		var twoSegment []namedCounter
 		for _, nc := range plain {
-			say(pad(nc.name, 40) + padLeft(commaInt(nc.counter.Calls), 16))
+			parts := strings.Split(nc.name, ".")
+			if len(parts) < 2 {
+				rows = append(rows, &familyRow{name: nc.name, total: nc.counter.Calls})
+				continue
+			}
+			if len(parts) == 2 {
+				twoSegment = append(twoSegment, nc)
+				continue
+			}
+			key := parts[0] + "." + parts[1] + ".*"
+			held := families[key]
+			if held == nil {
+				held = &familyRow{name: key}
+				families[key] = held
+				rows = append(rows, held)
+			}
+			held.total += nc.counter.Calls
+			held.members = append(held.members, nc)
+		}
+		// a two-segment prefix with many names is a per-name ledger
+		// (inline.<callee>) — fold it; a prefix with a few names is a
+		// handful of flags (snapshot.hit/miss/fill) — leave them flat.
+		prefixCount := map[string]int{}
+		for _, nc := range twoSegment {
+			prefixCount[nc.name[:strings.Index(nc.name, ".")]]++
+		}
+		for _, nc := range twoSegment {
+			prefix := nc.name[:strings.Index(nc.name, ".")]
+			if prefixCount[prefix] < 4 {
+				rows = append(rows, &familyRow{name: nc.name, total: nc.counter.Calls})
+				continue
+			}
+			key := prefix + ".*"
+			held := families[key]
+			if held == nil {
+				held = &familyRow{name: key}
+				families[key] = held
+				rows = append(rows, held)
+			}
+			held.total += nc.counter.Calls
+			held.members = append(held.members, nc)
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].total > rows[j].total })
+		for _, row := range rows {
+			suffix := ""
+			if len(row.members) > 0 {
+				suffix = fmt.Sprintf("  (%d names)", len(row.members))
+			}
+			say(pad(row.name, 40) + padLeft(commaInt(row.total), 16) + suffix)
+			sort.Slice(row.members, func(i, j int) bool { return row.members[i].counter.Calls > row.members[j].counter.Calls })
+			shown := row.members
+			if len(shown) > 8 {
+				shown = shown[:8]
+			}
+			for _, member := range shown {
+				short := member.name[strings.LastIndex(member.name, ".")+1:]
+				say(pad("    "+short, 40) + padLeft(commaInt(member.counter.Calls), 16))
+			}
+			if len(row.members) > 8 {
+				say(fmt.Sprintf("    … %d more names", len(row.members)-8))
+			}
 		}
 		sayBlank()
 	}
@@ -375,6 +460,13 @@ func TraceReportText() string {
 		sayBlank()
 	}
 
+	// Per-entry truth under a parallel sweep: FileDetail is filled on
+	// the goroutine that walks each file, so phases/contracts/counts
+	// do not mix the way the flat SELF table does.
+	if details := SnapshotFileDetails(); len(details) > 0 {
+		sayFileDetailSection(say, sayBlank, details)
+	}
+
 	// allocation pressure, as far as the runtime will say: a heap this
 	// size is time spent in the collector, and a GC pause lands inside
 	// whichever span was running when it hit
@@ -387,6 +479,92 @@ func TraceReportText() string {
 	))
 	say(strings.Repeat("═", 78))
 	return strings.Join(out, "\n")
+}
+
+// sayFileGlance is the one-look straggler table: one row per slowest
+// entry (ranked by bodies ms) carrying the mechanism split and the
+// worst contract inline, so the ranking and its explanation sit in
+// the same row instead of two report sections apart.
+func sayFileGlance(say func(string), sayBlank func(), details []*FileDetail) {
+	ranked := append([]*FileDetail(nil), details...)
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].BodiesMs > ranked[j].BodiesMs })
+	shown := ranked
+	if len(shown) > SlowestFiles {
+		shown = shown[:SlowestFiles]
+	}
+	say("the stragglers at a glance — bodies ms ranked; join vs analyzeFn names the mechanism")
+	sayBlank()
+	say(padLeft("bodies", 10) + padLeft("join", 10) + padLeft("analyzeFn", 11) +
+		padLeft("inlines", 9) + padLeft("contracts", 11) + "  file — worst contract")
+	say(strings.Repeat("─", 110))
+	for _, d := range shown {
+		worst := ""
+		if len(d.SlowContracts) > 0 {
+			top := d.SlowContracts[0]
+			for _, c := range d.SlowContracts[1:] {
+				if c.Ms > top.Ms {
+					top = c
+				}
+			}
+			worst = fmt.Sprintf(" — %s ms %s", ms(top.Ms), top.Name)
+		}
+		say(padLeft(ms(d.BodiesMs), 10) + padLeft(ms(d.CallSiteJoinMs), 10) +
+			padLeft(ms(d.AnalyzeFunction), 11) + padLeft(commaInt(d.InlineContractCall), 9) +
+			padLeft(strconv.Itoa(d.Contracts), 11) + "  " + d.BaseName() + worst)
+	}
+	sayBlank()
+}
+
+// sayFileDetailSection prints why the slowest entries cost what they
+// cost: phase split, mechanism counts local to the entry, and the
+// slowest contract bodies. Ranked by bodies ms — the band that owns
+// the recharts gap.
+func sayFileDetailSection(say func(string), sayBlank func(), details []*FileDetail) {
+	ranked := append([]*FileDetail(nil), details...)
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].BodiesMs > ranked[j].BodiesMs })
+	shown := ranked
+	if len(shown) > SlowestFiles {
+		shown = shown[:SlowestFiles]
+	}
+	say("per-file refinement detail (parallel-safe — each entry's own timers)")
+	say("  phases: facts / objectGraphs / topLevel / bodies / flush")
+	say("  bodies splits into callSiteJoin + analyzeFunction; slowest contracts listed")
+	say("  counts are LOCAL to the entry (global COUNTERS above mix every file)")
+	sayBlank()
+	for _, d := range shown {
+		say(fmt.Sprintf("%s ms bodies  %s  (entry wall %s ms, %d contracts)",
+			padLeft(ms(d.BodiesMs), 9), d.BaseName(), ms(d.WallMs), d.Contracts))
+		say(fmt.Sprintf("    phases  facts=%s  objects=%s  topLevel=%s  bodies=%s  flush=%s",
+			ms(d.FactsMs), ms(d.ObjectMs), ms(d.TopMs), ms(d.BodiesMs), ms(d.FlushMs)))
+		say(fmt.Sprintf("    bodies  callSiteJoin=%s  analyzeFunction=%s",
+			ms(d.CallSiteJoinMs), ms(d.AnalyzeFunction)))
+		say(fmt.Sprintf("    counts  assign=%s  inline=%s  kernel.ask=%s  cacheHit=%s  narrow=%s  effectScan=%s",
+			commaInt(d.CheckAssignability),
+			commaInt(d.InlineContractCall),
+			commaInt(d.KernelAsk),
+			commaInt(d.KernelCacheHit),
+			commaInt(d.Narrowings),
+			commaInt(d.EffectScan)))
+		if d.JoinDeclared+d.JoinCallback+d.JoinMemoHit+d.JoinMemoMiss+d.JoinReachSnapshot+d.JoinReachFallback > 0 {
+			say(fmt.Sprintf("    join    declared=%s  callback=%s  memoHit=%s  memoMiss=%s  reachSnap=%s  reachFallback=%s",
+				commaInt(d.JoinDeclared),
+				commaInt(d.JoinCallback),
+				commaInt(d.JoinMemoHit),
+				commaInt(d.JoinMemoMiss),
+				commaInt(d.JoinReachSnapshot),
+				commaInt(d.JoinReachFallback)))
+		}
+		if len(d.SlowContracts) > 0 {
+			say("    slowest contracts:")
+			for _, c := range d.SlowContracts {
+				if c.Ms < 1 {
+					continue
+				}
+				say(fmt.Sprintf("      %s ms  %s", padLeft(ms(c.Ms), 9), c.Name))
+			}
+		}
+		sayBlank()
+	}
 }
 
 // readMemory mirrors the TS try/process.memoryUsage() block. Go's

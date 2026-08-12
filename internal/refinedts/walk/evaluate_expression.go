@@ -19,24 +19,38 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
+	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
-// analysisDepth/deepestReached: how deep the expression walk has
-// gone, and the deepest it ever went. A call read by walking its body
-// nests the walk inside itself, so this is the honest measure of how
-// far the checker follows code — the number `limits.ts` talks about
-// when it discusses CALL_DEPTH. The unwind is in a `defer` because a
-// refused kernel question panics past here, and a leaked frame would
-// make every later reading look deeper than it was.
+// analysisDepth: how deep THIS check's expression walk has gone. A
+// call read by walking its body nests the walk inside itself, so this
+// is the honest measure of how far the checker follows code — the
+// number `limits.ts` talks about when it discusses CALL_DEPTH. The
+// unwind is in a `defer` because a refused kernel question panics
+// past here, and a leaked frame would make every later reading look
+// deeper than it was.
 //
-// The TS source's module-level `let` becomes a mutex-guarded package
-// var: the walk is not guaranteed single-threaded the way a TS
-// worker's synchronous call stack is.
+// The TS source's module-level `let` is a single synchronous call
+// stack's own counter. Under goroutine-per-entry parallelism that
+// counter must be PER-CHECK: one shared package var would let two
+// concurrent checks push and pop the same number, so neither reading
+// means anything. analysisDepths holds one counter per check, keyed
+// on ctx.P (the per-check view pointer, per PORT.md's parallel-sweep
+// audit), guarded by analysisDepthMu.
+var (
+	analysisDepthMu sync.Mutex
+	analysisDepths  = map[*program.CheckerProgram]int{}
+)
+
+// deepestReached: the deepest expression nesting this PROCESS has
+// walked, across every check — an intentional cross-check bench
+// high-water mark (deepestWalk's own doc comment), not per-check
+// state, so it stays one mutex-guarded global rather than joining
+// analysisDepths.
 var (
 	depthMu        sync.Mutex
-	analysisDepth  int
 	deepestReached int
 )
 
@@ -62,16 +76,22 @@ func ClearDeepestWalk() {
 // extra call frame a wrapper adds was measured at a third of a whole
 // real-codebase run.
 func evaluateExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractValue {
+	analysisDepthMu.Lock()
+	analysisDepths[ctx.P]++
+	depth := analysisDepths[ctx.P]
+	analysisDepthMu.Unlock()
 	depthMu.Lock()
-	analysisDepth++
-	if analysisDepth > deepestReached {
-		deepestReached = analysisDepth
+	if depth > deepestReached {
+		deepestReached = depth
 	}
 	depthMu.Unlock()
 	defer func() {
-		depthMu.Lock()
-		analysisDepth--
-		depthMu.Unlock()
+		analysisDepthMu.Lock()
+		analysisDepths[ctx.P]--
+		if analysisDepths[ctx.P] == 0 {
+			delete(analysisDepths, ctx.P)
+		}
+		analysisDepthMu.Unlock()
 	}()
 	known := evaluateForm(ctx, env, e)
 	// a call `this` reaches — as method receiver, argument, or

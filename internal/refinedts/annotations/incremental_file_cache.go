@@ -87,7 +87,7 @@ func ImportedUserFiles(p *program.CheckerProgram, file *ast.SourceFile) []*ast.S
 // check can reach, imports first.
 func ReachableFiles(p *program.CheckerProgram) []*ast.SourceFile {
 	graph := GraphOf(p)
-	if held, ok := graph.Closures[p.Entry]; ok {
+	if held, ok := graph.closureOf(p.Entry); ok {
 		tracing.Count("facts.closureHit", 0)
 		return held
 	}
@@ -112,10 +112,10 @@ func ReachableFiles(p *program.CheckerProgram) []*ast.SourceFile {
 			return
 		}
 		seen[file] = true
-		edges, ok := graph.Edges[file]
+		edges, ok := graph.edgesOf(file)
 		if !ok {
 			edges = ImportedUserFiles(p, file)
-			graph.Edges[file] = edges
+			graph.setEdges(file, edges)
 		}
 		for _, imported := range edges {
 			visit(imported)
@@ -126,7 +126,11 @@ func ReachableFiles(p *program.CheckerProgram) []*ast.SourceFile {
 	order := OrderOf(p, graph, func(file *ast.SourceFile) []*ast.SourceFile { return ImportedUserFiles(p, file) })
 	sortSourceFilesByOrder(members, order)
 	out = append(out, members...)
-	graph.Closures[p.Entry] = out
+	// a concurrent goroutine racing on the same entry may also fill
+	// this closure -- setClosure just overwrites with an equal answer
+	// (same deterministic DFS + order), so the race is duplicate work,
+	// never a torn map
+	graph.setClosure(p.Entry, out)
 	tracing.CountBy("facts.closureFiles", int64(len(out)))
 	return out
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // CallSiteBindings is callSiteBindings in the TS source: what `fn`'s
@@ -32,8 +33,10 @@ import (
 // call pins. (nil, false) when callers are not all in view.
 func CallSiteBindings(ctx CallSiteCtx, fn *ast.Node) (Env, bool) {
 	if ast.IsFunctionDeclaration(fn) {
+		tracing.Count("join.declared", 0)
 		return declaredJoin(ctx.P, ctx.Registry, ctx.Objects, ctx.Contracts, ctx.Kernel, fn)
 	}
+	tracing.Count("join.callback", 0)
 	return callbackSitePins(ctx.P, ctx.Registry, ctx.Objects, ctx.Contracts, ctx.Kernel, fn)
 }
 
@@ -156,11 +159,16 @@ func callbackSitePins(
 					Declared: map[string]*annotations.DeclaredRefinement{},
 				}
 				// the recorded snapshot IS the state at the call — pass 3's
-				// own walk already carried it here; only a call no walk
-				// recorded pays the per-query walk below
-				snapshot, hasSnapshot := CallSnapshotOf(p, call)
+				// own walk already carried it here, or a demand fill runs
+				// the owner's walk now; only a call no walk records pays
+				// the per-query walk below
+				snapshot, hasSnapshot := CallSnapshotOrFill(CallSiteCtx{P: p, Registry: registry, Objects: objects, Contracts: contracts, Kernel: kernel}, call)
 				outerEnv := snapshot
+				if hasSnapshot {
+					tracing.Count("join.reach.snapshot", 0)
+				}
 				if !hasSnapshot {
+					tracing.Count("join.reach.fallback", 0)
 					outerEnv = Env{}
 					outerSite, hasOuterSite := SiteOf(p, contracts, call)
 					if hasOuterSite {
@@ -311,11 +319,16 @@ func callbackSitePins(
 		Declared: map[string]*annotations.DeclaredRefinement{},
 	}
 	// the recorded snapshot IS the state at the owner call — pass 3's
-	// own walk already carried it here, enclosing callbacks included;
-	// only a call no walk recorded pays the seeding walk below
-	snapshot, hasSnapshot := CallSnapshotOf(p, call)
+	// own walk already carried it here (or a demand fill runs the
+	// owner's walk now), enclosing callbacks included; only a call no
+	// walk records pays the seeding walk below
+	snapshot, hasSnapshot := CallSnapshotOrFill(CallSiteCtx{P: p, Registry: registry, Objects: objects, Contracts: contracts, Kernel: kernel}, call)
 	env := snapshot
+	if hasSnapshot {
+		tracing.Count("join.reach.snapshot", 0)
+	}
 	if !hasSnapshot {
+		tracing.Count("join.reach.fallback", 0)
 		env = Env{}
 		for i, outer := range site.Parameters {
 			if outer == nil || !ast.IsIdentifier(outer.AsParameterDeclaration().Name()) {
@@ -438,11 +451,13 @@ func declaredJoin(
 	remembered, hasRemembered := held[fn]
 	if hasRemembered {
 		bindingsMemoMu.Unlock()
+		tracing.Count("join.memo.hit", 0)
 		if remembered == nil {
 			return nil, false
 		}
 		return remembered, true
 	}
+	tracing.Count("join.memo.miss", 0)
 	// A self-recursive declared function (fn calls itself, directly or
 	// through an enclosing callback like `.forEach`) re-asks its OWN
 	// join mid-computation: declaredJoinUncached's reach() walks to the
@@ -582,13 +597,16 @@ func declaredJoinUncached(
 	// walk the file to a call site, with the site's own enclosing
 	// parameters and callbacks initialized the way a hover there would
 	reach := func(call *ast.Node) (Env, bool) {
-		// the recorded snapshot IS the state at the call site — no
-		// per-site walk; the 484-walks-per-declaration quadratic this
-		// replaces is findings/read-once.md's amplifier
-		snapshot, hasSnapshot := CallSnapshotOf(p, call)
+		// the recorded snapshot IS the state at the call site (a miss
+		// demand-fills the owner's walk once) — no per-site walk; the
+		// 484-walks-per-declaration quadratic this replaces is
+		// findings/read-once.md's amplifier
+		snapshot, hasSnapshot := CallSnapshotOrFill(CallSiteCtx{P: p, Registry: registry, Objects: objects, Contracts: contracts, Kernel: kernel}, call)
 		if hasSnapshot {
+			tracing.Count("join.reach.snapshot", 0)
 			return snapshot, true
 		}
+		tracing.Count("join.reach.fallback", 0)
 		site, hasSite := SiteOf(p, contracts, call)
 		if !hasSite {
 			return nil, false

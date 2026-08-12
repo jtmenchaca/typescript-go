@@ -8,9 +8,9 @@
 package walk
 
 import (
-	"encoding/json"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
@@ -263,8 +263,11 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 }
 
 // computeInlineMemoKey builds the DETERMINISTIC replay key —
-// "" where nothing can be safely spelled (mirroring the TS source's
-// try/catch around JSON.stringify).
+// "" where nothing can be safely spelled (the TS source's try/catch
+// around JSON.stringify answered the same way). SpellForMemoKey
+// writes one flat string per value — compiler symbols by pointer
+// identity, non-finite floats as words — so the key builds without
+// a JSON pass, and this runs on EVERY inline call, hits included.
 func computeInlineMemoKey(ctx *FlowContext, env Env, call *ast.Node, callExpr *ast.CallExpression, contract *FunctionContract, calleeName *ast.Node, argKnowns []abstractdomain.AbstractValue) string {
 	var callbacks []*ast.Node
 	for _, a := range callExpr.Arguments.Nodes {
@@ -290,39 +293,43 @@ func computeInlineMemoKey(ctx *FlowContext, env Env, call *ast.Node, callExpr *a
 		}
 		sort.Strings(observed)
 	}
-	type outerEntry struct {
-		Name  string
-		Value string
+	// one flat key: args then observed env rows, each spelled by the
+	// builder speller — \x1e separates spells, and names (identifiers,
+	// no control bytes) bind with '=' — injective without a JSON pass
+	var key strings.Builder
+	if len(callbacks) > 0 {
+		key.WriteByte('@')
+		key.WriteString(strconv.Itoa(CallNodeIdOf(call)))
+		key.WriteByte('|')
 	}
-	var outer []outerEntry
+	for _, arg := range argKnowns {
+		spelled, ok := abstractdomain.SpellForMemoKey(arg)
+		if !ok {
+			if tracing.Recording(tracing.GrainStep) {
+				tracing.Count("inline.unkeyed."+calleeName.Text(), 0)
+			}
+			return ""
+		}
+		key.WriteString(spelled)
+		key.WriteByte('\x1e')
+	}
+	key.WriteByte(';')
 	for _, name := range observed {
 		held, ok := env[name]
 		if !ok {
 			continue
 		}
-		heldJSON, err := json.Marshal(held)
-		if err != nil {
+		heldSpell, ok := abstractdomain.SpellForMemoKey(held)
+		if !ok {
+			if tracing.Recording(tracing.GrainStep) {
+				tracing.Count("inline.unkeyed."+calleeName.Text(), 0)
+			}
 			return ""
 		}
-		outer = append(outer, outerEntry{Name: name, Value: string(heldJSON)})
+		key.WriteString(name)
+		key.WriteByte('=')
+		key.WriteString(heldSpell)
+		key.WriteByte('\x1e')
 	}
-	argKnownsJSON, err := json.Marshal(argKnowns)
-	if err != nil {
-		if tracing.Recording(tracing.GrainStep) {
-			tracing.Count("inline.unkeyed."+calleeName.Text(), 0)
-		}
-		return ""
-	}
-	outerJSON, err := json.Marshal(outer)
-	if err != nil {
-		if tracing.Recording(tracing.GrainStep) {
-			tracing.Count("inline.unkeyed."+calleeName.Text(), 0)
-		}
-		return ""
-	}
-	prefix := ""
-	if len(callbacks) > 0 {
-		prefix = "@" + strconv.Itoa(CallNodeIdOf(call)) + "|"
-	}
-	return prefix + string(argKnownsJSON) + string(outerJSON)
+	return key.String()
 }

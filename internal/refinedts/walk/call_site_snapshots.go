@@ -32,6 +32,13 @@ import (
 // pattern as dataflowfacts's per-node memos): entries live exactly as
 // long as the program that produced their nodes is in use by this
 // port.
+//
+// Already goroutine-safe for a per-entry parallel sweep: keyed on
+// *program.CheckerProgram — the same per-check view pointer FlowContext
+// carries as ctx.P (PORT.md's parallel-sweep audit) — with every
+// access under snapshotStoresMu, so concurrent checks (different p)
+// land in different sub-maps and the shared top-level map's own
+// reads/writes never race.
 var (
 	snapshotStoresMu sync.Mutex
 	snapshotStores   = map[*program.CheckerProgram]map[*ast.Node]Env{}
@@ -41,12 +48,14 @@ var (
 // the state a call's arguments evaluate in, when the call belongs to
 // the owner being walked. The env is copied — the walk mutates its
 // own map onward.
+//
+// "Belongs to" is lexical containment, not only the innermost
+// function: a call inside a nested arrow still records under the
+// outer function's dedicated walk (the nested arrow often has no
+// contract of its own). An inline of a sibling callee never records
+// — those call nodes live outside the owner's AST subtree.
 func RecordCallSnapshot(p *program.CheckerProgram, owner *ast.Node, call *ast.Node, env Env) {
-	enclosing := dataflowfacts.EnclosingFunctionOf(call)
-	if enclosing == nil {
-		enclosing = p.Entry.AsNode()
-	}
-	if enclosing != owner {
+	if !callBelongsToOwner(owner, call) {
 		return
 	}
 	snapshotStoresMu.Lock()
@@ -57,6 +66,30 @@ func RecordCallSnapshot(p *program.CheckerProgram, owner *ast.Node, call *ast.No
 		snapshotStores[p] = store
 	}
 	store[call] = cloneEnv(env)
+}
+
+// callBelongsToOwner reports whether `call` sits in `owner`'s lexical
+// body. Source-file (entry) owners only claim calls whose innermost
+// enclosing function IS the source file itself — nested functions get
+// their own walks or an ancestor function owner, so top-level never
+// steals their snapshots during an inline of a same-file helper.
+func callBelongsToOwner(owner *ast.Node, call *ast.Node) bool {
+	if owner == nil || call == nil {
+		return false
+	}
+	enclosing := dataflowfacts.EnclosingFunctionOf(call)
+	if enclosing == owner {
+		return true
+	}
+	if ast.IsSourceFile(owner) {
+		return false
+	}
+	for cursor := call; cursor != nil; cursor = cursor.Parent {
+		if cursor == owner {
+			return true
+		}
+	}
+	return false
 }
 
 // CallSnapshotOf is callSnapshotOf in the TS source: the recorded

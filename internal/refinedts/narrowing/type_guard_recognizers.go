@@ -13,21 +13,33 @@
 package narrowing
 
 import (
+	"sync/atomic"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
+
+// narrowKernelHolder guards the kernel every check's run() hands in
+// through SetNarrowKernel — one *program.CheckerProgram per goroutine
+// in a parallel sweep, all calling SetNarrowKernel with the SAME
+// process-wide kernel before their walk starts. The write is racy
+// without this even though every writer sets the same pointer value:
+// atomic.Pointer makes the set-then-read safe across goroutines.
+var narrowKernelHolder atomic.Pointer[kernelbridge.RefinedTSKernel]
 
 // NarrowKernel is narrowKernel in the TS source: the kernel the
 // narrowings pose their questions through — set by the checker's run()
 // before any walk. Without one (a unit test that skipped setup), a
 // condition narrows nothing — degraded loudly by the alerts that
 // causes, never wrong.
-var NarrowKernel *kernelbridge.RefinedTSKernel
+func NarrowKernel() *kernelbridge.RefinedTSKernel {
+	return narrowKernelHolder.Load()
+}
 
 // SetNarrowKernel is setNarrowKernel in the TS source.
 func SetNarrowKernel(kernel *kernelbridge.RefinedTSKernel) {
-	NarrowKernel = kernel
+	narrowKernelHolder.Store(kernel)
 }
 
 // Other is OTHER in the TS source.

@@ -56,6 +56,11 @@ func CallbackOutcome(
 	}
 	silent := *ctx
 	silent.Report = func(d assignability.RefinementDiagnostic) {}
+	// the callback's body is THIS arrow's walk for snapshot purposes —
+	// calls inside it must record under the arrow, not the outer
+	// owner's SnapshotOwner (otherwise nested map/forEach bodies never
+	// feed CallSiteBindings for the helpers they invoke)
+	silent.SnapshotOwner = arrow
 
 	callExpr := call.AsCallExpression()
 
@@ -103,6 +108,10 @@ func CallbackOutcome(
 	}
 
 	evalBody := func(reporting *FlowContext, bindings map[string]abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+		// every body evaluation owns snapshots for calls inside this
+		// arrow — including the reporting pass that runs on `ctx`
+		owned := *reporting
+		owned.SnapshotOwner = arrow
 		callEnv := Env{}
 		for k, v := range env {
 			callEnv[k] = v
@@ -117,7 +126,7 @@ func CallbackOutcome(
 			// the return sink collects what the block returns; its
 			// judgments still report through `reporting`
 			var sink []abstractdomain.AbstractValue
-			sinkCtx := *reporting
+			sinkCtx := owned
 			sinkCtx.ReturnSink = &sink
 			analyzers.AnalyzeStatement(&sinkCtx, callEnv, body, nil)
 			if len(sink) == 0 {
@@ -129,7 +138,7 @@ func CallbackOutcome(
 			}
 			return joined
 		}
-		return analyzers.EvaluateExpression(reporting, callEnv, body)
+		return analyzers.EvaluateExpression(&owned, callEnv, body)
 	}
 
 	reportPins := func(accumulator *abstractdomain.AbstractValue) map[string]abstractdomain.AbstractValue {

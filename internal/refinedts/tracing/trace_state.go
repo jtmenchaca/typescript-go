@@ -11,7 +11,11 @@
 
 package tracing
 
-import "time"
+import (
+	"sync"
+	"sync/atomic"
+	"time"
+)
 
 // Grain names how fine a span records: "phase" | "step" | "node"
 // (cache_tuning.ts's Grain; the tuning module lives in service/ and
@@ -63,13 +67,40 @@ const treeDepthCap = 16
 // TRACE.enabled / TRACE.grain (cache_tuning.ts): off by default, at
 // the step grain when turned on — the same resting state the TS
 // tuning file ships.
+//
+// Both are atomics: Span/Count/Clock/Recording on every walk
+// goroutine read them first, before touching anything else, so the
+// off path (Enabled false) must be race-free without taking the
+// records mutex below — a single atomic load per call, same as the
+// single bool read the TS source pays.
 var (
-	Enabled = false
-	Level   = GrainLevel[GrainStep]
+	enabledFlag atomic.Bool
+	levelValue  = func() atomic.Int64 {
+		var v atomic.Int64
+		v.Store(int64(GrainLevel[GrainStep]))
+		return v
+	}()
 )
 
-func SetEnabled(value bool) { Enabled = value }
-func SetLevel(value int)    { Level = value }
+func SetEnabled(value bool) { enabledFlag.Store(value) }
+func SetLevel(value int)    { levelValue.Store(int64(value)) }
+
+// IsEnabled and CurrentLevel are the atomic reads every hot call site
+// uses instead of the old plain Enabled/Level vars.
+func IsEnabled() bool  { return enabledFlag.Load() }
+func CurrentLevel() int { return int(levelValue.Load()) }
+
+// recordsMu guards every mutable record below (the flat map, the
+// active-frame counts, the counters, the span stack, the tree, the
+// per-file costs, the pre-trace notes, and the run clock/reads). One
+// lock rather than one per field because Enter/Leave/Count each touch
+// several of these together as a single bookkeeping step (e.g. Enter
+// pushes the stack AND may open a tree node AND bumps Active in one
+// call) — splitting the lock would let those steps interleave with a
+// concurrent goroutine's and tear the bookkeeping. Held only on the
+// recording path; the off path (Enabled false) never reaches it, so
+// it costs nothing when tracing is off.
+var recordsMu sync.Mutex
 
 /* ── the flat record ─────────────────────────────────────────────── */
 
@@ -101,8 +132,28 @@ var (
 	TreeDepth   int
 )
 
-func SetRoot(value *TraceSpan)        { Root = value }
-func SetTreeCurrent(value *TraceSpan) { TreeCurrent = value }
+// SetRoot and SetTreeCurrent are called by TraceStop, outside
+// Enter/Leave's own locking, so each takes recordsMu itself.
+func SetRoot(value *TraceSpan) {
+	recordsMu.Lock()
+	defer recordsMu.Unlock()
+	Root = value
+}
+
+func SetTreeCurrent(value *TraceSpan) {
+	recordsMu.Lock()
+	defer recordsMu.Unlock()
+	TreeCurrent = value
+}
+
+// GetRoot reads Root under the same lock Enter/Leave/ResetRecords use
+// to write it — TraceStop's read-then-clear needs both under one
+// critical section so no Enter/Leave lands between them.
+func GetRoot() *TraceSpan {
+	recordsMu.Lock()
+	defer recordsMu.Unlock()
+	return Root
+}
 
 // A tree node per (parent, name), created once and reused — the tree
 // aggregates repeats rather than growing a node per call. (TS holds
@@ -144,13 +195,24 @@ var RunStartedAt time.Time
 // own overhead.
 var ClockReads int64
 
-func AddClockReads(n int64) { ClockReads += n }
+// AddClockReads takes recordsMu itself: Clock() in tracing.go calls it
+// standalone, not from inside an Enter/Leave critical section.
+func AddClockReads(n int64) {
+	recordsMu.Lock()
+	defer recordsMu.Unlock()
+	ClockReads += n
+}
 
 func msSince(t time.Time) float64 {
 	return float64(time.Since(t)) / float64(time.Millisecond)
 }
 
+// Enter takes recordsMu for its whole body: the stack push, the
+// active-count bump, and the tree-node open are one bookkeeping step
+// that must not interleave with another goroutine's Enter/Leave.
 func Enter(name string, grain Grain) *Frame {
+	recordsMu.Lock()
+	defer recordsMu.Unlock()
 	already := Active[name]
 	Active[name] = already + 1
 	var treeHeld *TraceSpan
@@ -183,7 +245,12 @@ func Enter(name string, grain Grain) *Frame {
 	return frame
 }
 
+// Leave takes recordsMu for its whole body, mirroring Enter — the
+// stack pop, the flat-entry update, and the tree-node close are one
+// step.
 func Leave(frame *Frame, grain Grain) {
+	recordsMu.Lock()
+	defer recordsMu.Unlock()
 	ClockReads++
 	elapsed := msSince(frame.StartedAt)
 	Stack = Stack[:len(Stack)-1]
@@ -220,7 +287,10 @@ func Leave(frame *Frame, grain Grain) {
 
 // ResetRecords clears flat/tree/file counters and opens a fresh root.
 // Leaves PreTraceNotes alone — those document time before tracing.
+// Shared record maps clear under recordsMu; FileDetails has its own
+// lock and clears after.
 func ResetRecords() {
+	recordsMu.Lock()
 	Flat = map[string]*TraceEntry{}
 	Active = map[string]int{}
 	Counters = map[string]*TraceCounter{}
@@ -233,4 +303,6 @@ func ResetRecords() {
 	TreeCurrent = Root
 	TreeDepth = 0
 	RunStartedAt = time.Now()
+	recordsMu.Unlock()
+	ClearFileDetails()
 }
