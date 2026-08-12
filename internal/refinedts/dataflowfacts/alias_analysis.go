@@ -7,7 +7,6 @@
 // unmodeled method on a reference, or a reference handed to any call,
 // forgets the WHOLE alias class. No stale fact survives an unmodeled
 // write; number-typed bindings copy by value and are never havocked.
-//
 package dataflowfacts
 
 import (

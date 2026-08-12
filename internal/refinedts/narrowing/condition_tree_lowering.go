@@ -8,6 +8,7 @@ package narrowing
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/conditiontree"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
@@ -29,13 +30,13 @@ func TreeOf(
 	// and be absent from the row and gate emitters. The shared tree
 	// pushes `!` onto leaf polarity; a negated leaf comes back as the
 	// kernel's own `not` node around the recognized test.
-	var fold func(t ConditionTree) kernelbridge.NarrowTree
-	fold = func(t ConditionTree) kernelbridge.NarrowTree {
-		if t.Kind == ConditionTreeAnd || t.Kind == ConditionTreeOr {
+	var fold func(t conditiontree.ConditionTree) kernelbridge.NarrowTree
+	fold = func(t conditiontree.ConditionTree) kernelbridge.NarrowTree {
+		if t.Kind == conditiontree.ConditionTreeAnd || t.Kind == conditiontree.ConditionTreeOr {
 			a := fold(*t.A)
 			b := fold(*t.B)
 			kind := kernelbridge.NarrowKindAnd
-			if t.Kind == ConditionTreeOr {
+			if t.Kind == conditiontree.ConditionTreeOr {
 				kind = kernelbridge.NarrowKindOr
 			}
 			return kernelbridge.NarrowTree{Kind: kind, A: &a, B: &b}
@@ -46,7 +47,7 @@ func TreeOf(
 		}
 		return leaf
 	}
-	return fold(ConditionTreeOf(condition, false))
+	return fold(conditiontree.ConditionTreeOf(condition, false))
 }
 
 // leafTreeOf is leafTreeOf in the TS source: one LEAF recognized on the
@@ -188,7 +189,7 @@ func CollectPlaces(
 	}
 	// the connectives come from the SHARED tree (finding 16) — this
 	// walk reads leaves only, `await` peeled per leaf
-	for _, leaf := range AllLeaves(ConditionTreeOf(condition, false)) {
+	for _, leaf := range conditiontree.AllLeaves(conditiontree.ConditionTreeOf(condition, false)) {
 		e := Peeled(leaf.Test)
 		if e != leaf.Test {
 			CollectPlaces(c, e, isTracked, into)

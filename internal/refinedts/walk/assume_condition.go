@@ -1,0 +1,485 @@
+// from control_flow/assume_condition.ts
+//
+// The assume operator: everything a condition proves, applied at a
+// branch split — ONE routine for every site that splits on a
+// condition (if, ternary, &&/||, switch(true)), so no site gets a
+// hand-picked subset of the narrowing families. Each side comes back
+// as an environment and a context: the set narrowings, the
+// structural narrowings, value-copy narrowings, inverse-factor and
+// length-guard narrowings on the environment; the condition's
+// difference rows and sum rows on the context — the TRUE side's held
+// rows, the FALSE side's refuted rows (¬(a < b) proves a ≥ b of real
+// pairs). Dead sides are decided here too: a computed verdict, a
+// path-condition assumption, or a narrowing a known value
+// contradicts.
+//
+// CROSS-DIRECTORY: dataflowfacts.DifferenceConstraintsOf,
+// NegatedDifferenceConstraintsOf (dataflow_facts/difference_constraints.ts),
+// LengthGuardNarrowings (dataflow_facts/length_guard_narrowings.ts), and
+// SumConstraintsOf/NoteSumExitConstraints (dataflow_facts/sum_constraints.ts)
+// are now landed in package dataflowfacts, but each answers NO ROWS —
+// they need narrowing/condition_tree.ts's conditionTreeOf/conjunctiveLeaves,
+// and dataflowfacts cannot import narrowing (narrowing already imports
+// dataflowfacts in several files — a true cross-package cycle; see
+// dataflowfacts/difference_constraints.go's banner). The sound "nothing
+// vouched" fallback these answer is exactly what this file's own
+// heldConstraints/refutedConstraints/etc. already tolerate when a guard
+// proves nothing. InverseFactorNarrowings (dataflow_facts/
+// inverse_factor_narrowings.ts) landed in THIS package instead (walk/
+// inverse_factor_narrowings.go) — it needs narrowing.SideBounds/Narrowed,
+// which would close the same cycle from dataflowfacts, but walk already
+// imports narrowing one-way, so it fits here and is called unqualified.
+// AssumedVerdict is this package's own (correlation_gate.go /
+// path_conditions.go).
+
+package walk
+
+import (
+	"math"
+
+	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
+	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+)
+
+// registerSumConstraints is registerSumConstraints in the TS source:
+// sum rows carry the same flow-sensitive invalidation order rows do
+// — each registers with EVERY name it roots in — both terms and the
+// anchor — so a write through any alias of any of them kills it.
+func registerSumConstraints(ctx *FlowContext, rows []dataflowfacts.SumConstraint) {
+	for i := range rows {
+		row := &rows[i]
+		ctx.Aliases.RegisterRooted(row, []string{
+			row.Terms[0].BaseName,
+			row.Terms[1].BaseName,
+			row.Anchor.BaseName,
+		})
+	}
+}
+
+// InfeasibleBranch is infeasibleBranch in the TS source: a branch is
+// DEAD when a narrowing contradicts a singleton value — the runtime
+// cannot take it, so its writes never happen and its value never
+// joins. Decided only on facts a known real decides — everything
+// else stays feasible.
+func InfeasibleBranch(env Env, ns []narrowing.Narrowed) bool {
+	for _, n := range ns {
+		if len(n.Path) != 0 {
+			continue
+		}
+		held, ok := env[n.Binding]
+		if !ok || held.Kind != abstractdomain.KindValues {
+			continue
+		}
+		if len(held.Values) != 1 || held.KindTag != abstractdomain.PrimitiveNumber {
+			continue
+		}
+		v := held.Values[0]
+		for _, form := range n.Forms {
+			if form.Form == refinementsets.FormOneOf && !floatsInclude(form.W, v) {
+				return true
+			}
+			if form.Form == refinementsets.FormAtLeast && v < form.A {
+				return true
+			}
+			if form.Form == refinementsets.FormAbove && v <= form.A {
+				return true
+			}
+			if form.Form == refinementsets.FormAtMost && v > form.A {
+				return true
+			}
+			if form.Form == refinementsets.FormBelow && v >= form.A {
+				return true
+			}
+			if form.Form == refinementsets.FormDifference {
+				// membership in A∖B needs v ∉ B: a v inside B kills the
+				// branch whatever A holds
+				excluded := len(form.B.Forms) == 1 &&
+					form.B.Forms[0].Form == refinementsets.FormOneOf &&
+					floatsInclude(form.B.Forms[0].W, v)
+				if excluded {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func floatsInclude(list []float64, v float64) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// ConditionEnvTransfersSite mirrors conditionEnvTransfers' `site`
+// parameter.
+type ConditionEnvTransfersSite struct {
+	// At: the node value-copy collection scans from.
+	At *ast.Node
+	// SideWindow: comparison-side windows — a loop passes an
+	// entry-state reader gated to names it never writes (an ungated
+	// window would go stale by the second iteration); a branch site
+	// leaves this nil and the current environment answers.
+	SideWindow    narrowing.SideBounds
+	ReadElsewhere narrowing.GuardReadElsewhere
+}
+
+// ConditionEnvTransfers is the ENVIRONMENT transfers one condition
+// proves, packaged for any site that applies them repeatedly — a
+// branch applies each side once; a loop applies the held side at
+// every body entry and the refuted side at the exit. Rows are NOT
+// here: each site owns its own row discipline (branches carry rows
+// on their contexts; loops invalidate and revalidate theirs per
+// entry).
+type ConditionEnvTransfers struct {
+	WhenTrue  []narrowing.Narrowed
+	WhenFalse []narrowing.Narrowed
+	// ApplyWhenTrue applies everything the HELD condition proves to
+	// `into`: the narrowings with their value copies, the inverse
+	// product factors, the length-guard floors.
+	ApplyWhenTrue func(into Env)
+	// ApplyWhenFalse applies everything the REFUTED condition proves
+	// to `into`.
+	ApplyWhenFalse func(into Env)
+}
+
+// ConditionEnvTransfersOf is conditionEnvTransfers in the TS source.
+func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, site ConditionEnvTransfersSite) ConditionEnvTransfers {
+	// a condition BOUND TO A NAME keeps every fact it encodes;
+	// narrowings() resolves bound names internally
+	condition := narrowing.BoundConditionInitializer(ctx.P.Checker, expression)
+	if condition == nil {
+		condition = expression
+	}
+	windows := site.SideWindow
+	if windows == nil {
+		windows = SideBoundsIn(ctx, env)
+	}
+	branches := narrowing.Narrowings(ctx.P.Checker, expression, func(name string) bool {
+		_, ok := env[name]
+		return ok
+	}, windows, site.ReadElsewhere)
+	// a held product guard (`x * y > k`) inverted: each factor narrows
+	// by the quotient of k and the other factor's window
+	inverse := InverseFactorNarrowings(ctx.Kernel, condition, func(name string) bool {
+		_, ok := env[name]
+		return ok
+	}, windows)
+	// a VALUE COPY rides its source's narrowing: `const n = o.n` with
+	// neither n nor o written in this function still equals o.n when
+	// the guard tests it — applied on BOTH sides, and in BOTH
+	// directions: a guard on the place narrows its copies, a guard on
+	// the copy narrows the source place
+	applySide := func(into Env, ns []narrowing.Narrowed) {
+		for _, n := range ns {
+			into[n.Binding] = narrowing.ApplyNarrowed(envOrResidue(into, n.Binding), n)
+			if len(n.Path) > 0 {
+				// the PLACE-VALUE memory: a root whose own shape cannot
+				// absorb the path — an unknown behind Array.isArray, a
+				// sequence's length — remembers the narrowed value under the
+				// DOTTED key (dots never appear in identifiers), so the
+				// entry rides the environment's own forking and joining;
+				// writes through the root sweep it (assignments.ts)
+				root := envOrResidue(into, n.Binding)
+				rootAbsorbs := root.Kind == abstractdomain.KindObject ||
+					(root.Kind == abstractdomain.KindPossiblyUndefined && root.Inner != nil && root.Inner.Kind == abstractdomain.KindObject)
+				if !rootAbsorbs {
+					pathKey := n.Binding
+					for _, p := range n.Path {
+						pathKey += "." + p
+					}
+					pathless := n
+					pathless.Path = nil
+					into[pathKey] = narrowing.ApplyNarrowed(envOrResidue(into, pathKey), pathless)
+				}
+				for _, copy := range narrowing.CopyBindingsOf(ctx.P.Checker, site.At, dataflowfacts.TrackedPlace{Binding: n.Binding, Path: n.Path}) {
+					if _, ok := into[copy]; !ok {
+						continue
+					}
+					renamed := n
+					renamed.Binding = copy
+					renamed.Path = nil
+					into[copy] = narrowing.ApplyNarrowed(envOrResidue(into, copy), renamed)
+				}
+			}
+			if len(n.Path) == 0 {
+				source, ok := narrowing.CopySourcePlaceOf(ctx.P.Checker, site.At, n.Binding)
+				if ok {
+					if _, has := into[source.Binding]; has {
+						renamed := n
+						renamed.Binding = source.Binding
+						renamed.Path = source.Path
+						into[source.Binding] = narrowing.ApplyNarrowed(envOrResidue(into, source.Binding), renamed)
+					}
+				}
+			}
+		}
+	}
+	isStringKindAt := func(e *ast.Node) bool {
+		return primitives.IsStringKind(ctx.P.Checker, e)
+	}
+	return ConditionEnvTransfers{
+		WhenTrue:  branches.WhenTrue,
+		WhenFalse: branches.WhenFalse,
+		ApplyWhenTrue: func(into Env) {
+			applySide(into, branches.WhenTrue)
+			for _, n := range inverse {
+				into[n.Binding] = narrowing.ApplyNarrowed(envOrResidue(into, n.Binding), n)
+			}
+			// a held length guard (`xs.length >= k`) raises a repetition's
+			// counting floor — read from the target state, which the test
+			// just passed
+			for _, n := range dataflowfacts.LengthGuardNarrowings(into, condition, isStringKindAt, false) {
+				into[n.Binding] = n.Known
+			}
+		},
+		ApplyWhenFalse: func(into Env) {
+			applySide(into, branches.WhenFalse)
+			// refuted, the length guard caps the floor instead
+			for _, n := range dataflowfacts.LengthGuardNarrowings(into, condition, isStringKindAt, true) {
+				into[n.Binding] = n.Known
+			}
+		},
+	}
+}
+
+func envOrResidue(env Env, name string) abstractdomain.AbstractValue {
+	if v, ok := env[name]; ok {
+		return v
+	}
+	return silence.Residue()
+}
+
+// AssumedBranch mirrors the TS AssumedBranch interface.
+type AssumedBranch struct {
+	// Env: the entry environment with this side's narrowings applied.
+	Env Env
+	// Ctx: the context with this side's condition rows riding — the
+	// TRUE side carries the held rows, the FALSE side the refuted
+	// ones.
+	Ctx *FlowContext
+	// Dead: the runtime cannot take this side.
+	Dead bool
+}
+
+// AssumeConditionScope mirrors assumeCondition's `site` parameter.
+type AssumeConditionScope struct {
+	// WhenTrueScope: where the TRUE side's rows must stay stable (the
+	// branch).
+	WhenTrueScope *ast.Node
+	// WhenFalseScope: where the FALSE side's rows must stay stable.
+	WhenFalseScope *ast.Node
+	// At: the node value-copy collection scans from.
+	At *ast.Node
+}
+
+// AssumedCondition mirrors the TS AssumedCondition interface.
+type AssumedCondition struct {
+	WhenTrue  AssumedBranch
+	WhenFalse AssumedBranch
+	// HeldConstraints: the held (true-side) rows — the continuation
+	// after an else-exit carries them (NoteExitConstraints is the
+	// caller's, at its statement).
+	HeldConstraints []dataflowfacts.DifferenceConstraint
+	// RefuteIntoContinuation: the refuted condition carried into the
+	// CONTINUATION after a then-exit — records the negated rows and
+	// sum rows at `statement` for the statement list to pick up, and
+	// applies the negated length guards to the continuing
+	// environment.
+	RefuteIntoContinuation func(statement *ast.Node, scope *ast.Node, continuation Env)
+}
+
+// assumeCondition is assumeCondition in the TS source: everything
+// one condition proves, both sides — see the header. The caller
+// evaluates the condition expression first (for its effects and its
+// verdict) and passes ToBoolean's verdict when it pinned one (via
+// computedVerdict/hasComputedVerdict); the sides this routine
+// evaluates itself are the comparison operands the row machinery
+// windows, exactly as the if-arm always did.
+func assumeCondition(
+	ctx *FlowContext,
+	env Env,
+	expression *ast.Node,
+	site AssumeConditionScope,
+	computedVerdict bool,
+	hasComputedVerdict bool,
+) AssumedCondition {
+	// a condition BOUND TO A NAME keeps every fact it encodes for the
+	// ROW machinery; narrowings() resolves bound names internally
+	condition := narrowing.BoundConditionInitializer(ctx.P.Checker, expression)
+	if condition == nil {
+		condition = expression
+	}
+	exactWindowOf := func(side *ast.Node) (dataflowfacts.ExactWindow, bool) {
+		r := RangeOfKnown(evaluateExpression(ctx, env, side))
+		if r == nil {
+			return dataflowfacts.ExactWindow{}, false
+		}
+		return dataflowfacts.ExactWindow{Lo: r.Lo, Hi: r.Hi, Int: r.Int}, true
+	}
+	exactValueOf := func(side *ast.Node) (float64, bool) {
+		if !ast.IsIdentifier(side) {
+			return 0, false
+		}
+		held := evaluateExpression(ctx, env, side)
+		if held.Kind == abstractdomain.KindValues && held.KindTag == abstractdomain.PrimitiveNumber && len(held.Values) == 1 {
+			return held.Values[0], true
+		}
+		// a const bound to a literal outside the walked scope (a
+		// module-level gap) — const, so the value never moves
+		symbol := ctx.P.Checker.GetSymbolAtLocation(side)
+		if symbol == nil || symbol.ValueDeclaration == nil {
+			return 0, false
+		}
+		declaration := symbol.ValueDeclaration
+		if !ast.IsVariableDeclaration(declaration) {
+			return 0, false
+		}
+		vd := declaration.AsVariableDeclaration()
+		if declaration.Parent == nil || (declaration.Parent.Flags&ast.NodeFlagsConst) == 0 {
+			return 0, false
+		}
+		if vd.Initializer == nil || !ast.IsNumericLiteral(vd.Initializer) {
+			return 0, false
+		}
+		return NumberOf(vd.Initializer)
+	}
+	// an offset side whose arithmetic leaves the safe range: the
+	// kernel's proved envelope on |fl(x + k) − (x + k)| widens the
+	// row's bound instead of dropping the row
+	flSlackOf := func(window dataflowfacts.ExactWindow, offset float64) (float64, bool) {
+		if !window.Int || math.IsInf(window.Lo, 0) || math.IsNaN(window.Lo) || math.IsInf(window.Hi, 0) || math.IsNaN(window.Hi) {
+			return 0, false
+		}
+		return ctx.Kernel.Envelope(
+			"add",
+			refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(window.Lo), refinementsets.AtMost(window.Hi)),
+			refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(offset), refinementsets.AtMost(offset)),
+		)
+	}
+	// ¬(a < b) proves a ≥ b only of a real pair: a set-known side is
+	// NaN-free by construction (no set holds NaN)
+	realSide := func(side *ast.Node) bool {
+		held := evaluateExpression(ctx, env, side)
+		if held.Kind == abstractdomain.KindSet {
+			return true
+		}
+		if held.Kind == abstractdomain.KindValues && held.KindTag == abstractdomain.PrimitiveNumber {
+			for _, v := range held.Values {
+				if math.IsNaN(v) {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+
+	heldConstraints := dataflowfacts.DifferenceConstraintsOf(ctx.P.Checker, condition, site.WhenTrueScope, exactWindowOf, exactValueOf, flSlackOf)
+	readElsewhere := narrowing.GuardReadNowhere
+	if hasComputedVerdict {
+		readElsewhere = narrowing.GuardReadVerdict
+	} else if len(heldConstraints) > 0 {
+		readElsewhere = narrowing.GuardReadRelation
+	}
+	transfers := ConditionEnvTransfersOf(ctx, env, expression, ConditionEnvTransfersSite{
+		At:            site.At,
+		ReadElsewhere: readElsewhere,
+	})
+	// under a path-condition split, a test of the assumed condition is
+	// DECIDED: the pass models exactly the runs where it held (failed)
+	assumedVerdictValue, hasAssumedVerdict := AssumedVerdict(ctx, ctx.GateAssumptions, expression)
+	whenTrueDead := (hasAssumedVerdict && !assumedVerdictValue) ||
+		(hasComputedVerdict && !computedVerdict) ||
+		InfeasibleBranch(env, transfers.WhenTrue)
+	whenFalseDead := (hasAssumedVerdict && assumedVerdictValue) ||
+		(hasComputedVerdict && computedVerdict) ||
+		InfeasibleBranch(env, transfers.WhenFalse)
+
+	whenTrueEnv := cloneEnv(env)
+	transfers.ApplyWhenTrue(whenTrueEnv)
+	whenFalseEnv := cloneEnv(env)
+	transfers.ApplyWhenFalse(whenFalseEnv)
+
+	// the rows ride the branch contexts — held on the true side,
+	// refuted on the false side — recorded only for places the branch
+	// (and every closure) leaves unwritten
+	registerDifferenceConstraints(ctx, heldConstraints)
+	heldSumConstraints := dataflowfacts.SumConstraintsOf(ctx.P.Checker, condition, site.WhenTrueScope, false, nil)
+	registerSumConstraints(ctx, heldSumConstraints)
+	whenTrueCtx := ctx
+	if len(heldConstraints) > 0 {
+		next := *ctx
+		next.DifferenceConstraints = append(append([]dataflowfacts.DifferenceConstraint{}, ctx.DifferenceConstraints...), heldConstraints...)
+		whenTrueCtx = &next
+	}
+	if len(heldSumConstraints) > 0 {
+		next := *whenTrueCtx
+		next.SumConstraints = append(append([]dataflowfacts.SumConstraint{}, whenTrueCtx.SumConstraints...), heldSumConstraints...)
+		whenTrueCtx = &next
+	}
+	refutedConstraints := dataflowfacts.NegatedDifferenceConstraintsOf(ctx.P.Checker, condition, site.WhenFalseScope, exactWindowOf, exactValueOf, realSide, flSlackOf)
+	registerDifferenceConstraints(ctx, refutedConstraints)
+	refutedSumConstraints := dataflowfacts.SumConstraintsOf(ctx.P.Checker, condition, site.WhenFalseScope, true, realSide)
+	registerSumConstraints(ctx, refutedSumConstraints)
+	whenFalseCtx := ctx
+	if len(refutedConstraints) > 0 {
+		next := *ctx
+		next.DifferenceConstraints = append(append([]dataflowfacts.DifferenceConstraint{}, ctx.DifferenceConstraints...), refutedConstraints...)
+		whenFalseCtx = &next
+	}
+	if len(refutedSumConstraints) > 0 {
+		next := *whenFalseCtx
+		next.SumConstraints = append(append([]dataflowfacts.SumConstraint{}, whenFalseCtx.SumConstraints...), refutedSumConstraints...)
+		whenFalseCtx = &next
+	}
+
+	return AssumedCondition{
+		WhenTrue:        AssumedBranch{Env: whenTrueEnv, Ctx: whenTrueCtx, Dead: whenTrueDead},
+		WhenFalse:       AssumedBranch{Env: whenFalseEnv, Ctx: whenFalseCtx, Dead: whenFalseDead},
+		HeldConstraints: heldConstraints,
+		RefuteIntoContinuation: func(statement *ast.Node, scope *ast.Node, continuation Env) {
+			// the continuation runs with the condition REFUTED: the false
+			// side's rows ride the exit channel (the same one loops use),
+			// recomputed at the continuation's own scope so stability
+			// covers everything that follows
+			exitConstraints := dataflowfacts.NegatedDifferenceConstraintsOf(ctx.P.Checker, condition, scope, exactWindowOf, exactValueOf, realSide, flSlackOf)
+			registerDifferenceConstraints(ctx, exitConstraints)
+			if len(exitConstraints) > 0 {
+				dataflowfacts.NoteExitConstraints(statement, exitConstraints)
+			}
+			exitSumConstraints := dataflowfacts.SumConstraintsOf(ctx.P.Checker, condition, scope, true, realSide)
+			registerSumConstraints(ctx, exitSumConstraints)
+			if len(exitSumConstraints) > 0 {
+				dataflowfacts.NoteSumExitConstraints(statement, exitSumConstraints)
+			}
+			for _, n := range dataflowfacts.LengthGuardNarrowings(env, condition, func(e *ast.Node) bool { return primitives.IsStringKind(ctx.P.Checker, e) }, true) {
+				continuation[n.Binding] = n.Known
+			}
+		},
+	}
+}
+
+func registerDifferenceConstraints(ctx *FlowContext, rows []dataflowfacts.DifferenceConstraint) {
+	facts := make([]dataflowfacts.InvalidatableFact, len(rows))
+	for i := range rows {
+		facts[i] = &rows[i]
+	}
+	ctx.Aliases.Register(facts)
+}
+
+func cloneEnv(env Env) Env {
+	out := make(Env, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
+}

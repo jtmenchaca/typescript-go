@@ -1,0 +1,193 @@
+// from assignability/check_assignability.ts
+//
+// One checked position: what is known against what is stated. Every
+// obligation in the program ends here — a call argument, a returned
+// value, a write to a declared binding, a key of an object — and each
+// one is a single question to the proved kernel, never entailment
+// computed on this side.
+//
+// An object target is the PER-KEY subset check (TERMS.md term 10 —
+// objects live in the graph, so assignability is key by key, which is
+// exactly TypeScript's structural subtyping); a set target is one
+// membership or subset question.
+//
+// The three outcomes are the vocabulary's: proved says nothing, a
+// refutation reports 7001 with the counterexample spelled, and an
+// undetermined verdict reports 7002 — the alert, which blocks.
+//
+// This file is the gate and the dispatcher: cast wrapping, unread
+// refine, trust-level, unknown. Each arm lives in its own module.
+
+package walk
+
+import (
+	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
+)
+
+// CheckAssignability is checkAssignability in the TS source.
+// positionType is the position's DECLARED type where the caller
+// knows it better than the node's contextual type (a property
+// write's target) — nil for the TS default parameter.
+func CheckAssignability(
+	ctx *FlowContext,
+	known abstractdomain.AbstractValue,
+	target annotations.DeclaredRefinement,
+	node *ast.Node,
+	what string,
+	positionType *checker.Type,
+) {
+	// knowledge that crossed a cast still judges — and every refutation
+	// it produces says so, in the value's own words
+	judging := ctx
+	if abstractdomain.TrustLevelOf(known) == abstractdomain.TrustAsserted {
+		originalReport := ctx.Report
+		withCastNote := *ctx
+		withCastNote.Report = func(d assignability.RefinementDiagnostic) {
+			if d.Code == 7001 {
+				d.MessageText = d.MessageText + " — the cast doesn't change what the value can be"
+			}
+			originalReport(d)
+		}
+		judging = &withCastNote
+	}
+	if !tracing.Recording(tracing.GrainStep) {
+		CheckAssignabilityAgainst(judging, known, target, node, what, positionType)
+		return
+	}
+	tracing.Span("checkAssignability", func() struct{} {
+		CheckAssignabilityAgainst(judging, known, target, node, what, positionType)
+		return struct{}{}
+	}, tracing.GrainStep)
+}
+
+// CheckAssignabilityAgainst is checkAssignabilityAgainst in the TS
+// source.
+func CheckAssignabilityAgainst(
+	ctx *FlowContext,
+	known abstractdomain.AbstractValue,
+	target annotations.DeclaredRefinement,
+	node *ast.Node,
+	what string,
+	positionType *checker.Type,
+) {
+	tracing.Count("checkAssignability", 0)
+	// an UNREAD refine rides the statement: the parse checks more
+	// than the set says, so the position stays undetermined even
+	// where the set alone would prove — refutations below still land.
+	// An EXACT value can RUN the carried predicate, though: a decided
+	// TRUE discharges the unread obstacle for this value (the set
+	// still judges below), a decided FALSE refutes outright.
+	if target.Kind == annotations.DeclaredSet && target.Unread {
+		var decided bool
+		hasDecided := false
+		if target.Refine != nil {
+			decided, hasDecided = RefineDecidedOnExact(target.Refine, known)
+		}
+		if hasDecided && !decided {
+			ctx.Report(assignability.At(
+				node,
+				7001,
+				what+" fails the statement's own .refine predicate",
+			))
+			return
+		}
+		if !(hasDecided && decided) {
+			ctx.Report(assignability.At(node, 7002, assignability.AlertText))
+		}
+	}
+	// the strictness dial: knowledge whose boundary the workspace
+	// distrusts fires no judgment — the honest alert, never a verdict
+	// built on an inadmissible derivation (a no-op at "full")
+	if known.Kind != abstractdomain.KindUnknown && !abstractdomain.TrustLevelAdmitted(abstractdomain.TrustLevelOf(known)) {
+		ctx.Report(assignability.At(node, 7002, assignability.AlertText))
+		return
+	}
+	if known.Kind == abstractdomain.KindUnknown {
+		// a stated set that only RESTATES the sort's ground — the whole
+		// scalar line, the star of every string, an array of either —
+		// adds nothing beyond the host type, and tsc's own shape already
+		// enforces that; unknown knowledge against it alerts nowhere
+		// (the coverage report's "adds nothing" verdict, applied to the
+		// judge). Dependent bounds still judge on their own row.
+		if target.Kind == annotations.DeclaredSet && target.Temporal == nil &&
+			!target.Unread && AddsNothingSet(*target.Set) {
+			return
+		}
+		fix, hasFix := GuardFix(node, target)
+		messageText := assignability.AlertText
+		if ContainsPow(node) {
+			messageText = PowAlert(node, target)
+		}
+		base := assignability.At(node, 7002, messageText)
+		if hasFix {
+			base.Fix = &assignability.RefinementFix{Title: fix.Title, NewText: fix.NewText, InsertAt: fix.InsertAt}
+		}
+		ctx.Report(base)
+		return
+	}
+
+	if known.Kind == abstractdomain.KindNaN {
+		CheckPinnedNan(ctx, target, node, what)
+		return
+	}
+	if target.Kind == annotations.DeclaredObjectArray {
+		CheckObjectArrayTarget(ctx, known, target, node, what)
+		return
+	}
+	if target.Kind == annotations.DeclaredPossiblyUndefined {
+		CheckMaybeTarget(ctx, known, target, node, what, positionType)
+		return
+	}
+	if known.Kind == abstractdomain.KindUndef || known.Kind == abstractdomain.KindPossiblyUndefined {
+		RefutePossiblyAbsent(ctx, known, target, node, what)
+		return
+	}
+	if known.Kind == abstractdomain.KindKindUnion {
+		CheckKindUnion(ctx, known, target, node, what, positionType)
+		return
+	}
+	if target.Kind == annotations.DeclaredVariable {
+		CheckVariableTarget(ctx, known, target, node)
+		return
+	}
+	if known.Kind == abstractdomain.KindVariable {
+		CheckVariableKnown(ctx, known, target, node, what, positionType)
+		return
+	}
+	if target.Kind == annotations.DeclaredObject {
+		CheckObjectTarget(ctx, known, target, node, what)
+		return
+	}
+	if known.Kind == abstractdomain.KindObject {
+		CheckObjectKnown(ctx, known, target, node, what)
+		return
+	}
+	if known.Kind == abstractdomain.KindPossiblyNaN {
+		CheckPossiblyNaN(ctx, known, target, node, what)
+		return
+	}
+	if known.Kind == abstractdomain.KindBigints {
+		CheckBigints(ctx, known, target, node, what)
+		return
+	}
+	if known.Kind == abstractdomain.KindSymbol {
+		CheckSymbol(ctx, known, target, node)
+		return
+	}
+	if known.Kind == abstractdomain.KindHostFunction {
+		CheckHostFunction(ctx, target, node, what)
+		return
+	}
+	if CheckListOrStructured(ctx, known, target, node, what) {
+		return
+	}
+	if CheckAdmittedSort(ctx, known, node, what, positionType) {
+		return
+	}
+	CheckSetMembership(ctx, known, target, node, what)
+}

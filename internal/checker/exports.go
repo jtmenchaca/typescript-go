@@ -366,6 +366,14 @@ func (c *Checker) GetConstraintOfType(t *Type) *Type {
 	return c.getConstraintOfType(t)
 }
 
+// GetTypeAlias returns the type's alias -- the TS source's own
+// `type.aliasSymbol` question (a resolved type instance still carries
+// the alias it was named through, e.g. `type Port = z.infer<typeof
+// zPort>`), nil when the type names no alias.
+func (t *Type) GetTypeAlias() *TypeAlias {
+	return t.alias
+}
+
 // SymbolInDefaultLib reports whether a symbol declares in the
 // checker's default library (the global Number, Math, ...). Symbols,
 // never names -- a local `const Math = ...` is not the library, and

@@ -1,0 +1,186 @@
+// from control_flow/effect_expression.ts
+//
+// The EXPRESSION half of the effect grammar, shared by both
+// lowerings — the loop solver (loop_effect.ts) and the flow IR
+// (lowering_to_kernel_ir.ts): literals through parens/casts, tracked
+// reads, negation and unary plus, the five arithmetic operators, the
+// Math reads (five unary, min/max), and the ternary as a join (its
+// condition must be write-free — both arms are admitted, sound).
+// `ReadPlace` answers a spelled tracked (or known) name; `Opaque`
+// says what an unmodeled shape becomes — the solver path answers
+// unknown for write-free shapes, the IR path declines. (0-value,
+// false) means the reading declines.
+
+package walk
+
+import (
+	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/jsnum"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+)
+
+var binOps = map[ast.Kind]kernelbridge.LoopEffectOp{
+	ast.KindPlusToken:     kernelbridge.LoopOpAdd,
+	ast.KindMinusToken:    kernelbridge.LoopOpSub,
+	ast.KindAsteriskToken: kernelbridge.LoopOpMul,
+	ast.KindSlashToken:    kernelbridge.LoopOpDiv,
+	ast.KindPercentToken:  kernelbridge.LoopOpRem,
+}
+
+var mathOps = map[string]kernelbridge.LoopEffectOp{
+	"floor": kernelbridge.LoopOpFloor,
+	"ceil":  kernelbridge.LoopOpCeil,
+	"round": kernelbridge.LoopOpRound,
+	"trunc": kernelbridge.LoopOpTrunc,
+	"abs":   kernelbridge.LoopOpAbs,
+}
+
+// ContainsWrite is containsWrite in the TS source: does the subtree
+// perform any write? A shape mapped to an opaque effect must be
+// write-free, or the lowering's state would miss the write. Shared
+// by both lowerings.
+func ContainsWrite(node *ast.Node) bool {
+	if ast.IsBinaryExpression(node) {
+		bin := node.AsBinaryExpression()
+		if bin.OperatorToken.Kind >= ast.KindFirstAssignment && bin.OperatorToken.Kind <= ast.KindLastAssignment {
+			return true
+		}
+	}
+	if ast.IsPrefixUnaryExpression(node) {
+		unary := node.AsPrefixUnaryExpression()
+		if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+			return true
+		}
+	}
+	if ast.IsPostfixUnaryExpression(node) {
+		unary := node.AsPostfixUnaryExpression()
+		if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+			return true
+		}
+	}
+	found := false
+	node.ForEachChild(func(child *ast.Node) bool {
+		if !found {
+			found = ContainsWrite(child)
+		}
+		return false
+	})
+	return found
+}
+
+// EffectReader mirrors the destructured `reader` parameter of
+// lowerEffectExpression in the TS source.
+type EffectReader struct {
+	ReadPlace func(spelled string) (kernelbridge.LoopEffect, bool)
+	Opaque    func(e *ast.Node) (kernelbridge.LoopEffect, bool)
+}
+
+// LowerEffectExpression is lowerEffectExpression in the TS source.
+func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopEffect, bool) {
+	if ast.IsParenthesizedExpression(e) || ast.IsAsExpression(e) || ast.IsNonNullExpression(e) {
+		var inner *ast.Node
+		switch {
+		case ast.IsParenthesizedExpression(e):
+			inner = e.AsParenthesizedExpression().Expression
+		case ast.IsAsExpression(e):
+			inner = e.AsAsExpression().Expression
+		case ast.IsNonNullExpression(e):
+			inner = e.AsNonNullExpression().Expression
+		}
+		return LowerEffectExpression(inner, reader)
+	}
+	if ast.IsNumericLiteral(e) {
+		return kernelbridge.LoopEffect{
+			Kind: kernelbridge.LoopEffectConst,
+			Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{float64(jsnum.FromString(e.AsNumericLiteral().Text))})),
+		}, true
+	}
+	if e.Kind == ast.KindTrueKeyword {
+		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1}))}, true
+	}
+	if e.Kind == ast.KindFalseKeyword {
+		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0}))}, true
+	}
+	if spelled, ok := SpelledNameOf(e); ok {
+		if held, ok := reader.ReadPlace(spelled); ok {
+			return held, true
+		}
+		return reader.Opaque(e)
+	}
+	if ast.IsPrefixUnaryExpression(e) {
+		unary := e.AsPrefixUnaryExpression()
+		if unary.Operator == ast.KindMinusToken {
+			if ast.IsNumericLiteral(unary.Operand) {
+				return kernelbridge.LoopEffect{
+					Kind: kernelbridge.LoopEffectConst,
+					Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{-float64(jsnum.FromString(unary.Operand.AsNumericLiteral().Text))})),
+				}, true
+			}
+			a, ok := LowerEffectExpression(unary.Operand, reader)
+			if !ok {
+				return kernelbridge.LoopEffect{}, false
+			}
+			return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnary, Op: kernelbridge.LoopOpNeg, A: &a}, true
+		}
+		if unary.Operator == ast.KindPlusToken {
+			return LowerEffectExpression(unary.Operand, reader)
+		}
+		return reader.Opaque(e)
+	}
+	if ast.IsBinaryExpression(e) {
+		bin := e.AsBinaryExpression()
+		op, ok := binOps[bin.OperatorToken.Kind]
+		if !ok {
+			return reader.Opaque(e)
+		}
+		a, aOk := LowerEffectExpression(bin.Left, reader)
+		b, bOk := LowerEffectExpression(bin.Right, reader)
+		if !aOk || !bOk {
+			return kernelbridge.LoopEffect{}, false
+		}
+		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectBinary, Op: op, A: &a, B: &b}, true
+	}
+	if ast.IsConditionalExpression(e) {
+		cond := e.AsConditionalExpression()
+		if ContainsWrite(cond.Condition) {
+			return kernelbridge.LoopEffect{}, false
+		}
+		a, aOk := LowerEffectExpression(cond.WhenTrue, reader)
+		b, bOk := LowerEffectExpression(cond.WhenFalse, reader)
+		if !aOk || !bOk {
+			return kernelbridge.LoopEffect{}, false
+		}
+		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectJoin, A: &a, B: &b}, true
+	}
+	if ast.IsCallExpression(e) {
+		call := e.AsCallExpression()
+		if ast.IsPropertyAccessExpression(call.Expression) {
+			access := call.Expression.AsPropertyAccessExpression()
+			if ast.IsIdentifier(access.Expression) && access.Expression.Text() == "Math" {
+				name := access.Name().Text()
+				if un, ok := mathOps[name]; ok && call.Arguments != nil && len(call.Arguments.Nodes) == 1 {
+					a, ok := LowerEffectExpression(call.Arguments.Nodes[0], reader)
+					if !ok {
+						return kernelbridge.LoopEffect{}, false
+					}
+					return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnary, Op: un, A: &a}, true
+				}
+				if (name == "min" || name == "max") && call.Arguments != nil && len(call.Arguments.Nodes) == 2 {
+					a, aOk := LowerEffectExpression(call.Arguments.Nodes[0], reader)
+					b, bOk := LowerEffectExpression(call.Arguments.Nodes[1], reader)
+					if !aOk || !bOk {
+						return kernelbridge.LoopEffect{}, false
+					}
+					op := kernelbridge.LoopOpMin
+					if name == "max" {
+						op = kernelbridge.LoopOpMax
+					}
+					return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectBinary, Op: op, A: &a, B: &b}, true
+				}
+			}
+		}
+		return reader.Opaque(e)
+	}
+	return reader.Opaque(e)
+}

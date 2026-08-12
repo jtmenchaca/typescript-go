@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
@@ -166,6 +167,15 @@ func CanonicalKeyOf(value any) *string {
 		return nil
 	}
 	return &key
+}
+
+// CanonicalKeyOfSet is the order-free canonical key of one refined
+// set — canonicalKeyOf(wireSet(set)) in the TS source, exported so
+// set-keyed memos outside this package (annotations' interface hash)
+// key on the canonical spelling rather than the order-sensitive wire
+// string. Nil past the spelling budget, like CanonicalKeyOf.
+func CanonicalKeyOfSet(set refinementsets.RefinedSet) *string {
+	return CanonicalKeyOf(wireSet(set))
 }
 
 // QuestionCacheEntry is the TS `{ ok: string } | { err: string }`.

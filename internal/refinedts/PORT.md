@@ -28,6 +28,12 @@ Every `foo.ts` becomes `foo.go`; every `foo.test.ts` becomes
   is `package primitives`).
 - Build:  `go build -C /Users/jtmenchaca/TypeRefinery/packages/refinedts/refined-ts-go ./internal/refinedts/...`
 - Test:   `go test -C /Users/jtmenchaca/TypeRefinery/packages/refinedts/refined-ts-go ./internal/refinedts/<dir>/`
+- Whole-tree equivalents exist as pre-approved pnpm scripts (run from
+  /Users/jtmenchaca/TypeRefinery, each needs the attestation comment
+  block like every pnpm command): `pnpm go:build`, `pnpm go:test`,
+  `pnpm go:vet`, `pnpm go:fmt`. Prefer these when a command would
+  otherwise prompt for approval; package-scoped `go test ./…/<dir>/`
+  stays fine.
 
 ## Port order (dependency-shallow to deep)
 

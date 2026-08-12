@@ -14,6 +14,10 @@
 // resolveBoundCondition only at its TOP (the const-name resolution
 // pass) — that pass is dropped there, reported, and the rest of
 // narrowingsOf (the connective and kernel-tree reading) ports whole.
+// walk/assume_condition.go's ConditionEnvTransfersOf calls
+// CopyBindingsOf/CopySourcePlaceOf directly (this is where the TS
+// source's own applySide reads them) — both answer their sound
+// "nothing proven" fallback until functionWrites lands.
 // ConstCopiesOf itself has no such dependency and is ported below,
 // ready for when functionWrites lands.
 package narrowing
@@ -105,4 +109,38 @@ func ResolveBoundCondition(c *checker.Checker, e *ast.Node) (ResolvedCondition, 
 	_ = c
 	_ = e
 	return ResolvedCondition{}, false
+}
+
+// CopyBindingsOf is copyBindingsOf in the TS source: names
+// `const x = <source place>` binds in the site's function with
+// neither the copy nor the source's root ever written there — x
+// still equals the place, so it rides the place's narrowings.
+// BLOCKED — see the file banner: it reads functionWrites, which
+// needs dataflowfacts.WrittenNamesOf (not ported). Always answers
+// nil here, the same "no copies proven" fallback the TS source's own
+// early returns (source.path.length === 0, fn === null) leave
+// standing when it has nothing to say — the caller in
+// walk/assume_condition.go simply applies no additional copy
+// narrowings.
+func CopyBindingsOf(c *checker.Checker, site *ast.Node, source dataflowfacts.TrackedPlace) []string {
+	_ = c
+	_ = site
+	_ = source
+	return nil
+}
+
+// CopySourcePlaceOf is copySourcePlaceOf in the TS source: the PLACE
+// `const x = <source place>` copied from, when neither x nor the
+// place's root is ever written in the site's function — x still
+// equals the place, so a narrowing on x holds of the place too.
+// BLOCKED — see the file banner: it reads functionWrites, which
+// needs dataflowfacts.WrittenNamesOf (not ported). Always answers
+// (TrackedPlace{}, false) here, the same "no source place proven"
+// fallback the TS source's own early returns (fn === null) leave
+// standing.
+func CopySourcePlaceOf(c *checker.Checker, site *ast.Node, binding string) (dataflowfacts.TrackedPlace, bool) {
+	_ = c
+	_ = site
+	_ = binding
+	return dataflowfacts.TrackedPlace{}, false
 }

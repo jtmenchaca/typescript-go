@@ -7,6 +7,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/conditiontree"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
@@ -43,14 +44,14 @@ func StructuralRaw(c *checker.Checker, condition *ast.Node, isTracked func(name 
 	// performed, now over the one resolved tree. De Morgan commutes
 	// with this composition, so pushing ! onto the leaves changes no
 	// answer.
-	var fold func(t ConditionTree) BranchNarrowings
-	fold = func(t ConditionTree) BranchNarrowings {
-		if t.Kind == ConditionTreeAnd {
+	var fold func(t conditiontree.ConditionTree) BranchNarrowings
+	fold = func(t conditiontree.ConditionTree) BranchNarrowings {
+		if t.Kind == conditiontree.ConditionTreeAnd {
 			a := fold(*t.A)
 			b := fold(*t.B)
 			return BranchNarrowings{WhenTrue: append(append([]Narrowed{}, a.WhenTrue...), b.WhenTrue...)}
 		}
-		if t.Kind == ConditionTreeOr {
+		if t.Kind == conditiontree.ConditionTreeOr {
 			a := fold(*t.A)
 			b := fold(*t.B)
 			return BranchNarrowings{WhenFalse: append(append([]Narrowed{}, a.WhenFalse...), b.WhenFalse...)}
@@ -61,7 +62,7 @@ func StructuralRaw(c *checker.Checker, condition *ast.Node, isTracked func(name 
 		}
 		return leaf
 	}
-	tree := ConditionTreeOf(condition, false)
+	tree := conditiontree.ConditionTreeOf(condition, false)
 	return fold(tree)
 }
 

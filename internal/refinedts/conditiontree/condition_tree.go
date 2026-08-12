@@ -1,3 +1,5 @@
+// from narrowing/condition_tree.ts
+//
 // A condition with its boolean connectives resolved, ONCE, for
 // every emitter that reads guards: parentheses peeled, `!` pushed
 // through De Morgan onto the leaves, `&&`/`||` swapped under
@@ -5,8 +7,21 @@
 // is tested under — so no emitter re-walks the connective structure
 // itself, and a De Morgan subtlety cannot be fixed in one walker
 // and stay absent from another.
+//
+// Pulled into this LEAF package (its own subtree, no imports beyond
+// ast) rather than left in package narrowing: dataflowfacts needs
+// ConditionTreeOf/ConjunctiveLeaves for the real bodies of
+// DifferenceConstraintsOf, NegatedDifferenceConstraintsOf,
+// LengthGuardNarrowings, and SumConstraintsOf, but narrowing already
+// imports dataflowfacts (TrackedPlace, the leaf recognizers), so
+// dataflowfacts importing narrowing back would close a true two-way
+// cycle. Both sides import this package instead, per PORT.md's
+// leaf-package cycle rule (precedent: annotations/libraryadapters/
+// compiledshape) — narrowing's own condition_tree.go was deleted and
+// its call sites repointed here at integration
+// (walk-integration-punchlist.md item 15).
 
-package narrowing
+package conditiontree
 
 import "github.com/microsoft/typescript-go/internal/ast"
 

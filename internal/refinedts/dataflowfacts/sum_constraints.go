@@ -1,11 +1,7 @@
 // Sum rows a condition vouches: computed doubles of two-place sums
 // against an anchor place, plus the loop-exit side channel for those
 // rows.
-//
-// BLOCKED: sumConstraintsOf needs narrowing/condition_tree.ts
-// (conditionTreeOf, conjunctiveLeaves) — not yet ported (dataflow_facts
-// precedes narrowing in the port order). sumPlacesOf and the exit-row
-// side channel, which do not need it, are ported below.
+
 package dataflowfacts
 
 import (
@@ -14,6 +10,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/conditiontree"
 )
 
 // SumPlaces is a two-place sum with an optional trailing ± literal
@@ -65,6 +62,78 @@ func SumPlacesOf(c *checker.Checker, e *ast.Node) *SumPlaces {
 		return nil
 	}
 	return &SumPlaces{Terms: [2]PlaceKey{*a, *b}, Offset: offset}
+}
+
+// SumConstraintsOf is the sum rows a condition vouches — the TRUE
+// side, or with `negatedAtRoot` the FALSE side (gated on real
+// operands, as the order rows are). Places must stay stable through
+// `scope`.
+func SumConstraintsOf(
+	c *checker.Checker,
+	condition *ast.Node,
+	scope *ast.Node,
+	negatedAtRoot bool,
+	real func(e *ast.Node) bool,
+) []SumConstraint {
+	var rows []SumConstraint
+	fn := EnclosingFunctionOf(condition)
+
+	readLeaf := func(e *ast.Node, negated bool) {
+		if !ast.IsBinaryExpression(e) {
+			return
+		}
+		bin := e.AsBinaryExpression()
+		kind := bin.OperatorToken.Kind
+		var held shape
+		switch kind {
+		case ast.KindLessThanToken:
+			held = shape{LowOnLeft: true, Strict: true}
+		case ast.KindLessThanEqualsToken:
+			held = shape{LowOnLeft: true, Strict: false}
+		case ast.KindGreaterThanToken:
+			held = shape{LowOnLeft: false, Strict: true}
+		case ast.KindGreaterThanEqualsToken:
+			held = shape{LowOnLeft: false, Strict: false}
+		default:
+			return
+		}
+		effective := held
+		if negated {
+			effective = shape{LowOnLeft: !held.LowOnLeft, Strict: !held.Strict}
+		}
+		if negated && (real == nil || !real(bin.Left) || !real(bin.Right)) {
+			return
+		}
+		record := func(sumExpression *ast.Node, anchorExpression *ast.Node, sumIsLow bool) {
+			sum := SumPlacesOf(c, sumExpression)
+			if sum == nil {
+				return
+			}
+			anchor := PlaceKeyOf(c, anchorExpression)
+			if anchor == nil {
+				return
+			}
+			if !StableIn(sum.Terms[0], []*ast.Node{scope}, fn) ||
+				!StableIn(sum.Terms[1], []*ast.Node{scope}, fn) ||
+				!StableIn(*anchor, []*ast.Node{scope}, fn) {
+				return
+			}
+			rows = append(rows, SumConstraint{
+				Terms:     sum.Terms,
+				Offset:    sum.Offset,
+				Anchor:    *anchor,
+				SumAtMost: sumIsLow,
+				Strict:    effective.Strict,
+			})
+		}
+		record(bin.Left, bin.Right, effective.LowOnLeft)
+		record(bin.Right, bin.Left, !effective.LowOnLeft)
+	}
+
+	for _, leaf := range conditiontree.ConjunctiveLeaves(conditiontree.ConditionTreeOf(condition, negatedAtRoot)) {
+		readLeaf(leaf.Test, leaf.Negated)
+	}
+	return rows
 }
 
 // sumExitConstraintsMu guards sumExitConstraintsCache.

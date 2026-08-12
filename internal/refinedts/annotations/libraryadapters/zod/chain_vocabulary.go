@@ -92,7 +92,7 @@ var ZodChainVocabulary = map[string]func(base refinementsets.RefinedSet) refinem
 		return tightened
 	},
 	// a compile-time marker; values unchanged
-	"readonly": func(base refinementsets.RefinedSet) refinementsets.RefinedSet { return base },
+	"readonly":    func(base refinementsets.RefinedSet) refinementsets.RefinedSet { return base },
 	"trim":        func(refinementsets.RefinedSet) refinementsets.RefinedSet { return refinementsets.Strings },
 	"toUpperCase": func(refinementsets.RefinedSet) refinementsets.RefinedSet { return refinementsets.Strings },
 	"toLowerCase": func(refinementsets.RefinedSet) refinementsets.RefinedSet { return refinementsets.Strings },

@@ -16,6 +16,7 @@ package narrowing
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/conditiontree"
 )
 
 // predicateDepth is the shared predicate-reading depth: predicate
@@ -61,15 +62,15 @@ func MentionsTracked(node *ast.Node, isTracked func(name string) bool) bool {
 // went unread (never mind the recorded sentence) can read the return
 // value; nothing is recorded to any coverage collector.
 func RecordUnreadGuard(condition *ast.Node, isTracked func(name string) bool, readElsewhere GuardReadElsewhere) {
-	// the shared tree resolves the connectives (condition_tree.go); a
+	// the shared tree resolves the connectives (conditiontree package); a
 	// single-leaf condition records unconditionally, a composite's
 	// leaves record where they mention a tracked binding
-	tree := ConditionTreeOf(condition, false)
-	if tree.Kind == ConditionTreeLeaf {
+	tree := conditiontree.ConditionTreeOf(condition, false)
+	if tree.Kind == conditiontree.ConditionTreeLeaf {
 		GuardReason(tree.Test, readElsewhere)
 		return
 	}
-	for _, leaf := range AllLeaves(tree) {
+	for _, leaf := range conditiontree.AllLeaves(tree) {
 		if !MentionsTracked(leaf.Test, isTracked) {
 			continue
 		}

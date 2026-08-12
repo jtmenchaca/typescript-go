@@ -31,7 +31,7 @@ export const z = {
 func newZodAdapterTestProgram(t *testing.T, entrySource string) (*program.CheckerProgram, *checker.Checker) {
 	t.Helper()
 	fs := vfstest.FromMap(map[string]string{
-		"/main.ts": `import { z } from "zod";` + "\n" + entrySource,
+		"/main.ts":                     `import { z } from "zod";` + "\n" + entrySource,
 		"/node_modules/zod/index.d.ts": zodPackageStandIn,
 		"/tsconfig.json": `{
 			"compilerOptions": {},

@@ -63,12 +63,12 @@ var V4FormatPatterns = map[string]string{
 // cited per row). The ten already-verified rows stay in
 // V4FormatPatterns; these are the REST of the regex-backed family.
 var RegexFormatRoots = map[string]string{
-	"uuidv4":    UUIDVersioned(4), // regexes.ts:36
-	"uuidv6":    UUIDVersioned(6), // regexes.ts:37
-	"uuidv7":    UUIDVersioned(7), // regexes.ts:38
-	"base64url": "^[A-Za-z0-9_-]*$", // regexes.ts:80
+	"uuidv4":    UUIDVersioned(4),      // regexes.ts:36
+	"uuidv6":    UUIDVersioned(6),      // regexes.ts:37
+	"uuidv7":    UUIDVersioned(7),      // regexes.ts:38
+	"base64url": "^[A-Za-z0-9_-]*$",    // regexes.ts:80
 	"e164":      "^\\+[1-9]\\d{6,14}$", // regexes.ts:93
-	"hex":       "^[0-9a-fA-F]*$", // regexes.ts:154
+	"hex":       "^[0-9a-fA-F]*$",      // regexes.ts:154
 	"cidrv4": "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\.){3}" +
 		"(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])" +
 		"\\/([0-9]|[1-2][0-9]|3[0-2])$", // regexes.ts:74
@@ -135,10 +135,10 @@ var HashPatterns = map[string]map[string]string{
 // keeps `.email()` and family): the same patterns as the roots,
 // intersected onto the chain.
 var FormatMethodPatterns = map[string]string{
-	"base64":   RegexFormatRoots["base64"],
+	"base64":    RegexFormatRoots["base64"],
 	"base64url": RegexFormatRoots["base64url"],
-	"e164":     RegexFormatRoots["e164"],
-	"duration": RegexFormatRoots["duration"],
-	"emoji":    RegexFormatRoots["emoji"],
-	"cidrv4":   RegexFormatRoots["cidrv4"],
+	"e164":      RegexFormatRoots["e164"],
+	"duration":  RegexFormatRoots["duration"],
+	"emoji":     RegexFormatRoots["emoji"],
+	"cidrv4":    RegexFormatRoots["cidrv4"],
 }

@@ -15,13 +15,13 @@
 // user, to serve a corner almost none hit).
 //
 // Other residues carried the same way:
-// - z.number() compiles to R-bar minus NaN (the set denotation never
-//   holds NaN). Zod v3 also admits +-infinity — an exact match; zod
-//   v4 rejects +-infinity at runtime, so the claim is wider than
-//   v4's enforcement: sound for parse results, imprecise for
-//   infinity refutations.
-// - multipleOf reads as the exact-multiple set; zod decides by float
-//   remainder, which can disagree on denormal corners.
+//   - z.number() compiles to R-bar minus NaN (the set denotation never
+//     holds NaN). Zod v3 also admits +-infinity — an exact match; zod
+//     v4 rejects +-infinity at runtime, so the claim is wider than
+//     v4's enforcement: sound for parse results, imprecise for
+//     infinity refutations.
+//   - multipleOf reads as the exact-multiple set; zod decides by float
+//     remainder, which can disagree on denormal corners.
 //
 // This file intentionally exports nothing: the deltas above are
 // documentation, and the length bounds compile through the shared
