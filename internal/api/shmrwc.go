@@ -122,13 +122,12 @@ func (s *ShmRWC) Read(b []byte) (int, error) {
 			return chunk, nil
 		}
 		spins++
-		if spins < 24_576 {
-			// hot across the sweep's typical inter-ask gap (~0.4ms):
-			// a bounded few-millisecond spin, so consecutive questions
-			// never pay the kernel's wake-to-run latency. Bounded is
-			// the point — an unbounded spin was measured SLOWER (it
-			// pinned cores against the single-threaded client).
-			runtime.Gosched()
+		if spins < 65_536 {
+			// a pure counter poll — NO Gosched: yielding ran the
+			// runtime's accumulated background work before re-checking
+			// the ring, measured as ask latency GROWING with the idle
+			// gap before it (5ms gap → 8ms ask). 64k relaxed loads is
+			// tens of microseconds, hot across a sweep's real gaps.
 		} else {
 			// block on the head counter itself: zero CPU while waiting,
 			// microsecond wake when the client stores a new head and

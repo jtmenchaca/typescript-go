@@ -18,6 +18,7 @@ func runAPI(args []string) int {
 	flag := flag.NewFlagSet("api", flag.ContinueOnError)
 	cwd := flag.String("cwd", core.Must(os.Getwd()), "current working directory")
 	pipePath := flag.String("pipe", "", "use named pipe or Unix domain socket for communication instead of stdio")
+	shmPath := flag.String("shm", "", "use a client-created shared-memory ring file for communication instead of stdio")
 	callbacks := flag.String("callbacks", "", "comma-separated list of FS callbacks to enable (readFile,fileExists,directoryExists,getAccessibleEntries,realpath)")
 	async := flag.Bool("async", false, "use JSON-RPC protocol instead of MessagePack (for async API)")
 	timing := flag.Bool("timing", false, "collect per-request server processing time, folded into the client's timing snapshot")
@@ -44,7 +45,15 @@ func runAPI(args []string) int {
 		LoadExternalPlugins:  *loadExternalPlugins,
 		ContentMapperSpawner: newSystem(),
 	}
-	if *pipePath != "" {
+	if *shmPath != "" {
+		rwc, err := api.NewShmRWC(*shmPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		options.In = rwc
+		options.Out = rwc
+	} else if *pipePath != "" {
 		options.PipePath = *pipePath
 	} else {
 		options.In = os.Stdin

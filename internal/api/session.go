@@ -109,6 +109,21 @@ func (sd *snapshotData) nodeHandleFrom(node *ast.Node) NodeHandle {
 	return NodeHandle(fmt.Sprintf("%d.%d.%s", idx, node.Kind, path))
 }
 
+// declarationSpanOf names a declaration by file and UTF-16 extent, so a
+// client with its own parse of the file finds the exact node.
+func declarationSpanOf(decl *ast.Node) *DeclarationSpan {
+	sourceFile := ast.GetSourceFileOfNode(decl)
+	if sourceFile == nil {
+		return nil
+	}
+	positionMap := sourceFile.GetPositionMap()
+	return &DeclarationSpan{
+		File: sourceFile.FileName(),
+		Pos:  uint32(positionMap.UTF8ToUTF16(decl.Pos())),
+		End:  uint32(positionMap.UTF8ToUTF16(decl.End())),
+	}
+}
+
 // getOrCreateProjectRegistry returns the registry for the given project, creating it if needed.
 func (sd *snapshotData) getOrCreateProjectRegistry(projectID ProjectID) *projectRegistryData {
 	if projectID == "" {
@@ -153,13 +168,16 @@ func (sd *snapshotData) newSymbolResponse(symbol *ast.Symbol, canonicalProject P
 
 	if len(symbol.Declarations) > 0 {
 		resp.Declarations = make([]NodeHandle, len(symbol.Declarations))
+		resp.DeclarationSpans = make([]*DeclarationSpan, len(symbol.Declarations))
 		for i, decl := range symbol.Declarations {
 			resp.Declarations[i] = sd.nodeHandleFrom(decl)
+			resp.DeclarationSpans[i] = declarationSpanOf(decl)
 		}
 	}
 
 	if symbol.ValueDeclaration != nil {
 		resp.ValueDeclaration = sd.nodeHandleFrom(symbol.ValueDeclaration)
+		resp.ValueDeclarationSpan = declarationSpanOf(symbol.ValueDeclaration)
 	}
 
 	if symbol.Parent != nil {
@@ -205,11 +223,23 @@ func (sd *snapshotData) registerSymbol(symbol *ast.Symbol, canonicalProject Proj
 }
 
 // newTypeResponse registers a type in the project's registry and returns the response.
+// Union/intersection constituents are embedded one level deep — each
+// registered too, so a follow-up ask by an embedded handle resolves.
 func (sd *snapshotData) newTypeResponse(projectID ProjectID, t *checker.Type) *TypeResponse {
 	if t == nil {
 		return nil
 	}
-	return newTypeResponse(t, sd.registerType(projectID, t))
+	resp := newTypeResponse(t, sd.registerType(projectID, t))
+	if t.Flags()&checker.TypeFlagsUnionOrIntersection != 0 {
+		parts := t.Types()
+		if len(parts) > 0 && len(parts) <= 64 {
+			resp.Types = make([]*TypeResponse, len(parts))
+			for i, part := range parts {
+				resp.Types[i] = newTypeResponse(part, sd.registerType(projectID, part))
+			}
+		}
+	}
+	return resp
 }
 
 func (sd *snapshotData) registerType(projectID ProjectID, t *checker.Type) TypeID {
@@ -631,6 +661,20 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
 		return s.handleGetTypeAtPosition(ctx, parsed.(*GetTypeAtPositionParams))
 	case string(MethodGetTypesAtPositions):
 		return s.handleGetTypesAtPositions(ctx, parsed.(*GetTypesAtPositionsParams))
+	case string(MethodGetTypeAtSpan):
+		return s.handleGetTypeAtSpan(ctx, parsed.(*GetTypeAtSpanParams))
+	case string(MethodGetTypesAtSpans):
+		return s.handleGetTypesAtSpans(ctx, parsed.(*GetTypesAtSpansParams))
+	case string(MethodGetTypeOfSymbolAtPos):
+		return s.handleGetTypeOfSymbolAtPosition(ctx, parsed.(*GetTypeAtPositionParams))
+	case string(MethodGetSymbolAtSpan):
+		return s.handleGetSymbolAtSpan(ctx, parsed.(*GetTypeAtSpanParams))
+	case string(MethodGetSymbolsAtSpans):
+		return s.handleGetSymbolsAtSpans(ctx, parsed.(*GetTypesAtSpansParams))
+	case string(MethodGetContextualTypeAtSpan):
+		return s.handleGetContextualTypeAtSpan(ctx, parsed.(*GetTypeAtSpanParams))
+	case string(MethodGetTypeOfSymbolAtSpan):
+		return s.handleGetTypeOfSymbolAtSpan(ctx, parsed.(*GetTypeOfSymbolAtSpanParams))
 	case string(MethodGetParentOfSymbol):
 		return s.handleGetParentOfSymbol(ctx, parsed.(*GetSymbolPropertyParams))
 	case string(MethodGetMembersOfSymbol):
@@ -1605,6 +1649,226 @@ func (s *Session) handleGetTypesAtPositions(ctx context.Context, params *GetType
 		t := setup.checker.GetTypeAtLocation(node)
 		if t != nil {
 			results[i] = setup.newTypeResponse(t)
+		}
+	}
+
+	return results, nil
+}
+
+// resolveSpanNode finds the DEEPEST node whose full extent matches
+// [pos, end) exactly, starting from the token containing touch. The
+// span identifies a node in the CLIENT'S own parse tree without a
+// handle: ancestors only widen, so the first exact match climbing up
+// is the deepest node sharing the extent.
+func resolveSpanNode(sourceFile *ast.SourceFile, touchU16 int, posU16 int, endU16 int) *ast.Node {
+	positionMap := sourceFile.GetPositionMap()
+	touch := positionMap.UTF16ToUTF8(touchU16)
+	pos := positionMap.UTF16ToUTF8(posU16)
+	end := positionMap.UTF16ToUTF8(endU16)
+	node := astnav.GetTouchingPropertyName(sourceFile, touch)
+	if node == nil {
+		return nil
+	}
+	for n := node; n != nil; n = n.Parent {
+		if n.Pos() == pos && n.End() == end {
+			return n
+		}
+		if n.Pos() < pos || n.End() > end {
+			return nil
+		}
+	}
+	return nil
+}
+
+// handleGetTypeAtSpan returns the type at the deepest node matching
+// an exact [pos, end) span.
+func (s *Session) handleGetTypeAtSpan(ctx context.Context, params *GetTypeAtSpanParams) (*TypeResponse, error) {
+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+	if err != nil {
+		return nil, err
+	}
+	defer setup.done()
+
+	sourceFile := setup.program.GetSourceFile(params.File.ToFileName())
+	if sourceFile == nil {
+		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
+	}
+
+	node := resolveSpanNode(sourceFile, int(params.Span.Touch), int(params.Span.Pos), int(params.Span.End))
+	if node == nil {
+		return nil, nil
+	}
+
+	t := setup.checker.GetTypeAtLocation(node)
+	if t == nil {
+		return nil, nil
+	}
+
+	return setup.newTypeResponse(t), nil
+}
+
+// handleGetTypeOfSymbolAtPosition resolves the symbol at a position
+// and answers its type in ONE round trip — the paired ask the
+// value-vs-reference sort memo makes for every unique symbol.
+func (s *Session) handleGetTypeOfSymbolAtPosition(ctx context.Context, params *GetTypeAtPositionParams) (*TypeResponse, error) {
+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+	if err != nil {
+		return nil, err
+	}
+	defer setup.done()
+
+	sourceFile := setup.program.GetSourceFile(params.File.ToFileName())
+	if sourceFile == nil {
+		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
+	}
+
+	positionMap := sourceFile.GetPositionMap()
+	node := astnav.GetTouchingPropertyName(sourceFile, positionMap.UTF16ToUTF8(int(params.Position)))
+	if node == nil {
+		return nil, nil
+	}
+
+	symbol := setup.checker.GetSymbolAtLocation(node)
+	if symbol == nil {
+		return nil, nil
+	}
+
+	return setup.newTypeResponse(setup.checker.GetTypeOfSymbol(symbol)), nil
+}
+
+// handleGetSymbolAtSpan returns the symbol at the deepest node matching
+// an exact [pos, end) span — the span-addressed twin of
+// getSymbolAtPosition, immune to touching-token ambiguity.
+func (s *Session) handleGetSymbolAtSpan(ctx context.Context, params *GetTypeAtSpanParams) (*SymbolResponse, error) {
+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+	if err != nil {
+		return nil, err
+	}
+	defer setup.done()
+
+	sourceFile := setup.program.GetSourceFile(params.File.ToFileName())
+	if sourceFile == nil {
+		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
+	}
+
+	node := resolveSpanNode(sourceFile, int(params.Span.Touch), int(params.Span.Pos), int(params.Span.End))
+	if node == nil {
+		return nil, nil
+	}
+
+	symbol := setup.checker.GetSymbolAtLocation(node)
+	if symbol == nil {
+		return nil, nil
+	}
+
+	return setup.newSymbolResponse(symbol), nil
+}
+
+// handleGetContextualTypeAtSpan returns the contextual type at the
+// deepest node matching an exact [pos, end) span.
+func (s *Session) handleGetContextualTypeAtSpan(ctx context.Context, params *GetTypeAtSpanParams) (*TypeResponse, error) {
+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+	if err != nil {
+		return nil, err
+	}
+	defer setup.done()
+
+	sourceFile := setup.program.GetSourceFile(params.File.ToFileName())
+	if sourceFile == nil {
+		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
+	}
+
+	node := resolveSpanNode(sourceFile, int(params.Span.Touch), int(params.Span.Pos), int(params.Span.End))
+	if node == nil || !ast.IsExpressionNode(node) {
+		return nil, nil
+	}
+
+	t := setup.checker.GetContextualType(node, checker.ContextFlagsNone)
+	if t == nil {
+		return nil, nil
+	}
+
+	return setup.newTypeResponse(t), nil
+}
+
+// handleGetTypeOfSymbolAtSpan returns a symbol's narrowed type at the
+// deepest node matching an exact [pos, end) span.
+func (s *Session) handleGetTypeOfSymbolAtSpan(ctx context.Context, params *GetTypeOfSymbolAtSpanParams) (*TypeResponse, error) {
+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+	if err != nil {
+		return nil, err
+	}
+	defer setup.done()
+
+	symbol, err := setup.resolveSymbolHandle(params.Symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	sourceFile := setup.program.GetSourceFile(params.File.ToFileName())
+	if sourceFile == nil {
+		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
+	}
+
+	node := resolveSpanNode(sourceFile, int(params.Span.Touch), int(params.Span.Pos), int(params.Span.End))
+	if node == nil {
+		return nil, nil
+	}
+
+	return setup.newTypeResponse(setup.checker.GetTypeOfSymbolAtLocation(symbol, node)), nil
+}
+
+// handleGetTypesAtSpans returns types at multiple exact spans in a file.
+func (s *Session) handleGetTypesAtSpans(ctx context.Context, params *GetTypesAtSpansParams) ([]*TypeResponse, error) {
+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+	if err != nil {
+		return nil, err
+	}
+	defer setup.done()
+
+	sourceFile := setup.program.GetSourceFile(params.File.ToFileName())
+	if sourceFile == nil {
+		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
+	}
+
+	results := make([]*TypeResponse, len(params.Spans))
+	for i, span := range params.Spans {
+		node := resolveSpanNode(sourceFile, int(span.Touch), int(span.Pos), int(span.End))
+		if node == nil {
+			continue
+		}
+		t := setup.checker.GetTypeAtLocation(node)
+		if t != nil {
+			results[i] = setup.newTypeResponse(t)
+		}
+	}
+
+	return results, nil
+}
+
+// handleGetSymbolsAtSpans returns symbols at multiple exact spans in a
+// file — one round trip for a whole file's symbol questions.
+func (s *Session) handleGetSymbolsAtSpans(ctx context.Context, params *GetTypesAtSpansParams) ([]*SymbolResponse, error) {
+	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
+	if err != nil {
+		return nil, err
+	}
+	defer setup.done()
+
+	sourceFile := setup.program.GetSourceFile(params.File.ToFileName())
+	if sourceFile == nil {
+		return nil, fmt.Errorf("%w: source file not found: %v", ErrClientError, params.File)
+	}
+
+	results := make([]*SymbolResponse, len(params.Spans))
+	for i, span := range params.Spans {
+		node := resolveSpanNode(sourceFile, int(span.Touch), int(span.Pos), int(span.End))
+		if node == nil {
+			continue
+		}
+		symbol := setup.checker.GetSymbolAtLocation(node)
+		if symbol != nil {
+			results[i] = setup.newSymbolResponse(symbol)
 		}
 	}
 

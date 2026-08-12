@@ -93,6 +93,13 @@ const (
 	MethodGetTypeAtLocations       Method = "getTypeAtLocations"
 	MethodGetTypeAtPosition        Method = "getTypeAtPosition"
 	MethodGetTypesAtPositions      Method = "getTypesAtPositions"
+	MethodGetTypeAtSpan            Method = "getTypeAtSpan"
+	MethodGetTypesAtSpans          Method = "getTypesAtSpans"
+	MethodGetTypeOfSymbolAtPos     Method = "getTypeOfSymbolAtPosition"
+	MethodGetSymbolAtSpan          Method = "getSymbolAtSpan"
+	MethodGetSymbolsAtSpans        Method = "getSymbolsAtSpans"
+	MethodGetContextualTypeAtSpan  Method = "getContextualTypeAtSpan"
+	MethodGetTypeOfSymbolAtSpan    Method = "getTypeOfSymbolAtSpan"
 
 	// Symbol sub-property methods
 	MethodGetParentOfSymbol       Method = "getParentOfSymbol"
@@ -410,6 +417,13 @@ var unmarshalers = map[Method]func([]byte) (any, error){
 	MethodGetTypeAtLocations:       unmarshallerFor[GetTypeAtLocationsParams],
 	MethodGetTypeAtPosition:        unmarshallerFor[GetTypeAtPositionParams],
 	MethodGetTypesAtPositions:      unmarshallerFor[GetTypesAtPositionsParams],
+	MethodGetTypeAtSpan:            unmarshallerFor[GetTypeAtSpanParams],
+	MethodGetTypesAtSpans:          unmarshallerFor[GetTypesAtSpansParams],
+	MethodGetTypeOfSymbolAtPos:     unmarshallerFor[GetTypeAtPositionParams],
+	MethodGetSymbolAtSpan:          unmarshallerFor[GetTypeAtSpanParams],
+	MethodGetSymbolsAtSpans:        unmarshallerFor[GetTypesAtSpansParams],
+	MethodGetContextualTypeAtSpan:  unmarshallerFor[GetTypeAtSpanParams],
+	MethodGetTypeOfSymbolAtSpan:    unmarshallerFor[GetTypeOfSymbolAtSpanParams],
 
 	MethodGetParentOfSymbol:       unmarshallerFor[GetSymbolPropertyParams],
 	MethodGetMembersOfSymbol:      unmarshallerFor[GetSymbolPropertyParams],
@@ -624,6 +638,20 @@ type SymbolResponse struct {
 	ValueDeclaration NodeHandle   `json:"valueDeclaration,omitempty"`
 	Parent           SymbolID     `json:"parent,omitzero"`
 	ExportSymbol     SymbolID     `json:"exportSymbol,omitzero"`
+
+	// Declaration extents in UTF-16 offsets, aligned with Declarations —
+	// a client holding its own parse of the same files maps each back to
+	// the exact node, shadowing-safe, with no handle translation.
+	DeclarationSpans     []*DeclarationSpan `json:"declarationSpans,omitempty"`
+	ValueDeclarationSpan *DeclarationSpan   `json:"valueDeclarationSpan,omitempty"`
+}
+
+// DeclarationSpan names a declaration by its file and full [pos, end)
+// extent, both in UTF-16 code units.
+type DeclarationSpan struct {
+	File string `json:"file"`
+	Pos  uint32 `json:"pos"`
+	End  uint32 `json:"end"`
 }
 
 func symbolHandles(symbols []*ast.Symbol) []SymbolID {
@@ -701,6 +729,12 @@ type TypeResponse struct {
 
 	// Symbol associated with structured types
 	Symbol SymbolID `json:"symbol,omitzero"`
+
+	// Union/intersection constituents, embedded ONE level deep so the
+	// common client walk (every part's flags and literal value) costs
+	// no further round trips. Nested unions inside a constituent stay
+	// handle-only; the getTypesOfType method remains for those.
+	Types []*TypeResponse `json:"types,omitempty"`
 }
 
 func newTypeResponse(t *checker.Type, id TypeID) *TypeResponse {
@@ -1067,6 +1101,41 @@ type GetTypeAtPositionParams struct {
 	Project  ProjectID          `json:"project"`
 	File     DocumentIdentifier `json:"file"`
 	Position uint32             `json:"position"`
+}
+
+// Span identifies a node in the client's OWN parse tree by extent:
+// Touch is a position inside the node's first token (its skipped-trivia
+// start), Pos/End are the node's full [pos, end). All three are UTF-16
+// code-unit offsets, converted server-side like every position here.
+type Span struct {
+	Touch uint32 `json:"touch"`
+	Pos   uint32 `json:"pos"`
+	End   uint32 `json:"end"`
+}
+
+type GetTypeAtSpanParams struct {
+	Snapshot SnapshotID         `json:"snapshot"`
+	Project  ProjectID          `json:"project"`
+	File     DocumentIdentifier `json:"file"`
+	Span     Span               `json:"span"`
+}
+
+type GetTypesAtSpansParams struct {
+	Snapshot SnapshotID         `json:"snapshot"`
+	Project  ProjectID          `json:"project"`
+	File     DocumentIdentifier `json:"file"`
+	Spans    []Span             `json:"spans"`
+}
+
+// GetTypeOfSymbolAtSpanParams asks a symbol's narrowed type at a node
+// named by span — the span-addressed twin of getTypeOfSymbolAtLocation,
+// for clients whose nodes live in their own parse tree.
+type GetTypeOfSymbolAtSpanParams struct {
+	Snapshot SnapshotID         `json:"snapshot"`
+	Project  ProjectID          `json:"project"`
+	Symbol   SymbolID           `json:"symbol"`
+	File     DocumentIdentifier `json:"file"`
+	Span     Span               `json:"span"`
 }
 
 type GetTypesAtPositionsParams struct {
