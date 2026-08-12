@@ -8,6 +8,8 @@
 package walk
 
 import (
+	"sync"
+
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
@@ -155,12 +157,20 @@ func measuresOf(m *annotations.Measures) *abstractdomain.Measures {
 // comparisons SameKnown/JoinKnown rely on (`a.Stated == b.Stated`)
 // still hold: the same *ObjectAnnotation always maps to the same
 // token, and different ones to different tokens.
-var objectAnnotationTokens = map[*annotations.ObjectAnnotation]abstractdomain.ObjectAnnotationRef{}
+// Mutex-guarded: concurrent entry walks reach this through declared
+// values, and an unguarded race could mint TWO tokens for one
+// annotation — breaking the identity SameKnown/JoinKnown compare by.
+var (
+	objectAnnotationTokensMu sync.Mutex
+	objectAnnotationTokens   = map[*annotations.ObjectAnnotation]abstractdomain.ObjectAnnotationRef{}
+)
 
 func objectAnnotationRefOf(o *annotations.ObjectAnnotation) abstractdomain.ObjectAnnotationRef {
 	if o == nil {
 		return nil
 	}
+	objectAnnotationTokensMu.Lock()
+	defer objectAnnotationTokensMu.Unlock()
 	if token, ok := objectAnnotationTokens[o]; ok {
 		return token
 	}

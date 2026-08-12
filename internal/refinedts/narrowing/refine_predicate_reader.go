@@ -109,12 +109,12 @@ func ReadableRefine(c *checker.Checker, predicate *ast.Node) ([]refinementsets.R
 	if loosened, ok := lengthBodyWindow(body, name); ok {
 		return loosened, false, true
 	}
-	if PredicateReadDepth() >= 3 {
+	if PredicateReadDepth(c) >= 3 {
 		return nil, false, false
 	}
-	OpenPredicateRead()
+	OpenPredicateRead(c)
 	branches := NarrowingsOf(c, body, func(candidate string) bool { return candidate == name }, nil, GuardReadNowhere)
-	ClosePredicateRead()
+	ClosePredicateRead(c)
 	if len(branches.WhenTrue) == 0 {
 		return nil, false, false
 	}

@@ -31,8 +31,11 @@
 package walk
 
 import (
+	"sync"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -134,12 +137,21 @@ func InlineCallback(
 // the callback NODE, so the same callback still runs once per
 // element — those calls are sequential, not nested.
 //
-// The TS source keys this with a `Set<ts.Node>`; a Go map keyed on
-// the node pointer is the direct twin (tsgo nodes are stable
-// pointers, per PORT.md). Not guarded by a mutex: one walk threads
-// through one goroutine, mirroring the TS module-level Set's
-// single-threaded use.
-var walkingCallbacks = map[*ast.Node]struct{}{}
+// The TS source keys this with a `Set<ts.Node>`; the Go twin keys by
+// (check, node) under a mutex — the parallel sweep runs one walk per
+// entry goroutine, and a shared node reached by TWO checks at once is
+// concurrency, not recursion, so each check tracks only its own
+// nesting (ctx.P is the per-check handle, the parallel-sweep audit's
+// registry key).
+type walkingCallbackKey struct {
+	p     *program.CheckerProgram
+	arrow *ast.Node
+}
+
+var (
+	walkingCallbacksMu sync.Mutex
+	walkingCallbacks   = map[walkingCallbackKey]struct{}{}
+)
 
 // CallbackResult is callbackResult in the TS source.
 func CallbackResult(
@@ -153,10 +165,20 @@ func CallbackResult(
 	hasTrackedName bool,
 	analyzers LoopAnalyzers,
 ) abstractdomain.AbstractValue {
-	if _, walking := walkingCallbacks[arrow]; walking {
+	key := walkingCallbackKey{p: ctx.P, arrow: arrow}
+	walkingCallbacksMu.Lock()
+	_, walking := walkingCallbacks[key]
+	if !walking {
+		walkingCallbacks[key] = struct{}{}
+	}
+	walkingCallbacksMu.Unlock()
+	if walking {
 		return silence.CutUnknown() // recursion: silence
 	}
-	walkingCallbacks[arrow] = struct{}{}
-	defer delete(walkingCallbacks, arrow)
+	defer func() {
+		walkingCallbacksMu.Lock()
+		delete(walkingCallbacks, key)
+		walkingCallbacksMu.Unlock()
+	}()
 	return CallbackOutcome(ctx, env, rawReceiver, method, call, arrow, trackedName, hasTrackedName, analyzers)
 }

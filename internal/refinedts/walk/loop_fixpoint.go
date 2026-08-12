@@ -234,6 +234,11 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 
 	statement := loopStatementBody(loop)
 
+	// read-once for the solve's silent passes: the fixpoint's repeat
+	// steps and a nested loop's re-solves replay a remembered image
+	// when the whole (entry, step-input) state spells identically
+	entrySpell, entrySpellOK := spellEnvForMemo(env)
+
 	bodyEffect := func(fromEnv Env, reporting *FlowContext) Env {
 		body := cloneEnv(fromEnv)
 		if bodyTransfers != nil {
@@ -260,6 +265,17 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 				bodyEntry[name] = known
 			}
 		}
+		// a silent pass replays a remembered image; the checked pass
+		// (reporting == ctx) always walks — its walk reports
+		effectState := ""
+		if reporting == &silent && entrySpellOK {
+			effectState = loopEffectStateOf(entrySpell, fromEnv)
+			if effectState != "" {
+				if held, ok := rememberedLoopEffect(ctx.P, loop, effectState); ok {
+					return held
+				}
+			}
+		}
 		for i := range conditionConstraints {
 			conditionConstraints[i].Dead = false
 		}
@@ -280,6 +296,9 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 		}
 		if ast.IsForStatement(loop) && loop.AsForStatement().Incrementor != nil {
 			analyzers.EvaluateExpression(reporting, body, loop.AsForStatement().Incrementor)
+		}
+		if effectState != "" {
+			rememberLoopEffect(ctx.P, loop, effectState, body)
 		}
 		return body
 	}

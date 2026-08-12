@@ -75,12 +75,12 @@ const treeDepthCap = 16
 // single bool read the TS source pays.
 var (
 	enabledFlag atomic.Bool
-	levelValue  = func() atomic.Int64 {
-		var v atomic.Int64
-		v.Store(int64(GrainLevel[GrainStep]))
-		return v
-	}()
+	levelValue  atomic.Int64
 )
+
+func init() {
+	levelValue.Store(int64(GrainLevel[GrainStep]))
+}
 
 func SetEnabled(value bool) { enabledFlag.Store(value) }
 func SetLevel(value int)    { levelValue.Store(int64(value)) }

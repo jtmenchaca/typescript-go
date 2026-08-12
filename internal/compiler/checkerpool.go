@@ -3,6 +3,7 @@ package compiler
 import (
 	"context"
 	"slices"
+	"sort"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -112,8 +113,20 @@ func (p *checkerPool) createCheckers() {
 		wg.RunAndWait()
 
 		p.fileAssociations = make(map[*ast.SourceFile]*checker.Checker, len(p.program.files))
-		for i, file := range p.program.files {
-			p.fileAssociations[file] = p.checkers[i%checkerCount]
+		// size-weighted striping: files assign to checkers in descending
+		// source-length order, round-robin, so the heaviest files land on
+		// DIFFERENT checkers — an exclusive per-checker consumer never
+		// serializes two heavy files on one lock, and each checker's
+		// total assigned bytes stay balanced. Ties keep program order.
+		order := make([]int, len(p.program.files))
+		for i := range order {
+			order[i] = i
+		}
+		sort.SliceStable(order, func(a, b int) bool {
+			return len(p.program.files[order[a]].Text()) > len(p.program.files[order[b]].Text())
+		})
+		for rank, idx := range order {
+			p.fileAssociations[p.program.files[idx]] = p.checkers[rank%checkerCount]
 		}
 	})
 }

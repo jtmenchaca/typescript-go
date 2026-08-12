@@ -15,15 +15,24 @@
 package narrowing
 
 import (
+	"sync"
+
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/conditiontree"
 )
 
-// predicateDepth is the shared predicate-reading depth: predicate
-// bodies may guard through further predicates; the walk is bounded so
-// a self-calling predicate reads as far as the bound and honestly no
-// further.
-var predicateDepth int
+// predicateDepths is the predicate-reading depth PER CHECKER:
+// predicate bodies may guard through further predicates; the walk is
+// bounded so a self-calling predicate reads as far as the bound and
+// honestly no further. One checker runs one walk at a time (the
+// pool's exclusive leases), so the checker is the walk handle this
+// package can see — the TS source's single shared int raced under
+// the parallel sweep and bled one walk's depth into another's cutoff.
+var (
+	predicateDepthMu sync.Mutex
+	predicateDepths  = map[*checker.Checker]int{}
+)
 
 // MentionsTracked is mentionsTracked in the TS source: whether the
 // condition READS a tracked binding anywhere — a property chain counts
@@ -79,16 +88,22 @@ func RecordUnreadGuard(condition *ast.Node, isTracked func(name string) bool, re
 }
 
 // PredicateReadDepth is predicateReadDepth in the TS source.
-func PredicateReadDepth() int {
-	return predicateDepth
+func PredicateReadDepth(c *checker.Checker) int {
+	predicateDepthMu.Lock()
+	defer predicateDepthMu.Unlock()
+	return predicateDepths[c]
 }
 
 // OpenPredicateRead is openPredicateRead in the TS source.
-func OpenPredicateRead() {
-	predicateDepth++
+func OpenPredicateRead(c *checker.Checker) {
+	predicateDepthMu.Lock()
+	defer predicateDepthMu.Unlock()
+	predicateDepths[c]++
 }
 
 // ClosePredicateRead is closePredicateRead in the TS source.
-func ClosePredicateRead() {
-	predicateDepth--
+func ClosePredicateRead(c *checker.Checker) {
+	predicateDepthMu.Lock()
+	defer predicateDepthMu.Unlock()
+	predicateDepths[c]--
 }

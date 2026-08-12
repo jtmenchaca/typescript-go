@@ -93,15 +93,18 @@ func diskHost(options *core.CompilerOptions) compiler.CompilerHost {
 func BuiltProgram(entryPaths []string) *compiler.Program {
 	first := entryPaths[0]
 	options := OptionsFor(first)
-	// the sweep's parallelism rides the program's OWN checker pool
-	// (tsgo defaults to 4 checkers): one checker per core, so the bulk
-	// shape check and the per-entry walks both spread across the
-	// machine. OptionsFor's result may be cached — clone before
-	// stating the knob.
-	widened := *options
-	checkerCount := runtime.GOMAXPROCS(0)
-	widened.Checkers = &checkerCount
-	options = &widened
+	// the sweep's parallelism rides the program's OWN checker pool.
+	// Width stays at tsgo's default 4 (capped by the machine): every
+	// checker resolves and instantiates the same lib and props types
+	// independently (pprof 2026-08-12: instantiateSymbolTable /
+	// resolveMappedTypeMembers per checker), and the measured refine
+	// wall was flat from 4 to 8 — wider pays duplication for nothing.
+	// OptionsFor's result is cached and CompilerOptions carries a
+	// noCopy — the knob is stated on the held options directly: it is
+	// the same value on every path, so the write is idempotent, and
+	// programs build sequentially (one per covering project group).
+	checkerCount := min(runtime.GOMAXPROCS(0), 4)
+	options.Checkers = &checkerCount
 	host := diskHost(options)
 	config := tsoptions.NewParsedCommandLine(options, fileNamesOf(entryPaths), tspath.ComparePathsOptions{
 		UseCaseSensitiveFileNames: true,

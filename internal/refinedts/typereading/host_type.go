@@ -20,8 +20,11 @@ import (
 
 const absentFlags = checker.TypeFlagsUndefined | checker.TypeFlagsNull | checker.TypeFlagsVoid
 
-// ReadHostType is readHostType in the TS source.
-func ReadHostType(c *checker.Checker, t *checker.Type, at *ast.Node, depth int) (abstractdomain.AbstractValue, bool) {
+// readHostTypeUncached is readHostType in the TS source. Callers go
+// through ReadHostType (host_type_memo.go), which remembers each
+// (type, depth) answer per checker — the recursive calls below go
+// through the memo too, so a big union's arms remember individually.
+func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, depth int) (abstractdomain.AbstractValue, bool) {
 	flags := t.Flags()
 	if (flags & checker.TypeFlagsStringLiteral) != 0 {
 		value, ok := t.AsLiteralType().Value().(string)

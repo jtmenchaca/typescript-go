@@ -9,7 +9,7 @@
 package walk
 
 import (
-	"encoding/json"
+	"strings"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -356,19 +356,22 @@ var recoveryMemo = map[*ast.Node]map[string]abstractdomain.AbstractValue{}
 
 // jsonStringifyArgKnowns is the TS source's `JSON.stringify(argKnowns)`
 // inside RecoverPure's try/catch: a memo key from the argument
-// knowledge, "" where the value carries something JSON cannot spell
-// (a *ast.Symbol pointer inside a "variable" AbstractValue —
-// encoding/json refuses a value holding an unexported/cyclic Go
-// pointer the way JSON.stringify silently drops functions but throws
-// on a circular structure; either way this is a memo KEY, so any
-// marshal failure just means "run unmemoized", not a correctness
-// question — unlike wire_format.go's byte-exact TS parity requirement).
+// knowledge, "" where a value refuses a spelling — those calls run
+// unmemoized rather than mis-keyed. Spelled by the builder speller,
+// not encoding/json: json refuses NaN/±Inf outright, and ±Inf is the
+// bare number set's own bound, so marshaling silently unkeyed the
+// common case (the same disease the inline memo key had).
 func jsonStringifyArgKnowns(argKnowns []abstractdomain.AbstractValue) string {
-	bytes, err := json.Marshal(argKnowns)
-	if err != nil {
-		return ""
+	var b strings.Builder
+	for _, arg := range argKnowns {
+		spelled, ok := abstractdomain.SpellForMemoKey(arg)
+		if !ok {
+			return ""
+		}
+		b.WriteString(spelled)
+		b.WriteByte('\x1e')
 	}
-	return string(bytes)
+	return b.String()
 }
 
 // RecoverPure is recoverPure in the TS source.

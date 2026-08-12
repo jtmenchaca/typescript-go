@@ -19,7 +19,7 @@ import (
 // carry over exactly. (BranchNarrowings{}, false) where the callee's
 // body is not pinned or nothing carries out.
 func PredicateCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(name string) bool) (BranchNarrowings, bool) {
-	if PredicateReadDepth() >= 3 {
+	if PredicateReadDepth(c) >= 3 {
 		return BranchNarrowings{}, false
 	}
 	callExpr := call.AsCallExpression()
@@ -51,8 +51,8 @@ func PredicateCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(
 	if !anyPlace {
 		return BranchNarrowings{}, false
 	}
-	OpenPredicateRead()
-	defer ClosePredicateRead()
+	OpenPredicateRead(c)
+	defer ClosePredicateRead(c)
 	inner, ok := PredicateBodyBranches(c, fn, func(name string) bool {
 		for _, p := range parameters {
 			if p == name {
@@ -161,7 +161,7 @@ func PredicateBodyBranches(c *checker.Checker, fn *ast.Node, isTrackedInner func
 // claims, so nothing rests on the annotation alone. (nil, false) where
 // the shape declines.
 func AssertionCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(name string) bool) ([]Narrowed, bool) {
-	if PredicateReadDepth() >= 3 {
+	if PredicateReadDepth(c) >= 3 {
 		return nil, false
 	}
 	callExpr := call.AsCallExpression()
@@ -233,8 +233,8 @@ func AssertionCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(
 	if !anyPlace {
 		return nil, false
 	}
-	OpenPredicateRead()
-	defer ClosePredicateRead()
+	OpenPredicateRead(c)
+	defer ClosePredicateRead(c)
 	inner := NarrowingsOf(c, only.AsIfStatement().Expression, func(name string) bool {
 		for _, p := range parameters {
 			if p == name {
