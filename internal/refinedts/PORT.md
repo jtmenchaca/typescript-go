@@ -85,6 +85,24 @@ of the TS tree's own import graph).
   reading undefined off an empty array where the constructor already
   collapsed that case) → the "not determined" answer plus a comment;
   do not build Go machinery to imitate undefined.
+- A TRUE two-way runtime cycle within one directory's own subtree
+  (not a type-only import TS allows freely) — e.g.
+  annotations/schema_chain_compiler.ts's isUnsupported/Annotation
+  called BY annotations/library_adapters/zod/*.ts, while
+  library_adapters/library_adapter.ts's LibraryAdapter is needed BY
+  schema_chain_compiler.ts's siblings — has no direct Go translation
+  (Go bans the cycle outright, unlike the objectgraphs/kernelbridge
+  precedent, which is a one-directional dependency Go already
+  tolerates). Resolution: pull the two-way shape into a NEW LEAF
+  package both sides import (precedent:
+  annotations/libraryadapters/compiledshape, mirroring
+  Annotation/Compiled/Unsupported structurally), and convert at the
+  call boundary in the higher package. A tiny pure helper needed on
+  BOTH sides of the same cycle (chain_args.ts's numberArg/stringArg/
+  stringList, needed by both annotations/ and its own
+  library_adapters/zod/) gets duplicated verbatim into the leaf side
+  rather than exported from a package it would also have to import —
+  noted in a header comment, never silently diverged.
 - `encoding/json.Marshal` SORTS `map[string]any` keys alphabetically —
   it cannot reproduce a TS `JSON.stringify(objectLiteral)` field
   order. A wire string that must match the TS bytes exactly is built
@@ -107,6 +125,42 @@ of the TS tree's own import graph).
   matched TS behavior by hand (an explicit post-match character check,
   a second pass, …) and say so in the report rather than silently
   dropping the constraint.
+
+## The walk package — the one structural deviation
+
+evaluation/, control_flow/, interprocedural/, and bindings/ are one
+strongly-connected component in the TS import graph (evaluation calls
+analyzeStatement, control_flow calls evaluateExpression,
+interprocedural calls both, bindings is woven through). ES modules
+tolerate that cycle; Go packages do not. They port into ONE package:
+
+    internal/refinedts/walk/    (package walk)
+
+- Every file keeps its 1:1 snake_case name and gains a first-line
+  header comment `// from evaluation/flow_context.ts` (its TS home).
+- On a FILE NAME collision between the four directories, the later
+  file prefixes its TS directory (`controlflow_…`); on an unexported
+  HELPER name collision, rename the later one with a comment.
+- The package builds only when the whole component is in — porters of
+  its stages verify with `gofmt -e` (syntax) per file and leave the
+  type-level build to the component's final integration stage, which
+  runs build/test/vet for the whole package and fixes until green.
+- assignability/ SPLITS: its FlowContext-reading files
+  (check_assignability, declared_value, dependent_edge,
+  dependent_return, plain_sort, set_membership, worn_set_membership,
+  sequence_measures, object_assignability, maybe_and_union,
+  nan_wrapper, admitted_sort, temporal_membership, refine_on_exact)
+  join package walk — the walk calls checkAssignability, so they are
+  inside the component. coverage_sentences joins walk too (it reads
+  control_flow's answer_types and is consumed by the answers). Its
+  LEAF files (refinement_diagnostics, decline_reasons — no walk
+  imports) stay `package assignability`, which walk imports one-way.
+- comparison/'s one file (compareKnown reads FlowContext) joins
+  package walk at integration; the placeholder package comparison
+  is deleted then.
+
+This mirrors tsgo's own structure — its checker is one large package
+for the same reason.
 
 ## Cross-cutting seams already in the Go tree
 
@@ -161,6 +215,32 @@ Package `internal/ast`:
   node's digits) parses with `internal/jsnum.FromString` — the
   checker's own ECMA StringToNumber — never `strconv.ParseFloat`,
   which diverges on hex/exponent forms.
+- Function-like nodes (`ArrowFunction`, `FunctionExpression`,
+  `FunctionDeclaration`, methods, …) have GENERIC accessors on `*ast.Node`
+  itself, not just their downcasts: `node.Body() *Node` and
+  `node.Parameters() []*ParameterDeclarationNode` read through
+  `FunctionLikeData()`/`BodyData()` regardless of concrete kind — use
+  these instead of a per-kind `switch { case IsArrowFunction: … case
+  IsFunctionExpression: … }` on every site that only wants the body or
+  parameter list (a TS `ts.isArrowFunction(fn) ? fn.body : ...` chain
+  collapses to one `fn.Body()` call).
+- `service/program_resolution.ts`'s CheckerProgram-level resolution
+  questions map onto direct checker calls once `p.host` is the checker
+  itself: `resolvesToDefaultLib(p, node)` is
+  `c.SymbolInDefaultLib(c.GetSymbolAtLocation(node))`;
+  `symbolEntirelyInDefaultLib(p, symbol)` is the STRICTER "every
+  declaration in the default lib" reading — a separate wrapper,
+  `c.SymbolEntirelyInDefaultLib(symbol)`, added to exports.go (narrowing
+  wave; SymbolInDefaultLib alone answers the weaker "some declaration"
+  question and is the wrong gate for `instanceof`'s ambientConstructor
+  check). `symbolAt(p, node)` (follow one alias hop through
+  `GetAliasedSymbol`) has no ready-made wrapper yet; write it inline at
+  the call site until enough callers want it to earn one.
+- `kernelbridge.RefinedTSKernel`'s question methods PANIC on a refused
+  question (mirroring the TS source's `throw`), never return an error
+  value — a TS `try { kernel.foo(...) } catch { ... }` around a kernel
+  ask becomes a `defer func() { if recover() != nil { ... } }()`
+  wrapper in Go, not an `if err != nil` check.
 
 ## Building a program in a test
 
@@ -195,6 +275,25 @@ plain TS sources until service/ lands.)
   FUNCTIONAL half of what such a test covers (here: each constructor
   returns the unknown atom) and say so in the file, rather than
   inventing a tree-scan test or silently dropping the coverage.
+
+## Blocked functions inside an otherwise-portable file
+
+When one function in a portable file needs an import outside the
+directory's allowed set (or a not-yet-ported sibling function), do not
+skip the whole file: port everything else, and give the blocked
+function a body that returns the SAME fallback answer the TS source's
+caller sees when that function's own reading finds nothing — never a
+panic, never an empty stub with no comment. `narrowing/bound_condition.go`
+is the pattern: `ResolveBoundCondition` always answers `(ResolvedCondition{},
+false)` because `dataflowfacts.WrittenNamesOf` (needed transitively
+through `FunctionWrites`) is blocked on `service/program_resolution.ts`'s
+`resolvesToDefaultLib` — and the TS source's own `narrowingsOf` already
+falls through to reading the condition plainly when
+`resolveBoundCondition` reads nothing, so the blocked function's
+constant-false answer is the SOUND fallback, not a lie. Every such
+function gets a file-header banner naming the blocking import and every
+call site that is consequently degraded — a future wave un-blocking the
+import only needs to fill the one function in, not re-audit callers.
 
 ## The kernel (for kernel_bridge and later)
 

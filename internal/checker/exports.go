@@ -381,3 +381,19 @@ func (c *Checker) SymbolInDefaultLib(symbol *ast.Symbol) bool {
 	}
 	return false
 }
+
+// SymbolEntirelyInDefaultLib reports whether EVERY declaration of a
+// symbol lives in the default library (and there is at least one) --
+// the stricter gate a user augmentation of a global must defeat
+// (service/program_resolution.ts's symbolEntirelyInDefaultLib).
+func (c *Checker) SymbolEntirelyInDefaultLib(symbol *ast.Symbol) bool {
+	if symbol == nil || len(symbol.Declarations) == 0 {
+		return false
+	}
+	for _, d := range symbol.Declarations {
+		if !c.program.IsSourceFileDefaultLibrary(ast.GetSourceFileOfNode(d).Path()) {
+			return false
+		}
+	}
+	return true
+}
