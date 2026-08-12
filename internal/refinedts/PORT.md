@@ -177,8 +177,24 @@ plain TS sources until service/ lands.)
 - Positions: `node.Pos()`, `node.End()` are UTF-8 offsets (tsc's are
   UTF-16) — anything comparing positions to TS-recorded data must
   convert; inside pure Go code just use them consistently.
+- TS `node.getStart()` SKIPS leading trivia; Go `node.Pos()` does
+  not. The twin is `scanner.GetTokenPosOfNode(node,
+  ast.GetSourceFileOfNode(node), false)` — every diagnostic span and
+  every span-keyed record needs it, or the span hangs on the
+  whitespace before the node (see assignability/
+  refinement_diagnostics.go's At).
 - Symbols: `*ast.Symbol` with `.Name`, `.Flags` (`ast.SymbolFlagsAlias`
   etc.), `.ValueDeclaration`, `.Declarations`.
+- A TS test that greps the WHOLE source tree (e.g. silence/
+  unknown.test.ts's "return UNKNOWN only appears in the silence
+  allowlist" / "UNKNOWN is not imported outside…") checks the TS
+  tree's own hygiene by text pattern — it has no Go-shaped twin: Go's
+  equivalent constants (`abstractdomain.Unknown`/`Opaque`) are
+  package-level vars constructible from any importer, not a grep
+  target, and no Go-side allowlist convention exists yet. Port the
+  FUNCTIONAL half of what such a test covers (here: each constructor
+  returns the unknown atom) and say so in the file, rather than
+  inventing a tree-scan test or silently dropping the coverage.
 
 ## The kernel (for kernel_bridge and later)
 

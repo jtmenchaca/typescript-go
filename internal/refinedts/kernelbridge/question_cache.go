@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 const moduleAbortedMarker = "the module aborted on this question"
@@ -155,13 +157,11 @@ func CanonicalPair(a *string, b *string) (string, bool) {
 // see the file comment just above. Returns nil when the canonical
 // spelling exceeded the budget — the caller keeps its compact wire key
 // instead.
-//
-// tracing: the TS wraps every computation in count("canonicalKey",
-// clock() - startedAt) — no tracing seam exists in this tree yet, so
-// this is a plain call-through.
 func CanonicalKeyOf(value any) *string {
+	startedAt := tracing.Clock()
 	budget := canonBudgetChars
 	key, err := canonicalKeyWithBudget(value, &budget)
+	tracing.Count("canonicalKey", tracing.Clock()-startedAt)
 	if err != nil {
 		return nil
 	}
@@ -364,25 +364,29 @@ func ClearQuestionCache() {
 }
 
 // AskCached is askCached in the TS source.
-//
-// tracing: the TS wraps the hit path in count("kernel.cacheHit"),
-// traceQuestionLine(...), and count("kernel.cacheLookup", …), and the
-// compute path in span("kernel.ask", compute, "step") — no tracing
-// seam exists in this tree yet, so these are plain call-throughs;
-// TraceQuestionLine itself (question_costs.go) is still called, since
-// it is this package's own seam, not service/tracing's.
 func AskCached(key string, compute func() (string, error)) (string, error) {
 	loadQuestionStore()
 	if held, ok := questionCache.get(key); ok {
+		tracing.Count("kernel.cacheHit", 0)
 		TraceQuestionLine(fmt.Sprintf("kernel cachehit %s", firstLine(key)))
+		lookedUpAt := tracing.Clock()
 		questionCache.delete(key)
 		questionCache.set(key, held) // LRU refresh
+		tracing.Count("kernel.cacheLookup", tracing.Clock()-lookedUpAt)
 		if held.IsError {
 			return "", fmt.Errorf("%s", held.Err)
 		}
 		return held.Ok, nil
 	}
-	ok, err := compute()
+	type computed struct {
+		ok  string
+		err error
+	}
+	answer := tracing.Span("kernel.ask", func() computed {
+		ok, err := compute()
+		return computed{ok: ok, err: err}
+	}, tracing.GrainStep)
+	ok, err := answer.ok, answer.err
 	if err != nil {
 		// A decline is a deterministic property of the question and is
 		// worth remembering — but a module that ABORTED is an operational

@@ -8,20 +8,22 @@
 // dissolveUnknown: lattice / unknown operand; do not seed.
 // afterReaders (after_readers.ts): seed from host type when allowed.
 // OPAQUE stays the opaque constructor on abstract_value.
-//
-// BLOCKED: the TS twin (unknown.ts) is three zero-argument functions
-// — residue, cutUnknown, dissolveUnknown — that each return exactly
-// UNKNOWN, and UNKNOWN itself is a value of the AbstractValue union
-// (abstract_domain/abstract_value.ts, kind "unknown"). AbstractValue
-// is not yet ported to Go (in flight concurrently per
-// go-port-tracker.md); this file intentionally carries no Go
-// declarations yet rather than inventing a placeholder AbstractValue
-// type ahead of that port landing. Per PORT.md, the independent-parts
-// rule does not apply when there are none: every branch of this file
-// returns the same AbstractValue-typed constant, so there is no
-// fragment that stands independent of that type.
-//
-// Port residue, cutUnknown, and dissolveUnknown here once
-// internal/refinedts/abstractdomain exports AbstractValue and its
-// UNKNOWN constant to return.
+
 package silence
+
+import "github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+
+// Residue is residue in the TS source.
+func Residue() abstractdomain.AbstractValue {
+	return abstractdomain.Unknown
+}
+
+// CutUnknown is cutUnknown in the TS source.
+func CutUnknown() abstractdomain.AbstractValue {
+	return abstractdomain.Unknown
+}
+
+// DissolveUnknown is dissolveUnknown in the TS source.
+func DissolveUnknown() abstractdomain.AbstractValue {
+	return abstractdomain.Unknown
+}

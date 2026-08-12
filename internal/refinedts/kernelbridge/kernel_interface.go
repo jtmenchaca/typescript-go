@@ -2,10 +2,10 @@
 // still owns the implementation) — the Go twin is the RefinedTSKernel
 // struct kernel_bridge.go builds, with the same method set as methods.
 //
-// NOT PORTED: `structural(spec)` and `checkAssignability(spec)` take a
-// `Specification` (object_graphs/graph_specification.ts — nodes, paths,
-// objects — no Go twin yet, object_graphs is later in the port order).
-// Blocked; reported.
+// `Structural` and `CheckAssignability` take the specification as its
+// ENCODED WIRE STRING (objectgraphs.EncodeSpecification): the
+// Specification type lives in objectgraphs, which imports this
+// package — Go forbids the cycle a typed parameter would close.
 package kernelbridge
 
 import (
@@ -39,6 +39,17 @@ type RefinedTSKernel struct {
 	// theorem (seqSubsetB_true); `false` means no positional proof —
 	// read it conservatively (the counterexample construction is owed).
 	SeqSubset func(a, b refinementsets.RefinedSet) bool
+	// Structural: does the graph specification hold structurally —
+	// the wire-string form of the TS structural(spec); the parameter
+	// is objectgraphs.EncodeSpecification's output (the typed wrapper
+	// lives in objectgraphs — the Specification type is defined there
+	// and that package imports this one, so a typed parameter here
+	// would close an import cycle).
+	Structural func(specWire string) bool
+	// CheckAssignability: judge the graph specification — the
+	// wire-string form of the TS checkAssignability(spec), same cycle
+	// note as Structural.
+	CheckAssignability func(specWire string) JudgeAnswer
 	// ValidateChain: validate a derivation chain — the certifying seam:
 	// every step replays through the proved set functions; a
 	// member-terminated chain answering true PROVES membership in the

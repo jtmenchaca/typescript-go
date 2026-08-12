@@ -1,10 +1,8 @@
 // The questions, given a live call: encode, ask, decode. Abort
 // detection stays with ask_kernel.go — these bodies never see a dead
-// module.
-//
-// NOT PORTED: `structural` and `checkAssignability` — both take a
-// Specification with no Go twin yet (object_graphs is unported).
-// Blocked; reported.
+// module. (`structural`/`checkAssignability` take the encoded wire —
+// see kernel_interface.go's cycle note; objectgraphs owns the typed
+// wrappers and the encoder.)
 //
 // The TS source dispatches through `kernel: KernelCalls` (a struct of
 // per-question C function pointers `ask1`/`ask2` apply generically).
@@ -112,6 +110,26 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 			panic(err.Error())
 		}
 		return BooleanField(raw, "subset")
+	}
+	// Structural and CheckAssignability take the specification ALREADY
+	// ENCODED (objectgraphs.EncodeSpecification): the Specification
+	// type lives in objectgraphs, which imports this package for its
+	// kernel calls — a typed parameter here would close an import
+	// cycle Go forbids (the TS tree's type-only import has no Go
+	// twin). objectgraphs provides the typed wrappers.
+	kernel.Structural = func(specWire string) bool {
+		raw, err := ask1("structural", "kernel_structural", specWire)
+		if err != nil {
+			panic(err.Error())
+		}
+		return BooleanField(raw, "structural")
+	}
+	kernel.CheckAssignability = func(specWire string) JudgeAnswer {
+		raw, err := ask1("checkAssignability", "kernel_judge", specWire)
+		if err != nil {
+			panic(err.Error())
+		}
+		return DecodeJudgeAnswer(Answered(raw))
 	}
 	kernel.Calendar = func(question CalendarQuestion) map[string]any {
 		raw, err := ask1(

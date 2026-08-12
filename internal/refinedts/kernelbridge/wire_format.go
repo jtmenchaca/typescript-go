@@ -20,6 +20,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // WireNumber is the TS union `{ num: number; exp: number } | "-inf" | "+inf"`
@@ -163,13 +164,16 @@ func encodeSetJSON(set refinementsets.RefinedSet) string {
 // EncodeSet is encodeSet in the TS source. Every question re-encodes
 // its sets — the wire is built from the working value each time it is
 // asked, including when the answer is about to come from the question
-// cache.
-//
-// tracing: the TS wraps this in span("wire.encodeSet", …) and
-// countBy("wire.bytes", …) when recording("step") — no tracing seam
-// exists in this tree yet, so this is a plain call-through.
+// cache. `wire.bytes` is how much JSON that comes to over a run.
 func EncodeSet(set refinementsets.RefinedSet) string {
-	return encodeSetJSON(set)
+	if !tracing.Recording(tracing.GrainStep) {
+		return encodeSetJSON(set)
+	}
+	return tracing.Span("wire.encodeSet", func() string {
+		text := encodeSetJSON(set)
+		tracing.CountBy("wire.bytes", int64(len(text)))
+		return text
+	}, tracing.GrainStep)
 }
 
 // wireFormValue and wireSet are the order-INsensitive twins of
@@ -242,10 +246,16 @@ func scalarValue(x float64) bool {
 
 // EncodeTuple is encodeTuple in the TS source, over the float64 member
 // (number | bigint) — see EncodeTupleBigInt for the bigint member.
-//
-// tracing: the TS wraps this in span("wire.encodeTuple", …) when
-// recording("step") — plain call-through here.
 func EncodeTuple(xs []float64) string {
+	if !tracing.Recording(tracing.GrainStep) {
+		return encodeTupleBody(xs)
+	}
+	return tracing.Span("wire.encodeTuple", func() string {
+		return encodeTupleBody(xs)
+	}, tracing.GrainStep)
+}
+
+func encodeTupleBody(xs []float64) string {
 	if len(xs) > 0 {
 		allScalar := true
 		for _, x := range xs {
