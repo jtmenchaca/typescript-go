@@ -109,7 +109,19 @@ func ReadHostType(c *checker.Checker, t *checker.Type, at *ast.Node, depth int) 
 		if len(c.GetCallSignatures(t)) > 0 || len(c.GetConstructSignatures(t)) > 0 {
 			return abstractdomain.HostFunction, true
 		}
-		if c.IsArrayLikeType(t) {
+		// GetTypeArguments assumes a Reference type underneath (tsgo's
+		// getTypeArguments downcasts unconditionally via
+		// t.AsTypeReference(), unlike tsc's own defensive
+		// `(type as TypeReference).resolvedTypeArguments || emptyArray`)
+		// -- IsArrayLikeType admits array-like INTERSECTIONS too (an
+		// array type-reference intersected with a stated `{ length }`,
+		// z.array(...).min(n)'s host shape), which carries no
+		// TypeReference of its own and segfaults the downcast. The
+		// ObjectFlagsReference check is the guard tsc's isArrayLikeType
+		// + getTypeArguments pairing provides implicitly; without it
+		// this reads as "not determined", the same answer an
+		// unrecognized array-like shape already falls through to below.
+		if c.IsArrayLikeType(t) && (t.ObjectFlags()&checker.ObjectFlagsReference) != 0 {
 			slots := c.GetTypeArguments(t)
 			if len(slots) == 0 {
 				return abstractdomain.AbstractValue{}, false

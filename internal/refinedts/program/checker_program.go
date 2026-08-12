@@ -29,4 +29,14 @@ type CheckerProgram struct {
 	// SurfacePaths: a name is "the surface" exactly when its
 	// declaration lives in one of these paths.
 	SurfacePaths map[string]bool
+	// Done releases the checker back to the Program's checker pool.
+	// compiler.Program.GetTypeChecker returns the checker together
+	// with this release function, and the checker is only valid to
+	// question while the lease is held — a caller building a
+	// CheckerProgram must hold it open for the whole time the walk
+	// questions the checker (typereading/read_type_test.go's
+	// t.Cleanup(done) is the same convention) and call Done when the
+	// program is discarded. nil for a CheckerProgram built directly
+	// against a checker whose lease belongs to someone else.
+	Done func()
 }
