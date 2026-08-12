@@ -48,8 +48,19 @@ func bindObjectPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer
 	elements := pattern.AsBindingPattern().Elements.Nodes
 	for _, element := range elements {
 		be := element.AsBindingElement()
+		// The TS source's element.name is typed ts.BindingName, never
+		// absent; tsgo's *BindingElement.Name() field CAN be nil on a
+		// parser-error-recovered node — IsIdentifier(nil) panics reading
+		// nil.Kind, so the nil check must gate every call below (see
+		// dataflowfacts/syntactic_facts.go's bindingNames for the fuller
+		// note). A nil name reads as "not an identifier here", the same
+		// branch the TS source's own `!ts.isIdentifier(element.name)`
+		// takes for a nested pattern — sound because destructureInto/
+		// ReadDestructuring already handles a nil/absent name as
+		// nothing-bound.
+		beName := be.Name()
 		// a NESTED pattern under a key recurses element by element
-		if !ast.IsIdentifier(be.Name()) {
+		if beName == nil || !ast.IsIdentifier(beName) {
 			var key string
 			hasKey := false
 			if be.PropertyName != nil && ast.IsIdentifier(be.PropertyName) {
@@ -75,10 +86,11 @@ func bindObjectPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer
 					if oe.DotDotDotToken != nil {
 						continue
 					}
+					oeName := oe.Name()
 					if oe.PropertyName != nil && ast.IsIdentifier(oe.PropertyName) {
 						picked[oe.PropertyName.Text()] = struct{}{}
-					} else if ast.IsIdentifier(oe.Name()) {
-						picked[oe.Name().Text()] = struct{}{}
+					} else if oeName != nil && ast.IsIdentifier(oeName) {
+						picked[oeName.Text()] = struct{}{}
 					} else {
 						picked[""] = struct{}{}
 					}
@@ -130,7 +142,15 @@ func bindArrayPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer 
 			continue
 		}
 		be := element.AsBindingElement()
-		if !ast.IsIdentifier(be.Name()) {
+		// The TS source's `element.name` is typed ts.BindingName, never
+		// absent (ts.isIdentifier(undefined) would itself throw, but the
+		// type system rules that case out statically). tsgo's
+		// *BindingElement.Name() field CAN be nil on a parser-error-
+		// recovered node — IsIdentifier(nil) panics reading nil.Kind, so
+		// the nil check must come first; a nil name binds nothing here,
+		// the same "no name at this position" fallback
+		// dataflowfacts/syntactic_facts.go's bindingNames uses.
+		if be.Name() == nil || !ast.IsIdentifier(be.Name()) {
 			continue
 		}
 		var held abstractdomain.AbstractValue

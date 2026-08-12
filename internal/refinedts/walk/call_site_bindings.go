@@ -436,15 +436,43 @@ func declaredJoin(
 		bindingsMemo[p] = held
 	}
 	remembered, hasRemembered := held[fn]
-	bindingsMemoMu.Unlock()
 	if hasRemembered {
+		bindingsMemoMu.Unlock()
 		if remembered == nil {
 			return nil, false
 		}
 		return remembered, true
 	}
+	// A self-recursive declared function (fn calls itself, directly or
+	// through an enclosing callback like `.forEach`) re-asks its OWN
+	// join mid-computation: declaredJoinUncached's reach() walks to the
+	// recursive call site, which — when that site sits inside a
+	// callback argument — runs initializeEnclosingCallbacks, which
+	// calls callSiteBindings on the enclosing callback, which (line
+	// ~307 of the TS source) asks declaredJoin(fn) again for the SAME
+	// still-open computation. In the TS source this unbounded mutual
+	// recursion still terminates: V8's stack overflow raises a
+	// catchable RangeError, and every caller on this path
+	// (callbackSitePins's outer try/catch) already answers null on a
+	// refused question — so the TS source's OWN fallback for this case
+	// is "no bindings determined here". Go's stack overflow is NOT a
+	// recoverable panic (runtime.throw, not runtime.gopanic) — this
+	// mutex-guarded in-progress set is the direct guard that produces
+	// the same "not yet known" answer without ever growing the stack
+	// unboundedly, matching the TS control flow's own outcome exactly
+	// rather than inventing a new one.
+	if inProgress[p] == nil {
+		inProgress[p] = map[*ast.Node]bool{}
+	}
+	if inProgress[p][fn] {
+		bindingsMemoMu.Unlock()
+		return nil, false
+	}
+	inProgress[p][fn] = true
+	bindingsMemoMu.Unlock()
 	computed, ok := declaredJoinUncached(p, registry, objects, contracts, kernel, fn)
 	bindingsMemoMu.Lock()
+	delete(inProgress[p], fn)
 	if ok {
 		held[fn] = computed
 	} else {
@@ -462,9 +490,15 @@ func declaredJoin(
 // dedicated MISSING_BINDINGS sentinel — a Go map already
 // distinguishes "absent" from "present but nil" via the second
 // hasRemembered return) records the null answer.
+//
+// inProgress has no TS twin (see declaredJoin's comment) — it exists
+// only to give Go's unrecoverable stack overflow the same "nothing
+// determined here" outcome the TS source's catchable RangeError
+// already produces on the same self-recursive shape.
 var (
 	bindingsMemoMu sync.Mutex
 	bindingsMemo   = map[*program.CheckerProgram]map[*ast.Node]Env{}
+	inProgress     = map[*program.CheckerProgram]map[*ast.Node]bool{}
 )
 
 func declaredJoinUncached(

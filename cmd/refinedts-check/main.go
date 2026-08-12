@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/microsoft/typescript-go/internal/locale"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
@@ -29,12 +31,29 @@ func main() {
 		"path to refined-ts-typescript/surface/z.ts (default: derived from this binary's location)")
 	kernelFlag := flag.String("kernel", "",
 		"path to librefinedts_kernel.dylib (default: derived from this binary's location)")
+	listFlag := flag.String("list", "",
+		"file holding newline-separated .ts paths to check (joins any positional args)")
+	wallFlag := flag.Bool("wall", false,
+		"print total wall time and file count to stderr when done")
 	flag.Parse()
 	files := flag.Args()
+	if *listFlag != "" {
+		listed, err := os.ReadFile(*listFlag)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		for _, line := range strings.Split(string(listed), "\n") {
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				files = append(files, trimmed)
+			}
+		}
+	}
 	if len(files) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] <file.ts> [...]")
+		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] [-list files.txt] [-wall] <file.ts> [...]")
 		os.Exit(2)
 	}
+	startedAt := time.Now()
 
 	surfacePath, err := surfaceZPath(*surfaceFlag)
 	if err != nil {
@@ -104,6 +123,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%s:%d @refinedts-expect-error: line %d was expected to fire%s, and nothing did\n",
 				file, e.MarkerLine, e.Line, codeSuffix)
 		}
+	}
+	if *wallFlag {
+		fmt.Fprintf(os.Stderr, "WALL %d ms  %d files\n",
+			time.Since(startedAt).Milliseconds(), len(files))
 	}
 	if fired {
 		os.Exit(1)

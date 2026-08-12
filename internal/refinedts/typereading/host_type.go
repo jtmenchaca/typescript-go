@@ -38,12 +38,21 @@ func ReadHostType(c *checker.Checker, t *checker.Type, at *ast.Node, depth int) 
 		return abstractdomain.KnownValues([]float64{value}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved), true
 	}
 	if (flags & checker.TypeFlagsBooleanLiteral) != 0 {
-		name := t.AsIntrinsicType().IntrinsicName()
-		if name != "true" && name != "false" {
+		// The TS source reads `(type as unknown as
+		// {intrinsicName?}).intrinsicName` -- tsc's own boolean-literal
+		// representation. tsgo represents a boolean literal type as a
+		// *checker.LiteralType carrying a Go bool (see checker.go's
+		// newLiteralType(TypeFlagsBooleanLiteral, ...) construction and
+		// getBooleanLiteralValue), not an *IntrinsicType with a name
+		// string -- AsIntrinsicType() panics on that shape. AsLiteralType
+		// is the correct downcast here, matching the StringLiteral/
+		// NumberLiteral branches just above.
+		value, ok := t.AsLiteralType().Value().(bool)
+		if !ok {
 			return abstractdomain.AbstractValue{}, false
 		}
 		bit := 0.0
-		if name == "true" {
+		if value {
 			bit = 1
 		}
 		return abstractdomain.KnownValues([]float64{bit}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustProved), true

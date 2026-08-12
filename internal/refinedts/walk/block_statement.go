@@ -21,6 +21,14 @@ func blockScopedNames(block *ast.Node) map[string]struct{} {
 	names := map[string]struct{}{}
 	var bindingNames func(name *ast.Node)
 	bindingNames = func(name *ast.Node) {
+		// The TS source's parameter is typed ts.BindingName, never
+		// absent; tsgo's *BindingElement.name field CAN be nil on a
+		// parser-error-recovered node — see dataflowfacts/
+		// syntactic_facts.go's bindingNames, the same duplicated
+		// helper's other copy, for the full note.
+		if name == nil {
+			return
+		}
 		if ast.IsIdentifier(name) {
 			names[name.Text()] = struct{}{}
 			return

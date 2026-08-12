@@ -126,6 +126,17 @@ of the TS tree's own import graph).
   dodge the reserved suffix (e.g. `repetition_windows.ts` →
   `repetition_window_forms.go`) and note the rename in the report;
   never rename the TS source.
+- `BindingElement.Name()` (and its parser kin) can be NIL on an
+  error-recovered node — TS's types say never-absent, Go's field says
+  otherwise, and `ast.IsIdentifier(nil)` panics. Guard every `Name()`
+  read with a nil check falling through to "no name here" (the
+  answer the TS type system's impossibility already assumed).
+- JS stack overflow is a CATCHABLE RangeError; Go's is a fatal
+  runtime.throw. TS code that relies on try/catch absorbing runaway
+  recursion (self-recursive declared functions re-entering their own
+  computation) needs an explicit in-progress guard in Go that answers
+  the same fallback the TS catch produced (precedent:
+  walk/call_site_bindings.go's inProgress set).
 - RE2 (Go's `regexp`) has no lookahead/lookbehind. A TS regex literal
   using `(?!...)`/`(?=...)`/`(?<=...)` has no literal Go twin; port the
   matched TS behavior by hand (an explicit post-match character check,

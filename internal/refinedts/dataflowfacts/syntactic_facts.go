@@ -357,6 +357,16 @@ func AssignedIdentifierNames(node *ast.Node) map[string]struct{} {
 /* ── the name scanners (from inliner and loop_fixpoint) ──────────── */
 
 func bindingNames(name *ast.Node, into map[string]struct{}) {
+	// The TS source's parameter is typed ts.BindingName (Identifier |
+	// BindingPattern), never absent — element.name there can never be
+	// undefined by construction. tsgo's *BindingElement.name is a
+	// plain field that CAN be nil on a parser-error-recovered node (no
+	// such static guarantee in the Go AST); a nil here is "no name
+	// declared at this position", the sound fallback, not a value this
+	// function's TS twin was ever asked to handle.
+	if name == nil {
+		return
+	}
 	if ast.IsIdentifier(name) {
 		into[name.Text()] = struct{}{}
 		return

@@ -162,6 +162,18 @@ func arrayRest(source abstractdomain.AbstractValue, from int) abstractdomain.Abs
 // MEANS at its site — a checked environment write, a parameter map
 // entry, a loop-body initialState.
 func ReadDestructuring(pattern *ast.Node, source abstractdomain.AbstractValue, bind func(name string, held abstractdomain.AbstractValue, at *ast.Node)) {
+	// The TS source's `pattern` parameter is typed ts.BindingName
+	// (Identifier | BindingPattern), never absent — every recursive
+	// call passes element.name, whose static type rules out undefined.
+	// tsgo's *BindingElement.Name() field CAN be nil on a parser-error-
+	// recovered node (no such static guarantee in the Go AST); a nil
+	// pattern here binds nothing, the sound fallback (same one
+	// dataflowfacts/syntactic_facts.go's bindingNames and
+	// destructure_binding.go's bindObjectPattern/bindArrayPattern use
+	// for the identical shape).
+	if pattern == nil {
+		return
+	}
 	if ast.IsIdentifier(pattern) {
 		bind(pattern.Text(), source, pattern)
 		return
@@ -170,11 +182,12 @@ func ReadDestructuring(pattern *ast.Node, source abstractdomain.AbstractValue, b
 		obp := pattern.AsBindingPattern()
 		for _, element := range obp.Elements.Nodes {
 			be := element.AsBindingElement()
+			beName := be.Name()
 			if be.DotDotDotToken != nil {
-				if !ast.IsIdentifier(be.Name()) {
+				if beName == nil || !ast.IsIdentifier(beName) {
 					continue
 				}
-				bind(be.Name().Text(), objectRest(pattern, source), be.Name())
+				bind(beName.Text(), objectRest(pattern, source), beName)
 				continue
 			}
 			var key string
@@ -183,8 +196,8 @@ func ReadDestructuring(pattern *ast.Node, source abstractdomain.AbstractValue, b
 				if ast.IsIdentifier(be.PropertyName) {
 					key, hasKey = be.PropertyName.Text(), true
 				}
-			} else if ast.IsIdentifier(be.Name()) {
-				key, hasKey = be.Name().Text(), true
+			} else if beName != nil && ast.IsIdentifier(beName) {
+				key, hasKey = beName.Text(), true
 			}
 			var held abstractdomain.AbstractValue
 			if !hasKey {
@@ -196,7 +209,7 @@ func ReadDestructuring(pattern *ast.Node, source abstractdomain.AbstractValue, b
 			if be.Initializer != nil {
 				next = withDefault(held)
 			}
-			ReadDestructuring(be.Name(), next, bind)
+			ReadDestructuring(beName, next, bind)
 		}
 		return
 	}
@@ -207,11 +220,12 @@ func ReadDestructuring(pattern *ast.Node, source abstractdomain.AbstractValue, b
 			continue
 		}
 		be := element.AsBindingElement()
+		beName := be.Name()
 		if be.DotDotDotToken != nil {
-			if !ast.IsIdentifier(be.Name()) {
+			if beName == nil || !ast.IsIdentifier(beName) {
 				continue
 			}
-			bind(be.Name().Text(), arrayRest(source, i), be.Name())
+			bind(beName.Text(), arrayRest(source, i), beName)
 			continue
 		}
 		held := SlotOfIndex(source, i)
@@ -219,6 +233,6 @@ func ReadDestructuring(pattern *ast.Node, source abstractdomain.AbstractValue, b
 		if be.Initializer != nil {
 			next = withDefault(held)
 		}
-		ReadDestructuring(be.Name(), next, bind)
+		ReadDestructuring(beName, next, bind)
 	}
 }

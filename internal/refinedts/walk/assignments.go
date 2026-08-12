@@ -345,8 +345,14 @@ func embeddedReferences(ctx *FlowContext, e *ast.Node, into *[]string) {
 				// reference makes the copy share structure with its source
 				sa := property.AsSpreadAssignment()
 				t := ctx.P.Checker.GetTypeAtLocation(sa.Expression)
+				// The TS source reads type.getProperties() (safe on any
+				// type shape, [] when there are none). t.Symbol() is nil
+				// for a union/primitive/any spread source, so walking
+				// t.Symbol().Members directly panics; GetPropertiesOfType
+				// is the checker's own safe equivalent (already used the
+				// same way in typereading/host_type.go).
 				sharesStructure := false
-				for _, member := range t.Symbol().Members {
+				for _, member := range ctx.P.Checker.GetPropertiesOfType(t) {
 					if dataflowfacts.ReferenceType(ctx.P.Checker.GetTypeOfSymbolAtLocation(member, sa.Expression)) {
 						sharesStructure = true
 						break
