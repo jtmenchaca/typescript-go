@@ -544,51 +544,100 @@ type bodySlot struct {
 	TypeofTag TypeofTag
 }
 
-// collectSummaryLocals is CollectLocals widened by exactly one shape:
-// an OBJECT BINDING PATTERN (`const { x, y } = p`) contributes one
+// collectSummaryLocals is CollectLocals widened by exactly two shapes,
+// and — where CollectLocals declines the whole body — narrowed to a SKIP.
+//
+// (1) A NESTED FUNCTION-LIKE NODE (a function or arrow expression, a
+// function or class declaration, a class expression) is SKIPPED, not
+// declined. Its declarations are the INNER function's, not this body's:
+// collecting them would lay out slots for names this body cannot read,
+// and declining costs this body its whole route over statements it
+// could still lower. So the subtree is stepped over and the collection
+// carries on with the enclosing body's own declarations.
+//
+// The statement HOLDING the nested function then lowers by whichever
+// route reads it:
+//
+//   - a recognized callback form at a call site (`xs.map(x => x + 1)`,
+//     ir_callback_summary.go) converts the arrow into its own summary
+//     and lowers the site to one call statement — that route reads the
+//     arrow node itself and never asks this collection about it;
+//   - otherwise the HAVOC FLOOR. `const cb = x => …` is a variable
+//     statement whose right side no effect grammar reads, so every route
+//     declines and OpaqueHavocStatements serves it under rule (c): the
+//     declared name's own slot takes `unknown`
+//     (declaredNameSlots → the identifier's slot). An arrow VALUE has no
+//     slot semantics of its own — nothing lowered can read "the function
+//     cb is" — and every later use of cb is a CALL, which the opaque
+//     call tier havocs in its own right. The floor also walks INTO the
+//     arrow for rules (a) and (b), so an arrow writing an outer name
+//     havocs that name's slot too (havocSlotsOfStatement's own comment).
+//
+// A FUNCTION DECLARATION statement (`function helper() {…}`) is served
+// the same way, and its HOISTING cannot be observed by anything lowered.
+// JS hoists a function declaration to the top of its scope, so a call
+// written above the declaration statement still reaches it — the floor's
+// havoc, which sits at the statement's own position, would be too late
+// for that call. It does not matter: `helper` is not a variable
+// declaration, so this collection gives it no slot at all, and a name
+// with no slot cannot be read by any lowered statement. There is no
+// knowledge about `helper` for an out-of-order write to falsify, and a
+// call THROUGH it resolves (or does not) through ResolveCallee, which
+// reads the declaration node rather than any slot.
+//
+// (2) An OBJECT BINDING PATTERN (`const { x, y } = p`) contributes one
 // ordinary scalar local per bound name rather than declining the body.
 // That is what the destructuring lowering needs — each bound name gets
 // its own slot, written from the record leaf it reads.
 //
+// (3) An ARRAY BINDING PATTERN (`const [a, b] = xs`) contributes its
+// bound names as ordinary UNKNOWN-sorted locals, one slot per element
+// name, rather than declining. No route lowers the declaration itself —
+// DestructuringAssignmentsOf reads object patterns alone, and the
+// two-slot array flattening does not distinguish positions — so the
+// declaring statement reaches the havoc floor, which havocs exactly
+// those bound names' slots under rule (c) (declaredNameSlots recurses
+// through both binding-pattern kinds). The names are then honestly
+// unknown rather than unreadable, and every OTHER statement of the body
+// keeps its knowledge.
+//
+// Inside an array pattern, an element with a plain identifier name is
+// collected and everything else — a REST element (`...rest`), a NESTED
+// pattern (`const [[a]] = xs`), an omitted hole — is skipped. A skipped
+// element's name still gets havocked where it has one, and where it has
+// none nothing lowered can read it; a DEFAULT (`const [a = 1] = xs`) is
+// covered the same way, since the havoc is the whole value claim for
+// that name and it admits the default as readily as the element.
+//
 // Everything else is CollectLocals unchanged: single-identifier
-// declarations in source order, recursing into branch arms and blocks,
-// never into nested functions (a nested function anywhere declines —
-// its captures read and write outside the lowered world). An ARRAY
-// binding pattern still declines: its elements read positions the
-// element slot does not distinguish.
+// declarations in source order, recursing into branch arms and blocks.
 //
 // (CollectLocals itself lives in tracked_bindings.go, which the whole-
 // body route shares; widening it there would change that route's
 // admitted set too. This variant belongs to the summary route alone.)
 func collectSummaryLocals(body *ast.Node) (locals []*ast.Node, patterns []*ast.Node, ok bool) {
-	declined := false
 	var visit func(node *ast.Node) bool
 	visit = func(node *ast.Node) bool {
-		if declined {
-			return false
-		}
+		// a nested function-like node's declarations are ITS locals, not
+		// this body's — the subtree is stepped over whole
 		if ast.IsFunctionDeclaration(node) || ast.IsFunctionExpression(node) ||
 			ast.IsArrowFunction(node) || ast.IsClassDeclaration(node) ||
 			ast.IsClassExpression(node) {
-			declined = true
 			return false
 		}
 		if ast.IsVariableDeclaration(node) {
 			name := node.Name()
-			if ast.IsObjectBindingPattern(name) {
-				for _, element := range name.AsBindingPattern().Elements.Nodes {
-					binding := element.AsBindingElement()
-					if binding.DotDotDotToken != nil || !ast.IsIdentifier(binding.Name()) {
-						declined = true
-						return false
-					}
-				}
+			if ast.IsObjectBindingPattern(name) || ast.IsArrayBindingPattern(name) {
 				patterns = append(patterns, node)
+				// the INITIALIZER still walks: a nested declaration inside it
+				// (`const { x } = (() => …)()`) belongs to this body
 				node.ForEachChild(visit)
 				return false
 			}
 			if !ast.IsIdentifier(name) {
-				declined = true
+				// a declaration whose name is neither an identifier nor either
+				// binding pattern has no name to lay out; the floor's rule (c)
+				// answers no slots for it and the statement havocs nothing
 				return false
 			}
 			locals = append(locals, node)
@@ -597,23 +646,38 @@ func collectSummaryLocals(body *ast.Node) (locals []*ast.Node, patterns []*ast.N
 		return false
 	}
 	visit(body)
-	if declined {
-		return nil, nil, false
-	}
 	return locals, patterns, true
 }
 
 // destructuredSlotsOf lays out the slots a destructuring declaration
-// needs: one per bound name, wearing the SORT of the record leaf it
+// needs: one per bound name.
+//
+// An OBJECT pattern's names wear the SORT of the record leaf each one
 // reads. A pattern whose source is not a flattened record, or that names
 // a leaf the record does not have, contributes unknown-sorted slots —
 // the read then finds no leaf slot and the lowering declines, which is
 // the total-or-decline law doing its work.
+//
+// An ARRAY pattern's names are UNKNOWN-sorted, every one of them. The
+// two-slot flattening holds a length and the JOIN of the elements, and
+// nothing that distinguishes position `0` from position `1` — so there
+// is no leaf whose sort a bound name could wear. The declaring statement
+// reaches the havoc floor, which writes `unknown` into exactly these
+// slots (rule (c)), and the unknown sort is what that answer already
+// says: the names are readable and nothing is claimed about them.
+//
+// Either kind SKIPS what it cannot name — a rest element, a nested
+// pattern, an omitted hole. A skipped element's own bound names get no
+// slot, and a name with no slot cannot be read by any lowered statement,
+// so nothing is claimed about it either way. (The floor still havocs
+// whatever slots such a name DOES have, since declaredNameSlots walks
+// both pattern kinds whole.)
 func destructuredSlotsOf(pattern *ast.Node, records map[*ast.Node]ObjectLocal) []bodySlot {
 	decl := pattern.AsVariableDeclaration()
+	isArray := ast.IsArrayBindingPattern(decl.Name())
 	// the leaves of the record this pattern reads, by their one-step key
 	leafOfKey := map[string]ObjectLocalKey{}
-	if decl.Initializer != nil {
+	if !isArray && decl.Initializer != nil {
 		initializer := Unwrapped(decl.Initializer)
 		if ast.IsIdentifier(initializer) {
 			source := initializer.Text()
@@ -631,12 +695,28 @@ func destructuredSlotsOf(pattern *ast.Node, records map[*ast.Node]ObjectLocal) [
 	}
 	var out []bodySlot
 	for _, element := range decl.Name().AsBindingPattern().Elements.Nodes {
+		if !ast.IsBindingElement(element) {
+			// an omitted hole (`const [, b] = xs`) binds no name
+			continue
+		}
 		binding := element.AsBindingElement()
+		// a rest element holds the REMAINDER — an array or an object, not
+		// a scalar the slot vector can carry — and a nested pattern binds
+		// names one level down that no leaf spells
+		if binding.DotDotDotToken != nil || binding.Name() == nil || !ast.IsIdentifier(binding.Name()) {
+			continue
+		}
+		slot := bodySlot{Name: binding.Name().Text(), Sort: BindingKindUnknown, TypeofTag: TypeofTagNone}
+		if isArray {
+			// no leaf distinguishes a position: unknown-sorted, and the
+			// declaring statement's havoc is what fills it
+			out = append(out, slot)
+			continue
+		}
 		read := binding.Name().Text()
 		if binding.PropertyName != nil && ast.IsIdentifier(binding.PropertyName) {
 			read = binding.PropertyName.Text()
 		}
-		slot := bodySlot{Name: binding.Name().Text(), Sort: BindingKindUnknown, TypeofTag: TypeofTagNone}
 		if leaf, found := leafOfKey[read]; found {
 			slot.Sort = ObjectLocalKeySort(leaf)
 			slot.TypeofTag = ObjectLocalKeyTypeof(leaf)
@@ -733,9 +813,10 @@ func localSlotsOf(
 			TypeofTag: LocalTypeof(declared),
 		})
 	}
-	// the destructured names last, each wearing its leaf's sort. A name
-	// some other local already claimed keeps that local's slot — one name,
-	// one slot.
+	// the destructured names last: an object pattern's each wearing its
+	// leaf's sort, an array pattern's each unknown-sorted (no leaf
+	// distinguishes a position). A name some other local already claimed
+	// keeps that local's slot — one name, one slot.
 	held := map[string]struct{}{}
 	for _, slot := range out {
 		held[slot.Name] = struct{}{}
@@ -1056,12 +1137,20 @@ func lowerSummaryBodyReporting(
 	} else {
 		statements = append(statements, syntheticReturnStatement(body))
 	}
+	// the collection no longer declines a body for what it cannot lay out
+	// — a nested function is SKIPPED (its declarations are the inner
+	// function's) and an array pattern's names are collected unknown-
+	// sorted. Either way the statement holding the construct lowers by
+	// its own route or by the havoc floor, so the body keeps its route
+	// and its other statements keep their knowledge. The ok flag stays in
+	// the signature because ir_inline_call.go reads it, and a false
+	// answer there would still be a decline.
 	var locals []*ast.Node
 	var patterns []*ast.Node
 	if ast.IsBlock(body) {
 		collected, collectedPatterns, collectedOk := collectSummaryLocals(body)
 		if !collectedOk {
-			return LoweredSummary{}, "", "a nested function or an array binding pattern", false
+			return LoweredSummary{}, "", "a body the local collection does not read", false
 		}
 		locals, patterns = collected, collectedPatterns
 	}
@@ -1139,10 +1228,17 @@ func lowerSummaryBodyReporting(
 	}
 	stmts, statementsOk := LowerStatements(context, statements)
 	if !statementsOk {
-		// the statement walk names no one construct of its own — every
-		// construct it refused declined inside its own route. What is known
-		// here is that a STATEMENT of this body did not lower.
-		return LoweredSummary{}, "", "a statement the lowering does not read", false
+		// the statement walk names the construct it refused ON — the
+		// havoc floor's own first-wins report ("throw inside try",
+		// "with statement", "labeled break crossing out"). The
+		// histogram is the work queue, so its rows name syntax someone
+		// can act on; the generic spelling is the fallback for a
+		// decline that reached here without naming itself.
+		named := DeclinedConstructOf(context)
+		if named == "" {
+			named = "a statement the lowering does not read"
+		}
+		return LoweredSummary{}, "", named, false
 	}
 	// ParamCount counts the ENTRIES the caller fills, not the declared
 	// parameters: an expanded record parameter contributes one entry per

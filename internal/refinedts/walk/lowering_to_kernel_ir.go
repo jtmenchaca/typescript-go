@@ -29,7 +29,26 @@ import (
 
 // LowerStatements is lowerStatements in the TS source: statements
 // lowered to the IR, or (nil, false) where any one declines.
+//
+// A DECLINE also leaves a name behind — the construct it refused, in
+// the source's own syntax — which the body-level owner reads with
+// DeclinedConstructOf. The bookkeeping is here rather than inside the
+// walk because only the outermost run knows the body's fate: an arm
+// that declined and was stood in for by the havoc floor is not the
+// body's decline, so a run that SUCCEEDS drops the name on the way out.
 func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernelbridge.IrStatement, bool) {
+	EnterLoweringRun(context)
+	lowered, ok := lowerStatementList(context, statements)
+	// only the outermost leave consults the flag (LeaveLoweringRun reads
+	// it at depth zero alone), so a nested arm's answer never clears a
+	// name the body still owes
+	LeaveLoweringRun(context, ok)
+	return lowered, ok
+}
+
+// lowerStatementList is the walk itself — every route, in order, with
+// the havoc floor last.
+func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]kernelbridge.IrStatement, bool) {
 	var out []kernelbridge.IrStatement
 	// havocFloor is the LAST resort every composite route below falls
 	// through to when its own reading declines: the statement's writable
@@ -43,7 +62,15 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 	// head did not, a `for` with no condition each havoc rather than
 	// costing the whole body its route.
 	havocFloor := func(s *ast.Node) ([]kernelbridge.IrStatement, bool) {
-		return OpaqueHavocStatements(context, s)
+		havoc, ok := OpaqueHavocStatements(context, s)
+		if !ok {
+			// the floor refused: name the construct it refused ON, in the
+			// statement's own syntax — "throw inside try", "with statement",
+			// "labeled break crossing out". The histogram is the work queue,
+			// so its rows have to name something a reader can act on.
+			NoteDeclinedConstruct(context, declinedFloorConstruct(s))
+		}
+		return havoc, ok
 	}
 	// THE HOIST STREAM. A call inside an EXPRESSION lowers to a temp-slot
 	// call statement that must be emitted BEFORE the statement holding the
@@ -96,6 +123,9 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 		// return.
 		if ast.IsReturnStatement(s) {
 			if context.Result == nil {
+				// no result slot pair: this lowering is not a function body,
+				// so there is nothing for a return to write or raise
+				NoteDeclinedConstruct(context, "return with no result slot")
 				return nil, false
 			}
 			raise := kernelbridge.IrStatement{
@@ -186,12 +216,92 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 						return out, true
 					}
 				}
-				// every reading of this return declined: nothing it hoisted may
-				// survive, and the return itself declines the body as before
+				// THE OPAQUE RETURN. Every reading of the returned VALUE
+				// declined — the effect grammar, the await forms, the inlining
+				// route, the guard shape. What did NOT decline is the control
+				// flow: this statement returns, here, unconditionally, and the
+				// block ends. So the return lowers with its control shape exact
+				// and its value unknown:
+				//
+				//	<the hoists this statement's readers produced>
+				//	#ret  := unknown
+				//	#done := {1}
+				//
+				// — the same two statements the readable return emits, with the
+				// value part standing in for the reading that was not had.
+				//
+				// UNKNOWN, never absent: absent is the claim "this call returned
+				// undefined", which is a claim, and a wrong one wherever the
+				// expression had a value. Unknown claims nothing about the
+				// value, which is exactly what is known here.
+				//
+				// The raise is what makes this sound rather than merely weak.
+				// Dropping it — the havoc floor's option — would walk every
+				// later statement as though this return had not happened, and a
+				// later `return` would then overwrite the result slot: a WRONG
+				// answer about the returned value. Raising it here is right for
+				// the same reason it is right for a readable return: control
+				// leaves the block at this statement on every path that reaches
+				// it, so the flag is up on exactly the paths it should be, and
+				// the continuation gating that the if and switch routes build
+				// around a returning arm reads it unchanged.
+				out = flush(out)
+				out = append(out, kernelbridge.IrStatement{
+					Kind:   kernelbridge.IrStatementAssign,
+					Target: context.Result.Ret,
+					Effect: unknownEffect,
+				})
+				out = append(out, raise)
+				NoteFirstHavoc(context, OpaqueReturnName(s))
+				return out, true
+			}
+			out = append(out, raise)
+			return out, true
+		}
+		// THE ESCAPING THROW. `throw e` whose parent chain up to this
+		// body's root passes through no `try` cannot reach a catch of this
+		// body — it leaves the body outright. A run that threw returns
+		// NOTHING, so no claim about the returned outcome can be wrong
+		// about it, and the shape that says so is a return of nothing:
+		//
+		//	#ret  := absent
+		//	#done := {1}
+		//
+		// Absent rather than unknown, and that direction is the honest
+		// one: the run produced no returned value at all, and absent is
+		// the weakest thing the result slot can hold that a later join
+		// will not mistake for a value. The done flag then reads exactly
+		// as it does for a `return` — the block ends here, later
+		// statements are dead, and the apply route's allReturned reading
+		// sees a path that left.
+		//
+		// A throw INSIDE a try keeps the decline (ir_opaque_havoc.go's
+		// throwCarryingStatement holds the reasoning: raising the flag
+		// would make the catch's own writes invisible to the walk, which
+		// is a wrong claim, not a weak one). The report names it "throw
+		// inside try" so the histogram row points at the construct.
+		if ast.IsThrowStatement(s) {
+			if context.Result == nil {
+				NoteDeclinedConstruct(context, "throw with no result slot")
 				dropHoists()
 				return nil, false
 			}
-			out = append(out, raise)
+			if ThrowReachesATry(s) {
+				NoteDeclinedConstruct(context, "throw inside try")
+				dropHoists()
+				return nil, false
+			}
+			out = append(out, kernelbridge.IrStatement{
+				Kind:   kernelbridge.IrStatementAssign,
+				Target: context.Result.Ret,
+				Effect: kernelbridge.AbsentConst(),
+			})
+			out = append(out, kernelbridge.IrStatement{
+				Kind:   kernelbridge.IrStatementAssign,
+				Target: context.Result.Done,
+				Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1}))},
+			})
+			NoteFirstHavoc(context, "throw")
 			return out, true
 		}
 		// `const p = { lo: 0, hi: n }` — a record local flattened into one
@@ -556,13 +666,59 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 		// whole contract is that it lowers to assignments of unknown and
 		// nothing else.
 		dropHoists()
-		havoc, havocOk := OpaqueHavocStatements(context, s)
+		havoc, havocOk := havocFloor(s)
 		if !havocOk {
 			return nil, false
 		}
 		out = append(out, havoc...)
 	}
 	return out, true
+}
+
+// declinedFloorConstruct names the construct the havoc floor refused a
+// statement over. The floor's own scan knows which node refused
+// (DeclinedHavocConstruct); where it names nothing — the slot
+// enumeration itself failed — the statement's own syntax is the name,
+// which is still a row someone can act on.
+func declinedFloorConstruct(s *ast.Node) string {
+	if named := DeclinedHavocConstruct(s); named != "" {
+		return named
+	}
+	return havocConstructName(s)
+}
+
+// ThrowReachesATry is whether a `throw` transfers to a `catch` of THIS
+// body rather than leaving it — the one structural question the escaping
+// throw's lowering turns on.
+//
+// Syntactic, by the parent chain: from the throw upwards, a `try`
+// reached before the body's root means the throw goes to that try's
+// catch (or through its finally and on out, which is the same thing for
+// this question: statements of this body run after the throw, and the
+// walk's done flag cannot spell "ran the catch, then ended"). The root
+// is the enclosing function — or the source file, for the top-level
+// statement lists the lowering tests hand in.
+//
+// A throw inside a nested FUNCTION is not this body's throw at all, and
+// never reaches here: the statement routes never descend into one.
+//
+// The answer is TRUE for a chain the walk cannot follow (a detached
+// node with no parent set), because the refusal only ever costs
+// coverage while a wrong false would raise the done flag over a catch.
+func ThrowReachesATry(throw *ast.Node) bool {
+	if throw == nil {
+		return true
+	}
+	for node := throw.Parent; node != nil; node = node.Parent {
+		if ast.IsTryStatement(node) {
+			return true
+		}
+		if ast.IsFunctionLike(node) || ast.IsClassLike(node) || ast.IsSourceFile(node) {
+			return false
+		}
+	}
+	// no parent chain at all: nothing was read, so nothing is claimed
+	return true
 }
 
 // OpaqueTestableCondition is whether an `if` head no reading lowered may

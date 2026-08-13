@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
 // summaryDeclarationOf parses a throwaway source whose FIRST statement
@@ -932,29 +933,35 @@ func summaryRetIsTop(
 	return exits[summary.RetIndex].Top
 }
 
-func TestKernelSummaryDirect_APorousBlobKeepsTheTopRetDecline(t *testing.T) {
+func TestKernelSummaryDirect_APorousBodyIsNeverCompiledAndNeverServes(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearResolvedRecordMembers()
 	ClearSummaryOutcomes()
 	// an unresolvable call HAVOCS rather than declines, so the body lowers
-	// porous — and a porous answer may be weaker than the inline walk's,
-	// so the TOP-ret decline stands and the walk serves instead
+	// POROUS — and a porous answer may be weaker than the inline walk's,
+	// so it never serves. Since it never serves, the registry does not
+	// pay to compile it either: the lowering runs (the outcome and its
+	// construct are recorded), the kernel compile is skipped, and every
+	// call takes the inline walk.
 	declaration := summaryDeclarationOf(t, "function f(x) { const y = mystery(x); return y; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
 		t.Fatalf("the body declined — an opaque call havocs, it does not decline")
 	}
-	outcome, _, _ := SummaryOutcomeOf(declaration)
-	if outcome != SummaryPorous {
-		t.Fatalf("outcome = %q, want porous — this case is about what a POROUS body does", outcome)
+	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	if !recorded || outcome != SummaryPorous {
+		t.Fatalf("outcome = %q (recorded %v), want porous — the lowering still runs and reports", outcome, recorded)
 	}
-	if !summaryRetIsTop(t, ctx, declaration, []abstractdomain.AbstractValue{silenceValue()}) {
-		t.Fatalf("this call's ret is not TOP — the case would not exercise the serving rule")
+	if construct == "" {
+		t.Errorf("a porous body named no construct — the histogram is the work queue")
+	}
+	if _, built := SummaryBlobFor(ctx, declaration); built {
+		t.Errorf("a porous body compiled a blob — it can never serve, so the compile is pure cost")
 	}
 	contract := &FunctionContract{Declaration: declaration}
 	if _, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{silenceValue()}, contract); ok {
-		t.Errorf("a porous blob served a TOP ret — its answer may be weaker than the inline walk's")
+		t.Errorf("a porous body served — its answer may be weaker than the inline walk's")
 	}
 }
 
@@ -962,4 +969,347 @@ func TestKernelSummaryDirect_APorousBlobKeepsTheTopRetDecline(t *testing.T) {
 // body's return come back TOP.
 func silenceValue() abstractdomain.AbstractValue {
 	return unknownReceiver()
+}
+
+/* ── the collection SKIPS what it cannot lay out ─────────────────── */
+
+// summaryCollectedNames is the slot names a body's LOCALS lay out. The
+// lowering's own slot vector is not carried out on LoweredSummary, so
+// this re-runs the collection and the layout over the body — the same
+// two functions lowerSummaryBodyReporting calls, so the names agree.
+func summaryCollectedNames(t *testing.T, declaration *ast.Node) []string {
+	t.Helper()
+	body := declaration.Body()
+	locals, patterns, ok := collectSummaryLocals(body)
+	if !ok {
+		t.Fatalf("collectSummaryLocals declined — the collection skips, it does not decline")
+	}
+	var names []string
+	for _, slot := range localSlotsOf(body, locals, patterns, map[string]struct{}{}) {
+		names = append(names, slot.Name)
+	}
+	return names
+}
+
+// hasName is whether a spelled slot name is among a collected list.
+func hasName(names []string, wanted string) bool {
+	for _, name := range names {
+		if name == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+// summaryRetExit drives the KERNEL over one call's entry states and
+// answers the ret slot's exit — the compiled program's own answer,
+// before the serving rule rules on whether the route hands it to a
+// caller.
+//
+// The POROUS bodies below need this: applySummary declines a porous blob
+// outright (it may be weaker than the inline walk), so asking
+// KernelSummaryDirect would say nothing about whether the statements
+// AROUND the havocked one were read. The exit state does say it.
+func summaryRetExit(
+	t *testing.T,
+	ctx *FlowContext,
+	declaration *ast.Node,
+	argKnowns []abstractdomain.AbstractValue,
+) kernelbridge.KnownStateWire {
+	t.Helper()
+	summary, ok := LowerSummaryBody(ctx, declaration)
+	if !ok {
+		_, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("the body declined at %q", construct)
+	}
+	blob, hasBlob := SummaryBlobFor(ctx, declaration)
+	if !hasBlob {
+		t.Fatalf("no blob compiled")
+	}
+	states, statesOk := summaryEntryStates(ctx, declaration, summary, argKnowns, unknownReceiver())
+	if !statesOk {
+		t.Fatalf("the entry states declined")
+	}
+	for len(states) < summary.SlotCount {
+		states = append(states, absentState)
+	}
+	states[summary.DoneIndex] = doneDownState
+	exits, exitsOk := kernelbridge.AskApplySummary(blob, states)
+	if !exitsOk || summary.RetIndex >= len(exits) {
+		t.Fatalf("the apply declined")
+	}
+	return exits[summary.RetIndex]
+}
+
+func TestKernelSummaryDirect_ANestedArrowIsSkippedNotDeclined(t *testing.T) {
+	// `cb` is this body's own local and takes a slot; `inner`, declared
+	// INSIDE the arrow, is the arrow's and takes none — collecting it
+	// would lay out a slot for a name no statement of this body can read
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { let total = n; const cb = (x: number) => { const inner = x + 1; return inner; }; return total; }")
+	names := summaryCollectedNames(t, declaration)
+	if !hasName(names, "total") {
+		t.Errorf("names = %v, want the enclosing body's `total` collected", names)
+	}
+	if !hasName(names, "cb") {
+		t.Errorf("names = %v, want the bound name `cb` collected — the floor havocs its slot", names)
+	}
+	if hasName(names, "inner") {
+		t.Errorf("names = %v, must NOT hold `inner` — it is the arrow's local, not this body's", names)
+	}
+}
+
+func TestKernelSummaryDirect_ANestedFunctionDeclarationIsSkipped(t *testing.T) {
+	// a function DECLARATION is not a variable declaration, so the name
+	// `helper` takes no slot at all — and hoisting is therefore
+	// unobservable: nothing lowered can read a name with no slot
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { let total = n; function helper(x: number) { const held = x; return held; } return total; }")
+	names := summaryCollectedNames(t, declaration)
+	if !hasName(names, "total") {
+		t.Errorf("names = %v, want `total` collected", names)
+	}
+	if hasName(names, "held") {
+		t.Errorf("names = %v, must NOT hold `held` — it is helper's local", names)
+	}
+}
+
+func TestKernelSummaryDirect_ABodyDeclaringANestedArrowLowersPorouslyAndKeepsItsOtherStatements(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	// the arrow's DECLARATION statement is served by the havoc floor —
+	// `cb`'s slot takes unknown — and the two arithmetic statements
+	// around it are read exactly as they would be without it. Before the
+	// skip rule the nested arrow declined this whole body.
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { let s = n + 1; const cb = (x: number) => x + 1; s = s + 1; return s; }")
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
+		_, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("a body declaring a nested arrow declined at %q — the arrow is skipped, not declined", construct)
+	}
+	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	if !recorded {
+		t.Fatalf("no outcome recorded")
+	}
+	if outcome != SummaryPorous {
+		t.Errorf("outcome = %q, want porous — the declaration statement havocked", outcome)
+	}
+	// THE FLOOR'S OWN SPELLING for this statement, recorded rather than
+	// asserted finer: havocConstructName (ir_opaque_havoc.go) names a
+	// VariableStatement "declaration", not "a nested function". Naming it
+	// finely is that file's vocabulary work, not this one's.
+	if construct != "declaration" {
+		t.Errorf("construct = %q, want %q — the floor's own naming for a variable statement", construct, "declaration")
+	}
+	// THE OTHER STATEMENTS' KNOWLEDGE SURVIVES. A porous body is never
+	// compiled (it can never serve), so the property is read off the
+	// LOWERED IR walked directly: the two arithmetic statements are in
+	// the statement list, the arrow's declaration is one unknown assign
+	// between them, and walking that program from n=2 answers 4.
+	lowered, loweredOk := RelowerSummaryBody(ctx, declaration)
+	if !loweredOk {
+		t.Fatalf("the body declined on the second lowering")
+	}
+	entries := make([]kernelbridge.KnownStateWire, lowered.SlotCount)
+	for i := range entries {
+		entries[i] = absentState
+	}
+	entries[0] = kernelbridge.KnownStateWire{
+		Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{2})),
+	}
+	entries[lowered.DoneIndex] = doneDownState
+	exits := kernel.Walk(entries, lowered.Stmts)
+	if lowered.RetIndex >= len(exits) {
+		t.Fatalf("the walk answered %d states, want more than %d", len(exits), lowered.RetIndex)
+	}
+	exit := exits[lowered.RetIndex]
+	if exit.Top {
+		t.Fatalf("the ret exit is TOP — the arithmetic around the arrow was lost")
+	}
+	if !kernel.Member(exit.Set, []float64{4}) {
+		t.Errorf("the ret exit excludes the true value 4: %+v", exit.Set)
+	}
+}
+
+func TestKernelSummaryDirect_AnArrayBindingPatternLowersWithItsNamesHavocked(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	// `const [a, b] = xs` names two slots. No route lowers the statement
+	// — DestructuringAssignmentsOf reads OBJECT patterns alone — so the
+	// havoc floor serves it and both names take `unknown`.
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { let s = n + 1; const [a, b] = xs; return s; }")
+	names := summaryCollectedNames(t, declaration)
+	if !hasName(names, "a") || !hasName(names, "b") {
+		t.Fatalf("names = %v, want both bound names collected — each element name is one slot", names)
+	}
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
+		_, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("an array binding pattern DECLINED the body at %q — its names are collected, the statement havocs", construct)
+	}
+	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	if outcome != SummaryPorous {
+		t.Errorf("outcome = %q, want porous — the pattern's statement havocked", outcome)
+	}
+	// again the floor's own spelling, recorded not asserted finer
+	if construct != "declaration" {
+		t.Errorf("construct = %q, want %q — the floor's naming for a variable statement", construct, "declaration")
+	}
+	// the statement BEFORE the pattern kept its knowledge: f(2) returns 3.
+	// Read off the LOWERED IR walked directly — a porous body is never
+	// compiled, so there is no blob to apply.
+	lowered, loweredOk := RelowerSummaryBody(ctx, declaration)
+	if !loweredOk {
+		t.Fatalf("the body declined on the second lowering")
+	}
+	entries := make([]kernelbridge.KnownStateWire, lowered.SlotCount)
+	for i := range entries {
+		entries[i] = absentState
+	}
+	entries[0] = kernelbridge.KnownStateWire{
+		Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{2})),
+	}
+	entries[lowered.DoneIndex] = doneDownState
+	exits := kernel.Walk(entries, lowered.Stmts)
+	if lowered.RetIndex >= len(exits) {
+		t.Fatalf("the walk answered %d states, want more than %d", len(exits), lowered.RetIndex)
+	}
+	exit := exits[lowered.RetIndex]
+	if exit.Top {
+		t.Fatalf("the ret exit is TOP — the statement before the pattern was lost")
+	}
+	if !kernel.Member(exit.Set, []float64{3}) {
+		t.Errorf("the ret exit excludes 3: %+v", exit.Set)
+	}
+}
+
+func TestKernelSummaryDirect_AnArrayPatternsRestAndNestedElementsAreSkipped(t *testing.T) {
+	// `head` is a plain identifier and takes a slot; `rest` holds the
+	// REMAINDER, which is an array rather than a scalar the vector
+	// carries, and `[deep]` binds one level down that no leaf spells —
+	// both are skipped, and the statement's havoc still covers whatever
+	// slots those names have (none here)
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { const [head, [deep], ...rest] = xs; return n; }")
+	names := summaryCollectedNames(t, declaration)
+	if !hasName(names, "head") {
+		t.Errorf("names = %v, want the plain identifier `head` collected", names)
+	}
+	if hasName(names, "rest") {
+		t.Errorf("names = %v, must NOT hold `rest` — a rest element is not a scalar slot", names)
+	}
+	if hasName(names, "deep") {
+		t.Errorf("names = %v, must NOT hold `deep` — a nested pattern binds a level no leaf spells", names)
+	}
+}
+
+func TestKernelSummaryDirect_AnArrayPatternsDefaultTakesAnOrdinaryUnknownSlot(t *testing.T) {
+	// a DEFAULT is covered by the same havoc: the floor's `unknown` is
+	// the whole value claim for that name, and it admits the default as
+	// readily as the element
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { const [a = 1, b] = xs; return n; }")
+	body := declaration.Body()
+	locals, patterns, ok := collectSummaryLocals(body)
+	if !ok {
+		t.Fatalf("a defaulted array element declined the collection")
+	}
+	slots := localSlotsOf(body, locals, patterns, map[string]struct{}{})
+	for _, wanted := range []string{"a", "b"} {
+		found := false
+		for _, slot := range slots {
+			if slot.Name != wanted {
+				continue
+			}
+			found = true
+			if slot.Sort != BindingKindUnknown {
+				t.Errorf("%q sort = %q, want unknown — no leaf distinguishes an array position", wanted, slot.Sort)
+			}
+		}
+		if !found {
+			t.Errorf("slots = %+v, want a slot named %q", slots, wanted)
+		}
+	}
+}
+
+func TestKernelSummaryDirect_AnObjectPatternsNamesStillWearTheirLeafSorts(t *testing.T) {
+	// the object-pattern reading is UNCHANGED by the array widening: its
+	// names still read the record's leaves and wear those sorts
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { const p = { lo: 1, hi: 2 }; const { lo, hi } = p; return lo + hi; }")
+	body := declaration.Body()
+	locals, patterns, ok := collectSummaryLocals(body)
+	if !ok {
+		t.Fatalf("collectSummaryLocals declined")
+	}
+	slots := localSlotsOf(body, locals, patterns, map[string]struct{}{})
+	for _, wanted := range []string{"lo", "hi"} {
+		found := false
+		for _, slot := range slots {
+			if slot.Name != wanted {
+				continue
+			}
+			found = true
+			if slot.Sort != BindingKindNumber {
+				t.Errorf("%q sort = %q, want number — the record leaf's own sort", wanted, slot.Sort)
+			}
+		}
+		if !found {
+			t.Errorf("slots = %+v, want a slot named %q", slots, wanted)
+		}
+	}
+}
+
+func TestKernelSummaryDirect_ARecognizedMapCallbackSiteIsUnchangedByTheSkip(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	// `ys = xs.map(x => x + 1)` still takes the CALLBACK route — the
+	// route reads the arrow NODE at the call site and never asks the
+	// collection about it, so skipping the arrow changed nothing here.
+	// (The slot layout is built directly, as every callback test does: an
+	// array whose uses include `.map` does not flatten from a whole body,
+	// which is ir_array_slots.go's rule, not this one's.)
+	context := &LoweringContext{
+		Bindings:     []string{"xs.len", "xs.elem", "ys.len", "ys.elem"},
+		Sorts:        []BindingKind{BindingKindNumber, BindingKindNumber, BindingKindNumber, BindingKindUnknown},
+		Typeofs:      make([]TypeofTag, 4),
+		Narrow:       kernel.Narrow,
+		Flow:         &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}},
+		SummaryTable: &SummaryTableBuilder{},
+	}
+	statements := loweringParse(t, `ys = xs.map(x => x + 1);`)
+	stmts, ok := SummaryCallbackStatementOf(context, statements[0])
+	if !ok {
+		t.Fatalf("the recognized map site declined — the callback route is unchanged by the skip")
+	}
+	if len(stmts) != 2 || stmts[1].Kind != kernelbridge.IrStatementCall {
+		t.Fatalf("stmts = %+v, want the length copy then the CALL statement", stmts)
+	}
+	// and the site never havocked: a complete-eligible lowering
+	if context.FirstHavoc != "" {
+		t.Errorf("FirstHavoc = %q, want empty — the callback route reads the whole site", context.FirstHavoc)
+	}
+}
+
+func TestKernelSummaryDirect_AnArrowAtACallSiteIsNotCollectedAsThisBodysLocal(t *testing.T) {
+	// the other half of the same fact: the collection walks straight past
+	// the arrow argument, so `x` (its parameter) and any local it declares
+	// take no slot here — the arrow's own summary lays those out
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { let total = n; const ys = xs.map(x => { const bump = x + 1; return bump; }); return total; }")
+	names := summaryCollectedNames(t, declaration)
+	if !hasName(names, "total") || !hasName(names, "ys") {
+		t.Errorf("names = %v, want this body's own `total` and `ys`", names)
+	}
+	if hasName(names, "bump") {
+		t.Errorf("names = %v, must NOT hold `bump` — it is the arrow's local", names)
+	}
 }

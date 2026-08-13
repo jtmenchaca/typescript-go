@@ -328,6 +328,21 @@ func buildSummaryBlob(ctx *FlowContext, declaration *ast.Node) (kernelbridge.Sum
 	if !ok {
 		return "", 0, false
 	}
+	// A POROUS body is not compiled. The serving rule declines a porous
+	// blob at every call (kernel_summaries.go), so compiling one buys
+	// nothing and costs a kernel round trip per declaration — measured
+	// on nest (2026-08-13): converting 589 bodies from declined to
+	// porous moved the wall 47.4s -> 52.2s with no verdict change,
+	// because each new porous body paid its compile and then served
+	// nothing. The lowering still RAN, so its outcome and its
+	// first-havoc construct are recorded either way and the coverage
+	// histogram keeps naming the work queue exactly as before.
+	//
+	// A porous body whose havoc later disappears is compiled then: the
+	// outcome is recomputed by the lowering, not cached as a verdict.
+	if outcome, _, recorded := SummaryOutcomeOf(declaration); recorded && outcome == SummaryPorous {
+		return "", 0, false
+	}
 	// arity is the WHOLE slot count, not the parameter count: the
 	// compiler numbers one entry state per binding (cur starts as
 	// [0, arity)), and the apply side sends one state per slot — the

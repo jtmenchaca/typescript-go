@@ -36,24 +36,130 @@
 //     o's properties, so which names the block writes is not a syntactic
 //     question at all;
 //   - a bare `eval(…)` call — the same, for arbitrary code;
-//   - a LABELLED `break` or `continue` — control leaves structure the IR
-//     has no statement for, so the havoc would sit where the transfer
-//     never reaches;
+//   - a break or continue that LEAVES the enumerated statement — a
+//     labelled one whose label is declared outside it, or a bare one
+//     with no enclosing switch or loop inside it. Control then goes
+//     somewhere the havoc's own statement position does not reach. A
+//     CONTAINED break or continue is admitted: it cannot leave the
+//     statement, and the havoc of the whole statement already covers
+//     every path through it (containedTransfer below);
 //   - a `return` — a havoc writes slots and then falls through, but a
 //     return raises the done flag and stops the block. Havocking a
-//     statement that contains one would drop the raise, and every
-//     statement after it would then be walked as if it ran;
+//     statement that contains one would drop the raise, and a later
+//     return would then overwrite the result slot the swallowed one
+//     wrote — a WRONG answer about the returned value, not a weak one;
 //   - a `throw` — see throwCarryingStatement below for the reasoning.
+//
+// A statement whose own route is the OPAQUE RETURN or the escaping
+// THROW never reaches this floor at all: the lowering has an exact
+// control-flow shape for each (lowering_to_kernel_ir.go), and this
+// floor's refusal of both is what routes them there.
 
 package walk
 
 import (
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
+
+/* ── naming a decline ────────────────────────────────────────────── */
+
+// The lowering's decline reasons, one per lowering run, keyed by the
+// context the run carries. A body that declines answers a bool and
+// nothing else — the signature every route and every caller is built
+// around — so the NAME of what it refused rides here beside it.
+//
+// Why this and not a context field: the field would say the same thing,
+// and this says it without the whole package's contexts changing shape.
+// Keyed by POINTER, which is the identity a lowering run has: nested
+// LowerStatements calls for an if's arms share the caller's context, so
+// an arm's refusal names the body's refusal, which is what the report
+// wants. First-wins, exactly as FirstHavoc is, so the name points at
+// the earliest place the body could not be read.
+var (
+	declinedConstructsLock sync.Mutex
+	declinedConstructs     = map[*LoweringContext]string{}
+	// how many LowerStatements runs are in flight on this context. The
+	// OUTERMOST one owns the name: it clears any name left behind before
+	// it starts, and drops the name on the way out when it SUCCEEDED —
+	// an inner arm may have declined and been stood in for by the havoc
+	// floor, and a body that lowered has no decline to report.
+	loweringDepth = map[*LoweringContext]int{}
+)
+
+// EnterLoweringRun marks a LowerStatements run beginning on a context and
+// answers whether it is the OUTERMOST one. The outermost run starts with
+// a clean slate, so a name left by an earlier lowering of the same
+// context cannot be read as this one's.
+func EnterLoweringRun(context *LoweringContext) bool {
+	if context == nil {
+		return false
+	}
+	declinedConstructsLock.Lock()
+	defer declinedConstructsLock.Unlock()
+	depth := loweringDepth[context]
+	loweringDepth[context] = depth + 1
+	if depth == 0 {
+		delete(declinedConstructs, context)
+		return true
+	}
+	return false
+}
+
+// LeaveLoweringRun marks a run finished. The outermost run that
+// SUCCEEDED drops the name: an inner arm's decline that the havoc floor
+// stood in for is not the body's decline, and the body lowered.
+func LeaveLoweringRun(context *LoweringContext, succeeded bool) {
+	if context == nil {
+		return
+	}
+	declinedConstructsLock.Lock()
+	defer declinedConstructsLock.Unlock()
+	depth := loweringDepth[context] - 1
+	if depth <= 0 {
+		delete(loweringDepth, context)
+		if succeeded {
+			delete(declinedConstructs, context)
+		}
+		return
+	}
+	loweringDepth[context] = depth
+}
+
+// NoteDeclinedConstruct records WHAT a lowering run refused, first-wins.
+// Every decline that has a name for its construct calls this on the way
+// out; the body-level owner reads it with DeclinedConstructOf and puts
+// it in the outcome report, so a histogram row names syntax someone can
+// act on rather than "a statement the lowering does not read".
+func NoteDeclinedConstruct(context *LoweringContext, construct string) {
+	if context == nil || construct == "" {
+		return
+	}
+	declinedConstructsLock.Lock()
+	defer declinedConstructsLock.Unlock()
+	if _, held := declinedConstructs[context]; held {
+		return
+	}
+	declinedConstructs[context] = construct
+}
+
+// DeclinedConstructOf is the name a declining lowering left behind, and
+// it CLEARS it: one lowering run, one read. Empty where the run declined
+// with no name of its own, and the caller then says what it knows.
+func DeclinedConstructOf(context *LoweringContext) string {
+	if context == nil {
+		return ""
+	}
+	declinedConstructsLock.Lock()
+	defer declinedConstructsLock.Unlock()
+	held := declinedConstructs[context]
+	delete(declinedConstructs, context)
+	return held
+}
 
 // OpaqueHavocStatements is the LAST resort of the statement dispatch: a
 // statement every route declined lowers as one `assign slot unknown` per
@@ -116,25 +222,30 @@ func havocAssignments(slots map[int]struct{}) []kernelbridge.IrStatement {
 //     that code may write any binding in scope. (A `o.eval(…)` member
 //     call is an ordinary method call — only the direct call has the
 //     scope-piercing semantics, so only it is refused here.)
-//   - a LABELLED `break`/`continue`: it leaves an enclosing labelled
-//     statement, and the IR has no statement for that transfer. Havocking
-//     here would put the writes on a path the kernel walks straight
-//     through, so the exit would claim the havoc happened where control
-//     had already left. A BARE break or continue inside a loop is the
-//     same problem for the same reason and is refused with them.
+//   - a break or continue that LEAVES this statement: the transfer goes
+//     to a structure outside the subtree being enumerated, so the exit
+//     the kernel walks to is not the exit the run reaches. The whole
+//     rule is containment, and containedTransfer decides it — a break
+//     whose switch or loop sits INSIDE the statement is admitted,
+//     because it cannot leave and the havoc of the whole statement
+//     already covers every path through it.
 //   - a `return`: the havoc's own shape is "write these slots, then carry
 //     on", and a return does not carry on — it writes the result slot,
 //     raises the done flag, and ends the block. A havoc that swallowed
-//     one would leave the flag down, and every statement after the
-//     havocked one would then be walked as if it had run. Raising the
-//     flag instead is not available either: the havoc cannot say WHICH of
-//     its paths returned, so the flag would be raised on all of them.
+//     one would leave the flag down, every statement after the havocked
+//     one would be walked as if it had run, and a later return would
+//     overwrite the result slot the swallowed one wrote: a WRONG answer
+//     about the returned value. Raising the flag instead is not
+//     available either: the havoc cannot say WHICH of its paths
+//     returned, so the flag would be raised on all of them. (A `return`
+//     in STATEMENT position never arrives here — the lowering's own
+//     opaque-return route holds the exact control shape for it.)
 //   - a `throw`: throwCarryingStatement.
 //
-// A nested FUNCTION's own returns and throws are its business, not this
-// statement's, so the scan stops at a function boundary — an unreadable
-// statement holding a callback is enumerable exactly as one holding any
-// other expression is.
+// A nested FUNCTION's own returns, throws and transfers are its
+// business, not this statement's, so the scan stops at a function
+// boundary — an unreadable statement holding a callback is enumerable
+// exactly as one holding any other expression is.
 func havocEnumerable(statement *ast.Node) bool {
 	enumerable := true
 	var visit func(node *ast.Node) bool
@@ -147,7 +258,9 @@ func havocEnumerable(statement *ast.Node) bool {
 			enumerable = false
 			return true
 		case ast.IsBreakStatement(node), ast.IsContinueStatement(node):
-			enumerable = false
+			if !containedTransfer(node, statement) {
+				enumerable = false
+			}
 			return true
 		case ast.IsReturnStatement(node):
 			enumerable = false
@@ -168,6 +281,187 @@ func havocEnumerable(statement *ast.Node) bool {
 	}
 	visit(statement)
 	return enumerable
+}
+
+// containedTransfer is whether a `break` or `continue` stays INSIDE the
+// statement being enumerated. This is the whole rule, and it is the one
+// the refusal is actually about:
+//
+// The havoc stands where the statement stood and writes every slot the
+// statement could have written. A transfer that stays inside the
+// statement is a path THROUGH it — the run leaves the statement at the
+// statement's own exit, which is exactly where the havoc's writes sit,
+// and the slot enumeration already unioned every block the transfer
+// could have skipped or repeated. So the havoc covers it.
+//
+// A transfer that LEAVES the statement is the refusal: the run departs
+// from somewhere in the middle for a target outside, and the kernel
+// walks straight on past the havoc as though the statement had run to
+// completion. The exit would then claim the havoc's writes happened on
+// a path control had already left.
+//
+// Two shapes leave:
+//
+//   - a BARE break or continue with no enclosing switch or loop inside
+//     the subtree — its target is an enclosing loop or switch of the
+//     BODY, outside what is being havocked;
+//   - a LABELLED break or continue whose labelled statement is not
+//     inside the subtree — same thing, reached by name.
+//
+// Both walks are syntactic: from the transfer up through Parent to the
+// subtree root. A parent chain that does not pass through the root at
+// all (a caller handing this a detached node) answers false — the safe
+// direction, since the refusal only ever costs coverage.
+func containedTransfer(transfer *ast.Node, root *ast.Node) bool {
+	if transfer == nil || root == nil {
+		return false
+	}
+	label := transferLabelOf(transfer)
+	isContinue := ast.IsContinueStatement(transfer)
+	for node := transfer.Parent; node != nil; node = node.Parent {
+		if label != "" {
+			// the labelled statement this transfer names, found inside the
+			// subtree: the target is contained
+			if ast.IsLabeledStatement(node) &&
+				node.AsLabeledStatement().Label.Text() == label {
+				return true
+			}
+		} else if breakTargetOf(node, isContinue) {
+			// the nearest switch or loop this bare transfer leaves, found
+			// inside the subtree
+			return true
+		}
+		if node == root {
+			// the subtree ended before any target did
+			return false
+		}
+		// a nested function boundary means this transfer was never this
+		// statement's to begin with; the scan above stops at one, so
+		// reaching it here is a caller passing an inner node directly
+		if ast.IsFunctionLike(node) || ast.IsClassLike(node) {
+			return false
+		}
+	}
+	return false
+}
+
+// transferLabelOf is the label a `break`/`continue` names, or "" for a
+// bare one.
+func transferLabelOf(transfer *ast.Node) string {
+	if ast.IsBreakStatement(transfer) {
+		if label := transfer.AsBreakStatement().Label; label != nil {
+			return label.Text()
+		}
+		return ""
+	}
+	if ast.IsContinueStatement(transfer) {
+		if label := transfer.AsContinueStatement().Label; label != nil {
+			return label.Text()
+		}
+		return ""
+	}
+	return ""
+}
+
+// breakTargetOf is whether a node is what a BARE transfer leaves: a
+// `continue` leaves the nearest loop only, a `break` leaves the nearest
+// loop OR switch — the language's own rule.
+func breakTargetOf(node *ast.Node, isContinue bool) bool {
+	switch {
+	case ast.IsForStatement(node), ast.IsForInStatement(node),
+		ast.IsForOfStatement(node), ast.IsWhileStatement(node),
+		ast.IsDoStatement(node):
+		return true
+	case ast.IsSwitchStatement(node):
+		return !isContinue
+	}
+	return false
+}
+
+// DeclinedHavocConstruct names WHY the floor refused a statement, in the
+// statement's own syntax rather than as a category. The coverage
+// histogram is the work queue, so a row has to name something a reader
+// can go and act on: "throw inside try" and "labelled break crossing
+// out" are worth having, "a statement the lowering does not read" is
+// not.
+//
+// The scan is havocEnumerable's, run again to find WHICH node refused —
+// the predicate answers a bool because that is what the route needs, and
+// this answers the name because that is what the report needs. Empty
+// where nothing refuses (the caller then names its own reason).
+func DeclinedHavocConstruct(statement *ast.Node) string {
+	if statement == nil {
+		return ""
+	}
+	reason := ""
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if reason != "" {
+			return true
+		}
+		switch {
+		case node.Kind == ast.KindWithStatement:
+			reason = "with statement"
+			return true
+		case ast.IsBreakStatement(node), ast.IsContinueStatement(node):
+			if !containedTransfer(node, statement) {
+				reason = transferDeclineName(node)
+			}
+			return true
+		case ast.IsReturnStatement(node):
+			reason = "return inside " + havocConstructName(statement)
+			return true
+		case ast.IsThrowStatement(node):
+			reason = "throw inside " + havocConstructName(statement)
+			if throwInsideTry(node, statement) {
+				reason = "throw inside try"
+			}
+			return true
+		case isBareEvalCall(node):
+			reason = "eval call"
+			return true
+		}
+		if ast.IsFunctionLike(node) || ast.IsClassLike(node) {
+			return false
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	visit(statement)
+	return reason
+}
+
+// transferDeclineName spells a break or continue that leaves the
+// statement: labelled or bare, break or continue, each said as the
+// construct it is.
+func transferDeclineName(transfer *ast.Node) string {
+	word := "break"
+	if ast.IsContinueStatement(transfer) {
+		word = "continue"
+	}
+	if transferLabelOf(transfer) != "" {
+		return "labeled " + word + " crossing out"
+	}
+	return word + " crossing out"
+}
+
+// throwInsideTry is whether a throw sits lexically inside a `try` within
+// the subtree — the case whose decline the reasoning in
+// throwCarryingStatement holds, and the one the report names by that
+// name so it reads as the construct it is.
+func throwInsideTry(throw *ast.Node, root *ast.Node) bool {
+	for node := throw.Parent; node != nil; node = node.Parent {
+		if ast.IsTryStatement(node) {
+			return true
+		}
+		if node == root {
+			return ast.IsTryStatement(root)
+		}
+		if ast.IsFunctionLike(node) || ast.IsClassLike(node) {
+			return false
+		}
+	}
+	return false
 }
 
 // isBareEvalCall is `eval(…)` called through the bare name — the direct
@@ -211,10 +505,32 @@ func isBareEvalCall(node *ast.Node) bool {
 // enclosing try catches" is exactly the structural reading the flag
 // cannot spell, and there is no second flag here to spell it with.
 //
-// So a throw is refused: a `throw` anywhere in a statement declines it,
-// and a body carrying one keeps today's decline. That is a coverage
-// cost, named here rather than paid for with a claim that is wrong in
-// the try case.
+// So a throw is refused HERE: a `throw` anywhere in a statement this
+// floor is standing in for declines it.
+//
+// WHAT CLOSED SINCE. The second objection is about the TRY, and it is
+// structural — so read the structure. A `throw` in STATEMENT position
+// whose parent chain up to the lowered body's root passes through no
+// `try` cannot transfer to a catch of THIS body: it leaves the body
+// outright. For that throw the first paragraph's reasoning is the whole
+// story, and it closes — a throwing run returns NOTHING, so no claim
+// about the returned outcome can be wrong about it. The lowering gives
+// it the exact shape of a return of nothing:
+//
+//	#ret := AbsentConst()   (a run that threw returned no value)
+//	#done := {1}            (and the block ends here)
+//
+// which is weaker than the truth (the run produced no outcome at all,
+// not an absent one) and never stronger. That route lives in
+// lowering_to_kernel_ir.go; a throw INSIDE a try keeps this decline,
+// under the catch-invisibility reasoning above, and the report names it
+// "throw inside try" rather than as a category.
+//
+// This predicate is unchanged: the floor still refuses every throw it
+// meets, because a havoc STANDS IN FOR a statement and a statement
+// standing in for a throw would have to spell the transfer, which is
+// what it cannot do. Only the statement-position route above it
+// changed.
 //
 // (The subtree walk is havocEnumerable's, which calls this at every
 // node; this only rules on the node in front of it.)
@@ -533,10 +849,78 @@ func havocConstructName(statement *ast.Node) string {
 		return "if"
 	case ast.IsVariableStatement(statement):
 		return "declaration"
+	case ast.IsLabeledStatement(statement):
+		return "labeled statement"
+	case ast.IsThrowStatement(statement):
+		return "throw"
+	case ast.IsReturnStatement(statement):
+		return OpaqueReturnName(statement)
 	case ast.IsExpressionStatement(statement):
 		return havocExpressionName(Unwrapped(statement.AsExpressionStatement().Expression))
 	}
 	return "statement"
+}
+
+// OpaqueReturnName spells a return whose VALUE no reading lowered:
+// "return (call this.x.y)", "return (object literal)" — the word
+// `return`, then the returned expression's own syntax in parentheses,
+// so the histogram row names the shape a reader can go and build a
+// reading for. A bare `return` (which always lowers) spells itself.
+//
+// The value is what was lost; the control flow was not. The name says
+// only "return", never "return declined", because the statement did
+// lower — porously.
+func OpaqueReturnName(statement *ast.Node) string {
+	if statement == nil || !ast.IsReturnStatement(statement) {
+		return "return"
+	}
+	expression := statement.AsReturnStatement().Expression
+	if expression == nil {
+		return "return"
+	}
+	return "return (" + returnedShapeName(Unwrapped(expression)) + ")"
+}
+
+// returnedShapeName is the returned expression's own syntax, spelled
+// plainly. A CALL keeps the callee's dotted path, which is the one
+// spelling that tells a reader which callee to teach the lowering
+// about; everything else says what kind of expression it is.
+func returnedShapeName(e *ast.Node) string {
+	if e == nil {
+		return "expression"
+	}
+	switch {
+	case ast.IsCallExpression(e):
+		return havocCallName(e)
+	case ast.IsAwaitExpression(e):
+		return "await " + returnedShapeName(Unwrapped(e.AsAwaitExpression().Expression))
+	case ast.IsObjectLiteralExpression(e):
+		return "object literal"
+	case ast.IsArrayLiteralExpression(e):
+		return "array literal"
+	case ast.IsNewExpression(e):
+		return "new"
+	case ast.IsElementAccessExpression(e):
+		return "computed member"
+	case ast.IsPropertyAccessExpression(e):
+		if spelled, ok := calleeSpelling(e); ok {
+			return "member " + spelled
+		}
+		return "member"
+	case ast.IsIdentifier(e):
+		return "name " + e.Text()
+	case ast.IsTaggedTemplateExpression(e):
+		return "tagged template"
+	case ast.IsTemplateExpression(e):
+		return "template"
+	case ast.IsConditionalExpression(e):
+		return "conditional"
+	case ast.IsBinaryExpression(e):
+		return "binary"
+	case ast.IsFunctionLike(e):
+		return "function"
+	}
+	return "expression"
 }
 
 // havocExpressionName spells the EXPRESSION an unreadable expression

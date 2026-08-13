@@ -273,18 +273,36 @@ func TestIrSwitchLowering_GroupedLabelsShareOneArm(t *testing.T) {
 	}
 }
 
-func TestIrSwitchLowering_AFallingThroughCaseDeclinesTheWholeSwitch(t *testing.T) {
+func TestIrSwitchLowering_AFallingThroughCaseTakesTheHavocFloor(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	context := recordLoweringContext(kernel,
 		[]string{"x", "n"},
 		[]BindingKind{BindingKindNumber, BindingKindNumber})
-	if _, ok := LowerStatements(context, loweringParse(t, `
+	// the equality CHAIN still refuses a falling-through case (its
+	// statements run on into the next clause, which the chain has no
+	// arm for), and the whole switch then takes the havoc floor: its
+	// breaks are CONTAINED, so every path through it ends at the
+	// statement's own exit, where the havoc's writes sit
+	stmts, ok := LowerStatements(context, loweringParse(t, `
 		switch (x) {
 			case 1: n = 1;
 			case 2: n = 2; break;
 		}
-	`)); ok {
-		t.Errorf("a falling-through case lowered — its statements run on into the next clause, which the chain has no arm for")
+	`))
+	if !ok {
+		t.Fatalf("a falling-through switch declined outright, want the havoc floor")
+	}
+	sawN := false
+	for _, s := range stmts {
+		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
+			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
+		}
+		if s.Target == 1 {
+			sawN = true
+		}
+	}
+	if !sawN {
+		t.Errorf("n (slot 1) was not havocked — the arms' writes would be skipped")
 	}
 }
 
@@ -320,16 +338,32 @@ func TestIrSwitchLowering_ASwitchWithNoDefaultLeavesTheChainsFinalElseEmpty(t *t
 	}
 }
 
-func TestIrSwitchLowering_ASwitchOnAnUntrackedDiscriminantDeclines(t *testing.T) {
+func TestIrSwitchLowering_ASwitchOnAnUntrackedDiscriminantTakesTheHavocFloor(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	context := recordLoweringContext(kernel,
 		[]string{"n"},
 		[]BindingKind{BindingKindNumber})
-	if _, ok := LowerStatements(context, loweringParse(t, `
+	// no slot carries the discriminant's value, so the chain refuses —
+	// and the floor havocs what the arms could write, which claims
+	// nothing about which arm ran
+	stmts, ok := LowerStatements(context, loweringParse(t, `
 		switch (free) {
 			case 1: n = 1; break;
 		}
-	`)); ok {
-		t.Errorf("a switch on an untracked name lowered — no slot carries its value")
+	`))
+	if !ok {
+		t.Fatalf("an untracked-discriminant switch declined outright, want the havoc floor")
+	}
+	sawN := false
+	for _, s := range stmts {
+		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
+			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
+		}
+		if s.Target == 0 {
+			sawN = true
+		}
+	}
+	if !sawN {
+		t.Errorf("n (slot 0) was not havocked — the arm's write would be skipped")
 	}
 }
