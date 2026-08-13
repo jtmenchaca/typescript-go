@@ -229,6 +229,22 @@ func lowerSummary(
 	for _, name := range paramNames {
 		paramNameSet[name] = struct{}{}
 	}
+	// a fixed-shape record local carries ONE SLOT PER KEY, spelled
+	// "p.lo" — the name IndexOf already resolves a `p.lo` read through.
+	// A record the recognizer declines keeps its single whole-name slot,
+	// exactly as before, and the reads of its keys then miss and decline
+	// the lowering.
+	var objectLocals map[*ast.Node]ObjectLocal
+	if ast.IsBlock(body) {
+		objectLocals = ObjectLocalsOf(body, localList.Locals)
+	} else {
+		objectLocals = map[*ast.Node]ObjectLocal{}
+	}
+	// A name declared TWICE keeps the last declaration's reading, as
+	// before. A name whose declarations disagree about shape — a record
+	// once and a scalar once — has no one slot family, so its record
+	// declarations lose their flattening and it stays a whole-name slot
+	// (whose key reads then miss and decline the lowering).
 	var localNames []string
 	declaredOf := map[string]*ast.Node{}
 	for _, d := range localList.Locals {
@@ -236,34 +252,68 @@ func lowerSummary(
 		if _, isParam := paramNameSet[name]; isParam {
 			continue
 		}
-		if _, seen := declaredOf[name]; !seen {
+		if previous, seen := declaredOf[name]; seen {
+			_, wasRecord := objectLocals[previous]
+			_, isRecord := objectLocals[d]
+			if wasRecord != isRecord {
+				delete(objectLocals, previous)
+				delete(objectLocals, d)
+			}
+		} else {
 			localNames = append(localNames, name)
 		}
 		declaredOf[name] = d
 	}
+	// localSlots is each local's slot names, sorts and typeof evidence
+	// in one list: one entry for a scalar local, one PER KEY for a
+	// flattened record.
+	type localSlot struct {
+		Name      string
+		Sort      BindingKind
+		TypeofTag TypeofTag
+	}
+	var localSlots []localSlot
+	for _, name := range localNames {
+		declared, has := declaredOf[name]
+		if !has {
+			localSlots = append(localSlots, localSlot{Name: name, Sort: BindingKindUnknown, TypeofTag: TypeofTagNone})
+			continue
+		}
+		if local, flattened := objectLocals[declared]; flattened {
+			for _, key := range local.Keys {
+				localSlots = append(localSlots, localSlot{
+					Name:      key.SlotName,
+					Sort:      ObjectLocalKeySort(key),
+					TypeofTag: ObjectLocalKeyTypeof(key),
+				})
+			}
+			continue
+		}
+		localSlots = append(localSlots, localSlot{
+			Name:      name,
+			Sort:      LocalSort(declared),
+			TypeofTag: LocalTypeof(declared),
+		})
+	}
 	// MUTABLE vectors: composition allocates fresh slots past #ret
-	bindings := append(append(append([]string{}, paramNames...), localNames...), "#done", "#ret")
+	bindings := append([]string{}, paramNames...)
+	for _, slot := range localSlots {
+		bindings = append(bindings, slot.Name)
+	}
+	bindings = append(bindings, "#done", "#ret")
 	if len(bindings) > slotBudget {
 		return kernelSummary{}, false
 	}
 	sorts := make([]BindingKind, 0, len(bindings))
 	sorts = append(sorts, paramSorts...)
-	for _, name := range localNames {
-		if declared, ok := declaredOf[name]; ok {
-			sorts = append(sorts, LocalSort(declared))
-		} else {
-			sorts = append(sorts, BindingKindUnknown)
-		}
+	for _, slot := range localSlots {
+		sorts = append(sorts, slot.Sort)
 	}
 	sorts = append(sorts, BindingKindNumber, BindingKindUnknown)
 	typeofs := make([]TypeofTag, 0, len(bindings))
 	typeofs = append(typeofs, paramTypeofs...)
-	for _, name := range localNames {
-		if declared, ok := declaredOf[name]; ok {
-			typeofs = append(typeofs, LocalTypeof(declared))
-		} else {
-			typeofs = append(typeofs, TypeofTagNone)
-		}
+	for _, slot := range localSlots {
+		typeofs = append(typeofs, slot.TypeofTag)
 	}
 	typeofs = append(typeofs, TypeofTagNumber, TypeofTagNone)
 	doneIndex := len(bindings) - 2

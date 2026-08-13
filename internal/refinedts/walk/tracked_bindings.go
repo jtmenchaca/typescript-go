@@ -93,6 +93,13 @@ type CollectLocalsResult struct {
 // body, in source order — recursing into branch arms and blocks,
 // never into nested functions (a nested function anywhere declines:
 // its captures read and write outside the lowered world).
+//
+// A local holding an object literal is collected here like any other
+// single-identifier local; what it becomes in the slot vector is
+// decided afterwards by the recognizer in ir_object_slots.go, which
+// either flattens it into one slot per key ("p.lo", "p.hi") or leaves
+// it a single whole-name slot whose key reads then find no slot and
+// decline the lowering.
 func CollectLocals(body *ast.Node) (CollectLocalsResult, bool) {
 	var locals []*ast.Node
 	declined := false

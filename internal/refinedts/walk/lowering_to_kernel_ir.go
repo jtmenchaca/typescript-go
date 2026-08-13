@@ -100,6 +100,16 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 			out = append(out, raise)
 			return out, true
 		}
+		// `const p = { lo: 0, hi: n }` — a record local flattened into one
+		// slot per key lowers as N ordinary assignments at the
+		// declaration's position, in literal order. Tried ahead of the
+		// single-name reader, which has no slot for `p` itself.
+		if assignments, ok := ObjectDeclarationAssignmentsOf(context, s); ok {
+			for _, assignment := range assignments {
+				out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: assignment.Target, Effect: assignment.Effect})
+			}
+			continue
+		}
 		if assignment, ok := AssignmentOf(context, s); ok {
 			out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: assignment.Target, Effect: assignment.Effect})
 			continue

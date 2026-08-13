@@ -525,15 +525,17 @@ func runRefinements(p *program.CheckerProgram, shape []*ast.Diagnostic, kernel *
 	detail.NotePhase("objectGraphs", tObj)
 
 	// ── pass 3: facts flow; the kernel judges ────────────────────────
+	inlineBudgetForEntry := walk.InlineCallLimit
 	ctx := &walk.FlowContext{
-		P:         p,
-		Kernel:    kernel,
-		Registry:  facts.registry,
-		Objects:   facts.objects,
-		Contracts: facts.contracts,
-		Report:    report,
-		Aliases:   dataflowfacts.NewAliasClasses(),
-		Declared:  map[string]*annotations.DeclaredRefinement{},
+		P:            p,
+		Kernel:       kernel,
+		Registry:     facts.registry,
+		Objects:      facts.objects,
+		Contracts:    facts.contracts,
+		Report:       report,
+		Aliases:      dataflowfacts.NewAliasClasses(),
+		Declared:     map[string]*annotations.DeclaredRefinement{},
+		InlineBudget: &inlineBudgetForEntry,
 	}
 	tTop := time.Now()
 	tracing.Span("pass3.topLevel", func() any {

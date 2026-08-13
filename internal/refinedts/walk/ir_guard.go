@@ -94,21 +94,26 @@ func TypeofRead(context *LoweringContext, head *ast.Node) (TypeofReadResult, boo
 	return TypeofReadResult{}, false
 }
 
-// TestOfResult mirrors testOf's return shape.
+// TestOfResult mirrors testOf's return shape. OnB/HasOnB carry the
+// SECOND slot when the head compares two tracked number bindings
+// (`i < n`); those results never carry W.
 type TestOfResult struct {
 	On      int
 	Test    kernelbridge.IrBranchTest
 	W       float64
 	HasW    bool
+	OnB     int
+	HasOnB  bool
 	Points  []float64
 	Swapped bool
 }
 
 // TestOf is testOf in the TS source: the single-test head reader —
 // strict equality under the literal's sort, definedness against
-// `undefined`, ordered comparison under the number sort (mirrored
-// for a literal left), bare truthiness under the binding's own sort.
-// Swapped arms carry a negated head.
+// `undefined`, ordered comparison under the number sort (against a
+// constant, against a second tracked slot, or mirrored for a literal
+// left), bare truthiness under the binding's own sort. Swapped arms
+// carry a negated head.
 func TestOf(context *LoweringContext, head *ast.Node) (TestOfResult, bool) {
 	if ast.IsBinaryExpression(head) {
 		bin := head.AsBinaryExpression()
@@ -150,8 +155,17 @@ func TestOf(context *LoweringContext, head *ast.Node) (TestOfResult, bool) {
 			if onOk && context.Sorts[on] == BindingKindNumber && wOk {
 				return TestOfResult{On: on, Test: irTestOfCmp(cmp), W: w, HasW: true, Swapped: false}, true
 			}
-			// a literal LEFT mirrors: k < x reads as x > k
 			onRight, onRightOk := NumberIndexOf(context, bin.Right)
+			// BOTH sides tracked numbers: `i < n` — the two-slot
+			// comparison, which carries the other SLOT where the
+			// one-slot form carries a constant
+			if onOk && context.Sorts[on] == BindingKindNumber && onRightOk {
+				return TestOfResult{
+					On: on, Test: irTestOfCmp2(cmp),
+					OnB: onRight, HasOnB: true, Swapped: false,
+				}, true
+			}
+			// a literal LEFT mirrors: k < x reads as x > k
 			kLeft, kLeftOk := NumberOf(bin.Left)
 			if onRightOk && kLeftOk {
 				return TestOfResult{On: onRight, Test: irTestOfCmp(mirrorCmp(cmp)), W: kLeft, HasW: true, Swapped: false}, true
@@ -183,6 +197,22 @@ func irTestOfCmp(cmp kernelbridge.NarrowCmpOp) kernelbridge.IrBranchTest {
 		return kernelbridge.IrTestLt
 	}
 	panic("irTestOfCmp: unreached op")
+}
+
+// irTestOfCmp2 is irTestOfCmp's two-slot twin: the same four
+// comparisons, named for the form whose right operand is a slot.
+func irTestOfCmp2(cmp kernelbridge.NarrowCmpOp) kernelbridge.IrBranchTest {
+	switch cmp {
+	case kernelbridge.NarrowOpGe:
+		return kernelbridge.IrTestGeSlot
+	case kernelbridge.NarrowOpGt:
+		return kernelbridge.IrTestGtSlot
+	case kernelbridge.NarrowOpLe:
+		return kernelbridge.IrTestLeSlot
+	case kernelbridge.NarrowOpLt:
+		return kernelbridge.IrTestLtSlot
+	}
+	panic("irTestOfCmp2: unreached op")
 }
 
 func mirrorCmp(cmp kernelbridge.NarrowCmpOp) kernelbridge.NarrowCmpOp {
@@ -325,6 +355,9 @@ func LowerGuard(context *LoweringContext, condition *ast.Node, thn, els []kernel
 		if single.HasW {
 			w := single.W
 			stmt.W = &w
+		}
+		if single.HasOnB {
+			stmt.OnB = single.OnB
 		}
 		if single.Points != nil {
 			stmt.Points = single.Points

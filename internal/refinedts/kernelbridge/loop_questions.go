@@ -162,7 +162,25 @@ const (
 	IrTestLe        IrBranchTest = "le"
 	IrTestGt        IrBranchTest = "gt"
 	IrTestGe        IrBranchTest = "ge"
+	// The two-slot comparisons: the right operand is another tracked
+	// slot (OnB), not a constant, so these carry no `w`. `i < n`
+	// lowers here where `i < 10` lowers to IrTestLt.
+	IrTestLtSlot IrBranchTest = "ltSlot"
+	IrTestLeSlot IrBranchTest = "leSlot"
+	IrTestGtSlot IrBranchTest = "gtSlot"
+	IrTestGeSlot IrBranchTest = "geSlot"
 )
+
+// IsTwoSlotTest reports whether a branch test compares two tracked
+// slots rather than a slot against a constant — the tests that ride
+// with OnB and never with W.
+func IsTwoSlotTest(t IrBranchTest) bool {
+	switch t {
+	case IrTestLtSlot, IrTestLeSlot, IrTestGtSlot, IrTestGeSlot:
+		return true
+	}
+	return false
+}
 
 // IrStatement is a lowered statement for the kernel's flow walk: an
 // assignment of an effect to a binding, a branch that tests one
@@ -183,6 +201,10 @@ type IrStatement struct {
 	On     int
 	Test   IrBranchTest
 	W      *float64
+	// OnB: the SECOND slot a two-slot comparison tests On against —
+	// read only when Test is one of the *Slot comparisons, which
+	// carry no W.
+	OnB    int
 	Points []float64 // "eqSeq": the compared tuple (a string's code points)
 	Then   []IrStatement
 	Else   []IrStatement
@@ -232,7 +254,10 @@ func StmtWire(s IrStatement) string {
 		)
 	}
 	operand := ""
-	if s.Test == IrTestEqSeq && s.Points != nil {
+	if IsTwoSlotTest(s.Test) {
+		// the second operand is a slot, not a constant
+		operand = fmt.Sprintf(`,"onB":%d`, s.OnB)
+	} else if s.Test == IrTestEqSeq && s.Points != nil {
 		operand = fmt.Sprintf(`,"t":%s`, EncodeTuple(s.Points))
 	} else if s.Test != IrTestDefined && s.Test != IrTestTruthyNum &&
 		s.Test != IrTestTruthyStr && s.Test != IrTestIsNan && s.W != nil {

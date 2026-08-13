@@ -22,17 +22,20 @@ type AssignmentTarget struct {
 
 // EffectOf is effectOf in the TS source: an expression as a body
 // effect, or (zero, false) where the reading ends.
+//
+// The read resolves through slotIndexOfName, which honours the CLOSED
+// name map an inlined body carries — a free name inside an inlined
+// callee must decline, never bind to the caller's slot of the same
+// spelling. (The TS source reads context.bindings directly here; a
+// name the callee did not declare could resolve to the caller's
+// binding of that spelling, which is the capture the `names` map
+// exists to forbid. Resolving through the one path IndexOf uses closes
+// that.)
 func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, bool) {
 	return LowerEffectExpression(e, EffectReader{
 		ReadPlace: func(spelled string) (kernelbridge.LoopEffect, bool) {
-			i := -1
-			for idx, binding := range context.Bindings {
-				if binding == spelled {
-					i = idx
-					break
-				}
-			}
-			if i == -1 {
+			i, found := slotIndexOfName(context, spelled)
+			if !found {
 				return kernelbridge.LoopEffect{}, false
 			}
 			// arithmetic admits only the number sort

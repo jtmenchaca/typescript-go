@@ -12,16 +12,27 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
-// LoopHead is the {on, cond, after} shape loopHeadOf returns.
+// LoopHead is the {on, cond, after} shape loopHeadOf returns. A
+// TwoSlot head compares On against a second tracked slot rather than
+// a constant; nothing constant bounds either side, so Cond and After
+// stay nil and the loop narrows nothing at entry and intersects
+// nothing at exit — the reading the kernel's loop form already
+// accepts, and the weakest one that is sound. OnB records which slot
+// the head tested against; the loop lowering claims nothing from it.
 type LoopHead struct {
-	On    int
-	Cond  *refinementsets.RefinedSet
-	After *refinementsets.RefinedSet
+	On      int
+	Cond    *refinementsets.RefinedSet
+	After   *refinementsets.RefinedSet
+	TwoSlot bool
+	OnB     int
 }
 
 // LoopHeadOf is loopHeadOf in the TS source: a while head `binding
 // <cmp> literal`, lowered through the kernel's narrowing question
-// into the condition's truth and falsity sets.
+// into the condition's truth and falsity sets. A head comparing two
+// tracked number bindings (`i < n`) reads as the two-slot form
+// instead: recognized, so the loop lowers, with no narrowing claimed
+// on either side.
 func LoopHeadOf(context *LoweringContext, condition *ast.Node) (LoopHead, bool) {
 	if !ast.IsBinaryExpression(condition) {
 		return LoopHead{}, false
@@ -29,9 +40,17 @@ func LoopHeadOf(context *LoweringContext, condition *ast.Node) (LoopHead, bool) 
 	bin := condition.AsBinaryExpression()
 	op, hasOp := CmpOps[bin.OperatorToken.Kind]
 	on, onOk := NumberIndexOf(context, bin.Left)
-	k, kOk := NumberOf(bin.Right)
-	if !hasOp || !onOk || !kOk {
+	if !hasOp || !onOk {
 		return LoopHead{}, false
+	}
+	k, kOk := NumberOf(bin.Right)
+	if !kOk {
+		// `i < n`: the right side is another tracked number slot
+		onB, onBOk := NumberIndexOf(context, bin.Right)
+		if !onBOk {
+			return LoopHead{}, false
+		}
+		return LoopHead{On: on, TwoSlot: true, OnB: onB}, true
 	}
 	answer := context.Narrow(kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindCmp, Op: op, K: k})
 	head := LoopHead{On: on}
@@ -227,12 +246,15 @@ func RaisesDone(statements []kernelbridge.IrStatement, done int) bool {
 }
 
 // LoopStatement is loopStatement in the TS source: the IR loop
-// statement from a prepared head and body.
+// statement from a prepared head and body. A two-slot head leaves
+// every cond and after entry nil — no constant bounds either side, so
+// the pass entry narrows nothing and the exit intersects nothing;
+// the solver still certifies whatever the body's effects support.
 func LoopStatement(context *LoweringContext, head LoopHead, body LoopBody) kernelbridge.IrStatement {
 	cond := make([]*refinementsets.RefinedSet, len(context.Bindings))
 	after := make([]*refinementsets.RefinedSet, len(context.Bindings))
 	for i := range context.Bindings {
-		if i == head.On {
+		if i == head.On && !head.TwoSlot {
 			cond[i] = head.Cond
 			after[i] = head.After
 		}

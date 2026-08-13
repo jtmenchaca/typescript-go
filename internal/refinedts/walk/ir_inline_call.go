@@ -147,9 +147,23 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 			argAssigns = append(argAssigns, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: effect})
 		}
 	}
+	// a fixed-shape record local flattens into one slot per key here
+	// too — the closed name map carries "p.lo" so the inlined body's
+	// own steps resolve, mirroring lowerSummary's flattening
+	inlineObjectLocals := ObjectLocalsOf(body, locals)
 	for _, declaration := range locals {
 		name := declaration.AsVariableDeclaration().Name().AsIdentifier().Text
 		if _, exists := names[name]; exists {
+			continue
+		}
+		if local, flattened := inlineObjectLocals[declaration]; flattened {
+			for _, key := range local.Keys {
+				slot, ok := allocate(fmt.Sprintf("#in%d:%s", site, key.SlotName), ObjectLocalKeySort(key), ObjectLocalKeyTypeof(key))
+				if !ok {
+					return InlineCallResult{}, false
+				}
+				names[key.SlotName] = slot
+			}
 			continue
 		}
 		slot, ok := allocate(fmt.Sprintf("#in%d:%s", site, name), LocalSort(declaration), LocalTypeof(declaration))

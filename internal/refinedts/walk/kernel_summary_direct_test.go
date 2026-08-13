@@ -36,9 +36,9 @@ func TestKernelSummaryDirect_ALocalWritingLoopBodySummarizesWithoutTheEffectFree
 	SetEngineKernel(kernel)
 	// scanBody calls this body impure (it assigns s and i), so the
 	// effect-free route never reaches it — the direct route must.
-	// The while head compares against a LITERAL: loop heads admit only
-	// `binding <cmp> literal` (LoopHeadOf), which is the lowering's
-	// own inherited coverage, not this route's.
+	// The while head compares against a LITERAL, so the head's truth
+	// and falsity sets narrow the loop (LoopHeadOf); a head comparing
+	// two slots lowers too, but claims no narrowing on either side.
 	declaration := summaryDeclarationOf(t,
 		"function f(n: number) { let s = 0; let i = 0; while (i < 3) { s = s + n; i = i + 1; } return s; }")
 	contract := &FunctionContract{Declaration: declaration}

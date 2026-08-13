@@ -178,18 +178,6 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			v := AbstractValueOfDeclared(*contract.Result)
 			statedResult = &v
 		}
-		// the kernel-summary route first, for EVERY contracted call —
-		// a lowerable body answers with one proved walk instead of a
-		// JS inline; a decline anywhere keeps every path below exactly
-		// as it was (KernelSummaryDirect's own comment carries the
-		// soundness argument)
-		if summarized, ok := KernelSummaryDirect(ctx, argKnowns, contract); ok {
-			tracing.Count("inline.summaryDirect", 0)
-			if statedResult == nil {
-				return summarized
-			}
-			return abstractdomain.MeetKnown(summarized, *statedResult)
-		}
 		summary := Summarize(ctx, *contract)
 		if summary.EffectFree {
 			tracing.Count("inlineSkipped", 0)
