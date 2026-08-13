@@ -32,19 +32,40 @@ type AssignmentTarget struct {
 // exists to forbid. Resolving through the one path IndexOf uses closes
 // that.)
 func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, bool) {
+	numberSlot := func(i int) (kernelbridge.LoopEffect, bool) {
+		// arithmetic admits only the number sort
+		if context.Sorts[i] == BindingKindNumber {
+			return varEffect(i), true
+		}
+		return kernelbridge.LoopEffect{}, false
+	}
 	return LowerEffectExpression(e, EffectReader{
 		ReadPlace: func(spelled string) (kernelbridge.LoopEffect, bool) {
 			i, found := slotIndexOfName(context, spelled)
 			if !found {
 				return kernelbridge.LoopEffect{}, false
 			}
-			// arithmetic admits only the number sort
-			if context.Sorts[i] == BindingKindNumber {
-				return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: i}, true
+			return numberSlot(i)
+		},
+		// a DEEP record path (`p.a.b`), an array's `a.length`, and an
+		// index read `a[i]` are all ordinary slot reads once the
+		// flattenings gave them slots
+		ReadNode: func(node *ast.Node) (kernelbridge.LoopEffect, bool) {
+			if i, ok := PathSlotIndexOf(context, node); ok {
+				return numberSlot(i)
+			}
+			if i, ok := ArrayLengthSlotOf(context, node); ok {
+				return numberSlot(i)
 			}
 			return kernelbridge.LoopEffect{}, false
 		},
-		Opaque: func(e *ast.Node) (kernelbridge.LoopEffect, bool) {
+		Opaque: func(node *ast.Node) (kernelbridge.LoopEffect, bool) {
+			// `a[i]`: the element slot, or-absent where nothing bounds i.
+			// Arithmetic admits only a number-sorted element slot, the
+			// same gate every other read here wears.
+			if slot, ok := ArrayElementSlotOf(context, node); ok && context.Sorts[slot] == BindingKindNumber {
+				return ArrayIndexReadEffect(context, node)
+			}
 			return kernelbridge.LoopEffect{}, false
 		},
 	})

@@ -2,23 +2,24 @@
 //
 // The callee summary: a function body lowers to the kernel's flow IR
 // ONCE — returns encoded through a result slot and a done flag over
-// the existing proved grammar (lowering_to_kernel_ir) — and every
-// call walks it kernel-side from the call's own argument states.
+// the existing proved grammar (lowering_to_kernel_ir) — the kernel
+// COMPILES that IR to a slot-program once per declaration, and every
+// call applies the compiled program to its own argument states.
 // Every piece the walk composes is individually proved and the
 // composition theorem (walk_sound, set_functions/walk.lean) covers
 // the whole body, returns included, because the encoding uses only
 // the proved statements: `return e` is an assignment pair, and the
 // continuation after a returning branch runs under an ordinary
-// branch on the flag.
+// branch on the flag; the compile itself is proved faithful to that
+// walk (summarize_eq), so an application carries the same soundness.
 //
-// A body the lowering cannot spell — a call, an object, a string
-// method, a loop that returns — declines here and keeps today's JS
-// inline walk. The ledger counts which route served.
+// A body the lowering cannot spell — an object, a string method, a
+// loop that returns — declines here and keeps today's JS inline
+// walk. The ledger counts which route served.
 
 package walk
 
 import (
-	"strings"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -34,12 +35,13 @@ import (
 // not the small computation summaries serve.
 const slotBudget = 32
 
-// kernelSummary is Summary in the TS source (renamed to avoid
+// LoweredSummary is Summary in the TS source (renamed to avoid
 // colliding with function_summaries.go's exported Summarize/
 // EffectSummary vocabulary — the TWO "summary" concepts in this
 // directory are unrelated: an effect summary and a kernel-lowering
-// summary).
-type kernelSummary struct {
+// summary). It is the body's IR plus the slot bookkeeping a call
+// site reads its answer out of.
+type LoweredSummary struct {
 	Stmts      []kernelbridge.IrStatement
 	ParamCount int
 	DoneIndex  int
@@ -47,28 +49,30 @@ type kernelSummary struct {
 	// SlotCount is every slot, composition's grown ones included —
 	// the walk's state vector is this long.
 	SlotCount int
+	// Table is the composed-call table the lowering built: one entry
+	// per callee an IrStatementCall statement indexes, in the order
+	// the lowering assigned. It rides into AskSummarize beside the
+	// statements. A body with no composed calls carries an empty
+	// table.
+	Table []kernelbridge.SummaryBlob
 }
 
-// kernelSummariesMu guards kernelSummaries: lowered bodies per
-// declaration, keyed inside by the parameter sorts the call
-// supplied — the sorts gate which tests the lowering admits, so
-// different sort vectors are different lowerings. A summaryEntry
-// with Ok false remembers a body that declined (the TS source's Map
-// value of `null`, distinguished from "no entry yet" the same way
+// kernelSummariesMu guards kernelSummaries: the LOWERED body per
+// declaration. Keyed by declaration alone, matching the registry
+// above it: the lowering no longer takes the call's argument sorts,
+// so one declaration has exactly one lowering. An entry with Ok
+// false remembers a body that declined (the TS source's Map value of
+// `null`, distinguished from "no entry yet" the same way
 // class_field_invariants.go's invariantMemoSet distinguishes
 // re-entry from "no answer computed").
 type summaryEntry struct {
-	Summary kernelSummary
+	Summary LoweredSummary
 	Ok      bool
 }
 
-// Keyed by the CHECK first: the lowering composes callees through the
-// entry's own contract registry (resolveCallee closes over ctx), so a
-// cross-entry store held entry-dependent lowerings under an
-// entry-free key — the scheduling-order verdict flicker.
 var (
 	kernelSummariesMu sync.Mutex
-	kernelSummaries   = map[*program.CheckerProgram]map[*ast.Node]map[string]summaryEntry{}
+	kernelSummaries   = map[*ast.Node]summaryEntry{}
 )
 
 // absentState is ABSENT in the TS source: the definitely-undefined
@@ -137,30 +141,11 @@ func mayContainZero(set refinementsets.RefinedSet) bool {
 	return true
 }
 
-// typeofOfKnown is the typeof evidence an argument's knowledge
-// carries: a values knowledge names its primitive kind outright;
-// anything else claims nothing — a set spelled by narrowing could
-// stand for a boolean riding the number sort, so it must not pin
-// "number".
-func typeofOfKnown(k abstractdomain.AbstractValue) TypeofTag {
-	switch k.Kind {
-	case abstractdomain.KindValues:
-		switch k.KindTag {
-		case abstractdomain.PrimitiveNumber:
-			return TypeofTagNumber
-		case abstractdomain.PrimitiveString:
-			return TypeofTagString
-		case abstractdomain.PrimitiveBoolean:
-			return TypeofTagBoolean
-		default:
-			return TypeofTagNone
-		}
-	case abstractdomain.KindPossiblyUndefined, abstractdomain.KindPossiblyNaN:
-		return typeofOfKnown(*k.Inner)
-	default:
-		return TypeofTagNone
-	}
-}
+// (typeofOfKnown lived here: the typeof evidence a call's ARGUMENT
+// knowledge carried into the lowering. A summary quantifies over all
+// entries, so no call's arguments may gate what it admits — the
+// evidence now comes from the declaration's own annotations, through
+// declaredParamTypeof below.)
 
 // summaryLowerable gates the declarations a summary may lower at all:
 // an async body's value is a Promise and a generator's an iterator —
@@ -192,168 +177,76 @@ func summaryLowerable(declaration *ast.Node) bool {
 	return true
 }
 
-func lowerSummary(
-	declaration *ast.Node,
-	paramSorts []BindingKind,
-	paramTypeofs []TypeofTag,
-	resolveCallee func(callee *ast.Node) *ast.Node,
-) (kernelSummary, bool) {
-	if !summaryLowerable(declaration) {
-		return kernelSummary{}, false
+// declaredParamSort reads a parameter's sort from the DECLARATION
+// alone — its own type annotation, never a call's arguments. A
+// summary quantifies over all entries, so the lowering that produces
+// it must not read any one call's argument knowledge; an unannotated
+// or richer-typed parameter is "unknown", which admits only the
+// definedness test.
+func declaredParamSort(parameter *ast.Node) BindingKind {
+	typeNode := parameter.AsParameterDeclaration().Type
+	if typeNode == nil {
+		return BindingKindUnknown
 	}
-	body := declaration.Body()
-	kernel := EngineKernelHeld()
-	if kernel == nil {
-		return kernelSummary{}, false
+	switch typeNode.Kind {
+	case ast.KindNumberKeyword, ast.KindBooleanKeyword:
+		// booleans ride the number sort — their typeof differs, which
+		// declaredParamTypeof answers separately
+		return BindingKindNumber
+	case ast.KindStringKeyword:
+		return BindingKindString
+	default:
+		return BindingKindUnknown
 	}
-	// parameters: plain identifiers, no defaults, no rest
-	var paramNames []string
-	for _, parameter := range declaration.Parameters() {
-		pd := parameter.AsParameterDeclaration()
-		if !ast.IsIdentifier(pd.Name()) || pd.Initializer != nil || pd.DotDotDotToken != nil {
-			return kernelSummary{}, false
-		}
-		paramNames = append(paramNames, pd.Name().Text())
-	}
-	// a concise arrow body IS a single return
-	var statements []*ast.Node
-	if ast.IsBlock(body) {
-		statements = append(statements, body.AsBlock().Statements.Nodes...)
-	} else {
-		statements = append(statements, syntheticReturnStatement(body))
-	}
-	var localList CollectLocalsResult
-	if ast.IsBlock(body) {
-		result, ok := CollectLocals(body)
-		if !ok {
-			return kernelSummary{}, false
-		}
-		localList = result
-	}
-	paramNameSet := map[string]struct{}{}
-	for _, name := range paramNames {
-		paramNameSet[name] = struct{}{}
-	}
-	// a fixed-shape record local carries ONE SLOT PER KEY, spelled
-	// "p.lo" — the name IndexOf already resolves a `p.lo` read through.
-	// A record the recognizer declines keeps its single whole-name slot,
-	// exactly as before, and the reads of its keys then miss and decline
-	// the lowering.
-	var objectLocals map[*ast.Node]ObjectLocal
-	if ast.IsBlock(body) {
-		objectLocals = ObjectLocalsOf(body, localList.Locals)
-	} else {
-		objectLocals = map[*ast.Node]ObjectLocal{}
-	}
-	// A name declared TWICE keeps the last declaration's reading, as
-	// before. A name whose declarations disagree about shape — a record
-	// once and a scalar once — has no one slot family, so its record
-	// declarations lose their flattening and it stays a whole-name slot
-	// (whose key reads then miss and decline the lowering).
-	var localNames []string
-	declaredOf := map[string]*ast.Node{}
-	for _, d := range localList.Locals {
-		name := d.AsVariableDeclaration().Name().Text()
-		if _, isParam := paramNameSet[name]; isParam {
-			continue
-		}
-		if previous, seen := declaredOf[name]; seen {
-			_, wasRecord := objectLocals[previous]
-			_, isRecord := objectLocals[d]
-			if wasRecord != isRecord {
-				delete(objectLocals, previous)
-				delete(objectLocals, d)
-			}
-		} else {
-			localNames = append(localNames, name)
-		}
-		declaredOf[name] = d
-	}
-	// localSlots is each local's slot names, sorts and typeof evidence
-	// in one list: one entry for a scalar local, one PER KEY for a
-	// flattened record.
-	type localSlot struct {
-		Name      string
-		Sort      BindingKind
-		TypeofTag TypeofTag
-	}
-	var localSlots []localSlot
-	for _, name := range localNames {
-		declared, has := declaredOf[name]
-		if !has {
-			localSlots = append(localSlots, localSlot{Name: name, Sort: BindingKindUnknown, TypeofTag: TypeofTagNone})
-			continue
-		}
-		if local, flattened := objectLocals[declared]; flattened {
-			for _, key := range local.Keys {
-				localSlots = append(localSlots, localSlot{
-					Name:      key.SlotName,
-					Sort:      ObjectLocalKeySort(key),
-					TypeofTag: ObjectLocalKeyTypeof(key),
-				})
-			}
-			continue
-		}
-		localSlots = append(localSlots, localSlot{
-			Name:      name,
-			Sort:      LocalSort(declared),
-			TypeofTag: LocalTypeof(declared),
-		})
-	}
-	// MUTABLE vectors: composition allocates fresh slots past #ret
-	bindings := append([]string{}, paramNames...)
-	for _, slot := range localSlots {
-		bindings = append(bindings, slot.Name)
-	}
-	bindings = append(bindings, "#done", "#ret")
-	if len(bindings) > slotBudget {
-		return kernelSummary{}, false
-	}
-	sorts := make([]BindingKind, 0, len(bindings))
-	sorts = append(sorts, paramSorts...)
-	for _, slot := range localSlots {
-		sorts = append(sorts, slot.Sort)
-	}
-	sorts = append(sorts, BindingKindNumber, BindingKindUnknown)
-	typeofs := make([]TypeofTag, 0, len(bindings))
-	typeofs = append(typeofs, paramTypeofs...)
-	for _, slot := range localSlots {
-		typeofs = append(typeofs, slot.TypeofTag)
-	}
-	typeofs = append(typeofs, TypeofTagNumber, TypeofTagNone)
-	doneIndex := len(bindings) - 2
-	retIndex := len(bindings) - 1
-	allocate := func(name string, sort BindingKind, typeofTag TypeofTag) (int, bool) {
-		if len(bindings) >= slotBudget {
-			return 0, false
-		}
-		bindings = append(bindings, name)
-		sorts = append(sorts, sort)
-		typeofs = append(typeofs, typeofTag)
-		return len(bindings) - 1, true
-	}
-	context := &LoweringContext{
-		Bindings:      bindings,
-		Sorts:         sorts,
-		Typeofs:       typeofs,
-		Narrow:        kernel.Narrow,
-		Result:        &LoweringResult{Done: doneIndex, Ret: retIndex},
-		ResolveCallee: resolveCallee,
-		Allocate:      allocate,
-		Inlining:      map[*ast.Node]struct{}{declaration: {}},
-	}
-	stmts, ok := LowerStatements(context, statements)
-	if !ok {
-		return kernelSummary{}, false
-	}
-	return kernelSummary{
-		Stmts:      stmts,
-		ParamCount: len(paramNames),
-		DoneIndex:  doneIndex,
-		RetIndex:   retIndex,
-		SlotCount:  len(context.Bindings),
-	}, true
 }
+
+// declaredParamTypeof reads what `typeof` answers for a parameter's
+// every defined value, from the declaration's own annotation.
+func declaredParamTypeof(parameter *ast.Node) TypeofTag {
+	typeNode := parameter.AsParameterDeclaration().Type
+	if typeNode == nil {
+		return TypeofTagNone
+	}
+	switch typeNode.Kind {
+	case ast.KindNumberKeyword:
+		return TypeofTagNumber
+	case ast.KindStringKeyword:
+		return TypeofTagString
+	case ast.KindBooleanKeyword:
+		return TypeofTagBoolean
+	default:
+		return TypeofTagNone
+	}
+}
+
+// LowerSummaryBody lowers a declaration's body to the kernel's flow
+// IR, remembering the answer — hit or decline — under the
+// declaration. Standalone so the registry can compile a summary
+// without going through a call site: the lowering reads only the
+// declaration, so the same IR serves every entry.
+//
+// The lowering's own call sites may demand a callee's compiled blob
+// (SummaryBlobFor), and that recursion is what puts the table in
+// bottom-up order.
+func LowerSummaryBody(ctx *FlowContext, declaration *ast.Node) (LoweredSummary, bool) {
+	kernelSummariesMu.Lock()
+	held, has := kernelSummaries[declaration]
+	kernelSummariesMu.Unlock()
+	if has {
+		return held.Summary, held.Ok
+	}
+	summary, ok := lowerSummaryBody(ctx, declaration)
+	kernelSummariesMu.Lock()
+	kernelSummaries[declaration] = summaryEntry{Summary: summary, Ok: ok}
+	kernelSummariesMu.Unlock()
+	return summary, ok
+}
+
+// (The body lowering itself lives in ir_summary_body.go's
+// lowerSummaryBody — the slot layout there flattens records by leaf
+// path, arrays to len/elem pairs, and admits destructuring, and its
+// lowering context carries the composed-call table builder. This file
+// keeps the memo, the gate, and the apply route.)
 
 // syntheticReturnStatement builds the single-statement body a
 // concise arrow's expression reads as — the TS source's
@@ -366,74 +259,60 @@ func syntheticReturnStatement(expression *ast.Node) *ast.Node {
 	return factory.NewReturnStatement(expression)
 }
 
-// SummaryResult is the summary route: lower once, walk per call.
-// (result, false) — no claim — wherever the body, the arguments, or
-// the kernel decline; the JS inline walk then serves exactly as
-// before.
+// SummaryResult is the summary route as the older call sites spell
+// it — a program handle and a callee resolver, with no walk context.
+// The route now runs off the DECLARATION alone and resolves callees
+// through the walk's own contract registry, so a caller that hands
+// over only a program handle gets a context with no registry: its
+// bodies lower, and any call inside them declines. The one such
+// caller is function_summaries.go's RecoverPure (another agent's
+// file); moving it to SummaryResultIn is a report item.
 func SummaryResult(
 	p *program.CheckerProgram,
 	declaration *ast.Node,
 	argKnowns []abstractdomain.AbstractValue,
 	resolveCallee func(callee *ast.Node) *ast.Node,
 ) (abstractdomain.AbstractValue, bool) {
-	kernel := EngineKernelHeld()
-	if kernel == nil {
-		return abstractdomain.AbstractValue{}, false
-	}
-	// parameter sorts and typeof evidence from the arguments the call
-	// actually hands over — both gate which tests the lowering admits,
-	// so both key the memo
-	parameters := declaration.Parameters()
-	paramSorts := make([]BindingKind, len(parameters))
-	paramTypeofs := make([]TypeofTag, len(parameters))
-	for i := range parameters {
-		if i >= len(argKnowns) {
-			paramSorts[i] = BindingKindUnknown
-			paramTypeofs[i] = TypeofTagNone
-			continue
-		}
-		argument := argKnowns[i]
-		if sort, ok := SortFromKnown(argument); ok {
-			paramSorts[i] = sort
-		} else {
-			paramSorts[i] = BindingKindUnknown
-		}
-		paramTypeofs[i] = typeofOfKnown(argument)
-	}
-	sortsParts := make([]string, len(paramSorts))
-	for i, s := range paramSorts {
-		sortsParts[i] = string(s)
-	}
-	typeofParts := make([]string, len(paramTypeofs))
-	for i, t := range paramTypeofs {
-		typeofParts[i] = string(t)
-	}
-	sortsKey := strings.Join(sortsParts, ",") + "|" + strings.Join(typeofParts, ",")
+	return applySummary(&FlowContext{P: p}, declaration, argKnowns)
+}
 
-	kernelSummariesMu.Lock()
-	shelf := kernelSummaries[p]
-	if shelf == nil {
-		shelf = map[*ast.Node]map[string]summaryEntry{}
-		kernelSummaries[p] = shelf
-	}
-	byKey := shelf[declaration]
-	if byKey == nil {
-		byKey = map[string]summaryEntry{}
-		shelf[declaration] = byKey
-	}
-	entry, has := byKey[sortsKey]
-	kernelSummariesMu.Unlock()
-	if !has {
-		summary, ok := lowerSummary(declaration, paramSorts, paramTypeofs, resolveCallee)
-		entry = summaryEntry{Summary: summary, Ok: ok}
-		kernelSummariesMu.Lock()
-		byKey[sortsKey] = entry
-		kernelSummariesMu.Unlock()
-	}
-	if !entry.Ok {
+// SummaryResultIn is the same route with the walk's own context — the
+// spelling a caller that HAS a FlowContext should use, so composed
+// calls resolve through its contract registry.
+func SummaryResultIn(ctx *FlowContext, declaration *ast.Node, argKnowns []abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
+	return applySummary(ctx, declaration, argKnowns)
+}
+
+// applySummary is the summary route: COMPILE once per declaration,
+// apply per call.
+//
+// What crosses the wire: the body's IR travels exactly once ever, in
+// the AskSummarize that builds the declaration's blob; every call
+// after that sends only its own entry states to AskApplySummary. The
+// answer handling below is unchanged from the whole-body walk — the
+// same result/done slot reading, the same TOP decline.
+//
+// (result, false) — no claim — wherever the body, the arguments, or
+// the kernel decline; the JS inline walk then serves exactly as
+// before.
+func applySummary(
+	ctx *FlowContext,
+	declaration *ast.Node,
+	argKnowns []abstractdomain.AbstractValue,
+) (abstractdomain.AbstractValue, bool) {
+	if EngineKernelHeld() == nil {
 		return abstractdomain.AbstractValue{}, false
 	}
-	summary := entry.Summary
+	// the slot layout the answer is read out of comes from the lowering;
+	// the blob is what the kernel compiled from it
+	summary, lowered := LowerSummaryBody(ctx, declaration)
+	if !lowered {
+		return abstractdomain.AbstractValue{}, false
+	}
+	blob, hasBlob := SummaryBlobFor(ctx, declaration)
+	if !hasBlob {
+		return abstractdomain.AbstractValue{}, false
+	}
 	// entry states: the arguments' own knowledge; every other slot —
 	// locals and composition's grown ones — starts absent, and each
 	// inlined done flag is assigned {0} in the statements themselves;
@@ -454,7 +333,7 @@ func SummaryResult(
 		states = append(states, absentState)
 	}
 	states[summary.DoneIndex] = doneDownState
-	exits, ok := runKernelWalk(kernel, states, summary.Stmts)
+	exits, ok := kernelbridge.AskApplySummary(blob, states)
 	if !ok {
 		return abstractdomain.AbstractValue{}, false
 	}
@@ -506,28 +385,11 @@ func SummaryResult(
 // have no lowering, and scalar-only argument states mean no reference
 // argument exists for the caller to observe. Whatever the lowering
 // admits therefore has exactly one caller-visible outcome — the
-// return value — which the kernel's walk_sound answer covers.
+// return value — which the kernel's walk_sound answer covers, and
+// which summarize_eq carries through the compile.
 func KernelSummaryDirect(ctx *FlowContext, argKnowns []abstractdomain.AbstractValue, contract *FunctionContract) (abstractdomain.AbstractValue, bool) {
 	if !summaryLowerable(contract.Declaration) {
 		return abstractdomain.AbstractValue{}, false
 	}
-	return SummaryResult(ctx.P, contract.Declaration, argKnowns, func(callee *ast.Node) *ast.Node {
-		called := ContractOf(ctx, callee)
-		if called == nil || !summaryLowerable(called.Declaration) {
-			return nil
-		}
-		return called.Declaration
-	})
-}
-
-// runKernelWalk asks kernel.Walk, turning a refused question (the
-// TS source's try/catch around `kernel.walk(states, summary.stmts)`)
-// into an (exits, false) pair.
-func runKernelWalk(kernel *kernelbridge.RefinedTSKernel, states []kernelbridge.KnownStateWire, stmts []kernelbridge.IrStatement) (exits []kernelbridge.KnownStateWire, ok bool) {
-	defer func() {
-		if recover() != nil {
-			exits, ok = nil, false
-		}
-	}()
-	return kernel.Walk(states, stmts), true
+	return applySummary(ctx, contract.Declaration, argKnowns)
 }

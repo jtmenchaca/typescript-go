@@ -54,26 +54,67 @@ type LoweringContext struct {
 	// composition cycle guard. Nil means the TS `inlining?` was
 	// absent.
 	Inlining map[*ast.Node]struct{}
+	// BoundedIndices: the index/array pairs a dominating guard proved
+	// in range ("i<a" for `i < a.length`). An index read inside such a
+	// guard's arm answers the element slot outright; outside it, the
+	// read carries the or-absent wrapping. HoldBoundIndex swaps a fresh
+	// set in for the arm and swaps the old one back after, so a bound
+	// never escapes the arm that proved it. Nil is "nothing proved".
+	BoundedIndices map[string]struct{}
+	// Flow: the check's flow context, which the summary registry needs
+	// to build a callee's blob. Nil: call statements decline (no
+	// registry to ask), and the lowering keeps the inlining route.
+	Flow *FlowContext
+	// SummaryTable: the composed-call table this lowering is building —
+	// one blob per callee, in the order IrStatementCall's Callee field
+	// indexes. Shared through the pointer so an inlined or nested
+	// lowering appends to the SAME table the whole body rides with.
+	// Nil: call statements decline (no table to grow).
+	SummaryTable *SummaryTableBuilder
+}
+
+// SummaryTableBuilder grows the summary table a lowered body carries:
+// one blob per callee, appended on first use, with the declaration's
+// index remembered so a second call to the same callee reuses it.
+type SummaryTableBuilder struct {
+	Blobs []kernelbridge.SummaryBlob
+	Index map[*ast.Node]int
+}
+
+// CalleeIndex is the table index of a callee's blob, appending it on
+// first use. The caller has already obtained the blob from the
+// registry; this only assigns it a slot in THIS body's table.
+func (builder *SummaryTableBuilder) CalleeIndex(declaration *ast.Node, blob kernelbridge.SummaryBlob) int {
+	if builder.Index == nil {
+		builder.Index = map[*ast.Node]int{}
+	}
+	if held, has := builder.Index[declaration]; has {
+		return held
+	}
+	builder.Blobs = append(builder.Blobs, blob)
+	index := len(builder.Blobs) - 1
+	builder.Index[declaration] = index
+	return index
 }
 
 // IndexOf is indexOf in the TS source: the tracked index of an
-// identifier or a property path (`o.k`), matched by spelled name.
-// An inlined body resolves ONLY through its own name map.
+// identifier or a property path (`o.k`, and — since nested records
+// flatten by leaf path — `o.a.b`), matched by spelled name. An inlined
+// body resolves ONLY through its own name map.
+//
+// SpelledNameOf spells one step, so a DEEP path takes the path
+// resolver; a one-step path answers the same slot either way.
 func IndexOf(context *LoweringContext, name *ast.Node) (int, bool) {
-	spelled, ok := SpelledNameOf(name)
-	if !ok {
-		return 0, false
-	}
-	if context.Names != nil {
-		i, found := context.Names[spelled]
-		return i, found
-	}
-	for i, binding := range context.Bindings {
-		if binding == spelled {
-			return i, true
+	if spelled, ok := SpelledNameOf(name); ok {
+		if index, found := slotIndexOfName(context, spelled); found {
+			return index, true
 		}
 	}
-	return 0, false
+	// `a.length` on a flattened array is the len slot, spelled "a.len"
+	if index, ok := ArrayLengthSlotOf(context, name); ok {
+		return index, true
+	}
+	return PathSlotIndexOf(context, name)
 }
 
 // NumberIndexOf is numberIndexOf in the TS source: a tracked

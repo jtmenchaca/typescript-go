@@ -304,30 +304,32 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 		parsed := Answered(raw)
 		return DecodeWireState(parsed["whenTrue"]), DecodeWireState(parsed["whenFalse"])
 	}
-	kernel.Walk = func(states []KnownStateWire, stmts []IrStatement) []KnownStateWire {
-		stateParts := make([]string, len(states))
-		for i, s := range states {
-			stateParts[i] = StateWire(s)
-		}
-		stmtParts := make([]string, len(stmts))
-		for i, s := range stmts {
-			stmtParts[i] = StmtWire(s)
-		}
-		wire := fmt.Sprintf(`{"states":[%s],"stmts":[%s]}`, joinComma(stateParts), joinComma(stmtParts))
+	kernel.Walk = func(states []KnownStateWire, stmts []IrStatement, table ...SummaryBlob) []KnownStateWire {
+		wire := fmt.Sprintf(
+			`{"states":[%s],"stmts":[%s]%s}`,
+			joinComma(StateWires(states)), joinComma(StmtWires(stmts)), TableField(table),
+		)
 		raw, err := ask1("walk", "kernel_walk", wire)
 		if err != nil {
 			panic(err.Error())
 		}
-		parsed := Answered(raw)
-		out, ok := parsed["states"].([]any)
-		if !ok {
-			panic(fmt.Sprintf("kernel walk answered an unexpected shape: %v", parsed))
+		return DecodeWalkStates(Answered(raw), "walk")
+	}
+	kernel.Summarize = func(arity int, stmts []IrStatement, table []SummaryBlob) SummaryBlob {
+		wire := SummarizeWire(arity, stmts, table)
+		raw, err := ask1("summarize", "kernel_summarize", wire)
+		if err != nil {
+			panic(err.Error())
 		}
-		result := make([]KnownStateWire, len(out))
-		for i, s := range out {
-			result[i] = DecodeWireState(s)
+		return DecodeSummaryBlob(raw)
+	}
+	kernel.ApplySummary = func(blob SummaryBlob, entries []KnownStateWire) []KnownStateWire {
+		wire := ApplySummaryWire(blob, entries)
+		raw, err := ask1("applySummary", "kernel_apply_summary", wire)
+		if err != nil {
+			panic(err.Error())
 		}
-		return result
+		return DecodeWalkStates(Answered(raw), "applySummary")
 	}
 	kernel.ValidateChain = func(chain Chain) ValidateChainResult {
 		raw, err := ask1("validateChain", "kernel_validate_chain", EncodeChain(chain))

@@ -4,6 +4,7 @@ package kernelbridge
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -67,6 +68,12 @@ const (
 	// arithmetic transfers and rides its own wire field.
 	LoopEffectConcat LoopEffectKind = "concat"
 	LoopEffectJoin   LoopEffectKind = "join"
+	// LoopEffectOrAbsent is the unguarded index read: `a[i]` with nothing
+	// bounding i against the length produces the element or undefined.
+	// The value part is the operand's — the element slot's effect, in the
+	// A field like the unary forms — and the absent outcome rides beside
+	// it, since the absent value lives outside every set.
+	LoopEffectOrAbsent LoopEffectKind = "orAbsent"
 )
 
 // LoopEffectOp is the op field of a unary or binary LoopEffect.
@@ -142,6 +149,8 @@ func EffectWire(e LoopEffect) string {
 		return fmt.Sprintf(`{"concat":[%s,%s]}`, EffectWire(*e.A), EffectWire(*e.B))
 	case LoopEffectJoin:
 		return fmt.Sprintf(`{"join":[%s,%s]}`, EffectWire(*e.A), EffectWire(*e.B))
+	case LoopEffectOrAbsent:
+		return fmt.Sprintf(`{"orAbsent":%s}`, EffectWire(*e.A))
 	}
 	panic(fmt.Sprintf("EffectWire: unreached kind %q", e.Kind))
 }
@@ -184,6 +193,13 @@ const (
 	IrStatementAssign IrStatementKind = "assign"
 	IrStatementBranch IrStatementKind = "branch"
 	IrStatementLoop   IrStatementKind = "loop"
+	// IrStatementCall applies a callee's already-built summary. Callee
+	// indexes the summary table the question carries beside the
+	// statements; each Args entry is an effect over the CALLER's
+	// bindings producing one callee entry state; Rets says where the
+	// callee's out-states land — Rets[k] is the caller binding the
+	// k-th out-state writes, and -1 there drops it.
+	IrStatementCall IrStatementKind = "call"
 )
 
 // IrBranchTest is the test field of a branch IrStatement.
@@ -273,6 +289,15 @@ type IrStatement struct {
 	// the kernel tightens each slot's EXIT by the negated comparison's
 	// ray read off the other slot's flagless exit.
 	CondCmp *IrLoopCondCmp
+
+	// "call"
+	// Callee: which summary of the question's table this call applies.
+	Callee int
+	// Args: one effect per callee entry, read over the caller's bindings.
+	Args []LoopEffect
+	// Rets: per callee out-state, the caller binding it writes. -1 says
+	// nothing reads that out-state and spells `null` on the wire.
+	Rets []int
 }
 
 // IrLoopCondCmp is a loop head comparing two tracked slots: On
@@ -294,6 +319,25 @@ func optSetWire(c *refinementsets.RefinedSet) string {
 func StmtWire(s IrStatement) string {
 	if s.Kind == IrStatementAssign {
 		return fmt.Sprintf(`{"assign":{"target":%d,"e":%s}}`, s.Target, EffectWire(s.Effect))
+	}
+	if s.Kind == IrStatementCall {
+		args := make([]string, len(s.Args))
+		for i, a := range s.Args {
+			args[i] = EffectWire(a)
+		}
+		rets := make([]string, len(s.Rets))
+		for i, r := range s.Rets {
+			// -1 is the out-state nothing reads: the wire says null there
+			if r < 0 {
+				rets[i] = "null"
+			} else {
+				rets[i] = strconv.Itoa(r)
+			}
+		}
+		return fmt.Sprintf(
+			`{"call":{"callee":%d,"args":[%s],"rets":[%s]}}`,
+			s.Callee, strings.Join(args, ","), strings.Join(rets, ","),
+		)
 	}
 	if s.Kind == IrStatementLoop {
 		written := make([]string, len(s.Written))

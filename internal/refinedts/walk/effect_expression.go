@@ -71,8 +71,14 @@ func ContainsWrite(node *ast.Node) bool {
 
 // EffectReader mirrors the destructured `reader` parameter of
 // lowerEffectExpression in the TS source.
+//
+// ReadNode is the Go addition: a DEEP path read (`p.a.b`) that
+// SpelledNameOf cannot spell, which nested-record flattening makes an
+// ordinary slot read. Tried after ReadPlace declines and before Opaque;
+// nil leaves the reading exactly as ReadPlace left it.
 type EffectReader struct {
 	ReadPlace func(spelled string) (kernelbridge.LoopEffect, bool)
+	ReadNode  func(e *ast.Node) (kernelbridge.LoopEffect, bool)
 	Opaque    func(e *ast.Node) (kernelbridge.LoopEffect, bool)
 }
 
@@ -128,6 +134,11 @@ func SequenceEffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopE
 	}
 	if slot, ok := stringSlotEffect(context, head); ok {
 		return slot, true
+	}
+	// `a[i]` on a string-sorted flattened array is a sequence read — the
+	// element slot, or-absent where nothing bounds i
+	if slot, ok := ArrayElementSlotOf(context, head); ok && context.Sorts[slot] == BindingKindString {
+		return ArrayIndexReadEffect(context, head)
 	}
 	if ast.IsBinaryExpression(head) {
 		bin := head.AsBinaryExpression()
@@ -246,7 +257,19 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 		if held, ok := reader.ReadPlace(spelled); ok {
 			return held, true
 		}
+		if reader.ReadNode != nil {
+			if held, ok := reader.ReadNode(e); ok {
+				return held, true
+			}
+		}
 		return reader.Opaque(e)
+	}
+	// a DEEP path (`p.a.b`) has no one-step spelling; a flattened nested
+	// record gives it a slot all the same
+	if ast.IsPropertyAccessExpression(e) && reader.ReadNode != nil {
+		if held, ok := reader.ReadNode(e); ok {
+			return held, true
+		}
 	}
 	if ast.IsPrefixUnaryExpression(e) {
 		unary := e.AsPrefixUnaryExpression()

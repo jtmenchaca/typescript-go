@@ -417,23 +417,14 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 			}
 		}
 	}
-	// the kernel summary: a lowerable body walks ENGINE-SIDE from the
-	// argument states — one proved answer (walk_sound) instead of a JS
-	// re-walk per distinct argument tuple. A body or argument set the
-	// lowering cannot spell falls through to the inline walk below.
-	// Composition resolves through the contract registry: a called
-	// name that is a PURE contracted function hands its declaration to
-	// the lowering, which inlines its body into fresh slots.
-	if summarized, ok := SummaryResult(ctx.P, contract.Declaration, argKnowns, func(callee *ast.Node) *ast.Node {
-		called := ContractOf(ctx, callee)
-		if called == nil || called.Declaration.Body() == nil {
-			return nil
-		}
-		if !Summarize(ctx, *called).EffectFree {
-			return nil
-		}
-		return called.Declaration
-	}); ok {
+	// the kernel summary: the declaration's compiled summary applied
+	// at the argument states — one proved answer (walk_sound +
+	// summarize_eq) instead of a JS re-walk per distinct argument
+	// tuple. A body the lowering cannot spell falls through to the
+	// inline walk below. Composition resolves through the walk's own
+	// contract registry, which needs the flow context — not the bare
+	// checker program.
+	if summarized, ok := SummaryResultIn(ctx, contract.Declaration, argKnowns); ok {
 		if memo != nil && key != "" {
 			recoveryMemoMu.Lock()
 			memo[key] = summarized

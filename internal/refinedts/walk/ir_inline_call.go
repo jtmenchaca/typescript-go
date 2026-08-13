@@ -79,12 +79,13 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 		statements = []*ast.Node{syntheticNodeFactory.NewReturnStatement(body)}
 	}
 	var locals []*ast.Node
+	var patterns []*ast.Node
 	if ast.IsBlock(body) {
-		result, ok := CollectLocals(body)
+		collected, collectedPatterns, ok := collectSummaryLocals(body)
 		if !ok {
 			return InlineCallResult{}, false
 		}
-		locals = result.Locals
+		locals, patterns = collected, collectedPatterns
 	}
 	// the result slot's sort: string only where EVERY return spells a
 	// SEQUENCE by its own syntax — a string literal, a template, or a
@@ -151,30 +152,24 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 			argAssigns = append(argAssigns, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: effect})
 		}
 	}
-	// a fixed-shape record local flattens into one slot per key here
-	// too — the closed name map carries "p.lo" so the inlined body's
-	// own steps resolve, mirroring lowerSummary's flattening
-	inlineObjectLocals := ObjectLocalsOf(body, locals)
-	for _, declaration := range locals {
-		name := declaration.AsVariableDeclaration().Name().AsIdentifier().Text
-		if _, exists := names[name]; exists {
+	// the callee's locals lay out exactly as the summary route's do: a
+	// scalar takes one slot, a fixed-shape record one per LEAF ("p.a.b"),
+	// a flattened array two ("a.len", "a.elem"), and a destructured name
+	// one wearing its leaf's sort. The closed name map carries the
+	// spelled names so the inlined body's own reads resolve.
+	parameterNames := map[string]struct{}{}
+	for _, paramName := range paramNames {
+		parameterNames[paramName] = struct{}{}
+	}
+	for _, slot := range localSlotsOf(body, locals, patterns, parameterNames) {
+		if _, exists := names[slot.Name]; exists {
 			continue
 		}
-		if local, flattened := inlineObjectLocals[declaration]; flattened {
-			for _, key := range local.Keys {
-				slot, ok := allocate(fmt.Sprintf("#in%d:%s", site, key.SlotName), ObjectLocalKeySort(key), ObjectLocalKeyTypeof(key))
-				if !ok {
-					return InlineCallResult{}, false
-				}
-				names[key.SlotName] = slot
-			}
-			continue
-		}
-		slot, ok := allocate(fmt.Sprintf("#in%d:%s", site, name), LocalSort(declaration), LocalTypeof(declaration))
+		index, ok := allocate(fmt.Sprintf("#in%d:%s", site, slot.Name), slot.Sort, slot.TypeofTag)
 		if !ok {
 			return InlineCallResult{}, false
 		}
-		names[name] = slot
+		names[slot.Name] = index
 	}
 	done, doneOk := allocate(fmt.Sprintf("#in%d:#done", site), BindingKindNumber, TypeofTagNumber)
 	ret, retOk := allocate(fmt.Sprintf("#in%d:#ret", site), retSort, TypeofTagNone)
@@ -182,7 +177,7 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 		return InlineCallResult{}, false
 	}
 	inlining[callee] = struct{}{}
-	lowered, ok := LowerStatements(&LoweringContext{
+	inner := &LoweringContext{
 		Bindings:      context.Bindings,
 		Sorts:         context.Sorts,
 		Typeofs:       context.Typeofs,
@@ -190,9 +185,28 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 		Result:        &LoweringResult{Done: done, Ret: ret},
 		Names:         names,
 		ResolveCallee: resolveCallee,
-		Allocate:      allocate,
 		Inlining:      inlining,
-	}, statements)
+		// the inlined body's own call sites take the summary route where
+		// their callees have one — the table is the caller's, so every
+		// callee this whole lowering names shares one index space
+		Flow:         context.Flow,
+		SummaryTable: context.SummaryTable,
+	}
+	// A NESTED inlining allocates through the owner's allocate, which
+	// grows the owner's vectors. This context copied those vectors when it
+	// was built, so it re-reads them after each growth — otherwise a slot
+	// handed out below would index past this context's own Sorts.
+	inner.Allocate = func(name string, sort BindingKind, typeofTag TypeofTag) (int, bool) {
+		slot, allocated := allocate(name, sort, typeofTag)
+		if !allocated {
+			return 0, false
+		}
+		inner.Bindings = append(inner.Bindings, name)
+		inner.Sorts = append(inner.Sorts, sort)
+		inner.Typeofs = append(inner.Typeofs, typeofTag)
+		return slot, true
+	}
+	lowered, ok := LowerStatements(inner, statements)
 	delete(inlining, callee)
 	if !ok {
 		return InlineCallResult{}, false

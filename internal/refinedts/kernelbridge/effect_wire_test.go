@@ -1,5 +1,6 @@
 // The effect wire's newer forms — the state constant that carries the
-// absent flag, and the sequence concatenation — beside the pins that
+// absent flag, the sequence concatenation, the or-absent index read,
+// and the call that applies a callee's summary — beside the pins that
 // keep the OLDER forms byte-identical, so a kernel built before them
 // decodes an unchanged wire.
 package kernelbridge
@@ -36,6 +37,39 @@ func TestAConcatenationEffectWiresItsTwoOperands(t *testing.T) {
 	want := `{"concat":[{"var":0},{"var":1}]}`
 	if got != want {
 		t.Errorf("EffectWire(concat) = %q, want %q", got, want)
+	}
+}
+
+func TestAnOrAbsentEffectWiresItsOperandUnderTheOneField(t *testing.T) {
+	elem := LoopEffect{Kind: LoopEffectVar, Index: 2}
+	got := EffectWire(LoopEffect{Kind: LoopEffectOrAbsent, A: &elem})
+	want := `{"orAbsent":{"var":2}}`
+	if got != want {
+		t.Errorf("EffectWire(orAbsent) = %q, want %q", got, want)
+	}
+}
+
+func TestACallStatementWiresItsCalleeArgsAndRets(t *testing.T) {
+	got := StmtWire(IrStatement{
+		Kind:   IrStatementCall,
+		Callee: 1,
+		Args: []LoopEffect{
+			{Kind: LoopEffectVar, Index: 0},
+			{Kind: LoopEffectVar, Index: 3},
+		},
+		Rets: []int{2, -1},
+	})
+	want := `{"call":{"callee":1,"args":[{"var":0},{"var":3}],"rets":[2,null]}}`
+	if got != want {
+		t.Errorf("StmtWire(call) = %q, want %q", got, want)
+	}
+}
+
+func TestACallWithNoArgsOrRetsWiresEmptyLists(t *testing.T) {
+	got := StmtWire(IrStatement{Kind: IrStatementCall, Callee: 0})
+	want := `{"call":{"callee":0,"args":[],"rets":[]}}`
+	if got != want {
+		t.Errorf("StmtWire(call, empty) = %q, want %q", got, want)
 	}
 }
 

@@ -73,7 +73,7 @@ func EffectNodes(e kernelbridge.LoopEffect) int {
 	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectConst,
 		kernelbridge.LoopEffectConstState, kernelbridge.LoopEffectUnknown:
 		return 1
-	case kernelbridge.LoopEffectUnary:
+	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent:
 		return 1 + EffectNodes(*e.A)
 	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectConcat,
 		kernelbridge.LoopEffectJoin:
@@ -95,7 +95,7 @@ func SubstituteVars(e kernelbridge.LoopEffect, current []kernelbridge.LoopEffect
 	case kernelbridge.LoopEffectConst, kernelbridge.LoopEffectConstState,
 		kernelbridge.LoopEffectUnknown:
 		return e
-	case kernelbridge.LoopEffectUnary:
+	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent:
 		out := e
 		a := SubstituteVars(*e.A, current)
 		out.A = &a
@@ -185,7 +185,7 @@ func effectsEqual(a, b kernelbridge.LoopEffect) bool {
 		return a.Absent == b.Absent && a.Nan == b.Nan && setsEqualForFold(a.Set, b.Set)
 	case kernelbridge.LoopEffectUnknown:
 		return true
-	case kernelbridge.LoopEffectUnary:
+	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent:
 		return a.Op == b.Op && effectsEqual(*a.A, *b.A)
 	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectConcat,
 		kernelbridge.LoopEffectJoin:
@@ -247,6 +247,15 @@ func RaisesDone(statements []kernelbridge.IrStatement, done int) bool {
 		case kernelbridge.IrStatementBranch:
 			if RaisesDone(s.Then, done) || RaisesDone(s.Else, done) {
 				return true
+			}
+		case kernelbridge.IrStatementCall:
+			// a call writes only the slots Rets names; the done flag is
+			// never among them today, but the test reads the statement
+			// rather than assuming it
+			for _, target := range s.Rets {
+				if target == done {
+					return true
+				}
 			}
 		}
 	}

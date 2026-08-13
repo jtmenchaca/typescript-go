@@ -1,4 +1,4 @@
-// Load the native dylib and hand the 23 C functions to the asks.
+// Load the native dylib and hand the 25 C functions to the asks.
 // Marshaling is a null-terminated string in and a C string out, freed
 // by the seam's own free once copied — the same C ABI the TS bridge
 // dlopens over Deno FFI (instantiate_kernel.ts); no wasm here, the
@@ -35,7 +35,7 @@ import (
 	"unsafe"
 )
 
-// The 23 question symbols the dylib exports (boundary/exports.lean),
+// The 25 question symbols the dylib exports (boundary/exports.lean),
 // split by arity exactly as the TS FFI table splits them.
 var oneArgSymbols = []string{
 	"kernel_scalar_empty",
@@ -54,6 +54,8 @@ var oneArgSymbols = []string{
 	"kernel_join_state",
 	"kernel_narrow_state",
 	"kernel_walk",
+	"kernel_summarize",
+	"kernel_apply_summary",
 	"kernel_bounds",
 	"kernel_decimal",
 }

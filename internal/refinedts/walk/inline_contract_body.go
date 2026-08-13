@@ -106,10 +106,12 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		}
 	}
 	// a FRESH key tries the kernel-summary route before walking: a
-	// lowerable body answers with one proved kernel walk, remembered
-	// under the same key so repeats replay without re-asking. Ordered
-	// AFTER the memo hit — a replay is cheaper than a kernel ask — and
-	// only here, so the route pays exactly once per distinct state.
+	// lowerable body answers by APPLYING its compiled summary to this
+	// call's entry states — the body's IR crossed the wire once, when
+	// the declaration's summary was compiled — remembered under the
+	// same key so repeats replay without re-asking. Ordered AFTER the
+	// memo hit — a replay is cheaper than a kernel ask — and only
+	// here, so the route pays exactly once per distinct state.
 	// The summary's admitted bodies have no caller-visible effect
 	// beyond the return (KernelSummaryDirect's comment carries the
 	// argument), so the remembered outcome carries no posts.

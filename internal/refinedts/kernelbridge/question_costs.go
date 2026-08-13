@@ -10,6 +10,12 @@
 // So: ask, and record what it cost. Every question that crosses into
 // the wasm is timed and its wire measured. Nothing here declines
 // anything.
+//
+// An op earns its row the first time it is asked — the op string at
+// the ask site IS the registration, and the units are the same for
+// every question: wall-clock milliseconds around the crossing, and
+// the byte length of the wire that crossed. See OpNames for the ops
+// this package asks under.
 package kernelbridge
 
 import (
@@ -19,6 +25,19 @@ import (
 	"strings"
 	"sync"
 )
+
+// OpNames are the op strings the asks record under — every question
+// this package sends, in the order kernel_asks.go binds them. The
+// costs map builds itself from the ask sites, so this list is not read
+// at ask time; it says which rows a run can produce and keeps the
+// report's op column wide enough for the longest of them.
+var OpNames = []string{
+	"member", "scalarEmpty", "scalarSubset", "scalarDisjoint",
+	"seqEmpty", "seqSubset", "structural", "checkAssignability",
+	"calendar", "transfer", "linear", "envelope", "bounds", "members",
+	"decimal", "invariant", "solveLoop", "narrow", "joinState",
+	"narrowState", "walk", "summarize", "applySummary", "validateChain",
+}
 
 // QuestionCost mirrors the TS QuestionCost interface.
 type QuestionCost struct {

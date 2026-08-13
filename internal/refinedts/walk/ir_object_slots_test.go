@@ -128,18 +128,58 @@ func TestObjectSlots_TheRecognizerDeclinesARecordPassedWhole(t *testing.T) {
 	}
 }
 
-func TestObjectSlots_TheRecognizerDeclinesANestedRecord(t *testing.T) {
-	// a nested object row would need slots of its own, which this
-	// flattening does not spell
+func TestObjectSlots_TheRecognizerFlattensANestedRecordByLeafPath(t *testing.T) {
+	// a nested object row contributes its own leaves under the row's key:
+	// `{ lo: 0, inner: { deep: n } }` names "p.lo" and "p.inner.deep"
 	declaration := summaryDeclarationOf(t,
-		"function f(n: number) { const p = { lo: 0, inner: { deep: n } }; return p.lo; }")
+		"function f(n: number) { const p = { lo: 0, inner: { deep: n } }; return p.inner.deep; }")
+	body := declaration.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the record local collected")
+	}
+	flattened := ObjectLocalsOf(body, locals.Locals)
+	if len(flattened) != 1 {
+		t.Fatalf("ObjectLocalsOf found %d flattened locals, want 1", len(flattened))
+	}
+	for _, local := range flattened {
+		if len(local.Keys) != 2 {
+			t.Fatalf("flattened local has %d leaves, want 2", len(local.Keys))
+		}
+		if local.Keys[0].SlotName != "p.lo" {
+			t.Errorf("first leaf slot = %q, want p.lo", local.Keys[0].SlotName)
+		}
+		if local.Keys[1].SlotName != "p.inner.deep" {
+			t.Errorf("second leaf slot = %q, want p.inner.deep", local.Keys[1].SlotName)
+		}
+	}
+}
+
+func TestObjectSlots_TheRecognizerDeclinesAReadOfAnUndeclaredNestedLeaf(t *testing.T) {
+	// `p.inner.missing` names no leaf the literal gave a slot
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { const p = { inner: { deep: n } }; return p.inner.missing; }")
 	body := declaration.Body()
 	locals, ok := CollectLocals(body)
 	if !ok {
 		t.Fatalf("CollectLocals ok = false, want the record local collected")
 	}
 	if flattened := ObjectLocalsOf(body, locals.Locals); len(flattened) != 0 {
-		t.Errorf("a nested record flattened — its inner keys have no slots")
+		t.Errorf("a read of an undeclared nested leaf flattened — its read lands in no slot")
+	}
+}
+
+func TestObjectSlots_TheRecognizerDeclinesAReadOfAnInteriorNode(t *testing.T) {
+	// `p.inner` is a whole record after flattening, not one scalar leaf
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { const p = { inner: { deep: n } }; const q = p.inner; return q.deep; }")
+	body := declaration.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the record local collected")
+	}
+	if flattened := ObjectLocalsOf(body, locals.Locals); len(flattened) != 0 {
+		t.Errorf("a read of an interior node flattened — it names no one scalar")
 	}
 }
 

@@ -139,7 +139,23 @@ type RefinedTSKernel struct {
 	// the proved exact join — and answer every binding's exit state
 	// (set_functions/walk.lean). The beginning of the shared engine:
 	// the first question that carries a program shape whole.
-	Walk func(states []KnownStateWire, stmts []IrStatement) []KnownStateWire
+	// The table is the summaries a `call` statement indexes. It is
+	// variadic because Go has no optional parameter: every caller that
+	// sends no table keeps compiling unchanged, and an empty table
+	// leaves the wire byte-identical to what it was before summaries
+	// existed, so every cached walk question stays valid.
+	Walk func(states []KnownStateWire, stmts []IrStatement, table ...SummaryBlob) []KnownStateWire
+	// Summarize: compile one lowered body to its summary — a
+	// straight-line program over an indexed state space, quantified over
+	// every entry, so it is built once per declaration and applied
+	// wherever that declaration is called. Branches become cut/cut/join
+	// step triples, loops become solver steps, and a call splices the
+	// callee's summary out of the table. Proved faithful to the walk
+	// (summarize_eq), so the walk's soundness covers every application.
+	Summarize func(arity int, stmts []IrStatement, table []SummaryBlob) SummaryBlob
+	// ApplySummary: run a compiled summary on concrete entry states and
+	// answer each out-state — the same state list the walk answers.
+	ApplySummary func(blob SummaryBlob, entries []KnownStateWire) []KnownStateWire
 	// InitMs: wall-clock ms for glue factory + Lean runtime init.
 	InitMs float64
 }
