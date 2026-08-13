@@ -283,8 +283,11 @@ func storePath() string {
 // Only compact entries persist: an oversized key (a grammar-scale
 // wire) stays in the in-process cache but never on disk, and an
 // implausibly large store file is refused outright rather than parsed
-// into memory.
-const storeEntryLimitBytes = 4096
+// into memory. The entry cap admits the union-of-word-tuples wires a
+// real corpus asks (recharts' slowest ask is a ~9 KB seqSubset that
+// costs ~100 ms in the kernel EVERY run when it cannot persist); the
+// file cap still bounds the store as a whole.
+const storeEntryLimitBytes = 64 * 1024
 const storeFileLimitBytes = 32 * 1024 * 1024
 
 type storedFile struct {

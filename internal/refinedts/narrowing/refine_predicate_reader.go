@@ -112,9 +112,15 @@ func ReadableRefine(c *checker.Checker, predicate *ast.Node) ([]refinementsets.R
 	if PredicateReadDepth(c) >= 3 {
 		return nil, false, false
 	}
-	OpenPredicateRead(c)
-	branches := NarrowingsOf(c, body, func(candidate string) bool { return candidate == name }, nil, GuardReadNowhere)
-	ClosePredicateRead(c)
+	// deferred: a refused kernel question panics out of NarrowingsOf,
+	// and a non-deferred close leaked the depth on this checker for
+	// good — every later walk on it read depth ≥ 3 and silently lost
+	// its predicate reads (the flickering-determination defect)
+	branches := func() BranchNarrowings {
+		OpenPredicateRead(c)
+		defer ClosePredicateRead(c)
+		return NarrowingsOf(c, body, func(candidate string) bool { return candidate == name }, nil, GuardReadNowhere)
+	}()
 	if len(branches.WhenTrue) == 0 {
 		return nil, false, false
 	}

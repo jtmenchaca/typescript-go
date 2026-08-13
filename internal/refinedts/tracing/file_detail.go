@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -77,10 +78,25 @@ var (
 	FileDetails   []*FileDetail
 )
 
+// detailOnly turns on the per-entry timers WITHOUT the global spans
+// and counters. Those ride one shared mutex and inflate a parallel
+// sweep 6–8×; the FileDetail timers are per-goroutine time.Since
+// reads at sites that already own the work, so this mode's numbers
+// are honest wall — the mechanism × file decomposition an estimate
+// prices against.
+var detailOnly atomic.Bool
+
+// SetDetailOnly turns the detail-only mode on or off.
+func SetDetailOnly(value bool) { detailOnly.Store(value) }
+
+// DetailOnly reports whether the detail-only mode is on.
+func DetailOnly() bool { return detailOnly.Load() }
+
 // BeginFileDetail starts a per-entry accumulator. Identity when
-// tracing is off — callers still call End with a nil-safe pattern.
+// neither tracing nor detail-only mode is on — callers still call
+// End with a nil-safe pattern.
 func BeginFileDetail(path string) *FileDetail {
-	if !IsEnabled() {
+	if !IsEnabled() && !DetailOnly() {
 		return nil
 	}
 	return &FileDetail{Path: path}

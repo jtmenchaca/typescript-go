@@ -38,9 +38,11 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
@@ -60,6 +62,19 @@ type CheckResult struct {
 	Shape []*ast.Diagnostic
 	// Refinements are the refinement judgments, in source order.
 	Refinements []assignability.RefinementDiagnostic
+	// WallMs is this entry's own refinement-walk wall — the honest
+	// (untraced) per-file number the CLI's -wall decomposition prints.
+	WallMs float64
+}
+
+// SweepPhases holds the last CheckFiles run's phase walls, summed
+// across project groups — the CLI's -wall decomposition reads it. An
+// estimate for any fix is its share of the CRITICAL PATH these rows
+// spell (program + shape + the busiest checker slot's file chain),
+// never its share of process CPU.
+var SweepPhases struct {
+	ProgramMs float64
+	ShapeMs   float64
 }
 
 // Check is the TS `check` function: build an in-memory program from a
@@ -132,14 +147,19 @@ func CheckFiles(entryPaths []string, surfacePath string) map[string]CheckResult 
 		}
 		groups[key] = append(groups[key], entryRow{given: given, resolved: resolved})
 	}
+	SweepPhases.ProgramMs = 0
+	SweepPhases.ShapeMs = 0
 	for _, key := range groupOrder {
 		group := groups[key]
 		resolved := make([]string, len(group))
 		for i, row := range group {
 			resolved[i] = row.resolved
 		}
+		tProgram := time.Now()
 		p := ProgramFromDiskMany(resolved)
+		SweepPhases.ProgramMs += float64(time.Since(tProgram)) / float64(time.Millisecond)
 		shapeByFile := map[*ast.SourceFile][]*ast.Diagnostic{}
+		tShape := time.Now()
 		if shapeDiagnosticsIncluded {
 			for _, d := range p.GetSemanticDiagnostics(context.Background(), nil) {
 				if d.File() != nil {
@@ -147,45 +167,60 @@ func CheckFiles(entryPaths []string, surfacePath string) map[string]CheckResult 
 				}
 			}
 		}
+		SweepPhases.ShapeMs += float64(time.Since(tShape)) / float64(time.Millisecond)
 		kernel := setupKernel()
 		factsStore := &sweepFactsStore{held: map[*ast.SourceFile]*walk.FileFacts{}}
-		// one goroutine per entry, each walking on the checker the
-		// POOL assigned to its file (the same checker that just
-		// shape-checked it — warm caches), held exclusively for the
-		// walk's duration. Types from different checkers never mix
-		// within one walk; parallel width is the pool's checker count
-		// (BuiltProgram sizes it to the machine).
-		var wg sync.WaitGroup
-		var resultsMu sync.Mutex
+		// walk scheduling: heaviest entries first off ONE shared list,
+		// each worker holding one checker exclusively until the list
+		// drains — longest-processing-time packing. The old file→checker
+		// affinity left ~800 ms of measured imbalance on the recharts
+		// corpus (entries queued behind their assigned checker while
+		// other checkers sat idle). Types from different checkers never
+		// mix: an entry walks WHOLLY on its worker's checker, and any
+		// checker answers any file's questions.
+		type walkRow struct {
+			given     string
+			entryFile *ast.SourceFile
+		}
+		var rows []walkRow
 		for _, row := range group {
 			entry := p.GetSourceFile(row.resolved)
 			if entry == nil {
 				continue
 			}
-			entryFile := entry.AsSourceFile()
-			wg.Add(1)
-			go func(given string, entryFile *ast.SourceFile) {
-				defer wg.Done()
-				c, release := p.GetTypeCheckerForFileExclusive(context.Background(), entryFile)
-				defer release()
+			rows = append(rows, walkRow{given: row.given, entryFile: entry.AsSourceFile()})
+		}
+		sort.SliceStable(rows, func(i, j int) bool {
+			return len(rows[i].entryFile.Text()) > len(rows[j].entryFile.Text())
+		})
+		var nextRow atomic.Int64
+		var resultsMu sync.Mutex
+		p.ForEachCheckerParallel(func(idx int, c *checker.Checker) {
+			for {
+				i := int(nextRow.Add(1)) - 1
+				if i >= len(rows) {
+					return
+				}
+				row := rows[i]
 				view := &program.CheckerProgram{
 					Program:      p,
 					Checker:      c,
-					Entry:        entryFile,
+					Entry:        row.entryFile,
 					SurfacePaths: map[string]bool{surfacePath: true},
-					// the lease is released by this goroutine's defer;
+					// the pool's own iteration holds the checker lock;
 					// the view never owns it
 					Done: nil,
 				}
-				result := tracing.TraceFile(given, func() CheckResult {
-					return runRefinements(view, shapeByFile[entryFile], kernel, factsStore)
+				entryStarted := time.Now()
+				result := tracing.TraceFile(row.given, func() CheckResult {
+					return runRefinements(view, shapeByFile[row.entryFile], kernel, factsStore)
 				})
+				result.WallMs = float64(time.Since(entryStarted)) / float64(time.Millisecond)
 				resultsMu.Lock()
-				results[given] = result
+				results[row.given] = result
 				resultsMu.Unlock()
-			}(row.given, entryFile)
-		}
-		wg.Wait()
+			}
+		})
 	}
 	return results
 }
@@ -230,22 +265,13 @@ func programFactsCached(p *program.CheckerProgram, kernel *kernelbridge.RefinedT
 	var entryDiagnostics []assignability.RefinementDiagnostic
 
 	files := annotations.ReachableFiles(p)
+files:
 	for _, file := range files {
 		reporting := file == p.Entry
-		var held *walk.FileFacts
-		if cache != nil {
-			held = cache.get(file)
-		}
-		valid := held != nil && (!reporting || held.HasDiagnostics)
-		if valid {
-			for name, hash := range held.ImportHashes {
-				if currentHash[name] != hash {
-					valid = false
-					break
-				}
-			}
-		}
-		if valid {
+		// useHeld merges a valid cached row; validHeld applies the TS
+		// validity rule (an entry needs its own diagnostics, and every
+		// imported interface must still mean the same thing)
+		useHeld := func(held *walk.FileFacts) {
 			for symbol, a := range held.Annotations {
 				merged.Registry[symbol] = a
 			}
@@ -259,7 +285,56 @@ func programFactsCached(p *program.CheckerProgram, kernel *kernelbridge.RefinedT
 			if reporting {
 				entryDiagnostics = held.Diagnostics
 			}
+		}
+		validHeld := func() *walk.FileFacts {
+			if cache == nil {
+				return nil
+			}
+			held := cache.get(file)
+			valid := held != nil && (!reporting || held.HasDiagnostics)
+			if valid {
+				for name, hash := range held.ImportHashes {
+					if currentHash[name] != hash {
+						valid = false
+						break
+					}
+				}
+			}
+			if !valid {
+				return nil
+			}
+			return held
+		}
+		if h := validHeld(); h != nil {
+			useHeld(h)
 			continue
+		}
+		// one compile per shared file at a time: a loser waits for the
+		// winner's put, re-validates, and only compiles itself if its
+		// own rule (entry diagnostics) still demands it
+		claimed := false
+		if cache != nil {
+			for {
+				ch, winner := cache.claim(file)
+				if winner {
+					claimed = true
+					if h := validHeld(); h != nil {
+						cache.finish(file)
+						useHeld(h)
+						continue files
+					}
+					break
+				}
+				<-ch
+				if h := validHeld(); h != nil {
+					useHeld(h)
+					continue files
+				}
+			}
+		}
+		var held *walk.FileFacts
+		if cache != nil {
+			held = cache.get(file)
 		}
 		importHashes := map[string]string{}
 		for _, imported := range annotations.ImportedUserFiles(p, file) {
@@ -267,7 +342,35 @@ func programFactsCached(p *program.CheckerProgram, kernel *kernelbridge.RefinedT
 				importHashes[imported.FileName()] = hash
 			}
 		}
-		facts := walk.CompileFileFacts(p, file, merged, kernel, reporting, importHashes)
+		var facts walk.FileFacts
+		func() {
+			if claimed {
+				// released even if a refused kernel question panics out —
+				// a waiter must never sleep on a dead claim
+				defer cache.finish(file)
+			}
+			facts = walk.CompileFileFacts(p, file, merged, kernel, reporting, importHashes)
+			if cache != nil {
+				// the TS miss-classification precedence: an already-cached
+				// file recompiled AS the entry keeps its first hash and
+				// facts (even over a hash mismatch — TS classifies
+				// entryDiagnostics before hashMismatch); everything else
+				// caches the fresh compile whole
+				if held != nil && reporting && !held.HasDiagnostics {
+					updated := *held
+					updated.Diagnostics = facts.Diagnostics
+					updated.HasDiagnostics = facts.HasDiagnostics
+					cache.put(file, &updated)
+					currentHash[file.FileName()] = held.InterfaceHash
+				} else {
+					fresh := facts
+					cache.put(file, &fresh)
+					currentHash[file.FileName()] = facts.InterfaceHash
+				}
+			} else {
+				currentHash[file.FileName()] = facts.InterfaceHash
+			}
+		}()
 		for symbol, a := range facts.Annotations {
 			merged.Registry[symbol] = a
 		}
@@ -276,26 +379,6 @@ func programFactsCached(p *program.CheckerProgram, kernel *kernelbridge.RefinedT
 		}
 		for symbol, c := range facts.Contracts {
 			merged.Contracts[symbol] = c
-		}
-		if cache != nil {
-			// the TS miss-classification precedence: an already-cached
-			// file recompiled AS the entry keeps its first hash and
-			// facts (even over a hash mismatch — TS classifies
-			// entryDiagnostics before hashMismatch); everything else
-			// caches the fresh compile whole
-			if held != nil && reporting && !held.HasDiagnostics {
-				updated := *held
-				updated.Diagnostics = facts.Diagnostics
-				updated.HasDiagnostics = facts.HasDiagnostics
-				cache.put(file, &updated)
-				currentHash[file.FileName()] = held.InterfaceHash
-			} else {
-				fresh := facts
-				cache.put(file, &fresh)
-				currentHash[file.FileName()] = facts.InterfaceHash
-			}
-		} else {
-			currentHash[file.FileName()] = facts.InterfaceHash
 		}
 		if reporting {
 			entryDiagnostics = facts.Diagnostics
@@ -349,12 +432,15 @@ func setupKernel() *kernelbridge.RefinedTSKernel {
 // sweepFactsStore is incremental_file_cache.ts's factsCache made
 // sweep-shared: CheckFiles' entries compile and merge facts from many
 // goroutines at once, so lookups and inserts lock. Compiles happen
-// OUTSIDE the lock — two entries may compile the same file
-// concurrently; the duplicate work is benign (facts are
-// deterministic) and the last insert wins.
+// OUTSIDE the lock; a claim/await pair keeps N workers from compiling
+// the SAME shared file at once (a heavy shared file costs ~50 ms per
+// compile — measured duplicated across most workers before the claim
+// existed). A waiter re-checks validity itself: an entry that needs
+// its own diagnostics may still recompile the file it waited on.
 type sweepFactsStore struct {
-	mu   sync.Mutex
-	held map[*ast.SourceFile]*walk.FileFacts
+	mu       sync.Mutex
+	held     map[*ast.SourceFile]*walk.FileFacts
+	inFlight map[*ast.SourceFile]chan struct{}
 }
 
 func (s *sweepFactsStore) get(file *ast.SourceFile) *walk.FileFacts {
@@ -367,6 +453,32 @@ func (s *sweepFactsStore) put(file *ast.SourceFile, facts *walk.FileFacts) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.held[file] = facts
+}
+
+// claim answers (nil, true) when the caller should compile `file` and
+// then call finish, or (ch, false) when another worker is compiling —
+// the caller waits on ch and re-reads the store.
+func (s *sweepFactsStore) claim(file *ast.SourceFile) (chan struct{}, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inFlight == nil {
+		s.inFlight = map[*ast.SourceFile]chan struct{}{}
+	}
+	if ch, busy := s.inFlight[file]; busy {
+		return ch, false
+	}
+	s.inFlight[file] = make(chan struct{})
+	return nil, true
+}
+
+// finish releases a claim, waking every waiter.
+func (s *sweepFactsStore) finish(file *ast.SourceFile) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ch, held := s.inFlight[file]; held {
+		close(ch)
+		delete(s.inFlight, file)
+	}
 }
 
 // runRefinements is run's refinement half: passes 1–3 over an entry

@@ -481,6 +481,23 @@ func TraceReportText() string {
 	return strings.Join(out, "\n")
 }
 
+// DetailReportText is the detail-only mode's report: just the
+// per-entry mechanism decomposition (glance table + per-file blocks),
+// with no process accounting — those numbers only exist under full
+// tracing, and detail-only mode's whole point is not paying for them.
+func DetailReportText() string {
+	details := SnapshotFileDetails()
+	if len(details) == 0 {
+		return ""
+	}
+	var out []string
+	say := func(s string) { out = append(out, s) }
+	sayBlank := func() { out = append(out, "") }
+	sayFileGlance(say, sayBlank, details)
+	sayFileDetailSection(say, sayBlank, details)
+	return strings.Join(out, "\n")
+}
+
 // sayFileGlance is the one-look straggler table: one row per slowest
 // entry (ranked by bodies ms) carrying the mechanism split and the
 // worst contract inline, so the ranking and its explanation sit in

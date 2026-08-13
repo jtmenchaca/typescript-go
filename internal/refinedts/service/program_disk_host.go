@@ -103,7 +103,7 @@ func BuiltProgram(entryPaths []string) *compiler.Program {
 	// noCopy — the knob is stated on the held options directly: it is
 	// the same value on every path, so the write is idempotent, and
 	// programs build sequentially (one per covering project group).
-	checkerCount := min(runtime.GOMAXPROCS(0), 4)
+	checkerCount := min(runtime.GOMAXPROCS(0), 8)
 	options.Checkers = &checkerCount
 	host := diskHost(options)
 	config := tsoptions.NewParsedCommandLine(options, fileNamesOf(entryPaths), tspath.ComparePathsOptions{

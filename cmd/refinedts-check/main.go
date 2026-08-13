@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"runtime/pprof"
+	"sort"
 	"strings"
 	"time"
 
@@ -59,6 +60,8 @@ func main() {
 		"write a pprof CPU profile to this file (exact attribution, no tracing overhead)")
 	memProfileFlag := flag.String("memprofile", "",
 		"write a pprof allocation profile to this file when the sweep ends")
+	detailFlag := flag.Bool("detail", false,
+		"record per-entry mechanism timers only (honest wall, no trace inflation) and print the decomposition")
 	flag.Parse()
 	files := flag.Args()
 	if *listFlag != "" {
@@ -96,6 +99,9 @@ func main() {
 			tracing.SetWriteTo(*traceOutFlag)
 		}
 		tracing.TraceStart(tracing.GrainStep)
+	}
+	if *detailFlag {
+		tracing.SetDetailOnly(true)
 	}
 	// os.Exit below never runs defers — the profile stops explicitly
 	// before both exit paths
@@ -177,11 +183,37 @@ func main() {
 	if *wallFlag {
 		fmt.Fprintf(os.Stderr, "WALL %d ms  %d files\n",
 			time.Since(startedAt).Milliseconds(), len(files))
+		// the critical-path decomposition: wall ≈ program + shape +
+		// busiest-checker file chain. A fix's honest ceiling is its
+		// share of THESE rows, never its share of process CPU.
+		fmt.Fprintf(os.Stderr, "  program %.0f ms   shape %.0f ms\n",
+			service.SweepPhases.ProgramMs, service.SweepPhases.ShapeMs)
+		type entryWall struct {
+			path string
+			ms   float64
+		}
+		var walls []entryWall
+		total := 0.0
+		for path, result := range results {
+			walls = append(walls, entryWall{path: path, ms: result.WallMs})
+			total += result.WallMs
+		}
+		sort.Slice(walls, func(i, j int) bool { return walls[i].ms > walls[j].ms })
+		fmt.Fprintf(os.Stderr, "  refine %.0f ms summed across %d entries; slowest:\n", total, len(walls))
+		for i, w := range walls {
+			if i >= 12 {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "  %8.0f ms  %s\n", w.ms, filepath.Base(w.path))
+		}
 	}
 	if *traceFlag {
 		tracing.TraceStop()
 		tracing.EmitTraceReport()
 		fmt.Fprintln(os.Stderr, kernelbridge.QuestionCostReport())
+	}
+	if *detailFlag && !*traceFlag {
+		fmt.Fprintln(os.Stderr, tracing.DetailReportText())
 	}
 	stopProfile()
 	if *memProfileFlag != "" {
