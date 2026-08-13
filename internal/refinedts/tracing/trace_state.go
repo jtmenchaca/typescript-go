@@ -287,8 +287,8 @@ func Leave(frame *Frame, grain Grain) {
 
 // ResetRecords clears flat/tree/file counters and opens a fresh root.
 // Leaves PreTraceNotes alone — those document time before tracing.
-// Shared record maps clear under recordsMu; FileDetails has its own
-// lock and clears after.
+// Shared record maps clear under recordsMu; FileDetails and the
+// summary-outcome tally have their own locks and clear after.
 func ResetRecords() {
 	recordsMu.Lock()
 	Flat = map[string]*TraceEntry{}
@@ -305,4 +305,5 @@ func ResetRecords() {
 	RunStartedAt = time.Now()
 	recordsMu.Unlock()
 	ClearFileDetails()
+	ClearSummaryOutcomes()
 }

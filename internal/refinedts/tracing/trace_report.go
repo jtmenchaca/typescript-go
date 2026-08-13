@@ -422,6 +422,10 @@ func TraceReportText() string {
 		sayBlank()
 	}
 
+	// what the summary machinery covered, beside the counters that say
+	// how often it was reached
+	saySummaryOutcomeSection(say, sayBlank, SummaryOutcomeTally())
+
 	if len(data.Files) > 0 {
 		ranked := append([]FileCost(nil), data.Files...)
 		sort.Slice(ranked, func(i, j int) bool { return ranked[i].Ms > ranked[j].Ms })
@@ -495,6 +499,7 @@ func DetailReportText() string {
 	sayBlank := func() { out = append(out, "") }
 	sayFileGlance(say, sayBlank, details)
 	sayFileDetailSection(say, sayBlank, details)
+	saySummaryOutcomeSection(say, sayBlank, SummaryOutcomeTally())
 	return strings.Join(out, "\n")
 }
 
@@ -571,6 +576,9 @@ func sayFileDetailSection(say func(string), sayBlank func(), details []*FileDeta
 				commaInt(d.JoinReachSnapshot),
 				commaInt(d.JoinReachFallback)))
 		}
+		if line, ok := SummaryOutcomeLineFor(&d.Summaries); ok {
+			say(line)
+		}
 		if len(d.SlowContracts) > 0 {
 			say("    slowest contracts:")
 			for _, c := range d.SlowContracts {
@@ -582,6 +590,94 @@ func sayFileDetailSection(say func(string), sayBlank func(), details []*FileDeta
 		}
 		sayBlank()
 	}
+}
+
+// SummaryOutcomeLineFor is the per-entry covered-ness row: how many of
+// this entry's contracted bodies lowered whole, how many lowered with
+// havoc, and how many declined — with the constructs that made the
+// difference named inline. False when the entry reported no outcome
+// at all, so the row is omitted rather than printed as zeros (the same
+// way the join row omits itself).
+func SummaryOutcomeLineFor(counts *SummaryOutcomeCounts) (string, bool) {
+	if counts.Total() == 0 {
+		return "", false
+	}
+	line := fmt.Sprintf("    summaries  complete=%s  porous=%s  declined=%s",
+		commaInt(counts.Complete),
+		commaInt(counts.Porous),
+		commaInt(counts.Declined))
+	// the named constructs ride the line the way the worst contract
+	// rides the glance row — the tally and its explanation together
+	if named := counts.TopConstructs(3); len(named) > 0 {
+		var parts []string
+		for _, n := range named {
+			parts = append(parts, fmt.Sprintf("%s×%s", n.Name, commaInt(n.Count)))
+		}
+		more := ""
+		if len(counts.Constructs) > len(named) {
+			more = fmt.Sprintf(", … %d more", len(counts.Constructs)-len(named))
+		}
+		line += fmt.Sprintf("  (%s%s)", strings.Join(parts, ", "), more)
+	}
+	return line, true
+}
+
+// saySummaryOutcomeSection appends the covered-ness section to a
+// report being composed. Silent when nothing reported.
+func saySummaryOutcomeSection(say func(string), sayBlank func(), counts SummaryOutcomeCounts) {
+	text := SummaryOutcomeSectionText(counts)
+	if text == "" {
+		return
+	}
+	for _, line := range strings.Split(text, "\n") {
+		say(line)
+	}
+}
+
+// SummaryOutcomeSectionText is the whole run's covered-ness: the three
+// outcomes as a share of every contracted body, then the constructs
+// that cost the most bodies, in the counters section's
+// family-plus-leaders shape. Empty when nothing reported, so the
+// report carries no section rather than a table of zeros.
+func SummaryOutcomeSectionText(counts SummaryOutcomeCounts) string {
+	total := counts.Total()
+	if total == 0 {
+		return ""
+	}
+	var out []string
+	say := func(s string) { out = append(out, s) }
+	sayBlank := func() { out = append(out, "") }
+	say("summary coverage — one outcome per contracted body")
+	sayBlank()
+	say("complete lowers whole and the kernel serves it; porous lowers with " +
+		"havoc and names the first havocked construct; declined names the " +
+		"first reason. This is a read-off of what the lowering did, not a " +
+		"claim about what it could do.")
+	sayBlank()
+	say(pad("outcome", 40) + padLeft("bodies", 16) + padLeft("%", 9))
+	say(strings.Repeat("─", 65))
+	row := func(name string, held int64) {
+		say(pad(name, 40) + padLeft(commaInt(held), 16) +
+			padLeft(strconv.FormatFloat(100*float64(held)/float64(total), 'f', 1, 64), 9))
+	}
+	row("complete", counts.Complete)
+	row("porous", counts.Porous)
+	row("declined", counts.Declined)
+	say(strings.Repeat("─", 65))
+	say(pad("bodies with an outcome", 40) + padLeft(commaInt(total), 16) + padLeft("100.0", 9))
+	sayBlank()
+	if named := counts.TopConstructs(12); len(named) > 0 {
+		say(pad("construct", 40) + padLeft("bodies", 16))
+		say(strings.Repeat("─", 56))
+		for _, n := range named {
+			say(pad("    "+n.Name, 40) + padLeft(commaInt(n.Count), 16))
+		}
+		if len(counts.Constructs) > len(named) {
+			say(fmt.Sprintf("    … %d more names", len(counts.Constructs)-len(named)))
+		}
+		sayBlank()
+	}
+	return strings.Join(out, "\n")
 }
 
 // readMemory mirrors the TS try/process.memoryUsage() block. Go's

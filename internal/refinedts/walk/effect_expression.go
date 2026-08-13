@@ -118,7 +118,19 @@ func concatOf(a, b kernelbridge.LoopEffect) kernelbridge.LoopEffect {
 //
 // A non-string or untracked part declines the whole reading, exactly
 // as it did before this route existed. Parens and casts unwrap first.
+//
+// A CALL is read only where the syntax already committed the expression
+// to being a sequence — inside a `+` chain or a template substitution.
+// Handed a bare call as the WHOLE expression this declines, because
+// SortOfArg (ir_guard.go) reads a success here as "this argument is
+// string-sorted", and a numeric callee's result is not.
 func SequenceEffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, bool) {
+	return sequenceEffectOf(context, e, false /*inSequence*/)
+}
+
+// sequenceEffectOf is the reading, carrying whether the caller has already
+// committed the expression to the sequence world.
+func sequenceEffectOf(context *LoweringContext, e *ast.Node, inSequence bool) (kernelbridge.LoopEffect, bool) {
 	head := Unwrapped(e)
 	if ast.IsStringLiteral(head) {
 		return kernelbridge.LoopEffect{
@@ -150,11 +162,13 @@ func SequenceEffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopE
 		if bin.OperatorToken.Kind != ast.KindPlusToken {
 			return kernelbridge.LoopEffect{}, false
 		}
-		a, aOk := SequenceEffectOf(context, bin.Left)
+		// a `+` chain commits BOTH sides to the sequence world, so a call in
+		// either operand is a call inside a sequence
+		a, aOk := sequenceEffectOf(context, bin.Left, true /*inSequence*/)
 		if !aOk {
 			return kernelbridge.LoopEffect{}, false
 		}
-		b, bOk := SequenceEffectOf(context, bin.Right)
+		b, bOk := sequenceEffectOf(context, bin.Right, true /*inSequence*/)
 		if !bOk {
 			return kernelbridge.LoopEffect{}, false
 		}
@@ -163,7 +177,45 @@ func SequenceEffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopE
 	if ast.IsTemplateExpression(head) {
 		return templateSequenceOf(context, head)
 	}
+	// a CALL inside the sequence — `"n=" + this.name()`, a template
+	// substitution `${this.name()}` — hoists to a temp-slot call statement
+	// ahead of this statement, and the concatenation reads the temp
+	// (ir_call_hoist.go). Refused wherever no statement stream exists or
+	// the reordering could be observed, and then the reading declines
+	// exactly as it did before.
+	//
+	// The hoist is asked only for a call whose spelling is INSIDE a
+	// sequence the syntax already committed to — a bare call handed to this
+	// reader on its own is not a sequence, and answering one here would
+	// tell SortOfArg (ir_guard.go) that a numeric callee's result is
+	// string-sorted, since SortOfArg reads "SequenceEffectOf succeeded" as
+	// exactly that claim. So the whole-expression case declines and the
+	// numeric reader (EffectOf's Opaque) hoists it instead; the memo means
+	// the two never build two statements for one site.
+	if inSequence && (ast.IsCallExpression(head) || isAwaitedCallShape(head)) {
+		return HoistCallEffect(context, head)
+	}
+	// a string-sorted GETTER read inside a sequence: the same hoisted
+	// call, admitted only where the temp's sort came out string — the
+	// same commitment gate the explicit call above wears, for the same
+	// SortOfArg reason
+	if inSequence && ast.IsPropertyAccessExpression(head) {
+		if held, ok := GetterReadEffect(context, head); ok &&
+			held.Kind == kernelbridge.LoopEffectVar &&
+			held.Index < len(context.Sorts) &&
+			context.Sorts[held.Index] == BindingKindString {
+			return held, true
+		}
+	}
 	return kernelbridge.LoopEffect{}, false
+}
+
+// isAwaitedCallShape is `await f(…)` — the one wrapper the hoist route
+// peels, spelled here so the sequence reader can ask before handing the
+// node over.
+func isAwaitedCallShape(e *ast.Node) bool {
+	operand, isAwait := AwaitedOperandOf(e)
+	return isAwait && ast.IsCallExpression(operand)
 }
 
 // SpelledSequenceShape is whether an expression is a sequence by its
@@ -204,7 +256,9 @@ func templateSequenceOf(context *LoweringContext, head *ast.Node) (kernelbridge.
 	}}
 	for _, spanNode := range template.TemplateSpans.Nodes {
 		span := spanNode.AsTemplateSpan()
-		substituted, ok := SequenceEffectOf(context, span.Expression)
+		// a substitution sits INSIDE a sequence the template already
+		// committed to, so a call there hoists
+		substituted, ok := sequenceEffectOf(context, span.Expression, true /*inSequence*/)
 		if !ok {
 			return kernelbridge.LoopEffect{}, false
 		}

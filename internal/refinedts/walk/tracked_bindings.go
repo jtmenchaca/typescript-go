@@ -39,15 +39,23 @@ const (
 )
 
 // SpelledNameOf is the spelled name a binding is tracked under: an
-// identifier, or a single property step on an identifier.
+// identifier, or a single property step on an identifier or `this` —
+// "this.count" is the spelling a method's bundle layout gives its
+// field slots.
 func SpelledNameOf(e *ast.Node) (string, bool) {
 	if ast.IsIdentifier(e) {
 		return e.Text(), true
 	}
 	if ast.IsPropertyAccessExpression(e) {
 		access := e.AsPropertyAccessExpression()
-		if ast.IsIdentifier(access.Expression) && ast.IsIdentifier(access.Name()) {
+		if !ast.IsIdentifier(access.Name()) {
+			return "", false
+		}
+		if ast.IsIdentifier(access.Expression) {
 			return access.Expression.Text() + "." + access.Name().Text(), true
+		}
+		if access.Expression.Kind == ast.KindThisKeyword {
+			return "this." + access.Name().Text(), true
 		}
 	}
 	return "", false

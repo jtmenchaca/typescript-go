@@ -11,19 +11,27 @@
 // body whose call sites lower to IrStatementCall carries one blob per
 // callee, and the table rides out beside the statements so the compile
 // can splice each callee's already-built summary.
+//
+// The lowering is also where a body's OUTCOME is recorded — complete,
+// porous, or declined naming the construct it refused
+// (summary_outcome.go holds the store). This is the one place the fate
+// of a body is known, so it is the one place that reports it.
 
 package walk
 
 import (
+	"sync"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 )
 
 /* ── record parameters ───────────────────────────────────────────── */
 
-// recordParamMember is one member of a parameter's TYPE LITERAL
-// annotation: the key it is spelled under, the slot name the body reads
-// it by ("p.lo"), and the sort and typeof evidence its OWN annotation
-// states.
+// recordParamMember is one member of a parameter's RECORD annotation —
+// an inline type literal, or the interface or type alias a named
+// annotation resolves to: the key it is spelled under, the slot name the
+// body reads it by ("p.lo"), and the sort and typeof evidence its OWN
+// annotation states.
 type recordParamMember struct {
 	Key       string
 	SlotName  string
@@ -31,32 +39,27 @@ type recordParamMember struct {
 	TypeofTag TypeofTag
 }
 
-// recordParamMembersOf reads a parameter's annotation as a SYNTACTIC
-// TYPE LITERAL of scalar members — `p: { lo: number, hi: string }` — and
-// answers one member per property signature, spelled "p.lo"/"p.hi".
+// scalarMemberListOf reads a list of TYPE ELEMENTS as the member list a
+// record parameter expands to, spelled under `holder` ("p.lo"/"p.hi").
 //
-// Nothing but that shape is admitted: a class name, an interface name,
-// a type alias, a union, an intersection, an optional member (`lo?:`),
-// a method signature, an index signature, a call signature, a nested
-// literal, or a member whose own annotation is not number/boolean/string
-// answers false and the parameter keeps its single whole-name slot —
-// exactly today's behaviour. The rule is deliberately syntactic: a
-// declaration's summary quantifies over every caller, and only what the
-// annotation itself spells is promised to every entry.
+// The rule is total-or-decline over the whole list: every element must
+// be a PROPERTY SIGNATURE with a plain identifier name, no `?`, no
+// initializer, and its own annotation exactly number, boolean, or
+// string. A method signature, an index signature, a call or construct
+// signature, a computed name, an optional member, a nested literal, a
+// union, an array, a duplicate key, or an EMPTY list answers false and
+// the parameter keeps its single whole-name slot.
 //
 // Each member's sort and typeof read through declaredParamSort's own
 // reading, member-wise: number and boolean ride the number sort (their
 // typeof differs), string rides the string sort.
-func recordParamMembersOf(parameter *ast.Node) ([]recordParamMember, bool) {
-	pd := parameter.AsParameterDeclaration()
-	if pd.Type == nil || !ast.IsIdentifier(pd.Name()) {
-		return nil, false
-	}
-	if !ast.IsTypeLiteralNode(pd.Type) {
-		return nil, false
-	}
-	holder := pd.Name().Text()
-	members := pd.Type.AsTypeLiteralNode().Members.Nodes
+//
+// This is the ONE member reading. Both the type-literal case and the
+// resolved named-type case go through it, so a `{ lo: number }` written
+// inline and the same members written behind an `interface` expand to
+// byte-identical member lists — they must, because the layout and the
+// call sites both build their entry vectors from this answer.
+func scalarMemberListOf(holder string, members []*ast.Node) ([]recordParamMember, bool) {
 	if len(members) == 0 {
 		return nil, false
 	}
@@ -72,7 +75,7 @@ func recordParamMembersOf(parameter *ast.Node) ([]recordParamMember, bool) {
 		if signature.PostfixToken != nil || signature.Initializer != nil {
 			return nil, false
 		}
-		if signature.Type == nil || !ast.IsIdentifier(signature.Name()) {
+		if signature.Type == nil || signature.Name() == nil || !ast.IsIdentifier(signature.Name()) {
 			return nil, false
 		}
 		var sort BindingKind
@@ -103,15 +106,200 @@ func recordParamMembersOf(parameter *ast.Node) ([]recordParamMember, bool) {
 	return out, true
 }
 
+// namedTypeMembersOf resolves a parameter annotation that is a TYPE
+// REFERENCE to a PLAIN IDENTIFIER — `p: Bounds` — to the members it
+// stands for, or (false).
+//
+// WHY THIS IS CHECK-INDEPENDENT. The identity of the answer is the
+// resolved DECLARATION NODE, and the members are then read off that
+// node's own SYNTAX by scalarMemberListOf — the very reading the inline
+// type literal takes. Nothing here asks the checker what a type MEANS;
+// the checker is used only to say which declaration a name is. So the
+// only way two checks could answer differently is by resolving the name
+// to a different declaration, and every shape where that is possible
+// declines below:
+//
+//   - a QUALIFIED name (`ns.Bounds`) or a name carrying TYPE ARGUMENTS
+//     (`Box<number>`) — the members would depend on the arguments, which
+//     no entry vector spells;
+//   - a symbol with NO declaration, or with declarations that are none of
+//     the two admitted kinds — nothing to read syntax off;
+//   - a symbol with MORE THAN ONE declaration — an interface declared
+//     twice merges its members across declarations, and reading only the
+//     first would build a member list the other declaration contradicts;
+//   - an INTERFACE with HERITAGE (`extends`) — an inherited member is
+//     declared somewhere this reading never visits, so the list would be
+//     incomplete and a body reading the inherited member would spell a
+//     slot the layout never made;
+//   - an interface or alias with TYPE PARAMETERS — the members'
+//     annotations are not the ones any instance actually holds;
+//   - a TYPE ALIAS whose right side is not a TYPE LITERAL (a union,
+//     another reference, a mapped or conditional type) — the census reads
+//     syntax, and only a literal spells its members;
+//   - a CLASS — an instance carries methods, accessors, private state and
+//     aliases the flattening cannot hold, and its fields are not promised
+//     by the annotation alone.
+//
+// A nil context, or one with no program or no checker, resolves nothing
+// and declines — the nil-tolerance the ctx-less callers rely on: a
+// lowering that runs without a checker keeps exactly today's behaviour
+// rather than crashing.
+func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]recordParamMember, bool) {
+	if !ast.IsTypeReferenceNode(typeNode) {
+		return nil, false
+	}
+	reference := typeNode.AsTypeReferenceNode()
+	// type ARGUMENTS make the members depend on what was applied
+	if reference.TypeArguments != nil && len(reference.TypeArguments.Nodes) > 0 {
+		return nil, false
+	}
+	typeName := reference.TypeName
+	// only a PLAIN identifier: a qualified name reaches into a namespace
+	// whose resolution this reading does not claim
+	if typeName == nil || !ast.IsIdentifier(typeName) {
+		return nil, false
+	}
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+		return nil, false
+	}
+	symbol := symbolAt(ctx.P.Checker, typeName)
+	if symbol == nil || len(symbol.Declarations) != 1 {
+		return nil, false
+	}
+	declaration := symbol.Declarations[0]
+	if declaration == nil {
+		return nil, false
+	}
+	if ast.IsInterfaceDeclaration(declaration) {
+		asInterface := declaration.AsInterfaceDeclaration()
+		if asInterface.HeritageClauses != nil && len(asInterface.HeritageClauses.Nodes) > 0 {
+			return nil, false
+		}
+		if asInterface.TypeParameters != nil && len(asInterface.TypeParameters.Nodes) > 0 {
+			return nil, false
+		}
+		return scalarMemberListOf(holder, asInterface.Members.Nodes)
+	}
+	if ast.IsTypeAliasDeclaration(declaration) {
+		asAlias := declaration.AsTypeAliasDeclaration()
+		if asAlias.TypeParameters != nil && len(asAlias.TypeParameters.Nodes) > 0 {
+			return nil, false
+		}
+		if asAlias.Type == nil || !ast.IsTypeLiteralNode(asAlias.Type) {
+			return nil, false
+		}
+		return scalarMemberListOf(holder, asAlias.Type.AsTypeLiteralNode().Members.Nodes)
+	}
+	// a class, an enum, a module, a type parameter — none expand
+	return nil, false
+}
+
+// resolvedRecordMembers remembers what ONE parameter node expanded to
+// the FIRST time a context resolved it, so every later reading answers
+// the same member list.
+//
+// Why the memo, and not just "resolve again": the two seams that read
+// this expansion do not both hold a context. The LAYOUT
+// (lowerSummaryBodyWithCaptures) threads the check's FlowContext down;
+// the CALL SITES that walk a callee's parameters reach the expansion
+// through the ctx-less spelling. If the named-type case answered
+// members under one and declined under the other, the layout would build
+// N entry slots while the site filled 1 — entry k would take a value
+// belonging to entry j, a silent unsoundness with no syntax to point at.
+// Caching the first resolved answer under the PARAMETER NODE makes the
+// two readings one answer by construction.
+//
+// The memo only ever ADDS the named-type case: a parameter whose
+// annotation is an inline type literal is answered syntactically on
+// every path and never consults it.
+var (
+	resolvedRecordMembersMu sync.Mutex
+	resolvedRecordMembers   = map[*ast.Node][]recordParamMember{}
+)
+
+// ClearResolvedRecordMembers drops every remembered named-type
+// expansion. The memo is keyed on parameter nodes from one program, so a
+// caller that builds a new program clears it; the tests clear it between
+// cases.
+func ClearResolvedRecordMembers() {
+	resolvedRecordMembersMu.Lock()
+	resolvedRecordMembers = map[*ast.Node]([]recordParamMember){}
+	resolvedRecordMembersMu.Unlock()
+}
+
+// recordParamMembersOf is the ctx-less spelling every seam that has no
+// context reads: the SYNTACTIC type-literal case, plus whatever named
+// type a context already resolved for this parameter (see
+// resolvedRecordMembers). It never resolves a new name itself.
+func recordParamMembersOf(parameter *ast.Node) ([]recordParamMember, bool) {
+	return recordParamMembersIn(nil, parameter)
+}
+
+// recordParamMembersIn reads a parameter's annotation as a record of
+// scalar members and answers one member per property, spelled
+// "p.lo"/"p.hi".
+//
+// Two annotations expand, and nothing else:
+//
+//	(a) a SYNTACTIC TYPE LITERAL — `p: { lo: number, hi: string }` —
+//	    read straight off the annotation, no context needed;
+//	(b) a TYPE REFERENCE to a plain identifier naming an INTERFACE (no
+//	    heritage, no type parameters) or a TYPE ALIAS of a type literal,
+//	    resolved through the context's checker to its one declaration and
+//	    then read off THAT declaration's syntax by the same member rules
+//	    (namedTypeMembersOf states why the answer is check-independent).
+//
+// A class name, a generic, a union, an intersection, a qualified name,
+// an unresolvable name, an optional member, a method, an index
+// signature, a nested literal, or a member whose own annotation is not
+// number/boolean/string answers false and the parameter keeps its single
+// whole-name slot — exactly today's behaviour. A declaration's summary
+// quantifies over every caller, and only what the annotation itself
+// promises to every entry may become slots.
+func recordParamMembersIn(ctx *FlowContext, parameter *ast.Node) ([]recordParamMember, bool) {
+	pd := parameter.AsParameterDeclaration()
+	if pd.Type == nil || pd.Name() == nil || !ast.IsIdentifier(pd.Name()) {
+		return nil, false
+	}
+	holder := pd.Name().Text()
+	// (a) the inline literal — answered the same on every path, with or
+	// without a context, so it never touches the memo
+	if ast.IsTypeLiteralNode(pd.Type) {
+		return scalarMemberListOf(holder, pd.Type.AsTypeLiteralNode().Members.Nodes)
+	}
+	// (b) the named type — whatever a context resolved for this parameter
+	// stands for every later reading
+	resolvedRecordMembersMu.Lock()
+	held, remembered := resolvedRecordMembers[parameter]
+	resolvedRecordMembersMu.Unlock()
+	if remembered {
+		return held, len(held) > 0
+	}
+	members, expanded := namedTypeMembersOf(ctx, holder, pd.Type)
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+		// nothing resolved and nothing to remember: a later reading WITH a
+		// context must still be free to resolve this parameter
+		return nil, false
+	}
+	if !expanded {
+		members = nil
+	}
+	resolvedRecordMembersMu.Lock()
+	resolvedRecordMembers[parameter] = members
+	resolvedRecordMembersMu.Unlock()
+	return members, expanded
+}
+
 // SummaryParameterEntries is the ONE expansion both the layout and the
 // call sites read: the entry slots one declared parameter contributes.
 //
 // A scalar (or richer-typed, or unannotated) parameter contributes
 // exactly ONE entry under its own spelled name, wearing declaredParamSort
-// / declaredParamTypeof — today's layout, unchanged. A parameter whose
-// annotation is a type literal of scalar members contributes ONE ENTRY
-// PER MEMBER, spelled "p.lo"/"p.hi", each sorted by its own member
-// annotation.
+// / declaredParamTypeof — today's layout, unchanged. A RECORD parameter
+// contributes ONE ENTRY PER MEMBER, spelled "p.lo"/"p.hi", each sorted by
+// its own member annotation: an inline type literal of scalar members, or
+// — through SummaryParameterEntriesIn, which holds a context to resolve
+// with — an interface or type alias whose members read the same way.
 //
 // (false) where the parameter itself declines outright: a binding
 // pattern, a default, or a rest — the same three the lowering has always
@@ -124,11 +312,21 @@ func recordParamMembersOf(parameter *ast.Node) ([]recordParamMember, bool) {
 // arity, the caller's argument order, and the apply side's entry states
 // are three readings of one answer.
 func SummaryParameterEntries(parameter *ast.Node) ([]bodySlot, bool) {
+	return SummaryParameterEntriesIn(nil, parameter)
+}
+
+// SummaryParameterEntriesIn is the same expansion with the check's own
+// context, so a parameter annotated with a NAMED type (an interface, a
+// type alias of a literal) resolves and expands rather than declining.
+// The ctx-less spelling above stays for the seams that hold no context;
+// once any context has resolved a parameter, both answer the same list
+// (recordParamMembersIn's memo).
+func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlot, bool) {
 	pd := parameter.AsParameterDeclaration()
-	if !ast.IsIdentifier(pd.Name()) || pd.Initializer != nil || pd.DotDotDotToken != nil {
+	if pd.Name() == nil || !ast.IsIdentifier(pd.Name()) || pd.Initializer != nil || pd.DotDotDotToken != nil {
 		return nil, false
 	}
-	if members, isRecord := recordParamMembersOf(parameter); isRecord {
+	if members, isRecord := recordParamMembersIn(ctx, parameter); isRecord {
 		out := make([]bodySlot, 0, len(members))
 		for _, member := range members {
 			out = append(out, bodySlot{
@@ -233,6 +431,99 @@ func recordParameterUsesAreDeclaredReads(body *ast.Node, name string, members []
 	}
 	visit(body)
 	return ok
+}
+
+/* ── the `this` bundle ───────────────────────────────────────────── */
+
+// thisBundleLayout is what a METHOD's own receiver is worth as entry
+// slots: the fields the body READS become entries spelled
+// "this.<field>", laid out after the declared parameters, and the fields
+// it WRITES are named so the outs can carry them back.
+//
+// `expanded` false is the whole decline of the EXPANSION, never of the
+// body: the method still lowers, its this-reads simply find no slot and
+// hit the opaque floor exactly as they do today. `escaped` says WHY it
+// declined when the reason was the receiver leaving the lowering's sight
+// — the caller notes it as the body's first havoc, because a bundle that
+// escaped may be written through a name nothing here saw.
+type thisBundleLayout struct {
+	Entries  []bodySlot
+	Written  map[string]struct{}
+	Expanded bool
+	Escaped  bool
+}
+
+// thisBundleOf reads a declaration's `this` bundle: (nothing) for
+// anything that is not a method, and otherwise the field census of the
+// enclosing class run over the method's body.
+//
+// The rules, per the wave-4 design:
+//
+//   - only a METHOD has a `this` bundle. An arrow keeps its enclosing
+//     `this`, but the arrow route lays out CAPTURES after the declared
+//     parameters, and a bundle would have to share that ground — so the
+//     two are exclusive and the caller asserts it rather than laying out
+//     both.
+//   - the READ fields become entries, in the class's own declaration
+//     order (FieldCensusOf answers in that order, which is what keeps
+//     the layout and the apply side building one vector).
+//   - COMPUTED access expands anyway: `this[k]` names no field, but the
+//     havoc floor already stands in for the statement that performed it,
+//     and the declaration still bounds which slots could be meant.
+//   - an ESCAPING receiver does NOT expand. The bundle may move through a
+//     name the census never saw, so an entry's state could be stale
+//     mid-body while the slot still reads as known — the one shape where
+//     expanding would claim more than it knows.
+func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
+	if declaration == nil {
+		return thisBundleLayout{}
+	}
+	// an ACCESSOR is a class member with a body and a `this`, exactly
+	// like a method — its bundle is what lets a getter over a backing
+	// field compile at all (the accessor-call route reads it)
+	if !ast.IsMethodDeclaration(declaration) &&
+		!ast.IsGetAccessorDeclaration(declaration) &&
+		!ast.IsSetAccessorDeclaration(declaration) {
+		return thisBundleLayout{}
+	}
+	body := declaration.Body()
+	if body == nil {
+		return thisBundleLayout{}
+	}
+	classLike := declaration.Parent
+	if classLike == nil || !ast.IsClassLike(classLike) {
+		return thisBundleLayout{}
+	}
+	// declared members UNION constructor parameter properties — nest's
+	// classes declare most fields as `constructor(private readonly …)`
+	fields, isClass := ClassBundleFields(ctx, classLike)
+	if !isClass || len(fields) == 0 {
+		return thisBundleLayout{}
+	}
+	census := FieldCensusOf(body, "this", BundleFieldsAs("this", fields))
+	if census.Escapes {
+		return thisBundleLayout{Escaped: true}
+	}
+	if len(census.Reads) == 0 && len(census.Writes) == 0 {
+		return thisBundleLayout{}
+	}
+	written := map[string]struct{}{}
+	for _, field := range census.Writes {
+		written[field.SlotName] = struct{}{}
+	}
+	// the READ fields carry entries. A write-only field has no entry state
+	// for the caller to fill — its slot is one the body creates, which the
+	// locals' own layout would have to hold — so this wave lays out the
+	// reads and names the writes among them.
+	entries := make([]bodySlot, 0, len(census.Reads))
+	for _, field := range census.Reads {
+		entries = append(entries, bodySlot{
+			Name:      field.SlotName,
+			Sort:      field.Sort,
+			TypeofTag: field.TypeofTag,
+		})
+	}
+	return thisBundleLayout{Entries: entries, Written: written, Expanded: len(entries) > 0}
 }
 
 // summarySlotBudget is the summary route's own slot ceiling — the same
@@ -543,53 +834,164 @@ type parameterSlotSort struct {
 
 // lowerSummaryBodyWithCaptures is the one lowering both doors share:
 // nil parameters and nil captures is the plain declaration route, a
-// supplied pair is the closure-converted arrow route.
+// supplied pair is the closure-converted arrow route. The arrow route
+// comes through lowerArrowSummary, which records under the ARROW node —
+// the same declaration identity the outcome store keys by.
+//
+// THE OUTCOME IS RECORDED HERE, and only here: this is the one place a
+// body's fate is known. Three answers, one per body:
+//
+//   - DECLINED, naming the first CONSTRUCT the lowering refused ("a
+//     generator body", "a binding-pattern parameter") — the reason the
+//     worker returned;
+//   - POROUS, naming the first construct that HAVOCKED, where the
+//     lowering succeeded but context.FirstHavoc is non-empty;
+//   - COMPLETE otherwise — the lowering read every statement.
+//
+// The outcome store ranks a later record against the one it holds
+// (RecordSummaryOutcome), so the fixpoint's re-lowerings never talk a
+// settled body back down.
 func lowerSummaryBodyWithCaptures(
 	ctx *FlowContext,
 	declaration *ast.Node,
 	parameterSorts []parameterSlotSort,
 	captures []capturedSlot,
 ) (LoweredSummary, bool) {
-	if !summaryLowerable(declaration) {
+	summary, havoc, declined, ok := lowerSummaryBodyReporting(ctx, declaration, parameterSorts, captures)
+	name := summaryBodyName(declaration)
+	if !ok {
+		RecordSummaryOutcome(declaration, name, SummaryDeclined, declined)
 		return LoweredSummary{}, false
+	}
+	if havoc != "" {
+		RecordSummaryOutcome(declaration, name, SummaryPorous, havoc)
+		return summary, true
+	}
+	RecordSummaryOutcome(declaration, name, SummaryComplete, "")
+	return summary, true
+}
+
+// summaryBodyName spells a lowered body the way the report spells
+// contracts: its declared name, or "" for an anonymous arrow or function
+// expression — the outcome store keys on the NODE, so an unnamed body
+// still has one record; the name is only what the tally prints.
+func summaryBodyName(declaration *ast.Node) string {
+	if declaration == nil {
+		return ""
+	}
+	name := declaration.Name()
+	if name == nil || !ast.IsIdentifier(name) {
+		return ""
+	}
+	return name.Text()
+}
+
+// lowerSummaryBodyReporting is the lowering itself. Beyond the summary
+// and its ok flag it answers TWO strings, at most one of them non-empty:
+// `havoc` names the first construct that havocked on a lowering that
+// SUCCEEDED, and `declined` names the construct the lowering refused.
+// Each decline return below names the CONSTRUCT it refused, never a
+// category — the tally is read to find out what to build next, so
+// "a generator body" is worth having and "unsupported" is not.
+func lowerSummaryBodyReporting(
+	ctx *FlowContext,
+	declaration *ast.Node,
+	parameterSorts []parameterSlotSort,
+	captures []capturedSlot,
+) (summary LoweredSummary, havoc string, declined string, ok bool) {
+	if !summaryLowerable(declaration) {
+		if declaration != nil && declaration.Body() == nil {
+			return LoweredSummary{}, "", "a body-less declaration", false
+		}
+		return LoweredSummary{}, "", "a generator body", false
 	}
 	body := declaration.Body()
 	kernel := EngineKernelHeld()
 	if kernel == nil {
-		return LoweredSummary{}, false
+		return LoweredSummary{}, "", "no kernel held", false
 	}
-	// parameters: plain identifiers, no defaults, no rest. A type-literal
-	// parameter EXPANDS to one entry per member (SummaryParameterEntries)
-	// — the entry vector is no longer one-to-one with the declared
-	// parameters, so the arrow route's per-parameter sorts are indexed by
-	// DECLARATION position while the entry vector runs ahead of it.
+	// parameters: plain identifiers, no defaults, no rest. A RECORD
+	// parameter — an inline type literal, or a named interface or type
+	// alias the context resolves — EXPANDS to one entry per member
+	// (SummaryParameterEntriesIn), so the entry vector is no longer
+	// one-to-one with the declared parameters and the arrow route's
+	// per-parameter sorts are indexed by DECLARATION position while the
+	// entry vector runs ahead of it.
+	//
+	// The context threads down to the expansion HERE, and this is the only
+	// seam that holds one: the resolution it performs is remembered under
+	// the parameter node, so the ctx-less readings the call sites take
+	// answer the same member list (recordParamMembersIn's memo).
 	parameters := declaration.Parameters()
 	paramNames := make([]string, 0, len(parameters))
 	paramSorts := make([]BindingKind, 0, len(parameters))
 	paramTypeofs := make([]TypeofTag, 0, len(parameters))
+	// the bundle rows the summary rides out with: a record parameter's
+	// leaves and, below, the method's this-fields. Filled in slot order,
+	// which is the order the entries are appended in.
+	var bundleEntries []BundleEntry
 	for index, parameter := range parameters {
-		entries, entriesOk := SummaryParameterEntries(parameter)
+		entries, entriesOk := SummaryParameterEntriesIn(ctx, parameter)
 		if !entriesOk {
-			return LoweredSummary{}, false
+			return LoweredSummary{}, "", declinedParameterConstruct(parameter), false
 		}
-		if members, expanded := recordParamMembersOf(parameter); expanded {
+		if members, expanded := recordParamMembersIn(ctx, parameter); expanded {
 			// an EXPANDED parameter's every use in the body must be a read of
 			// a declared member; a whole-p use, an undeclared member, or a
 			// write through it declines the body outright
 			if !recordParameterUsesAreDeclaredReads(body, parameter.AsParameterDeclaration().Name().Text(), members) {
-				return LoweredSummary{}, false
+				return LoweredSummary{}, "", "a whole-record parameter use", false
 			}
 			// the arrow route fills ONE entry per declared parameter with a
 			// site sort, which an expanded parameter has no single entry for
 			if index < len(parameterSorts) {
-				return LoweredSummary{}, false
+				return LoweredSummary{}, "", "a record parameter of an arrow argument", false
 			}
 			for _, entry := range entries {
+				// a record parameter's leaf is a bundle entry the call site may
+				// have to map back. Written is FALSE for every one of them: a
+				// write through an expanded parameter declined the body above,
+				// so no leaf of a body that got this far is ever moved.
+				bundleEntries = append(bundleEntries, BundleEntry{
+					Path:    entry.Name,
+					Index:   len(paramNames),
+					Written: false,
+				})
 				paramNames = append(paramNames, entry.Name)
 				paramSorts = append(paramSorts, entry.Sort)
 				paramTypeofs = append(paramTypeofs, entry.TypeofTag)
 			}
 			continue
+		}
+		// a CLASS-TYPED parameter is a slot bundle: the fields its body
+		// READS become entries spelled "wrapper.<field>", after whatever
+		// expansions came before, in the census's declaration order. The
+		// census is the one report the call sites read back, so the rows
+		// ride out in BundleEntries with the write flags it found.
+		if _, census, _, isBundle := BundleParamCensus(ctx, body, parameter); isBundle && !census.Escapes {
+			// the arrow route fills ONE entry per declared parameter with a
+			// site sort, which an expanded bundle has no single entry for
+			if index < len(parameterSorts) {
+				return LoweredSummary{}, "", "a class-typed parameter of an arrow argument", false
+			}
+			written := map[string]struct{}{}
+			for _, field := range census.Writes {
+				written[field.SlotName] = struct{}{}
+			}
+			for _, field := range census.Reads {
+				_, isWritten := written[field.SlotName]
+				bundleEntries = append(bundleEntries, BundleEntry{
+					Path:    field.SlotName,
+					Index:   len(paramNames),
+					Written: isWritten,
+				})
+				paramNames = append(paramNames, field.SlotName)
+				paramSorts = append(paramSorts, field.Sort)
+				paramTypeofs = append(paramTypeofs, field.TypeofTag)
+			}
+			if len(census.Reads) > 0 {
+				continue
+			}
 		}
 		paramNames = append(paramNames, entries[0].Name)
 		// the site's sort where the arrow route supplied one, the
@@ -620,11 +1022,32 @@ func lowerSummaryBodyWithCaptures(
 			}
 		}
 		if shadowed {
-			return LoweredSummary{}, false
+			return LoweredSummary{}, "", "a capture shadowed by a parameter", false
 		}
 		paramNames = append(paramNames, capture.Name)
 		paramSorts = append(paramSorts, capture.Sort)
 		paramTypeofs = append(paramTypeofs, capture.TypeofTag)
+	}
+	// the `this` bundle rides as EXTRA entries after the declared
+	// parameters — the same ground the arrow route's captures take, which
+	// is why the two are EXCLUSIVE: only a method has a this bundle, and
+	// only an arrow or function expression carries captures, so no
+	// declaration ever lays out both. The assertion states it rather than
+	// leaving the two silently sharing indices.
+	bundle := thisBundleOf(ctx, declaration)
+	if bundle.Expanded && len(captures) > 0 {
+		return LoweredSummary{}, "", "a this bundle beside arrow captures", false
+	}
+	for _, entry := range bundle.Entries {
+		_, isWritten := bundle.Written[entry.Name]
+		bundleEntries = append(bundleEntries, BundleEntry{
+			Path:    entry.Name,
+			Index:   len(paramNames),
+			Written: isWritten,
+		})
+		paramNames = append(paramNames, entry.Name)
+		paramSorts = append(paramSorts, entry.Sort)
+		paramTypeofs = append(paramTypeofs, entry.TypeofTag)
 	}
 	// a concise arrow body IS a single return
 	var statements []*ast.Node
@@ -636,9 +1059,9 @@ func lowerSummaryBodyWithCaptures(
 	var locals []*ast.Node
 	var patterns []*ast.Node
 	if ast.IsBlock(body) {
-		collected, collectedPatterns, ok := collectSummaryLocals(body)
-		if !ok {
-			return LoweredSummary{}, false
+		collected, collectedPatterns, collectedOk := collectSummaryLocals(body)
+		if !collectedOk {
+			return LoweredSummary{}, "", "a nested function or an array binding pattern", false
 		}
 		locals, patterns = collected, collectedPatterns
 	}
@@ -652,7 +1075,7 @@ func lowerSummaryBodyWithCaptures(
 	// declaration's own `p` is a whole-name occurrence the use scan
 	// refuses — so this only keeps the two readings agreeing.)
 	for _, parameter := range parameters {
-		if _, expanded := recordParamMembersOf(parameter); expanded {
+		if _, expanded := recordParamMembersIn(ctx, parameter); expanded {
 			parameterNames[parameter.AsParameterDeclaration().Name().Text()] = struct{}{}
 		}
 	}
@@ -670,7 +1093,7 @@ func lowerSummaryBodyWithCaptures(
 	sorts = append(sorts, BindingKindNumber, BindingKindUnknown)
 	typeofs = append(typeofs, TypeofTagNumber, TypeofTagNone)
 	if len(bindings) > summarySlotBudget {
-		return LoweredSummary{}, false
+		return LoweredSummary{}, "", "a body past the slot budget", false
 	}
 	doneIndex := len(bindings) - 2
 	retIndex := len(bindings) - 1
@@ -692,6 +1115,15 @@ func lowerSummaryBodyWithCaptures(
 		Flow:         ctx,
 		SummaryTable: table,
 	}
+	// an ESCAPING receiver is the ONE whole decline of the expansion, and
+	// it is POROUS rather than declined: the body still lowers, its
+	// this-reads simply find no slot and hit the opaque floor. The note
+	// goes in before the statements lower so it names the earliest reason
+	// the body stopped being read whole — the receiver left the lowering's
+	// sight before any statement could.
+	if bundle.Escaped {
+		NoteFirstHavoc(context, "this escapes")
+	}
 	// allocate grows the CONTEXT's own vectors, not copies of them: a slot
 	// handed out past the initial layout must be readable through
 	// context.Sorts at the index it was given, and a Go slice header
@@ -705,22 +1137,47 @@ func lowerSummaryBodyWithCaptures(
 		context.Typeofs = append(context.Typeofs, typeofTag)
 		return len(context.Bindings) - 1, true
 	}
-	stmts, ok := LowerStatements(context, statements)
-	if !ok {
-		return LoweredSummary{}, false
+	stmts, statementsOk := LowerStatements(context, statements)
+	if !statementsOk {
+		// the statement walk names no one construct of its own — every
+		// construct it refused declined inside its own route. What is known
+		// here is that a STATEMENT of this body did not lower.
+		return LoweredSummary{}, "", "a statement the lowering does not read", false
 	}
 	// ParamCount counts the ENTRIES the caller fills, not the declared
-	// parameters: an expanded type-literal parameter contributes one entry
-	// per member, and the captures contribute one each. The apply route's
-	// "everything past ParamCount enters absent" rule reads this number, so
-	// it has to be the entry count or a record parameter's later leaves
-	// would enter absent.
+	// parameters: an expanded record parameter contributes one entry per
+	// member, a method's read this-fields one each, and the captures one
+	// each. The apply route's "everything past ParamCount enters absent"
+	// rule reads this number, so it has to be the entry count or a record
+	// parameter's later leaves — and every this-field — would enter absent.
+	//
+	// FirstHavoc is the set-once field the havoc routes fill: empty means
+	// every statement was READ, non-empty names the first construct that
+	// was stood in for. The door above turns the two into complete/porous.
 	return LoweredSummary{
-		Stmts:      stmts,
-		ParamCount: len(paramNames),
-		DoneIndex:  doneIndex,
-		RetIndex:   retIndex,
-		SlotCount:  len(context.Bindings),
-		Table:      table.Blobs,
-	}, true
+		Stmts:         stmts,
+		ParamCount:    len(paramNames),
+		DoneIndex:     doneIndex,
+		RetIndex:      retIndex,
+		SlotCount:     len(context.Bindings),
+		Table:         table.Blobs,
+		BundleEntries: bundleEntries,
+	}, context.FirstHavoc, "", true
+}
+
+// declinedParameterConstruct names WHICH parameter shape the expansion
+// refused — the three SummaryParameterEntriesIn answers false for, each
+// spelled as the construct it is rather than as a category.
+func declinedParameterConstruct(parameter *ast.Node) string {
+	pd := parameter.AsParameterDeclaration()
+	if pd.DotDotDotToken != nil {
+		return "a rest parameter"
+	}
+	if pd.Initializer != nil {
+		return "a defaulted parameter"
+	}
+	if pd.Name() == nil || !ast.IsIdentifier(pd.Name()) {
+		return "a binding-pattern parameter"
+	}
+	return "a parameter the expansion does not read"
 }

@@ -111,13 +111,30 @@ func TestIrRecordLowering_ARecordTakesAMatchingLiteralLeafForLeaf(t *testing.T) 
 	}
 }
 
-func TestIrRecordLowering_ALiteralOfADifferentShapeDeclines(t *testing.T) {
+func TestIrRecordLowering_ALiteralOfADifferentShapeTakesTheHavocFloor(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	context := recordLoweringContext(kernel,
 		[]string{"p.hi", "p.lo"},
 		[]BindingKind{BindingKindNumber, BindingKindNumber})
-	if _, ok := LowerStatements(context, loweringParse(t, `p = { hi: 1, other: 2 };`)); ok {
-		t.Errorf("a literal of a different shape lowered — its rows name leaves p has no slot for")
+	// the leaf-for-leaf route refuses a shape mismatch, and the
+	// TOTAL-LOWERING floor havocs every leaf p carries — the write
+	// moved the record somewhere the slots cannot follow, and unknown
+	// is exactly that claim
+	stmts, ok := LowerStatements(context, loweringParse(t, `p = { hi: 1, other: 2 };`))
+	if !ok {
+		t.Fatalf("a different-shaped literal declined outright, want the havoc floor")
+	}
+	havocked := map[int]struct{}{}
+	for _, s := range stmts {
+		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
+			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
+		}
+		havocked[s.Target] = struct{}{}
+	}
+	for slot := 0; slot < 2; slot++ {
+		if _, hit := havocked[slot]; !hit {
+			t.Errorf("leaf slot %d not havocked — its knowledge would survive a write that moved it", slot)
+		}
 	}
 }
 
@@ -155,13 +172,29 @@ func TestIrRecordLowering_AShorthandDestructuringReadsTheSameNamedLeaf(t *testin
 	}
 }
 
-func TestIrRecordLowering_ADestructuringDefaultDeclines(t *testing.T) {
+func TestIrRecordLowering_ADestructuringDefaultTakesTheHavocFloor(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	context := recordLoweringContext(kernel,
 		[]string{"p.lo", "lo"},
 		[]BindingKind{BindingKindNumber, BindingKindNumber})
-	if _, ok := LowerStatements(context, loweringParse(t, `const { lo = 3 } = p;`)); ok {
-		t.Errorf("a destructuring default lowered — the leaf's absence would take the default, which the read does not spell")
+	// the leaf-read route refuses a default (the leaf's absence would
+	// take it, which a plain read does not spell), and the floor havocs
+	// the bound name — unknown covers both the leaf and the default
+	stmts, ok := LowerStatements(context, loweringParse(t, `const { lo = 3 } = p;`))
+	if !ok {
+		t.Fatalf("a destructuring default declined outright, want the havoc floor")
+	}
+	sawBoundName := false
+	for _, s := range stmts {
+		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
+			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
+		}
+		if s.Target == 1 {
+			sawBoundName = true
+		}
+	}
+	if !sawBoundName {
+		t.Errorf("the bound name (slot 1) was not havocked — its old knowledge would survive the binding")
 	}
 }
 

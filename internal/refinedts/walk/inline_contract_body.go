@@ -17,6 +17,33 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
+// SummaryCallReceiver is the abstract value a METHOD call's receiver
+// holds in the CALLER's environment — what the summary route fills a
+// method's this-field entries from.
+//
+// `a.m(x)` reads a; `this.m(x)` reads the tracked `this`. The read runs
+// on the caller's own env, which is where the receiver's field knowledge
+// lives, and it happens BEFORE the callee's body is walked, so what it
+// answers is the state at the call.
+//
+// It runs only where the receiver READS WITHOUT EFFECT — a name, `this`,
+// or a chain of names. A receiver that is a call result, a constructor,
+// or anything else that runs would be evaluated a SECOND time here
+// (evaluate_call_expression already walked it for its effects), and a
+// second evaluation would double whatever it did. Those answer silence,
+// which fills every this-entry TOP — a loss of precision, never of
+// soundness, since the entries are what the summary quantifies over.
+func SummaryCallReceiver(ctx *FlowContext, env Env, callExpr *ast.CallExpression) abstractdomain.AbstractValue {
+	if callExpr == nil || !ast.IsPropertyAccessExpression(callExpr.Expression) {
+		return silence.Residue()
+	}
+	receiver := callExpr.Expression.AsPropertyAccessExpression().Expression
+	if receiver == nil || !ReadsWithoutEffect(receiver) {
+		return silence.Residue()
+	}
+	return evaluateExpression(ctx, env, receiver)
+}
+
 // InlineContractBody is inlineContractBody in the TS source.
 func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, argKnowns []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	tracing.Count("inlineContractCall", 0)
@@ -115,7 +142,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	// The summary's admitted bodies have no caller-visible effect
 	// beyond the return (KernelSummaryDirect's comment carries the
 	// argument), so the remembered outcome carries no posts.
-	if summarized, ok := KernelSummaryDirect(ctx, argKnowns, contract); ok {
+	if summarized, ok := KernelSummaryDirectOn(ctx, argKnowns, contract, SummaryCallReceiver(ctx, env, callExpr)); ok {
 		tracing.Count("inline.summaryDirect", 0)
 		if memoKey != "" {
 			inlineMemoMu.Lock()

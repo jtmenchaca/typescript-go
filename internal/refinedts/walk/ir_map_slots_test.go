@@ -230,8 +230,25 @@ func TestMapSlots_AWriteInsideAnUnreadableTestStillDeclines(t *testing.T) {
 			BindingKindNumber, BindingKindNumber, BindingKindNumber,
 			BindingKindNumber, BindingKindNumber,
 		})
-	if _, ok := LowerStatements(context, loweringParse(t, `if (m.has(k++)) { x = 1; } else { x = 2; }`)); ok {
-		t.Errorf("a test that steps k lowered — skipping the step would leave the walk's slot behind the real one")
+	// the branchBoth fallback refuses a writing test, and the statement
+	// then takes the TOTAL-LOWERING floor: every slot the if could have
+	// touched havocs — k (the step), x (both arms), and the collection's
+	// leaves (mentioned) — which COVERS the step rather than skipping it
+	stmts, ok := LowerStatements(context, loweringParse(t, `if (m.has(k++)) { x = 1; } else { x = 2; }`))
+	if !ok {
+		t.Fatalf("a writing test declined outright, want the havoc floor")
+	}
+	havocked := map[int]struct{}{}
+	for _, s := range stmts {
+		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
+			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
+		}
+		havocked[s.Target] = struct{}{}
+	}
+	for _, slot := range []int{3, 4} { // k and x
+		if _, hit := havocked[slot]; !hit {
+			t.Errorf("slot %d not havocked — the step or the arms' writes would be skipped", slot)
+		}
 	}
 	// the awaited head: parsed inside an async body so `await` is the
 	// operator and not an identifier, then asked of the gate directly —

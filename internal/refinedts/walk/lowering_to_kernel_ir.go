@@ -31,8 +31,64 @@ import (
 // lowered to the IR, or (nil, false) where any one declines.
 func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernelbridge.IrStatement, bool) {
 	var out []kernelbridge.IrStatement
+	// havocFloor is the LAST resort every composite route below falls
+	// through to when its own reading declines: the statement's writable
+	// slots take `unknown`, every other slot keeps its knowledge, and the
+	// body keeps its route. It answers false only where the slot set is
+	// genuinely unenumerable, and THAT is what still declines the body.
+	//
+	// A route that declines reaches here rather than returning, so "the
+	// havoc floor is after every route" is true of the composite
+	// statements too — an `if` whose arms did not lower, a `while` whose
+	// head did not, a `for` with no condition each havoc rather than
+	// costing the whole body its route.
+	havocFloor := func(s *ast.Node) ([]kernelbridge.IrStatement, bool) {
+		return OpaqueHavocStatements(context, s)
+	}
+	// THE HOIST STREAM. A call inside an EXPRESSION lowers to a temp-slot
+	// call statement that must be emitted BEFORE the statement holding the
+	// expression (ir_call_hoist.go). This is the statement stream it lands
+	// in: the readers append to context.Hoisted, and every route below
+	// flushes those ahead of its own statements.
+	//
+	// The two bookkeeping rules, applied uniformly below:
+	//
+	//	flush(out) — before appending a route's own statements, the hoists
+	//	  this statement accumulated go out first, in order, and the
+	//	  accumulation empties. Order is what makes the lowering right: the
+	//	  temp must be written before the statement that reads it.
+	//	dropHoists(mark) — a route whose reading DECLINED truncates the
+	//	  accumulation back to where this statement started, so a declined
+	//	  statement leaves no call statement behind for the havoc floor to
+	//	  sit after. (Why that is cleanliness rather than soundness:
+	//	  DropHoistedFrom's own comment.)
+	//
+	// The flag and the statement pointer are set for the whole loop and
+	// RESTORED at the end: this same context is handed to FoldBody by the
+	// loop routes, whose effect language has no statement stream, and a
+	// hoist there would append a statement nothing emits.
+	priorCanHoist, priorStatement := context.CanHoist, context.HoistStatement
+	priorHoisted, priorTemps := context.Hoisted, context.HoistedTemp
+	context.Hoisted, context.HoistedTemp = nil, nil
+	defer func() {
+		context.CanHoist, context.HoistStatement = priorCanHoist, priorStatement
+		context.Hoisted, context.HoistedTemp = priorHoisted, priorTemps
+	}()
+	flush := func(out []kernelbridge.IrStatement) []kernelbridge.IrStatement {
+		return append(out, TakeHoisted(context)...)
+	}
 	for index := 0; index < len(statements); index++ {
 		s := statements[index]
+		// the readers may hoist for THIS statement, and the ordering gate
+		// measures a candidate against THIS statement's other slot mentions
+		context.CanHoist = true
+		context.HoistStatement = s
+		// the per-node memo is THIS statement's: the same call node reached
+		// again by a later statement's readers is a different run of the
+		// site and gets its own temp
+		context.HoistedTemp = nil
+		mark := HoistedMark(context)
+		dropHoists := func() { DropHoistedFrom(context, mark) }
 		// `return e`: the result slot takes e, the done flag raises, and
 		// the rest of this block never runs — dead statements simply do
 		// not lower. A bare `return` raises the flag alone; the result
@@ -62,10 +118,14 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 				}
 				effect, ok := RhsEffect(context, sort, rs.Expression)
 				if ok {
+					// `return this.a(this.b(x)) + 1`: the hoisted calls go out
+					// first, then the result write reads their temps
+					out = flush(out)
 					out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: effect})
 					out = append(out, raise)
 					return out, true
 				}
+				dropHoists()
 				// `return await f(…)`: the ret-as-inner convention means the
 				// callee's ret slot already holds the SETTLED value, so this
 				// is exactly the `return f(…)` call lowering with the await
@@ -76,15 +136,18 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 				// ahead of the inlining route, which lowers the callee's body
 				// into fresh slots instead.
 				if awaited, awaitedOk := AwaitReturnStatements(context, rs.Expression, raise); awaitedOk {
+					out = flush(out)
 					out = append(out, awaited...)
 					return out, true
 				}
+				dropHoists()
 				// `return f(…)`: the callee inlines and its result slot is
 				// this return's value — absent where a path fell off, which
 				// the copy carries
 				head := Unwrapped(rs.Expression)
 				if ast.IsCallExpression(head) {
 					if inlined, ok := InlineCall(context, head); ok {
+						out = flush(out)
 						out = append(out, inlined.Stmts...)
 						out = append(out, kernelbridge.IrStatement{
 							Kind:   kernelbridge.IrStatementAssign,
@@ -94,6 +157,7 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 						out = append(out, raise)
 						return out, true
 					}
+					dropHoists()
 				}
 				// a boolean-shaped return (`return typeof x === "number" &&
 				// f(x)`): its truth writes {1}, its falsity {0} — the guard
@@ -117,10 +181,14 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 						raise,
 					}
 					if guarded, ok := LowerGuard(context, rs.Expression, thn, els); ok {
+						out = flush(out)
 						out = append(out, guarded...)
 						return out, true
 					}
 				}
+				// every reading of this return declined: nothing it hoisted may
+				// survive, and the return itself declines the body as before
+				dropHoists()
 				return nil, false
 			}
 			out = append(out, raise)
@@ -131,87 +199,150 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 		// declaration's position, in literal order. Tried ahead of the
 		// single-name reader, which has no slot for `p` itself.
 		if assignments, ok := ObjectDeclarationAssignmentsOf(context, s); ok {
+			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		dropHoists()
 		// `const a = [1, 2, 3]` — an array local flattened into its two
 		// slots: the count and the join of the elements.
 		if assignments, ok := ArrayDeclarationAssignmentsOf(context, s); ok {
+			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		dropHoists()
 		// `const m = new Map(…)` / `new Set(…)` — a collection flattened
 		// into its size, values, and (Map) keys slots.
 		if assignments, ok := MapDeclarationAssignmentsOf(context, s); ok {
+			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		dropHoists()
 		// `const { x, y } = p` — a flattened record read leaf by leaf into
 		// the destructured names.
 		if assignments, ok := DestructuringAssignmentsOf(context, s); ok {
+			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		dropHoists()
 		// `p = q` / `p = { … }` — a whole record written leaf for leaf.
 		// Ahead of the single-name reader, which has no slot for `p`.
 		if assignments, ok := RecordAssignmentOf(context, s); ok {
+			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		dropHoists()
 		// `a.push(v)` — the length steps, the element slot joins.
 		if assignments, ok := ArrayPushAssignmentsOf(context, s); ok {
+			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		dropHoists()
 		// `a[i] = v` — the element slot joins; the length is untouched.
 		if assignments, ok := ArrayIndexWriteOf(context, s); ok {
+			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		dropHoists()
 		// `m.set(k, v)` / `s.add(v)` — the size may step, the keys and
 		// values slots join.
 		if assignments, ok := MapSetAssignmentsOf(context, s); ok {
+			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		dropHoists()
 		// `m.delete(k)` — the size may shrink (never below zero); the
 		// keys and values slots keep their joins.
 		if assignments, ok := MapDeleteAssignmentsOf(context, s); ok {
+			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		dropHoists()
+		// `x = count + f(y)` / `let x = f(g(y)) + 1`: the RHS reading hoists
+		// each call it met, left to right, and those statements go out ahead
+		// of the assignment that reads their temps
 		if assignment, ok := AssignmentOf(context, s); ok {
+			out = flush(out)
 			out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: assignment.Target, Effect: assignment.Effect})
 			continue
 		}
+		dropHoists()
+		// `this.value = e` where value is a SETTER: the write runs a
+		// body, so it lowers to the setter's own call statement — the
+		// value at entry 0, the written this-fields riding back through
+		// rets. Tried after AssignmentOf, whose target resolution has no
+		// slot for an accessor-backed name.
+		if viaSetter, ok := SetterWriteOf(context, s); ok {
+			out = flush(out)
+			out = append(out, viaSetter...)
+			continue
+		}
+		dropHoists()
 		// `await f(…)` in every statement position, plus the two promise
 		// shapes: a promise HELD in a local and only ever awaited, and
 		// `await Promise.all([…])` whose value is unused. Tried ahead of
 		// the plain call route, which has no reading for an await node.
 		if viaAwait, ok := AwaitStatementOf(context, s); ok {
+			out = flush(out)
 			out = append(out, viaAwait...)
 			continue
 		}
+		dropHoists()
 		// a CALLBACK-taking call (`xs.map(cb)` and its siblings) whose
 		// callback converts: the hook lowers the whole site. Tried ahead
 		// of the plain call route, whose callee resolution has no reading
 		// for a collection method.
 		if viaCallback, ok := SummaryCallbackStatementOf(context, s); ok {
+			out = flush(out)
 			out = append(out, viaCallback...)
 			continue
 		}
+		dropHoists()
 		// `f(…)` / `x = f(…)` where the callee has a compiled summary:
 		// the call statement, applying the summary kernel-side. Tried
 		// ahead of the inlining route, which lowers the callee's body
 		// into fresh slots instead.
 		if viaSummary, ok := SummaryCallStatementOf(context, s); ok {
+			out = flush(out)
 			out = append(out, viaSummary...)
 			continue
 		}
+		dropHoists()
 		if viaCall, ok := CallAssignmentOf(context, s); ok {
+			out = flush(out)
 			out = append(out, viaCall...)
 			continue
 		}
+		dropHoists()
+		// EVERY ROUTE PAST THIS POINT IS COMPOSITE, and none of them has a
+		// statement position for a hoist of its OWN expressions:
+		//
+		//   - the for-of routes and the loop routes fold their bodies into
+		//     the solver's effect-per-binding form (FoldBody, ir_loop.go),
+		//     which has no statement stream at all;
+		//   - the `if` and `switch` routes lower their ARMS through nested
+		//     LowerStatements calls, which set the flag for themselves and
+		//     restore it on the way out — an arm's own hoists belong inside
+		//     that arm, never ahead of the whole branch, since the arm may
+		//     not run;
+		//   - the guard composer reads the CONDITION, which runs before
+		//     either arm, but a hoist there would be a statement emitted
+		//     ahead of a branch whose test is the very expression that was
+		//     hoisted out of — the test would then read a temp written by a
+		//     call the condition's own short-circuiting may never reach.
+		//
+		// So the flag goes DOWN here and every one of them reads exactly as
+		// it did before hoisting existed. The nested LowerStatements calls
+		// raise it again for their own statements.
+		context.CanHoist = false
 		// `for (const x of a)` over a flattened array — the loop whose
 		// per-pass element effect is the element slot's var.
 		if loop, ok := ArrayForOfLowering(context, s); ok {
@@ -262,27 +393,38 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 				dropBound()
 			}
 			els, elsOk := LowerStatements(context, StatementsOf(ifStmt.ElseStatement))
-			if !thnOk || !elsOk {
-				return nil, false
+			var guarded []kernelbridge.IrStatement
+			guardedOk := false
+			if thnOk && elsOk {
+				// the guard composer reads the head: single tests, typeof
+				// folds, `!`/`&&`/`||` nesting, and inlined call guards
+				guarded, guardedOk = LowerGuard(context, ifStmt.Expression, thn, els)
+				if !guardedOk && OpaqueTestableCondition(ifStmt.Expression) {
+					// the last BRANCH route, after every reading declined: a
+					// condition that RUNS nothing the lowering must account for
+					// still gets its statement, as the branch that tests nothing.
+					// Both arms walk from the state as it stood and the kernel
+					// joins their exits, so an unreadable test costs precision at
+					// the merge and never costs the body its lowering.
+					guarded = []kernelbridge.IrStatement{{
+						Kind: kernelbridge.IrStatementBranchBoth,
+						Then: thn,
+						Else: els,
+					}}
+					guardedOk = true
+				}
 			}
-			// the guard composer reads the head: single tests, typeof
-			// folds, `!`/`&&`/`||` nesting, and inlined call guards
-			guarded, ok := LowerGuard(context, ifStmt.Expression, thn, els)
-			if !ok {
-				// the LAST route, after every reading declined: a condition
-				// that RUNS nothing the lowering must account for still gets
-				// its statement, as the branch that tests nothing. Both arms
-				// walk from the state as it stood and the kernel joins their
-				// exits, so an unreadable test costs precision at the merge
-				// and never costs the body its lowering.
-				if !OpaqueTestableCondition(ifStmt.Expression) {
+			// an arm that did not lower, or a condition the opaque branch
+			// refuses (it WRITES, or it awaits, or it constructs), falls to
+			// the havoc floor: the whole if havocs every slot either arm or
+			// the head could have written, which is sound and keeps the body.
+			if !guardedOk {
+				havoc, havocOk := havocFloor(s)
+				if !havocOk {
 					return nil, false
 				}
-				guarded = []kernelbridge.IrStatement{{
-					Kind: kernelbridge.IrStatementBranchBoth,
-					Then: thn,
-					Else: els,
-				}}
+				out = append(out, havoc...)
+				continue
 			}
 			out = append(out, guarded...)
 			// an arm that may have RETURNED: the block's remainder runs
@@ -312,7 +454,17 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 			head, headOk := LoopHeadOf(context, while.Expression)
 			body, bodyOk := LoopBodyOf(context, while.Statement, nil)
 			if !headOk || !bodyOk {
-				return nil, false
+				// a head or body the loop form cannot spell: the whole loop
+				// havocs the union of what its head and body could write, ONCE.
+				// A loop is its statements repeated and havoc is idempotent —
+				// writing unknown into a slot twice leaves the same state — so
+				// one pass covers every trip count, the zero-trip case included.
+				havoc, havocOk := havocFloor(s)
+				if !havocOk {
+					return nil, false
+				}
+				out = append(out, havoc...)
+				continue
 			}
 			out = append(out, LoopStatement(context, head, body))
 			continue
@@ -326,20 +478,19 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 			// statement. No kernel form is added.
 			do := s.AsDoStatement()
 			once, onceOk := LowerStatements(context, StatementsOf(do.Statement))
-			if !onceOk {
-				return nil, false
-			}
 			head, headOk := LoopHeadOf(context, do.Expression)
 			body, bodyOk := LoopBodyOf(context, do.Statement, nil)
-			if !headOk || !bodyOk {
-				return nil, false
-			}
 			// a once-through that RETURNS would make the loop's remainder
 			// conditional on the done flag, which the loop form cannot
-			// express — decline rather than walk a body the flag should
-			// have skipped
-			if context.Result != nil && RaisesDone(once, context.Result.Done) {
-				return nil, false
+			// express — the two proved halves do not compose there
+			returns := onceOk && context.Result != nil && RaisesDone(once, context.Result.Done)
+			if !onceOk || !headOk || !bodyOk || returns {
+				havoc, havocOk := havocFloor(s)
+				if !havocOk {
+					return nil, false
+				}
+				out = append(out, havoc...)
+				continue
 			}
 			out = append(out, once...)
 			out = append(out, LoopStatement(context, head, body))
@@ -349,31 +500,67 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 			// for (init; cond; step) body — the init runs before the loop,
 			// the step folds as the body's final statement
 			forStmt := s.AsForStatement()
-			if forStmt.Condition == nil {
-				return nil, false
+			var head LoopHead
+			var body LoopBody
+			headOk, bodyOk := false, false
+			if forStmt.Condition != nil {
+				head, headOk = LoopHeadOf(context, forStmt.Condition)
+				body, bodyOk = LoopBodyOf(context, forStmt.Statement, forStmt.Incrementor)
 			}
-			head, headOk := LoopHeadOf(context, forStmt.Condition)
-			body, bodyOk := LoopBodyOf(context, forStmt.Statement, forStmt.Incrementor)
-			if !headOk || !bodyOk {
-				return nil, false
-			}
+			// the init has to lower too, and it is lowered BEFORE the loop
+			// statement is appended so a declining init leaves nothing behind
+			var init AssignmentTarget
+			initOk := forStmt.Initializer == nil
 			if forStmt.Initializer != nil {
-				var init AssignmentTarget
-				var initOk bool
 				if ast.IsVariableDeclarationList(forStmt.Initializer) {
 					init, initOk = DeclarationAssignment(context, forStmt.Initializer.AsVariableDeclarationList().Declarations.Nodes)
 				} else {
 					init, initOk = AssignmentOfExpression(context, forStmt.Initializer)
 				}
-				if !initOk {
+			}
+			if !headOk || !bodyOk || !initOk {
+				// no condition (`for (;;)`), an unreadable head, an unreadable
+				// body, or an init the assignment grammar declines: the whole
+				// for havocs the union of what its three clauses and its body
+				// could write, once — idempotent, so one pass covers every trip
+				// count including zero
+				havoc, havocOk := havocFloor(s)
+				if !havocOk {
 					return nil, false
 				}
+				out = append(out, havoc...)
+				continue
+			}
+			if forStmt.Initializer != nil {
 				out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: init.Target, Effect: init.Effect})
 			}
 			out = append(out, LoopStatement(context, head, body))
 			continue
 		}
-		return nil, false
+		// THE LAST RESORT, after every route above including the if's own
+		// branchBoth fallback: a statement nothing read still cannot do
+		// anything but move slots, and the slots it could have moved are
+		// enumerable — its assignment targets, the leaves of every
+		// flattened local it mentions, and the names it declares. Each one
+		// takes `unknown`, every other slot keeps its knowledge, and the
+		// body keeps its route. (ir_opaque_havoc.go; false only where the
+		// slot set genuinely cannot be enumerated, which is what still
+		// declines the body.)
+		//
+		// The hoist accumulation is EMPTY here by the rules above — every
+		// route that could have added to it either flushed on success or
+		// truncated on decline, and the composite routes ran with hoisting
+		// off. The drop states that invariant rather than trusting it: a
+		// route added later that forgets its own truncation would otherwise
+		// leak a call statement into the floor's output, and the floor's
+		// whole contract is that it lowers to assignments of unknown and
+		// nothing else.
+		dropHoists()
+		havoc, havocOk := OpaqueHavocStatements(context, s)
+		if !havocOk {
+			return nil, false
+		}
+		out = append(out, havoc...)
 	}
 	return out, true
 }

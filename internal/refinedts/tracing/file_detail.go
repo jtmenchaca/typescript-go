@@ -58,6 +58,12 @@ type FileDetail struct {
 	JoinMemoHit        int64 // declaredJoin memo hit
 	JoinMemoMiss       int64 // declaredJoin computed fresh
 
+	// Summaries is this entry's covered-ness tally: one outcome per
+	// contracted body, with the first havocked construct or decline
+	// reason named. Filled through NoteSummaryOutcome
+	// (summary_outcomes.go), on the goroutine that walks the entry.
+	Summaries SummaryOutcomeCounts
+
 	// SlowContracts are the costliest AnalyzeFunction calls in this
 	// file, kept ranked as they arrive.
 	SlowContracts []ContractCost

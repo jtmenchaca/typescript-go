@@ -57,6 +57,13 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			if i, ok := ArrayLengthSlotOf(context, node); ok {
 				return numberSlot(i)
 			}
+			// a deep access whose last step is a GETTER
+			// (`this.holder.value`) never reaches Opaque —
+			// LowerEffectExpression's deep-path arm answers ReadNode
+			// alone — so the getter route is tried here too
+			if held, ok := GetterReadEffect(context, node); ok {
+				return held, true
+			}
 			return kernelbridge.LoopEffect{}, false
 		},
 		Opaque: func(node *ast.Node) (kernelbridge.LoopEffect, bool) {
@@ -72,7 +79,21 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			if slot, ok := MapValueSlotOf(context, node); ok && context.Sorts[slot] == BindingKindNumber {
 				return MapGetReadEffect(context, node)
 			}
-			return kernelbridge.LoopEffect{}, false
+			// `this.value` where value is a GETTER: the read runs a body,
+			// so it hoists as a zero-argument call exactly as an explicit
+			// call does. Ahead of HoistCallEffect, which reads only a
+			// CallExpression and has no reading for a property access.
+			if held, ok := GetterReadEffect(context, node); ok {
+				return held, true
+			}
+			// a CALL inside the expression — `count + this.bump()`, an
+			// argument, a ternary arm: it HOISTS to a temp-slot call
+			// statement emitted before this statement, and the expression
+			// reads the temp. Gated on a statement stream existing and on
+			// the reordering being observable by nothing
+			// (ir_call_hoist.go); a refusal reads exactly as it did before
+			// the route existed.
+			return HoistCallEffect(context, node)
 		},
 	})
 }

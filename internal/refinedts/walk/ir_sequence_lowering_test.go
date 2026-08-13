@@ -173,15 +173,31 @@ func TestIrSequenceLowering_ATemplateLiteralLowersAsAConcatChainOverItsLiteralCh
 	}
 }
 
-func TestIrSequenceLowering_ATemplateWithANumberSortedSubstitutionDeclines(t *testing.T) {
+func TestIrSequenceLowering_ATemplateWithANumberSortedSubstitutionTakesTheHavocFloor(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
-	_, ok := LowerStatements(&LoweringContext{
+	// the sequence reading refuses a number-sorted substitution (its
+	// spelled digits are ToString's, which no set operation here
+	// computes), and the TOTAL-LOWERING floor havocs the target — out
+	// becomes unknown rather than the body declining
+	stmts, ok := LowerStatements(&LoweringContext{
 		Bindings: []string{"n", "out"},
 		Sorts:    []BindingKind{BindingKindNumber, BindingKindString},
 		Narrow:   kernel.Narrow,
 	}, loweringParse(t, "out = `a${n}b`;"))
-	if ok {
-		t.Errorf("LowerStatements(number substitution) ok = true, want false")
+	if !ok {
+		t.Fatalf("a number substitution declined outright, want the havoc floor")
+	}
+	sawTarget := false
+	for _, s := range stmts {
+		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
+			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
+		}
+		if s.Target == 1 {
+			sawTarget = true
+		}
+	}
+	if !sawTarget {
+		t.Errorf("out (slot 1) was not havocked — its old knowledge would survive the write")
 	}
 }
 

@@ -56,6 +56,28 @@ type LoweredSummary struct {
 	// statements. A body with no composed calls carries an empty
 	// table.
 	Table []kernelbridge.SummaryBlob
+	// BundleEntries: one row per expanded bundle entry — this-fields
+	// and record-parameter leaves — in slot order. Path is the slot
+	// spelling ("this.container", "p.lo"), Index its slot index, and
+	// Written whether the BODY writes that field (the census's Writes).
+	//
+	// The call sites read this to map written field exits back through
+	// rets, the way a return value rides: an entry the body wrote holds a
+	// different value at exit than the caller's own knowledge of the
+	// field, and nothing else in the summary names WHICH slots those are.
+	// A body with no expanded bundle carries no rows.
+	BundleEntries []BundleEntry
+}
+
+// BundleEntry is one expanded bundle entry: where its slot sits and
+// whether the body moves it. The layout fills these rows and the call
+// sites read them — a second reading of the census at a call site would
+// be a chance for the two to disagree about which slot is which, so the
+// layout's own answer rides out beside the statements.
+type BundleEntry struct {
+	Path    string
+	Index   int
+	Written bool
 }
 
 // kernelSummariesMu guards kernelSummaries: the LOWERED body per
@@ -294,14 +316,36 @@ func SummaryResult(
 	argKnowns []abstractdomain.AbstractValue,
 	resolveCallee func(callee *ast.Node) *ast.Node,
 ) (abstractdomain.AbstractValue, bool) {
-	return applySummary(&FlowContext{P: p}, declaration, argKnowns)
+	return applySummary(&FlowContext{P: p}, declaration, argKnowns, unknownReceiver())
 }
 
 // SummaryResultIn is the same route with the walk's own context — the
 // spelling a caller that HAS a FlowContext should use, so composed
 // calls resolve through its contract registry.
+//
+// The receiver is UNKNOWN here: this spelling holds no call node to read
+// one off, so a method's this-entries all fill TOP — sound, because the
+// entries are what the summary quantifies over. A caller that can reach
+// the receiver goes through SummaryResultOn.
 func SummaryResultIn(ctx *FlowContext, declaration *ast.Node, argKnowns []abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
-	return applySummary(ctx, declaration, argKnowns)
+	return applySummary(ctx, declaration, argKnowns, unknownReceiver())
+}
+
+// SummaryResultOn is SummaryResultIn with the call's RECEIVER supplied —
+// what a method's this-entries are filled from.
+func SummaryResultOn(
+	ctx *FlowContext,
+	declaration *ast.Node,
+	argKnowns []abstractdomain.AbstractValue,
+	receiver abstractdomain.AbstractValue,
+) (abstractdomain.AbstractValue, bool) {
+	return applySummary(ctx, declaration, argKnowns, receiver)
+}
+
+// unknownReceiver is the receiver a call site that reached none supplies:
+// a value nothing is known about, which fills every this-entry TOP.
+func unknownReceiver() abstractdomain.AbstractValue {
+	return silence.Residue()
 }
 
 // applySummary is the summary route: COMPILE once per declaration,
@@ -320,6 +364,7 @@ func applySummary(
 	ctx *FlowContext,
 	declaration *ast.Node,
 	argKnowns []abstractdomain.AbstractValue,
+	receiver abstractdomain.AbstractValue,
 ) (abstractdomain.AbstractValue, bool) {
 	if EngineKernelHeld() == nil {
 		return abstractdomain.AbstractValue{}, false
@@ -338,7 +383,7 @@ func applySummary(
 	// locals and composition's grown ones — starts absent, and each
 	// inlined done flag is assigned {0} in the statements themselves;
 	// a state the wire cannot spell declines THIS call, not the summary
-	states, statesOk := summaryEntryStates(declaration, summary, argKnowns)
+	states, statesOk := summaryEntryStates(ctx, declaration, summary, argKnowns, receiver)
 	if !statesOk {
 		return abstractdomain.AbstractValue{}, false
 	}
@@ -355,11 +400,23 @@ func applySummary(
 	}
 	retExit := exits[summary.RetIndex]
 	doneExit := exits[summary.DoneIndex]
-	// a TOP result determines nothing the inline walk could not say
-	// better — decline rather than answer weaker than the fallback
-	if retExit.Top {
+	// THE SERVING RULE: only a COMPLETE body serves, and it serves
+	// unconditionally — TOP ret included. The compile is proved equal
+	// to the kernel walk (summarize_eq), and the lowering that produced
+	// it read every statement, so the answer carries the same knowledge
+	// the inline walk would derive. A POROUS or unrecorded outcome
+	// DECLINES OUTRIGHT, even with a concrete ret: a havocked construct
+	// is precisely a place the walk still reads and the lowering does
+	// not, so a porous answer can be weaker than the inline walk's —
+	// and serving those was measured (recharts, 2026-08-13) to widen
+	// the downstream sets until the call-site join machinery burned 14x
+	// the file's whole former wall. Porous blobs still count coverage;
+	// they no longer answer calls.
+	outcome, _, recorded := SummaryOutcomeOf(declaration)
+	if !recorded || outcome != SummaryComplete {
 		return abstractdomain.AbstractValue{}, false
 	}
+	serveTop := retExit.Top
 	// the result slot's own absent flag is the ENTRY state surviving
 	// the joins — path correlation the encoding routes through the
 	// done flag instead: every RETURNED value was written into the
@@ -367,7 +424,16 @@ func applySummary(
 	// the flag-still-down case decided below
 	answer := KnownOfState(kernelbridge.KnownStateWire{Set: retExit.Set, Absent: false, Nan: retExit.Nan})
 	if answer.Kind == abstractdomain.KindUnknown {
-		return abstractdomain.AbstractValue{}, false
+		// a COMPLETE body serving a TOP ret answers SILENCE, which is what
+		// "the return value is unconstrained" spells — and the route still
+		// says it SERVED, so the caller keeps this answer instead of
+		// re-walking the body to derive the same nothing. Every other
+		// unknown answer declines, exactly as before.
+		if !serveTop {
+			return abstractdomain.AbstractValue{}, false
+		}
+		tracing.Count("summaryServed", 0)
+		return promiseWrappedIfAsync(declaration, silence.Residue()), true
 	}
 	// a path may fall off the end (the flag can still be down at exit):
 	// the return is undefined on it
@@ -375,11 +441,13 @@ func applySummary(
 	if !allReturned {
 		answer = abstractdomain.PossiblyUndefined(answer, "", false, false)
 	}
-	// the claim's grade floors at the arguments' own standing. Indexed by
-	// DECLARED PARAMETER, not by entry — and an EXPANDED parameter's
-	// entries were built from the object's FIELDS, so each read field's
-	// own grade joins the floor beside the object's: an object at proved
-	// standing whose lo came from a spec row states no more than spec.
+	// the claim's grade floors at the standing of everything the entries
+	// were built from — the arguments, and (below) a method's receiver.
+	// The argument walk is indexed by DECLARED PARAMETER, not by entry —
+	// and an EXPANDED parameter's entries were built from the object's
+	// FIELDS, so each read field's own grade joins the floor beside the
+	// object's: an object at proved standing whose lo came from a spec row
+	// states no more than spec.
 	floor := abstractdomain.TrustProved
 	for index, parameter := range declaration.Parameters() {
 		if index >= len(argKnowns) {
@@ -387,7 +455,7 @@ func applySummary(
 		}
 		argument := argKnowns[index]
 		floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(argument))
-		members, expanded := recordParamMembersOf(parameter)
+		members, expanded := recordParamMembersIn(ctx, parameter)
 		if !expanded {
 			continue
 		}
@@ -396,6 +464,23 @@ func applySummary(
 				floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(argument.Keys[at].Value))
 			}
 		}
+	}
+	// a METHOD's this-entries were built from the RECEIVER's fields, so
+	// each read field's own standing joins the floor the same way — a
+	// receiver at proved standing whose container came from a spec row
+	// states no more than spec. A field the receiver does not name entered
+	// TOP and claims nothing, so it floors nothing.
+	if receiver.Kind == abstractdomain.KindObject {
+		for _, entry := range summary.BundleEntries {
+			field, isThis := thisFieldNameOf(entry.Path)
+			if !isThis {
+				continue
+			}
+			if at, has := objectKeyIndex(receiver, field); has {
+				floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(receiver.Keys[at].Value))
+			}
+		}
+		floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(receiver))
 	}
 	tracing.Count("summaryServed", 0)
 	return promiseWrappedIfAsync(declaration, abstractdomain.AtTrustLevel(answer, floor)), true
@@ -418,21 +503,42 @@ func applySummary(
 // them. So does an object missing a declared member, or one whose field
 // is itself unspellable.
 //
-// The walk stops once ParamCount entries are built: past the declared
-// parameters the vector holds an arrow route's captures, which this
-// route (the declaration route, no captures) never has, and the caller
-// fills the rest absent.
+// Past the declared parameters the vector holds a METHOD's this-entries,
+// which the RECEIVER fills field by field (thisEntryStates below), or an
+// arrow route's captures, which this route never has; anything still
+// short of ParamCount fills absent.
 func summaryEntryStates(
+	ctx *FlowContext,
 	declaration *ast.Node,
 	summary LoweredSummary,
 	argKnowns []abstractdomain.AbstractValue,
+	receiver abstractdomain.AbstractValue,
 ) ([]kernelbridge.KnownStateWire, bool) {
 	states := make([]kernelbridge.KnownStateWire, 0, summary.SlotCount)
 	for index, parameter := range declaration.Parameters() {
 		if len(states) >= summary.ParamCount {
 			break
 		}
-		members, expanded := recordParamMembersOf(parameter)
+		// a CLASS-TYPED parameter's bundle rows fill from that
+		// parameter's own argument, field by field, in the layout's own
+		// order — the scalar rule would push one whole-name state at the
+		// wrong index. A non-object or missing argument tops every row
+		// (BundleParamEntryStates' rule): a class instance the caller
+		// knows nothing about is the routine case, and the bundle exists
+		// so the body can read fields the caller never had.
+		if _, census, _, isBundle := BundleParamCensus(ctx, declaration.Body(), parameter); isBundle && !census.Escapes && len(census.Reads) > 0 {
+			var argument abstractdomain.AbstractValue
+			if index < len(argKnowns) {
+				argument = argKnowns[index]
+			}
+			row, filled := BundleParamEntryStates(argument, census.Reads)
+			if !filled {
+				return nil, false
+			}
+			states = append(states, row...)
+			continue
+		}
+		members, expanded := recordParamMembersIn(ctx, parameter)
 		if !expanded {
 			if index >= len(argKnowns) {
 				states = append(states, absentState)
@@ -467,10 +573,64 @@ func summaryEntryStates(
 			states = append(states, wire)
 		}
 	}
+	// the METHOD's this-entries, filled from the receiver's own field
+	// knowledge — the same objectKeyIndex/StateOfKnown reading the
+	// record-parameter apply above takes
+	for _, entry := range summary.BundleEntries {
+		if entry.Index < len(states) || entry.Index >= summary.ParamCount {
+			continue
+		}
+		field, isThis := thisFieldNameOf(entry.Path)
+		if !isThis {
+			continue
+		}
+		for len(states) < entry.Index {
+			states = append(states, absentState)
+		}
+		states = append(states, thisEntryState(receiver, field))
+	}
 	for len(states) < summary.ParamCount {
 		states = append(states, absentState)
 	}
 	return states, true
+}
+
+// thisFieldNameOf is the field behind a this-entry's slot spelling:
+// "this.container" is container. Anything not spelled under `this` is
+// some other bundle's row (a record parameter's leaf) and answers false.
+func thisFieldNameOf(path string) (string, bool) {
+	const under = "this."
+	if len(path) <= len(under) || path[:len(under)] != under {
+		return "", false
+	}
+	return path[len(under):], true
+}
+
+// thisEntryState is what ONE this-field entry enters holding, read from
+// the call's receiver.
+//
+// A receiver that is an OBJECT carrying knowledge of the field enters
+// with that field's own state. Everything else enters TOP — a receiver
+// that is not an object, one whose knowledge does not name this field,
+// and a field whose value the wire cannot spell.
+//
+// TOP, and never ABSENT: an unknown field is UNKNOWN, while absent would
+// claim the field is undefined — a claim no receiver made, and one the
+// body's reads would then narrow on. TOP is what the entry quantifier
+// already covers, so filling it costs precision and never soundness.
+func thisEntryState(receiver abstractdomain.AbstractValue, field string) kernelbridge.KnownStateWire {
+	if receiver.Kind != abstractdomain.KindObject {
+		return kernelbridge.KnownStateWire{Top: true}
+	}
+	at, has := objectKeyIndex(receiver, field)
+	if !has {
+		return kernelbridge.KnownStateWire{Top: true}
+	}
+	wire, ok := StateOfKnown(receiver.Keys[at].Value)
+	if !ok {
+		return kernelbridge.KnownStateWire{Top: true}
+	}
+	return wire
 }
 
 // promiseWrappedIfAsync is the ret-as-inner convention's boundary: an
@@ -526,9 +686,27 @@ func promiseWrappedIfAsync(declaration *ast.Node, answer abstractdomain.Abstract
 // admits therefore has exactly one caller-visible outcome — the
 // return value — which the kernel's walk_sound answer covers, and
 // which summarize_eq carries through the compile.
+// The receiver is UNKNOWN in this spelling, so a METHOD's this-entries
+// all fill TOP. A caller that can reach the call's receiver goes through
+// KernelSummaryDirectOn.
 func KernelSummaryDirect(ctx *FlowContext, argKnowns []abstractdomain.AbstractValue, contract *FunctionContract) (abstractdomain.AbstractValue, bool) {
+	return KernelSummaryDirectOn(ctx, argKnowns, contract, unknownReceiver())
+}
+
+// KernelSummaryDirectOn is the same route with the call's RECEIVER
+// supplied — the value a METHOD's this-field entries are filled from,
+// read off the call expression's property access in the caller's env
+// (SummaryCallReceiver, inline_contract_body.go). A plain function call,
+// and a receiver the caller could not read without running it, supply
+// silence and every this-entry fills TOP.
+func KernelSummaryDirectOn(
+	ctx *FlowContext,
+	argKnowns []abstractdomain.AbstractValue,
+	contract *FunctionContract,
+	receiver abstractdomain.AbstractValue,
+) (abstractdomain.AbstractValue, bool) {
 	if !summaryLowerable(contract.Declaration) {
 		return abstractdomain.AbstractValue{}, false
 	}
-	return applySummary(ctx, contract.Declaration, argKnowns)
+	return applySummary(ctx, contract.Declaration, argKnowns, receiver)
 }

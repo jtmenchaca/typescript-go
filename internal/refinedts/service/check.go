@@ -418,13 +418,21 @@ func loadedKernel() *kernelbridge.RefinedTSKernel {
 	return kernel
 }
 
-// setupKernel loads the kernel and points the operator transfers and
-// the condition narrowings at it. The two hooks are package-level
-// writes, so this runs ONCE per run or per sweep — never inside a
-// concurrent per-entry path.
+// setupKernel loads the kernel and points the operator transfers, the
+// condition narrowings, AND the walk's engine at it. The hooks are
+// package-level writes, so this runs ONCE per run or per sweep —
+// never inside a concurrent per-entry path.
+//
+// The engine hook is the one the whole summary route gates on
+// (EngineKernelHeld): without it, applySummary and every lowering
+// that compiles a blob decline on their first line, and the kernel
+// serves nothing but per-operation transfers. It was wired in every
+// TEST and never here — the measurement that found it read
+// kernel.ask=0 on every hot file while the engine sat built and dark.
 func setupKernel() *kernelbridge.RefinedTSKernel {
 	kernel := loadedKernel()
 	walk.SetTransferKernel(kernel)
+	walk.SetEngineKernel(kernel)
 	narrowing.SetNarrowKernel(kernel)
 	return kernel
 }

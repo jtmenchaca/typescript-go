@@ -71,6 +71,77 @@ type LoweringContext struct {
 	// lowering appends to the SAME table the whole body rides with.
 	// Nil: call statements decline (no table to grow).
 	SummaryTable *SummaryTableBuilder
+	// FirstHavoc: the spelling of the FIRST construct this lowering
+	// havocked, or "" where nothing did. Set once — the first havoc
+	// route to reach it wins, and every later one leaves it alone — so
+	// the name always points at the earliest place the body stopped
+	// being read whole.
+	//
+	// This field is only FILLED here. The body-level owner reads it
+	// when the lowering finishes and reports the body's outcome from it
+	// (empty is `complete`, non-empty is `porous` naming this
+	// construct); no route in the lowering reads it back, and no route
+	// in the lowering records an outcome of its own.
+	FirstHavoc string
+	// CanHoist: does a STATEMENT STREAM exist to hoist a call
+	// subexpression into? A call inside an expression lowers as a
+	// temp-slot call statement emitted BEFORE the statement that
+	// contained it (ir_call_hoist.go) — which is only possible where
+	// something is collecting statements.
+	//
+	// False everywhere else, and the two "everywhere else" are real: the
+	// loop solver's body folding (FoldBody, ir_loop.go) reads the same
+	// effect grammar into an effect-per-binding vector with no statement
+	// stream at all, and the loop-effect lowering (loop_effect.go) never
+	// builds a LoweringContext in the first place. A hoist in either
+	// place would append a statement nothing ever emits — the call would
+	// silently vanish and the temp would read its entry state, which is
+	// a WRONG answer, not a weak one. So the flag is set true by
+	// LowerStatements alone, and cleared for the duration of any reading
+	// that has no statement position.
+	CanHoist bool
+	// HoistStatement: the statement whose expressions are being read right
+	// now — what the ordering gate measures a candidate hoist against
+	// (hoistingIsOrderSafe). Set by LowerStatements alongside CanHoist;
+	// nil refuses every hoist, since a reordering cannot be proved safe
+	// against a statement nobody named.
+	HoistStatement *ast.Node
+	// Hoisted: the call statements accumulated for the statement being
+	// read, in the order the expression readers reached them — which is
+	// left to right, so several calls in one expression run among
+	// themselves exactly as JavaScript runs them. The statement route
+	// flushes these ahead of its own statements (TakeHoisted) or
+	// truncates them away when its reading declined (DropHoistedFrom).
+	Hoisted []kernelbridge.IrStatement
+	// HoistedTemp: the temp slot each call NODE already hoisted to, for
+	// the statement being read. One call site runs ONCE in the real run,
+	// so it lowers to one call statement however many times a reader
+	// reaches it — and readers do reach the same node repeatedly:
+	// SortOfArg (ir_guard.go) probes an argument through EffectOf and
+	// SequenceEffectOf purely to learn its sort, discarding the effect it
+	// built, and the statement routes try one reading after another over
+	// the same expression. Without this map each probe would allocate a
+	// fresh temp and append a duplicate call statement, so a call inside
+	// an argument would run two or three times kernel-side.
+	//
+	// Keyed by the call NODE, so two textually identical calls
+	// (`g(y) + g(y)`) are two different nodes and correctly hoist twice.
+	// Cleared with the accumulation by whoever owns the statement.
+	HoistedTemp map[*ast.Node]int
+}
+
+// NoteFirstHavoc records a havocked construct's spelling, first-wins:
+// the earliest havoc in the lowering names the body's outcome, and every
+// later one leaves the name where it stands.
+//
+// Called by every havoc route — the opaque statement floor, the opaque
+// call, and the recursion cycle floor — so a body that lowered with any
+// havoc at all carries a name for it.
+func NoteFirstHavoc(context *LoweringContext, construct string) {
+	if context == nil || construct == "" || context.FirstHavoc != "" {
+		return
+	}
+	context.FirstHavoc = construct
 }
 
 // SummaryTableBuilder grows the summary table a lowered body carries:

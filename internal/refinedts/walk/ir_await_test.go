@@ -123,17 +123,28 @@ func TestAwaitStatement_AwaitOfAnUntrackedNameDeclines(t *testing.T) {
 	}
 }
 
-func TestAwaitStatement_AwaitOfACallDeclinesWithoutARegistryToAnswerForTheCallee(t *testing.T) {
-	// no flow context, so no blob and no cycle — the site keeps whatever
-	// other route it has
+func TestAwaitStatement_AwaitOfACallWithoutARegistryTakesTheHavocFloor(t *testing.T) {
+	// no flow context, so no blob and no cycle — the TOTAL-LOWERING
+	// floor serves instead: the assigned form havocs its target, and
+	// the bare form (scalar arguments, nothing flattened mentioned)
+	// contributes no statement at all
 	context := awaitScalarContext()
 	statements := awaitParse(t, `x = await f(1);`)
-	if _, ok := AwaitStatementOf(context, statements[0]); ok {
-		t.Errorf("an awaited call lowered without a registry to answer for its callee")
+	lowered, ok := AwaitStatementOf(context, statements[0])
+	if !ok {
+		t.Fatalf("an awaited call without a registry declined, want the havoc floor")
+	}
+	if len(lowered) != 1 || lowered[0].Kind != kernelbridge.IrStatementAssign ||
+		lowered[0].Target != 0 || lowered[0].Effect.Kind != kernelbridge.LoopEffectUnknown {
+		t.Errorf("lowered = %+v, want one assign of unknown to x (slot 0)", lowered)
 	}
 	bare := awaitParse(t, `await f(1);`)
-	if _, ok := AwaitStatementOf(context, bare[0]); ok {
-		t.Errorf("a bare awaited call lowered without a registry to answer for its callee")
+	bareLowered, bareOk := AwaitStatementOf(context, bare[0])
+	if !bareOk {
+		t.Fatalf("a bare awaited call without a registry declined, want the havoc floor")
+	}
+	if len(bareLowered) != 0 {
+		t.Errorf("len(bareLowered) = %d, want 0 — nothing reads its value and nothing flattened is mentioned", len(bareLowered))
 	}
 }
 
@@ -235,14 +246,18 @@ func TestPromiseAllArray_TheArrayLiteralOfCallsIsRecognizedAndEveryOtherShapeDec
 	}
 }
 
-func TestPromiseAllStatement_WithoutARegistryTheSequenceOfCallsDeclines(t *testing.T) {
-	// the calls lower as call statements, which need a callee's blob;
-	// with no flow context there is none, so the whole shape declines
-	// rather than emitting some of the calls
+func TestPromiseAllStatement_WithoutARegistryTheCallsTakeTheHavocFloor(t *testing.T) {
+	// with no flow context there are no blobs, and each element call
+	// takes the total-lowering floor: no target, scalar arguments,
+	// nothing flattened mentioned — no statement per call
 	context := awaitScalarContext()
 	statements := awaitParse(t, `await Promise.all([f(1), g(2)]);`)
-	if _, ok := promiseAllStatementOf(context, statements[0]); ok {
-		t.Errorf("a Promise.all lowered without a registry to answer for its callees")
+	lowered, ok := promiseAllStatementOf(context, statements[0])
+	if !ok {
+		t.Fatalf("a Promise.all without a registry declined, want the havoc floor per call")
+	}
+	if len(lowered) != 0 {
+		t.Errorf("len(lowered) = %d, want 0 — nothing reads the calls' values", len(lowered))
 	}
 }
 

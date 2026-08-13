@@ -277,20 +277,40 @@ func TestLoweringToKernelIR_AForLoopHeadLowersInitComparisonAndStepCertifyThroug
 	}
 }
 
-func TestLoweringToKernelIR_UnreadableStatementsDeclineTheWholeLowering(t *testing.T) {
+func TestLoweringToKernelIR_UnreadableStatementsHavocWhatTheyCouldHaveWrittenAndDeclineOnlyWhereTheSlotSetIsUnknowable(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
-	_, ok := LowerStatements(&LoweringContext{
+	// an unresolvable call no longer declines the body: it HAVOCS the
+	// slots it could have written — here the assignment's target alone,
+	// since the argument is a literal — and the body keeps its route
+	context := &LoweringContext{
 		Bindings: []string{"x"},
 		Sorts:    []BindingKind{BindingKindNumber},
 		Narrow:   kernel.Narrow,
-	}, loweringParse(t, `x = fetch("nope");`))
-	if ok {
-		t.Errorf("LowerStatements(fetch call) ok = true, want false")
+	}
+	stmts, ok := LowerStatements(context, loweringParse(t, `x = fetch("nope");`))
+	if !ok {
+		t.Fatalf("LowerStatements(fetch call) ok = false, want the havoc floor")
+	}
+	if len(stmts) != 1 || stmts[0].Kind != kernelbridge.IrStatementAssign ||
+		stmts[0].Target != 0 || stmts[0].Effect.Kind != kernelbridge.LoopEffectUnknown {
+		t.Errorf("stmts = %+v, want one `assign 0 unknown`", stmts)
+	}
+	if context.FirstHavoc != "call fetch" {
+		t.Errorf("FirstHavoc = %q, want %q", context.FirstHavoc, "call fetch")
+	}
+	// a THROW still declines: the done flag cannot tell a throw that
+	// leaves the body from one an enclosing try catches
+	if _, ok := LowerStatements(&LoweringContext{
+		Bindings: []string{"x"},
+		Sorts:    []BindingKind{BindingKindNumber},
+		Narrow:   kernel.Narrow,
+	}, loweringParse(t, `throw new Error("nope");`)); ok {
+		t.Errorf("LowerStatements(throw) ok = true, want false")
 	}
 	// a value test on an unknown-sorted binding has no reading — the
 	// OPAQUE BRANCH now serves it: both arms walk, nothing is claimed
 	// about the condition
-	stmts, ok := LowerStatements(&LoweringContext{
+	stmts, ok = LowerStatements(&LoweringContext{
 		Bindings: []string{"x"},
 		Sorts:    []BindingKind{BindingKindUnknown},
 		Narrow:   kernel.Narrow,
@@ -301,14 +321,84 @@ func TestLoweringToKernelIR_UnreadableStatementsDeclineTheWholeLowering(t *testi
 	if len(stmts) != 1 || stmts[0].Kind != kernelbridge.IrStatementBranchBoth {
 		t.Errorf("stmts = %+v, want one branchBoth", stmts)
 	}
-	// a condition that WRITES is not opaque-lowerable — still a decline
-	_, ok = LowerStatements(&LoweringContext{
+	// a condition that WRITES is still not opaque-BRANCH-lowerable — the
+	// branch that tests nothing would skip the write. It now falls to the
+	// havoc floor instead of declining: the write's target is nameable,
+	// so x takes `unknown` and the body keeps its route. What the floor
+	// gives up on is the branch structure, which is precision; what it
+	// keeps is that no write is silently skipped.
+	writingContext := &LoweringContext{
 		Bindings: []string{"x"},
 		Sorts:    []BindingKind{BindingKindUnknown},
 		Narrow:   kernel.Narrow,
-	}, loweringParse(t, `if ((x = 1)) { x = 2; }`))
-	if ok {
-		t.Errorf("LowerStatements(writing test) ok = true, want false")
+	}
+	stmts, ok = LowerStatements(writingContext, loweringParse(t, `if ((x = 1)) { x = 2; }`))
+	if !ok {
+		t.Fatalf("LowerStatements(writing test) ok = false, want the havoc floor")
+	}
+	if len(stmts) != 1 || stmts[0].Kind != kernelbridge.IrStatementAssign ||
+		stmts[0].Target != 0 || stmts[0].Effect.Kind != kernelbridge.LoopEffectUnknown {
+		t.Errorf("stmts = %+v, want one `assign 0 unknown` — the write's own target", stmts)
+	}
+	if writingContext.FirstHavoc != "if" {
+		t.Errorf("FirstHavoc = %q, want %q", writingContext.FirstHavoc, "if")
+	}
+}
+
+func TestLoweringToKernelIR_HoistingIsInertWhereNoCallSubexpressionAppears(t *testing.T) {
+	// the hoist stream is threaded through every route of LowerStatements;
+	// a body with no call subexpression must lower to exactly what it
+	// lowered to before, statement for statement
+	kernel := kernelDelegationLoadKernel(t)
+	context := &LoweringContext{
+		Bindings: []string{"x", "y"},
+		Sorts:    []BindingKind{BindingKindNumber, BindingKindNumber},
+		Narrow:   kernel.Narrow,
+	}
+	stmts, ok := LowerStatements(context, loweringParse(t, `
+		y = x + 1;
+		if (x === 0) { y = 100; } else { y = y * 2; }
+		while (x < 10) { x = x + 1; }
+	`))
+	if !ok {
+		t.Fatalf("LowerStatements ok = false, want true")
+	}
+	if len(stmts) != 3 {
+		t.Errorf("len(stmts) = %d, want 3 — one assign, one branch, one loop", len(stmts))
+	}
+	for _, statement := range stmts {
+		if statement.Kind == kernelbridge.IrStatementCall {
+			t.Errorf("a call statement appeared in a body with no call: %+v", stmts)
+		}
+	}
+	if len(context.Hoisted) != 0 {
+		t.Errorf("len(Hoisted) = %d after a call-free body, want 0", len(context.Hoisted))
+	}
+	// the flag and the statement pointer are restored, so the context is
+	// handed back exactly as the caller gave it
+	if context.CanHoist || context.HoistStatement != nil {
+		t.Errorf("CanHoist = %v, HoistStatement = %v after the walk, want the caller's own values restored",
+			context.CanHoist, context.HoistStatement)
+	}
+}
+
+func TestLoweringToKernelIR_ACallSubexpressionWithNoBlobStillFallsToTheHavocFloor(t *testing.T) {
+	// with no registry there is no blob to hoist, so `x = fetch("n") + 1`
+	// reads exactly as it did before hoisting existed: the havoc floor,
+	// naming x's own slot and nothing else
+	kernel := kernelDelegationLoadKernel(t)
+	context := &LoweringContext{
+		Bindings: []string{"x"},
+		Sorts:    []BindingKind{BindingKindNumber},
+		Narrow:   kernel.Narrow,
+	}
+	stmts, ok := LowerStatements(context, loweringParse(t, `x = fetch("nope") + 1;`))
+	if !ok {
+		t.Fatalf("LowerStatements ok = false, want the havoc floor")
+	}
+	if len(stmts) != 1 || stmts[0].Kind != kernelbridge.IrStatementAssign ||
+		stmts[0].Target != 0 || stmts[0].Effect.Kind != kernelbridge.LoopEffectUnknown {
+		t.Errorf("stmts = %+v, want one `assign 0 unknown`", stmts)
 	}
 }
 

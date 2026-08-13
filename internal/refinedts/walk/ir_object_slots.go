@@ -134,8 +134,10 @@ func flatKeysOfLiteral(literal *ast.Node, holder string, prefix []string) ([]Obj
 }
 
 // propertyPathOf reads a chained property access down to a root
-// identifier: `p.a.b` answers ("p", ["a","b"]). Optional steps (`p?.a`)
-// and computed steps decline — neither is a plain path read.
+// identifier or `this`: `p.a.b` answers ("p", ["a","b"]) and
+// `this.count` answers ("this", ["count"]) — the spelling the bundle
+// layout gives a method's field slots. Optional steps (`p?.a`) and
+// computed steps decline — neither is a plain path read.
 func propertyPathOf(node *ast.Node) (root string, path []string, ok bool) {
 	var steps []string
 	current := node
@@ -150,12 +152,18 @@ func propertyPathOf(node *ast.Node) (root string, path []string, ok bool) {
 		steps = append(steps, access.Name().Text())
 		current = access.Expression
 	}
-	if len(steps) == 0 || !ast.IsIdentifier(current) {
+	if len(steps) == 0 {
+		return "", nil, false
+	}
+	if !ast.IsIdentifier(current) && current.Kind != ast.KindThisKeyword {
 		return "", nil, false
 	}
 	// steps were collected outermost-first; the path reads root-first
 	for left, right := 0, len(steps)-1; left < right; left, right = left+1, right-1 {
 		steps[left], steps[right] = steps[right], steps[left]
+	}
+	if current.Kind == ast.KindThisKeyword {
+		return "this", steps, true
 	}
 	return current.Text(), steps, true
 }
