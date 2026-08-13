@@ -9,7 +9,6 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
-	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -360,37 +359,37 @@ func readArrayWriteMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 		copy(held, receiver.Values)
 		if method == "push" {
 			next := append(append([]float64{}, held...), exact...)
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+			UpdateTrackedEnv(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
 			out := abstractdomain.KnownValues([]float64{float64(len(next))}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 			return &out
 		}
 		if method == "unshift" {
 			next := append(append([]float64{}, exact...), held...)
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+			UpdateTrackedEnv(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
 			out := abstractdomain.KnownValues([]float64{float64(len(next))}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 			return &out
 		}
 		if method == "pop" && len(exact) == 0 {
 			if len(held) == 0 {
-				dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(held, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+				UpdateTrackedEnv(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(held, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
 				out := abstractdomain.Undef
 				return &out
 			}
 			removed := held[len(held)-1]
 			next := held[:len(held)-1]
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+			UpdateTrackedEnv(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
 			out := abstractdomain.KnownValues([]float64{removed}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 			return &out
 		}
 		if method == "shift" && len(exact) == 0 {
 			if len(held) == 0 {
-				dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(held, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+				UpdateTrackedEnv(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(held, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
 				out := abstractdomain.Undef
 				return &out
 			}
 			removed := held[0]
 			next := held[1:]
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+			UpdateTrackedEnv(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
 			out := abstractdomain.KnownValues([]float64{removed}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 			return &out
 		}
@@ -399,7 +398,7 @@ func readArrayWriteMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 			for i := range next {
 				next[i] = exact[0]
 			}
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+			UpdateTrackedEnv(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
 			out := abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved)
 			return &out
 		}
@@ -442,14 +441,14 @@ func readArrayWriteMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 				next = append(next, held[:start]...)
 				next = append(next, inserted...)
 				next = append(next, held[start+deleteCount:]...)
-				dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+				UpdateTrackedEnv(ctx.Aliases, env, trackedName, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
 				out := abstractdomain.KnownValues(removed, abstractdomain.PrimitiveArray, abstractdomain.TrustProved)
 				return &out
 			}
 		}
 	}
 	// inexact operands on a writing method: the class forgets
-	ctx.Aliases.Havoc(env, trackedName)
+	HavocEnv(ctx.Aliases, env, trackedName)
 	out := silence.Residue()
 	return &out
 }

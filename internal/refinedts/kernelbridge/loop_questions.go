@@ -49,12 +49,24 @@ func PremiseKey(p InvariantPremise) (string, bool) {
 type LoopEffectKind string
 
 const (
-	LoopEffectVar     LoopEffectKind = "var"
-	LoopEffectConst   LoopEffectKind = "const"
-	LoopEffectUnknown LoopEffectKind = "unknown"
-	LoopEffectUnary   LoopEffectKind = "un"
-	LoopEffectBinary  LoopEffectKind = "bin"
-	LoopEffectJoin    LoopEffectKind = "join"
+	LoopEffectVar   LoopEffectKind = "var"
+	LoopEffectConst LoopEffectKind = "const"
+	// LoopEffectConstState is the const leaf carrying the WHOLE state:
+	// the set beside the absent and NaN flags. `x = null` and `return
+	// undefined` write the absent outcome, which lives outside R-bar
+	// and so cannot ride in a RefinedSet. A const with both flags down
+	// is exactly LoopEffectConst, and the wire keeps them distinct so
+	// older forms decode unchanged.
+	LoopEffectConstState LoopEffectKind = "constState"
+	LoopEffectUnknown    LoopEffectKind = "unknown"
+	LoopEffectUnary      LoopEffectKind = "un"
+	LoopEffectBinary     LoopEffectKind = "bin"
+	// LoopEffectConcat is the SEQUENCE binary: `a + b` where both sides
+	// are string-sorted builds the concatenation of the two operand
+	// sets. It is not an enclosure operation, so it never reaches the
+	// arithmetic transfers and rides its own wire field.
+	LoopEffectConcat LoopEffectKind = "concat"
+	LoopEffectJoin   LoopEffectKind = "join"
 )
 
 // LoopEffectOp is the op field of a unary or binary LoopEffect.
@@ -87,11 +99,28 @@ type LoopEffect struct {
 	Kind LoopEffectKind
 
 	Index int                       // "var"
-	Set   refinementsets.RefinedSet // "const"
+	Set   refinementsets.RefinedSet // "const" / "constState"
+
+	// Absent, Nan: "constState" only — whether the written constant may
+	// be the absent value or NaN, neither of which any set can hold.
+	Absent bool
+	Nan    bool
 
 	Op LoopEffectOp // "un" / "bin"
 	A  *LoopEffect
-	B  *LoopEffect // "bin" / "join"
+	B  *LoopEffect // "bin" / "concat" / "join"
+}
+
+// AbsentConst is the state constant `null`/`undefined` writes: the
+// empty set of values beside a raised absent flag. Under ANY target
+// sort — the absent value is not a number and not a word, so no sort
+// can hold it in its set part.
+func AbsentConst() LoopEffect {
+	return LoopEffect{
+		Kind:   LoopEffectConstState,
+		Set:    refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)),
+		Absent: true,
+	}
 }
 
 // EffectWire is effectWire in the TS source.
@@ -101,12 +130,16 @@ func EffectWire(e LoopEffect) string {
 		return fmt.Sprintf(`{"var":%d}`, e.Index)
 	case LoopEffectConst:
 		return fmt.Sprintf(`{"set":%s}`, EncodeSet(e.Set))
+	case LoopEffectConstState:
+		return fmt.Sprintf(`{"set":%s,"absent":%v,"nan":%v}`, EncodeSet(e.Set), e.Absent, e.Nan)
 	case LoopEffectUnknown:
 		return `{"unknown":true}`
 	case LoopEffectUnary:
 		return fmt.Sprintf(`{"op":"%s","A":%s}`, e.Op, EffectWire(*e.A))
 	case LoopEffectBinary:
 		return fmt.Sprintf(`{"op":"%s","A":%s,"B":%s}`, e.Op, EffectWire(*e.A), EffectWire(*e.B))
+	case LoopEffectConcat:
+		return fmt.Sprintf(`{"concat":[%s,%s]}`, EffectWire(*e.A), EffectWire(*e.B))
 	case LoopEffectJoin:
 		return fmt.Sprintf(`{"join":[%s,%s]}`, EffectWire(*e.A), EffectWire(*e.B))
 	}
@@ -123,6 +156,11 @@ type LoopQuestion struct {
 	Cond []*refinementsets.RefinedSet
 	// Body: per binding, the body's effect.
 	Body []LoopEffect
+	// CondCmp: the head when it compared two tracked slots. Nothing
+	// constant bounds either side, so this rides instead of Cond and
+	// the kernel cuts each pass entry by the bound the other slot's
+	// own entry value states.
+	CondCmp *IrLoopCondCmp
 }
 
 // LoopVarAnswerKind is the tag of a LoopVarAnswer.
@@ -164,11 +202,22 @@ const (
 	IrTestGe        IrBranchTest = "ge"
 	// The two-slot comparisons: the right operand is another tracked
 	// slot (OnB), not a constant, so these carry no `w`. `i < n`
-	// lowers here where `i < 10` lowers to IrTestLt.
+	// lowers here where `i < 10` lowers to IrTestLt. IrTestEqSlot is
+	// the equality shape — `i === n` and `i == n`, which agree
+	// between two number-sorted slots.
 	IrTestLtSlot IrBranchTest = "ltSlot"
 	IrTestLeSlot IrBranchTest = "leSlot"
 	IrTestGtSlot IrBranchTest = "gtSlot"
 	IrTestGeSlot IrBranchTest = "geSlot"
+	IrTestEqSlot IrBranchTest = "eqSlot"
+	// IrTestEqSeqSlot is SEQUENCE equality between two string-sorted
+	// slots (`s === t`). It rides with OnB like the scalar two-slot
+	// comparisons but narrows NEITHER arm: the two-slot tightening is
+	// built from enclosure bounds and a word has none, so the kernel
+	// walks both arms untouched and joins them. What it unlocks is
+	// bodies that decline today because the guard has no lowering at
+	// all.
+	IrTestEqSeqSlot IrBranchTest = "eqSeqSlot"
 )
 
 // IsTwoSlotTest reports whether a branch test compares two tracked
@@ -176,7 +225,8 @@ const (
 // with OnB and never with W.
 func IsTwoSlotTest(t IrBranchTest) bool {
 	switch t {
-	case IrTestLtSlot, IrTestLeSlot, IrTestGtSlot, IrTestGeSlot:
+	case IrTestLtSlot, IrTestLeSlot, IrTestGtSlot, IrTestGeSlot, IrTestEqSlot,
+		IrTestEqSeqSlot:
 		return true
 	}
 	return false
@@ -189,7 +239,8 @@ func IsTwoSlotTest(t IrBranchTest) bool {
 // whether it writes the binding, the condition's narrowing set if one
 // reads, and the body's effect ("var i" for a binding the body leaves
 // alone) — the entry premises come from the walk's own states,
-// kernel-side.
+// kernel-side. A loop head that compared two tracked slots rides in
+// CondCmp instead of the per-binding sets.
 type IrStatement struct {
 	Kind IrStatementKind
 
@@ -216,6 +267,20 @@ type IrStatement struct {
 	// only when the condition fails, so the exit intersects it.
 	After []*refinementsets.RefinedSet
 	Body  []LoopEffect
+	// CondCmp: a head that compared two tracked slots (`while (i < n)`)
+	// rather than a slot against a constant. Nothing constant bounds
+	// either side, so Cond and After stay nil and this rides instead:
+	// the kernel tightens each slot's EXIT by the negated comparison's
+	// ray read off the other slot's flagless exit.
+	CondCmp *IrLoopCondCmp
+}
+
+// IrLoopCondCmp is a loop head comparing two tracked slots: On
+// against OnB under Test, one of the *Slot comparisons.
+type IrLoopCondCmp struct {
+	On   int
+	Test IrBranchTest
+	OnB  int
 }
 
 func optSetWire(c *refinementsets.RefinedSet) string {
@@ -247,10 +312,17 @@ func StmtWire(s IrStatement) string {
 		for i, b := range s.Body {
 			body[i] = EffectWire(b)
 		}
+		condCmp := ""
+		if s.CondCmp != nil {
+			condCmp = fmt.Sprintf(
+				`,"condCmp":{"on":%d,"test":"%s","onB":%d}`,
+				s.CondCmp.On, s.CondCmp.Test, s.CondCmp.OnB,
+			)
+		}
 		return fmt.Sprintf(
-			`{"loop":{"written":[%s],"cond":[%s],"after":[%s],"body":[%s]}}`,
+			`{"loop":{"written":[%s],"cond":[%s],"after":[%s],"body":[%s]%s}}`,
 			strings.Join(written, ","), strings.Join(cond, ","),
-			strings.Join(after, ","), strings.Join(body, ","),
+			strings.Join(after, ","), strings.Join(body, ","), condCmp,
 		)
 	}
 	operand := ""
@@ -295,9 +367,17 @@ func LoopWire(q LoopQuestion) string {
 	for i, b := range q.Body {
 		body[i] = EffectWire(b)
 	}
+	condCmp := ""
+	if q.CondCmp != nil {
+		condCmp = fmt.Sprintf(
+			`,"condCmp":{"on":%d,"test":"%s","onB":%d}`,
+			q.CondCmp.On, q.CondCmp.Test, q.CondCmp.OnB,
+		)
+	}
 	return fmt.Sprintf(
-		`{"entry":[%s],"cond":[%s],"body":[%s]}`,
-		strings.Join(entry, ","), strings.Join(cond, ","), strings.Join(body, ","),
+		`{"entry":[%s],"cond":[%s],"body":[%s]%s}`,
+		strings.Join(entry, ","), strings.Join(cond, ","),
+		strings.Join(body, ","), condCmp,
 	)
 }
 

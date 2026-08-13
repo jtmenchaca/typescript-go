@@ -83,7 +83,7 @@ func callbackSitePins(
 					if annotations.IsUnsupported(compiled) {
 						return nil, false
 					}
-					return SchemaCallbackPins(schemaCallbackPinsParams{c: p.Checker, fn: fn, compiled: *compiled.Annotation}), true
+					return EnvOfBindings(SchemaCallbackPins(schemaCallbackPinsParams{c: p.Checker, fn: fn, compiled: *compiled.Annotation})), true
 				}
 			}
 		}
@@ -106,7 +106,7 @@ func callbackSitePins(
 					ast.IsPropertyAssignment(objLit.Properties.Nodes[0]) {
 					prop0Name := objLit.Properties.Nodes[0].AsPropertyAssignment().Name()
 					if prop0Name != nil && ast.IsIdentifier(prop0Name) && prop0Name.Text() == "length" {
-						return ArrayFromMapperPins(arrayFromMapperPinsParams{c: p.Checker, fn: fn}), true
+						return EnvOfBindings(ArrayFromMapperPins(arrayFromMapperPinsParams{c: p.Checker, fn: fn})), true
 					}
 				}
 			}
@@ -169,7 +169,7 @@ func callbackSitePins(
 				}
 				if !hasSnapshot {
 					tracing.Count("join.reach.fallback", 0)
-					outerEnv = Env{}
+					outerEnv = NewEnv()
 					outerSite, hasOuterSite := SiteOf(p, contracts, call)
 					if hasOuterSite {
 						for i, outer := range outerSite.Parameters {
@@ -182,9 +182,9 @@ func callbackSitePins(
 								stated = outerSite.Contract.Params[i]
 							}
 							if stated == nil {
-								outerEnv[outerName] = silence.Residue()
+								outerEnv.Set(outerName, silence.Residue())
 							} else {
-								outerEnv[outerName] = AbstractValueOfDeclared(*stated)
+								outerEnv.Set(outerName, AbstractValueOfDeclared(*stated))
 							}
 						}
 					}
@@ -202,7 +202,7 @@ func callbackSitePins(
 						AnalyzeToToken(flowCtx, outerEnv, statements, call, false)
 					}()
 				}
-				calleeEnv := Env{}
+				calleeEnv := NewEnv()
 				for i, parameter := range declaration.Parameters() {
 					if !ast.IsIdentifier(parameter.AsParameterDeclaration().Name()) || i == position {
 						continue
@@ -213,9 +213,9 @@ func callbackSitePins(
 						argument = callExpr.Arguments.Nodes[i]
 					}
 					if argument == nil {
-						calleeEnv[name] = abstractdomain.Undef
+						calleeEnv.Set(name, abstractdomain.Undef)
 					} else {
-						calleeEnv[name] = evaluateExpression(flowCtx, outerEnv, argument)
+						calleeEnv.Set(name, evaluateExpression(flowCtx, outerEnv, argument))
 					}
 				}
 				fnParameters := fn.Parameters()
@@ -244,7 +244,7 @@ func callbackSitePins(
 									if argument == nil {
 										value = abstractdomain.Undef
 									} else {
-										value = evaluateExpression(flowCtx, cloneEnv(calleeEnv), argument)
+										value = evaluateExpression(flowCtx, calleeEnv.Clone(), argument)
 									}
 									if joins[k] == nil {
 										v := value
@@ -266,7 +266,7 @@ func callbackSitePins(
 					visit(declaration.Body())
 				}()
 				if clean {
-					bindings := Env{}
+					bindings := map[string]abstractdomain.AbstractValue{}
 					for k, parameter := range fnParameters {
 						value := joins[k]
 						if value == nil || value.Kind == abstractdomain.KindUnknown {
@@ -275,7 +275,7 @@ func callbackSitePins(
 						BindParameter(p.Checker, parameter, *value, bindings)
 					}
 					if len(bindings) > 0 {
-						return bindings, true
+						return EnvOfBindings(bindings), true
 					}
 				}
 			}
@@ -299,7 +299,7 @@ func callbackSitePins(
 		if annotations.IsUnsupported(compiled) {
 			return nil, false
 		}
-		return SchemaCallbackPins(schemaCallbackPinsParams{c: p.Checker, fn: fn, compiled: *compiled.Annotation}), true
+		return EnvOfBindings(SchemaCallbackPins(schemaCallbackPinsParams{c: p.Checker, fn: fn, compiled: *compiled.Annotation})), true
 	}
 	_, isArrayCallback := ArrayCallbackMethods[method]
 	if !isArrayCallback && method != "then" {
@@ -329,7 +329,7 @@ func callbackSitePins(
 	}
 	if !hasSnapshot {
 		tracing.Count("join.reach.fallback", 0)
-		env = Env{}
+		env = NewEnv()
 		for i, outer := range site.Parameters {
 			if outer == nil || !ast.IsIdentifier(outer.AsParameterDeclaration().Name()) {
 				continue
@@ -340,9 +340,9 @@ func callbackSitePins(
 				stated = site.Contract.Params[i]
 			}
 			if stated == nil {
-				env[outerName] = silence.Residue()
+				env.Set(outerName, silence.Residue())
 			} else {
-				env[outerName] = AbstractValueOfDeclared(*stated)
+				env.Set(outerName, AbstractValueOfDeclared(*stated))
 			}
 		}
 		// a non-exported enclosing function's parameters wear their
@@ -361,9 +361,10 @@ func callbackSitePins(
 					}
 				}
 				if allNil {
-					for name, known := range outer {
-						env[name] = known
-					}
+					outer.Range(func(name string, known abstractdomain.AbstractValue) bool {
+						env.Set(name, known)
+						return true
+					})
 				}
 			}
 		}
@@ -395,9 +396,9 @@ func callbackSitePins(
 			if receiver.Kind != abstractdomain.KindPromise || len(fnParameters) == 0 {
 				return nil, false
 			}
-			out := Env{}
+			out := map[string]abstractdomain.AbstractValue{}
 			BindParameter(p.Checker, fnParameters[0], *receiver.Inner, out)
-			return out, true
+			return EnvOfBindings(out), true
 		}
 		var joined *abstractdomain.AbstractValue
 		if method == "reduce" {
@@ -408,13 +409,13 @@ func callbackSitePins(
 		if joined != nil && joined.Kind != abstractdomain.KindUnknown {
 			accumulator = joined
 		}
-		return ArrayCallbackPins(arrayCallbackPinsParams{
+		return EnvOfBindings(ArrayCallbackPins(arrayCallbackPinsParams{
 			c:           p.Checker,
 			fn:          fn,
 			receiver:    receiver,
 			method:      method,
 			accumulator: accumulator,
-		}), true
+		})), true
 	}
 	return result()
 }
@@ -611,7 +612,7 @@ func declaredJoinUncached(
 		if !hasSite {
 			return nil, false
 		}
-		env := Env{}
+		env := NewEnv()
 		for i, outer := range site.Parameters {
 			if outer == nil || !ast.IsIdentifier(outer.AsParameterDeclaration().Name()) {
 				continue
@@ -622,9 +623,9 @@ func declaredJoinUncached(
 				stated = site.Contract.Params[i]
 			}
 			if stated == nil {
-				env[outerName] = silence.Residue()
+				env.Set(outerName, silence.Residue())
 			} else {
-				env[outerName] = AbstractValueOfDeclared(*stated)
+				env.Set(outerName, AbstractValueOfDeclared(*stated))
 			}
 		}
 		InitializeEnclosingCallbacks(
@@ -680,7 +681,7 @@ func declaredJoinUncached(
 	if !ok {
 		return nil, false
 	}
-	bindings := Env{}
+	bindings := map[string]abstractdomain.AbstractValue{}
 	for i, parameter := range fnParameters {
 		value := joins[i]
 		if value == nil || value.Kind == abstractdomain.KindUnknown {
@@ -691,7 +692,7 @@ func declaredJoinUncached(
 	if len(bindings) == 0 {
 		return nil, false
 	}
-	return bindings, true
+	return EnvOfBindings(bindings), true
 }
 
 // reduceAccumulatorJoin is reduceAccumulatorJoin in the TS source: a
@@ -713,8 +714,8 @@ func reduceAccumulatorJoin(
 	fnParameters := fn.Parameters()
 	callExpr := call.AsCallExpression()
 	runStep := func(accumulator, item abstractdomain.AbstractValue, index *abstractdomain.AbstractValue) abstractdomain.AbstractValue {
-		callEnv := cloneEnv(env)
-		bindings := Env{}
+		callEnv := env.Clone()
+		bindings := map[string]abstractdomain.AbstractValue{}
 		if len(fnParameters) > 0 {
 			BindParameter(ctx.P.Checker, fnParameters[0], accumulator, bindings)
 		}
@@ -725,7 +726,7 @@ func reduceAccumulatorJoin(
 			BindParameter(ctx.P.Checker, fnParameters[2], *index, bindings)
 		}
 		for name, known := range bindings {
-			callEnv[name] = known
+			callEnv.Set(name, known)
 		}
 		if ast.IsBlock(body) {
 			var sink []abstractdomain.AbstractValue
@@ -819,9 +820,10 @@ func InitializeEnclosingCallbacks(ctx CallSiteCtx, env Env, from *ast.Node) {
 	for i := len(chain) - 1; i >= 0; i-- {
 		bindings, ok := CallSiteBindings(ctx, chain[i])
 		if ok {
-			for name, known := range bindings {
-				env[name] = known
-			}
+			bindings.Range(func(name string, known abstractdomain.AbstractValue) bool {
+				env.Set(name, known)
+				return true
+			})
 		}
 	}
 }

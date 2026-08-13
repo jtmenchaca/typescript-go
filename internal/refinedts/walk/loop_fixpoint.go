@@ -78,9 +78,9 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 					continue
 				}
 				if decl.Initializer == nil {
-					env[decl.Name().Text()] = silence.Residue()
+					env.Set(decl.Name().Text(), silence.Residue())
 				} else {
-					env[decl.Name().Text()] = analyzers.EvaluateExpression(ctx, env, decl.Initializer)
+					env.Set(decl.Name().Text(), analyzers.EvaluateExpression(ctx, env, decl.Initializer))
 				}
 			}
 		} else {
@@ -99,7 +99,7 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	}
 	// checkAssignability whatever the condition itself calls, once
 	if condition != nil {
-		analyzers.EvaluateExpression(ctx, cloneEnv(env), condition)
+		analyzers.EvaluateExpression(ctx, env.Clone(), condition)
 	}
 	// names the LOOP writes anywhere — a comparison side rooted in one
 	// is not loop-invariant, and its entry window would go stale
@@ -150,7 +150,7 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 				if !invariantSide(e) {
 					return narrowing.Window{}, false
 				}
-				return narrowing.BoundsOfKnown(analyzers.EvaluateExpression(ctx, cloneEnv(env), e))
+				return narrowing.BoundsOfKnown(analyzers.EvaluateExpression(ctx, env.Clone(), e))
 			},
 		})
 		transfers = &t
@@ -177,8 +177,8 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 		AssignedNames(ctx.P.Checker, loop.AsForInOrOfStatement().Expression, conditionWritten)
 	}
 	for name := range conditionWritten {
-		if _, ok := env[name]; ok {
-			env[name] = silence.Residue()
+		if _, ok := env.Get(name); ok {
+			env.Set(name, silence.Residue())
 		}
 	}
 
@@ -191,7 +191,7 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	elementKnown := silence.Residue()
 	if ast.IsForOfStatement(loop) || ast.IsForInStatement(loop) {
 		forInOf := loop.AsForInOrOfStatement()
-		iterable := analyzers.EvaluateExpression(ctx, cloneEnv(env), forInOf.Expression)
+		iterable := analyzers.EvaluateExpression(ctx, env.Clone(), forInOf.Expression)
 		if forInOf.Initializer != nil && ast.IsVariableDeclarationList(forInOf.Initializer) {
 			declarations := forInOf.Initializer.AsVariableDeclarationList().Declarations.Nodes
 			if len(declarations) == 1 {
@@ -217,7 +217,7 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 		if ast.IsForOfStatement(loop) && elementKnown.Kind == abstractdomain.KindUnknown {
 			// an iterable the walk holds no sequence for may still SAY its
 			// element: a web collection's iterator, an Object.entries call
-			if said := analyzers.IterationElement(ctx, cloneEnv(env), forInOf.Expression); said != nil {
+			if said := analyzers.IterationElement(ctx, env.Clone(), forInOf.Expression); said != nil {
 				elementKnown = *said
 			}
 		}
@@ -240,12 +240,12 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	entrySpell, entrySpellOK := spellEnvForMemo(env)
 
 	bodyEffect := func(fromEnv Env, reporting *FlowContext) Env {
-		body := cloneEnv(fromEnv)
+		body := fromEnv.Clone()
 		if bodyTransfers != nil {
 			bodyTransfers.ApplyWhenTrue(body)
 		}
 		if hasElementName && elementBinding != nil {
-			body[elementName] = silence.SeededBinding(ctx.P.Checker, elementKnown, elementBinding)
+			body.Set(elementName, silence.SeededBinding(ctx.P.Checker, elementKnown, elementBinding))
 		}
 		// a destructured element binds through the shared reader
 		// (destructure.ts): an exact pair's items land on their names,
@@ -253,17 +253,19 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 		// remains, and a defaulted slot admits the default honestly
 		if elementPattern != nil {
 			ReadDestructuring(elementPattern, elementKnown, func(name string, held abstractdomain.AbstractValue, at *ast.Node) {
-				body[name] = silence.SeededBinding(ctx.P.Checker, held, at)
+				body.Set(name, silence.SeededBinding(ctx.P.Checker, held, at))
 			})
 		}
 		// before the body runs, because the walk mutates it
 		if bodyEntry != nil {
-			for k := range bodyEntry {
-				delete(bodyEntry, k)
-			}
-			for name, known := range body {
-				bodyEntry[name] = known
-			}
+			bodyEntry.Range(func(k string, _ abstractdomain.AbstractValue) bool {
+				bodyEntry.Delete(k)
+				return true
+			})
+			body.Range(func(name string, known abstractdomain.AbstractValue) bool {
+				bodyEntry.Set(name, known)
+				return true
+			})
 		}
 		// a silent pass replays a remembered image; the checked pass
 		// (reporting == ctx) always walks — its walk reports
@@ -290,9 +292,10 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 		}
 		analyzers.AnalyzeStatement(&inBody, body, statement, result)
 		for _, snapshot := range continued {
-			for name, held := range body {
-				body[name] = abstractdomain.JoinKnown(held, envOrResidue(snapshot, name))
-			}
+			body.Range(func(name string, held abstractdomain.AbstractValue) bool {
+				body.Set(name, abstractdomain.JoinKnown(held, envOrResidue(snapshot, name)))
+				return true
+			})
 		}
 		if ast.IsForStatement(loop) && loop.AsForStatement().Incrementor != nil {
 			analyzers.EvaluateExpression(reporting, body, loop.AsForStatement().Incrementor)
@@ -324,7 +327,7 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	CallMediatedWrites(ctx.P.Checker, ctx.Contracts, loop, assigned, nil)
 	var touched []string
 	for name := range assigned {
-		if _, ok := env[name]; ok {
+		if _, ok := env.Get(name); ok {
 			touched = append(touched, name)
 		}
 	}
@@ -382,10 +385,10 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	// question over the set divergent (the do-then-anything hang).
 	premiseEnv := env
 	if ast.IsDoStatement(loop) && len(fixpointed) > 0 {
-		first := bodyEffect(cloneEnv(env), &silent)
-		joined := cloneEnv(env)
+		first := bodyEffect(env.Clone(), &silent)
+		joined := env.Clone()
 		for _, name := range fixpointed {
-			joined[name] = abstractdomain.JoinKnown(envOrResidue(env, name), envOrResidue(first, name))
+			joined.Set(name, abstractdomain.JoinKnown(envOrResidue(env, name), envOrResidue(first, name)))
 		}
 		premiseEnv = joined
 	}
@@ -407,15 +410,16 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	// A do-while tests AFTER the body, so its exit states are the
 	// body's step image — which the body-window candidate no longer
 	// contains — and that image joins in before the refutation narrows.
-	after := Env{}
-	for name, known := range env {
+	after := NewEnv()
+	env.Range(func(name string, known abstractdomain.AbstractValue) bool {
 		carried := abstractdomain.JoinKnown(known, envOrResidue(candidate, name))
 		if ast.IsDoStatement(loop) {
-			after[name] = abstractdomain.JoinKnown(carried, envOrResidue(checkedStep, name))
+			after.Set(name, abstractdomain.JoinKnown(carried, envOrResidue(checkedStep, name)))
 		} else {
-			after[name] = carried
+			after.Set(name, carried)
 		}
-	}
+		return true
+	})
 	GrowPushedArrays(GrowPushedArraysInput{
 		Ctx: ctx, Env: env, Loop: loop, Candidate: candidate, After: after,
 		Fixpointed: fixpointed, EvaluateExpression: analyzers.EvaluateExpression,
@@ -429,10 +433,12 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 			ConditionConstraints: conditionConstraints, After: after,
 		})
 	}
-	for k := range env {
-		delete(env, k)
-	}
-	for name, known := range after {
-		env[name] = known
-	}
+	env.Range(func(k string, _ abstractdomain.AbstractValue) bool {
+		env.Delete(k)
+		return true
+	})
+	after.Range(func(name string, known abstractdomain.AbstractValue) bool {
+		env.Set(name, known)
+		return true
+	})
 }

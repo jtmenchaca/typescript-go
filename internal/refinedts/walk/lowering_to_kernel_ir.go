@@ -3,9 +3,13 @@
 // Lowering: TypeScript statements → the kernel's flow IR. This is
 // the adapter's half of the engine division — recognize the syntax,
 // lower it, and let the kernel walk the whole body. The recognized
-// subset is NUMERIC straight-line code, if/else on one binding, and
-// while loops with a comparison head; everything else declines
-// (nil), never guesses.
+// subset is scalar and STRING straight-line code (arithmetic, string
+// concatenation and templates, `null`/`undefined` writes), if/else on
+// one binding or two, and while / for / do-while loops with a
+// comparison head; everything else declines (nil), never guesses.
+//
+// `do body while (cond)` is composed from the two proved halves: the
+// body's statements once, then the ordinary while loop.
 //
 // Tracked slots: tracked_bindings.go. Expression effects:
 // effect_expression.go (shared with loop_effect.ts, not yet ported
@@ -43,8 +47,15 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 			}
 			rs := s.AsReturnStatement()
 			if rs.Expression != nil {
+				// the result slot's OWN sort decides the reading, so a
+				// string-sorted body's `return a + b` concatenates where a
+				// number-sorted one's adds. A slot the caller left unsorted
+				// falls back to the returned expression's own spelling.
 				sort := BindingKindNumber
-				if ast.IsStringLiteral(Unwrapped(rs.Expression)) {
+				if context.Result.Ret < len(context.Sorts) &&
+					context.Sorts[context.Result.Ret] != BindingKindUnknown {
+					sort = context.Sorts[context.Result.Ret]
+				} else if ast.IsStringLiteral(Unwrapped(rs.Expression)) {
 					sort = BindingKindString
 				}
 				effect, ok := RhsEffect(context, sort, rs.Expression)
@@ -161,6 +172,34 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 			if !headOk || !bodyOk {
 				return nil, false
 			}
+			out = append(out, LoopStatement(context, head, body))
+			continue
+		}
+		if ast.IsDoStatement(s) {
+			// `do body while (cond)` is the body ONCE, then the ordinary
+			// while loop — the first pass runs unconditionally, and every
+			// later pass is exactly what `while (cond) body` does. Both
+			// halves are the proved forms already: the once-through is
+			// ordinary statement lowering, the remainder the loop
+			// statement. No kernel form is added.
+			do := s.AsDoStatement()
+			once, onceOk := LowerStatements(context, StatementsOf(do.Statement))
+			if !onceOk {
+				return nil, false
+			}
+			head, headOk := LoopHeadOf(context, do.Expression)
+			body, bodyOk := LoopBodyOf(context, do.Statement, nil)
+			if !headOk || !bodyOk {
+				return nil, false
+			}
+			// a once-through that RETURNS would make the loop's remainder
+			// conditional on the done flag, which the loop form cannot
+			// express — decline rather than walk a body the flag should
+			// have skipped
+			if context.Result != nil && RaisesDone(once, context.Result.Done) {
+				return nil, false
+			}
+			out = append(out, once...)
 			out = append(out, LoopStatement(context, head, body))
 			continue
 		}

@@ -215,7 +215,7 @@ func CheckOneDependentReturn(
 		if other != nil {
 			var otherKnown *abstractdomain.AbstractValue
 			if ast.IsIdentifier(other) {
-				if v, ok := env[other.Text()]; ok {
+				if v, ok := env.Get(other.Text()); ok {
 					otherKnown = &v
 				}
 			} else if ast.IsNumericLiteral(other) {
@@ -278,7 +278,7 @@ func CheckOneDependentReturn(
 		}
 	}
 	bound := dependsWords[op] + " " + param
-	sibling, hasSibling := env[param]
+	sibling, hasSibling := env.Get(param)
 	var siblingPtr *abstractdomain.AbstractValue
 	if hasSibling {
 		siblingPtr = &sibling

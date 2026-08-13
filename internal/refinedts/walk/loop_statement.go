@@ -33,7 +33,7 @@ func AnalyzeLoopStatement(ctx *FlowContext, env Env, statement *ast.Node, result
 				decl := declaration.AsVariableDeclaration()
 				if ast.IsIdentifier(decl.Name()) {
 					name := decl.Name().Text()
-					if held, ok := env[name]; ok {
+					if held, ok := env.Get(name); ok {
 						loopScoped[name] = held
 						loopScopedHas[name] = true
 					} else {
@@ -58,7 +58,7 @@ func AnalyzeLoopStatement(ctx *FlowContext, env Env, statement *ast.Node, result
 	for name, held := range loopScoped {
 		// only a SHADOWING head name restores — see the block rule
 		if loopScopedHas[name] {
-			env[name] = held
+			env.Set(name, held)
 		}
 	}
 	return false

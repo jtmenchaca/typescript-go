@@ -125,7 +125,7 @@ func UntrackedIdentifier(ctx *FlowContext, e *ast.Node) abstractdomain.AbstractV
 						delete(following, d)
 						followingMu.Unlock()
 					}()
-					return evaluateExpression(ctx, Env{}, vd.Initializer)
+					return evaluateExpression(ctx, NewEnv(), vd.Initializer)
 				}()
 				if followed.Kind == abstractdomain.KindUnknown && followed.Opaque {
 					return abstractdomain.Opaque

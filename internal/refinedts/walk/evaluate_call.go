@@ -19,7 +19,6 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
-	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
@@ -85,7 +84,7 @@ func CheckCallbackArgument(ctx *FlowContext, argument *ast.Node, parameterType *
 	inner.ReturnSink = nil
 	inner.DifferenceConstraints = nil
 	inner.GateAssumptions = nil
-	callbackEnv := Env{}
+	callbackEnv := NewEnv()
 	body := argument.Body()
 	if ast.IsBlock(body) {
 		AnalyzeStatements(&inner, callbackEnv, body.AsBlock().Statements.Nodes, read.Stated)
@@ -158,22 +157,6 @@ func ProjectionSources(e *ast.Node, into []string) []string {
 // conservatively impure; a cycle of write-free bodies is pure (the
 // walk answers recursion with unknown anyway).
 func InlineContractCall(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, argKnowns []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
-	// past either budget axis the checker determines LESS, never
-	// anything wrong: residue is the same honest undetermined every
-	// unmodeled call already answers, and every consumer of an inline
-	// result already handles it. The memo is untouched — a refused
-	// inline was never walked, so it has nothing to remember.
-	if !inlineBudgetOpen(ctx) {
-		return silence.Residue()
-	}
-	// the callee body walk nests one level deeper than this call —
-	// incremented on a local copy here, at the boundary this file
-	// owns, rather than inside InlineContractBody's own `silent := *ctx`
-	// copy (inline_contract_body.go), so the depth the budget reads is
-	// exactly the depth InlineContractCall itself controls entry to.
-	budgeted := *ctx
-	budgeted.InlineDepth++
-	ctx = &budgeted
 	if !tracing.Recording(tracing.GrainStep) {
 		return InlineContractBody(ctx, env, call, contract, argKnowns)
 	}

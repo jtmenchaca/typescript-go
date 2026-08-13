@@ -47,7 +47,7 @@ func IterationElementOf(ctx *FlowContext, env Env, iterable *ast.Node) *abstract
 				argument := call.Arguments.Nodes[0]
 				var held *abstractdomain.AbstractValue
 				if ast.IsIdentifier(argument) {
-					if h, ok := env[argument.Text()]; ok {
+					if h, ok := env.Get(argument.Text()); ok {
 						held = &h
 					}
 				}

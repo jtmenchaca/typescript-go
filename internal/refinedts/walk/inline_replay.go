@@ -14,6 +14,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
@@ -44,13 +45,29 @@ type InlineOutcome struct {
 }
 
 // inlineMemoMu guards inlineMemo: the TS source keys this with a
-// `WeakMap<ts.Node, Map<string, InlineOutcome>>`; substituted the
-// same way as function_summaries.go's effectSummaries (a Go map
-// keyed on the stable *ast.Node pointer, guarded by a mutex).
+// `WeakMap<ts.Node, Map<string, InlineOutcome>>`. The Go store adds
+// the CHECK as the outer key (ctx.P, the per-entry view): an inline
+// outcome is a function of the argument and observed states AND the
+// entry's own contract registry — each entry's facts pass merges a
+// different reachable set, so the same spelled key can hold different
+// true outcomes under different entries. A cross-entry store made
+// verdicts vary with the parallel sweep's scheduling order (whichever
+// entry wrote first won — the flickering-fire class).
 var (
 	inlineMemoMu sync.Mutex
-	inlineMemo   = map[*ast.Node]map[string]InlineOutcome{}
+	inlineMemo   = map[*program.CheckerProgram]map[*ast.Node]map[string]InlineOutcome{}
 )
+
+// inlineMemoOf answers the check's own memo shelf, making it on first
+// use. Callers hold inlineMemoMu.
+func inlineMemoOf(p *program.CheckerProgram) map[*ast.Node]map[string]InlineOutcome {
+	shelf := inlineMemo[p]
+	if shelf == nil {
+		shelf = map[*ast.Node]map[string]InlineOutcome{}
+		inlineMemo[p] = shelf
+	}
+	return shelf
+}
 
 // callNodeIdsMu guards callNodeIds: a stable small id per call node,
 // so a callback-carrying call's memo key can spell the node without
@@ -81,8 +98,8 @@ func CallNodeIdOf(node *ast.Node) int {
 // done.
 func ReplayInline(ctx *FlowContext, env Env, call *ast.Node, contract FunctionContract, argKnowns []abstractdomain.AbstractValue, held InlineOutcome) abstractdomain.AbstractValue {
 	for _, entry := range held.PostByName {
-		if _, ok := env[entry.Name]; ok {
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, entry.Name, entry.After)
+		if _, ok := env.Get(entry.Name); ok {
+			UpdateTrackedEnv(ctx.Aliases, env, entry.Name, entry.After)
 		}
 	}
 	captured := CapturedOf(contract.Declaration)
@@ -101,8 +118,8 @@ func ReplayInline(ctx *FlowContext, env Env, call *ast.Node, contract FunctionCo
 		// reference argument forgets on replay too
 		if _, isCaptured := captured[name.Text()]; isCaptured && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
 			if ast.IsIdentifier(argument) {
-				if _, ok := env[argument.Text()]; ok {
-					ctx.Aliases.Havoc(env, argument.Text())
+				if _, ok := env.Get(argument.Text()); ok {
+					HavocEnv(ctx.Aliases, env, argument.Text())
 					continue
 				}
 			}

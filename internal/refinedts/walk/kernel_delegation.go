@@ -216,10 +216,10 @@ type EngineEntry struct {
 // the binding's own, or its holder's key.
 func heldOf(env Env, slot BindingSlot) (abstractdomain.AbstractValue, bool) {
 	if !slot.HasHolder {
-		v, ok := env[slot.Name]
+		v, ok := env.Get(slot.Name)
 		return v, ok
 	}
-	holder, ok := env[slot.Holder]
+	holder, ok := env.Get(slot.Holder)
 	if !ok || holder.Kind != abstractdomain.KindObject {
 		return abstractdomain.AbstractValue{}, false
 	}
@@ -323,7 +323,7 @@ func EngineEntryOf(env Env, statement *ast.Node, sortAt func(node *ast.Node) Bin
 		if ast.IsPropertyAccessExpression(node) {
 			access := node.AsPropertyAccessExpression()
 			if ast.IsIdentifier(access.Expression) && ast.IsIdentifier(access.Name()) {
-				holderValue, holderOk := env[access.Expression.Text()]
+				holderValue, holderOk := env.Get(access.Expression.Text())
 				if holderOk && holderValue.Kind == abstractdomain.KindObject {
 					name := access.Expression.Text() + "." + access.Name().Text()
 					if _, already := seen[name]; !already {
@@ -336,7 +336,7 @@ func EngineEntryOf(env Env, statement *ast.Node, sortAt func(node *ast.Node) Bin
 			}
 		}
 		if ast.IsIdentifier(node) {
-			if _, tracked := env[node.Text()]; tracked {
+			if _, tracked := env.Get(node.Text()); tracked {
 				if _, already := seen[node.Text()]; !already {
 					seen[node.Text()] = struct{}{}
 					slots = append(slots, BindingSlot{Name: node.Text()})
@@ -468,7 +468,7 @@ func EngineMeetInto(env Env, entry *EngineEntry) {
 			continue
 		}
 		if !slot.HasHolder {
-			held, ok := env[slot.Name]
+			held, ok := env.Get(slot.Name)
 			if !ok {
 				continue
 			}
@@ -478,13 +478,13 @@ func EngineMeetInto(env Env, entry *EngineEntry) {
 				RouteStats.Met++
 				routeStatsMu.Unlock()
 			}
-			env[slot.Name] = met
+			env.Set(slot.Name, met)
 			continue
 		}
 		// an object field meets back through its holder; the rebuilt
 		// object drops its variants — a tightened joint key may
 		// contradict an arm, and variants only ever ADD precision
-		holder, ok := env[slot.Holder]
+		holder, ok := env.Get(slot.Holder)
 		if !ok || holder.Kind != abstractdomain.KindObject {
 			continue
 		}
@@ -519,6 +519,6 @@ func EngineMeetInto(env Env, entry *EngineEntry) {
 			newKeys = append(newKeys, abstractdomain.ObjectKey{Name: slot.Key, Value: met})
 		}
 		rebuilt.Keys = newKeys
-		env[slot.Holder] = rebuilt
+		env.Set(slot.Holder, rebuilt)
 	}
 }

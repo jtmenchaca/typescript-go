@@ -136,7 +136,7 @@ func constructedInstanceInner(
 					if pd.Initializer != nil && ast.IsIdentifier(pd.Name()) {
 						silent := *ctx
 						silent.Report = func(assignability.RefinementDiagnostic) {}
-						addCandidate(pd.Name().Text(), evaluateExpression(&silent, Env{}, pd.Initializer))
+						addCandidate(pd.Name().Text(), evaluateExpression(&silent, NewEnv(), pd.Initializer))
 					}
 				}
 			}
@@ -150,7 +150,7 @@ func constructedInstanceInner(
 			if pd.Initializer != nil && ast.IsIdentifier(pd.Name()) {
 				silent := *ctx
 				silent.Report = func(assignability.RefinementDiagnostic) {}
-				addCandidate(pd.Name().Text(), evaluateExpression(&silent, Env{}, pd.Initializer))
+				addCandidate(pd.Name().Text(), evaluateExpression(&silent, NewEnv(), pd.Initializer))
 			}
 		}
 	}
@@ -193,7 +193,7 @@ func constructedInstanceInner(
 		if escapes {
 			return bare
 		}
-		callEnv := Env{}
+		callEnv := NewEnv()
 		if constructorDeclaration != nil {
 			for i, parameter := range constructorDeclaration.AsConstructorDeclaration().Parameters.Nodes {
 				pd := parameter.AsParameterDeclaration()
@@ -201,9 +201,9 @@ func constructedInstanceInner(
 					continue
 				}
 				if i < len(argKnowns) {
-					callEnv[pd.Name().Text()] = argKnowns[i]
+					callEnv.Set(pd.Name().Text(), argKnowns[i])
 				} else {
-					callEnv[pd.Name().Text()] = abstractdomain.Undef
+					callEnv.Set(pd.Name().Text(), abstractdomain.Undef)
 				}
 			}
 		}

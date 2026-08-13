@@ -8,10 +8,6 @@
 package walk
 
 import (
-	"sort"
-	"strconv"
-	"strings"
-
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
@@ -59,8 +55,8 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		// `copy.nodes` frozen at [] and a live length guard folded dead
 		for _, argument := range callExpr.Arguments.Nodes {
 			if ast.IsIdentifier(argument) {
-				if _, ok := env[argument.Text()]; ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
-					ctx.Aliases.Havoc(env, argument.Text())
+				if _, ok := env.Get(argument.Text()); ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
+					HavocEnv(ctx.Aliases, env, argument.Text())
 					continue
 				}
 			}
@@ -73,8 +69,8 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		written := map[string]struct{}{}
 		AssignedNames(ctx.P.Checker, contract.Declaration, written)
 		for name := range written {
-			if _, ok := env[name]; ok {
-				ctx.Aliases.Havoc(env, name)
+			if _, ok := env.Get(name); ok {
+				HavocEnv(ctx.Aliases, env, name)
 			}
 		}
 		return RecursionMarker(symbol)
@@ -93,7 +89,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	memoKey := computeInlineMemoKey(ctx, env, call, callExpr, contract, calleeName, argKnowns)
 	if memoKey != "" {
 		inlineMemoMu.Lock()
-		byKey := inlineMemo[contract.Declaration]
+		byKey := inlineMemoOf(ctx.P)[contract.Declaration]
 		_, memoSeen := byKey[memoKey]
 		inlineMemoMu.Unlock()
 		if tracing.Recording(tracing.GrainStep) && !memoSeen {
@@ -102,7 +98,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	}
 	if memoKey != "" {
 		inlineMemoMu.Lock()
-		held, ok := inlineMemo[contract.Declaration][memoKey]
+		held, ok := inlineMemoOf(ctx.P)[contract.Declaration][memoKey]
 		inlineMemoMu.Unlock()
 		if ok {
 			tracing.Count("inlineMemoHit", 0)
@@ -121,10 +117,10 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		tracing.Count("inline.summaryDirect", 0)
 		if memoKey != "" {
 			inlineMemoMu.Lock()
-			memo := inlineMemo[contract.Declaration]
+			memo := inlineMemoOf(ctx.P)[contract.Declaration]
 			if memo == nil {
 				memo = map[string]InlineOutcome{}
-				inlineMemo[contract.Declaration] = memo
+				inlineMemoOf(ctx.P)[contract.Declaration] = memo
 			}
 			if len(memo) >= callResultsKept {
 				for k := range memo {
@@ -149,19 +145,20 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	}
 	declaredNames(body, shadowed)
 
-	callEnv := Env{}
-	for k, v := range env {
+	callEnv := NewEnv()
+	env.Range(func(k string, v abstractdomain.AbstractValue) bool {
 		if _, isShadowed := shadowed[k]; !isShadowed {
-			callEnv[k] = v
+			callEnv.Set(k, v)
 		}
-	}
+		return true
+	})
 	callableParams := map[string]Callback{}
 	for i, parameter := range contract.Declaration.Parameters() {
 		name := parameter.AsParameterDeclaration().Name()
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		callEnv[name.Text()] = ParameterKnown(parameter, i, call, argKnowns)
+		callEnv.Set(name.Text(), ParameterKnown(parameter, i, call, argKnowns))
 		if i < len(callExpr.Arguments.Nodes) {
 			argument := callExpr.Arguments.Nodes[i]
 			if ast.IsArrowFunction(argument) || ast.IsFunctionExpression(argument) {
@@ -189,12 +186,12 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	// what the caller observes afterwards: the normal exit joined with
 	// every exceptional one
 	post := func(name string) abstractdomain.AbstractValue {
-		held, ok := callEnv[name]
+		held, ok := callEnv.Get(name)
 		if !ok {
 			held = silence.Residue()
 		}
 		for _, snapshot := range thrown {
-			snapshotValue, hasSnapshot := snapshot[name]
+			snapshotValue, hasSnapshot := snapshot.Get(name)
 			if !hasSnapshot {
 				snapshotValue = silence.Residue()
 			}
@@ -204,21 +201,25 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	}
 	bodyWrites := BodyWritesOf(ctx, contract.Declaration)
 	var postByName []postByNameEntry
-	for name, before := range env {
+	// Range walks a snapshot, so the UpdateTrackedEnv writes below —
+	// which touch the very environment being visited — cannot disturb
+	// the visit.
+	env.Range(func(name string, before abstractdomain.AbstractValue) bool {
 		if _, isShadowed := shadowed[name]; isShadowed {
-			continue
+			return true
 		}
 		// narrowing-only names keep the caller's state — only a name
 		// the body may WRITE carries its exit state back
 		if _, writes := bodyWrites[name]; !writes {
-			continue
+			return true
 		}
 		after := post(name)
 		if !abstractdomain.SameKnown(after, before) {
 			postByName = append(postByName, postByNameEntry{Name: name, After: after})
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, name, after)
+			UpdateTrackedEnv(ctx.Aliases, env, name, after)
 		}
-	}
+		return true
+	})
 	// a parameter IS its argument: the parameter's final state lands on
 	// the identifier argument's name (a changed projection argument
 	// makes its holder forget instead)
@@ -240,8 +241,8 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		// facts forget instead of restating the inline's entry state
 		if _, isCaptured := captured[name.Text()]; isCaptured && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
 			if ast.IsIdentifier(argument) {
-				if _, ok := env[argument.Text()]; ok {
-					ctx.Aliases.Havoc(env, argument.Text())
+				if _, ok := env.Get(argument.Text()); ok {
+					HavocEnv(ctx.Aliases, env, argument.Text())
 					continue
 				}
 			}
@@ -273,10 +274,10 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	// never remembered; everything else replays for identical keys
 	if memoKey != "" && MarkerDropCount() == dropsBefore && MarkerKey(returned) == nil {
 		inlineMemoMu.Lock()
-		memo := inlineMemo[contract.Declaration]
+		memo := inlineMemoOf(ctx.P)[contract.Declaration]
 		if memo == nil {
 			memo = map[string]InlineOutcome{}
-			inlineMemo[contract.Declaration] = memo
+			inlineMemoOf(ctx.P)[contract.Declaration] = memo
 		}
 		if len(memo) >= callResultsKept {
 			for k := range memo {
@@ -290,174 +291,3 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	return AsCalleeResult(*contract, returned)
 }
 
-// computeInlineMemoKey builds the DETERMINISTIC replay key —
-// "" where nothing can be safely spelled (the TS source's try/catch
-// around JSON.stringify answered the same way). SpellForMemoKey
-// writes one flat string per value — compiler symbols by pointer
-// identity, non-finite floats as words — so the key builds without
-// a JSON pass, and this runs on EVERY inline call, hits included.
-func computeInlineMemoKey(ctx *FlowContext, env Env, call *ast.Node, callExpr *ast.CallExpression, contract *FunctionContract, calleeName *ast.Node, argKnowns []abstractdomain.AbstractValue) string {
-	var callbacks []*ast.Node
-	for _, a := range callExpr.Arguments.Nodes {
-		if ast.IsArrowFunction(a) || ast.IsFunctionExpression(a) {
-			callbacks = append(callbacks, a)
-		}
-	}
-	var observed []string
-	// paths mirrors `observed` one name at a time: a non-nil entry is
-	// the sorted first-level keys the union of bodies reads off that
-	// name; a nil entry (present in the map) means some body used the
-	// name whole — the union of two contributors takes the WIDER
-	// reading, since either body observing it whole means the caller's
-	// key must cover the whole value for the pair to be sound.
-	paths := map[string][]string{}
-	unionPaths := func(from map[string][]string) {
-		for name, keys := range from {
-			existingKeys, seen := paths[name]
-			if !seen {
-				paths[name] = keys
-				continue
-			}
-			if keys == nil || existingKeys == nil {
-				paths[name] = nil
-				continue
-			}
-			paths[name] = unionSortedKeys(existingKeys, keys)
-		}
-	}
-	if len(callbacks) == 0 {
-		observed = ObservedOf(contract.Declaration)
-		unionPaths(dataflowfacts.ObservedPathsOf(contract.Declaration))
-	} else {
-		set := map[string]struct{}{}
-		for _, name := range ObservedOf(contract.Declaration) {
-			set[name] = struct{}{}
-		}
-		unionPaths(dataflowfacts.ObservedPathsOf(contract.Declaration))
-		for _, callback := range callbacks {
-			for _, name := range dataflowfacts.ObservedNamesOf(callback) {
-				set[name] = struct{}{}
-			}
-			unionPaths(dataflowfacts.ObservedPathsOfNode(callback))
-		}
-		for name := range set {
-			observed = append(observed, name)
-		}
-		sort.Strings(observed)
-	}
-	// one flat key: args then observed env rows, each spelled by the
-	// builder speller — \x1e separates spells, and names (identifiers,
-	// no control bytes) bind with '=' — injective without a JSON pass
-	var key strings.Builder
-	if len(callbacks) > 0 {
-		key.WriteByte('@')
-		key.WriteString(strconv.Itoa(CallNodeIdOf(call)))
-		key.WriteByte('|')
-	}
-	for _, arg := range argKnowns {
-		spelled, ok := abstractdomain.SpellForMemoKey(arg)
-		if !ok {
-			if tracing.Recording(tracing.GrainStep) {
-				tracing.Count("inline.unkeyed."+calleeName.Text(), 0)
-			}
-			return ""
-		}
-		key.WriteString(spelled)
-		key.WriteByte('\x1e')
-	}
-	key.WriteByte(';')
-	for _, name := range observed {
-		held, ok := env[name]
-		if !ok {
-			continue
-		}
-		// SOUNDNESS OF THE NARROWED KEY: the memo replays an outcome
-		// that is a function of what the body READS. Observing exactly
-		// the read keys (plus the whole value for any name any
-		// contributing body used whole) keys the memo on no less than
-		// the body's true input, so two caller states with equal keys
-		// are indistinguishable to the body — a churn on a key the
-		// body never reads cannot change the replayed outcome, so it
-		// must not change the key.
-		fieldKeys := paths[name]
-		var heldSpell string
-		narrowed := false
-		if fieldKeys != nil && held.Kind == abstractdomain.KindObject {
-			heldSpell, narrowed = spellObjectFieldsForMemoKey(held, fieldKeys)
-			if narrowed && tracing.Recording(tracing.GrainStep) {
-				tracing.Count("inline.fieldkey", 0)
-			}
-		}
-		if !narrowed {
-			// nil entry, a spell failure, or a non-object holder: the
-			// whole-value path today's memo always took
-			heldSpell, ok = abstractdomain.SpellForMemoKey(held)
-		} else {
-			ok = true
-		}
-		if !ok {
-			if tracing.Recording(tracing.GrainStep) {
-				tracing.Count("inline.unkeyed."+calleeName.Text(), 0)
-			}
-			return ""
-		}
-		key.WriteString(name)
-		key.WriteByte('=')
-		key.WriteString(heldSpell)
-		key.WriteByte('\x1e')
-	}
-	return key.String()
-}
-
-// unionSortedKeys merges two sorted, duplicate-free key lists into one.
-func unionSortedKeys(a, b []string) []string {
-	set := make(map[string]struct{}, len(a)+len(b))
-	for _, k := range a {
-		set[k] = struct{}{}
-	}
-	for _, k := range b {
-		set[k] = struct{}{}
-	}
-	merged := make([]string, 0, len(set))
-	for k := range set {
-		merged = append(merged, k)
-	}
-	sort.Strings(merged)
-	return merged
-}
-
-// spellObjectFieldsForMemoKey spells only the listed keys' values off
-// an object-kind env value — a key ABSENT from the object spells a
-// fixed marker distinct from any real spelling, so "key missing" and
-// "key present with an unkeyable value" never collide. False bubbles
-// any inner spell failure up to the whole-value fallback, exactly
-// like SpellForMemoKey's own false.
-func spellObjectFieldsForMemoKey(held abstractdomain.AbstractValue, fieldKeys []string) (string, bool) {
-	var b strings.Builder
-	b.WriteString("fo(")
-	for i, fieldKey := range fieldKeys {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(strconv.Quote(fieldKey))
-		b.WriteByte('=')
-		var fieldValue *abstractdomain.AbstractValue
-		for _, objectKey := range held.Keys {
-			if objectKey.Name == fieldKey {
-				fieldValue = &objectKey.Value
-				break
-			}
-		}
-		if fieldValue == nil {
-			b.WriteString("\x01absent")
-			continue
-		}
-		spelled, ok := abstractdomain.SpellForMemoKey(*fieldValue)
-		if !ok {
-			return "", false
-		}
-		b.WriteString(spelled)
-	}
-	b.WriteByte(')')
-	return b.String(), true
-}

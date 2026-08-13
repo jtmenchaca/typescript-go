@@ -29,10 +29,10 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 		return abstractdomain.AbstractValue{}, false
 	}
 	name := elem.Expression.Text()
-	if _, ok := env[name]; !ok {
+	if _, ok := env.Get(name); !ok {
 		return abstractdomain.AbstractValue{}, false
 	}
-	receiver, ok := env[name]
+	receiver, ok := env.Get(name)
 	if !ok {
 		receiver = silence.Residue()
 	}
@@ -49,7 +49,7 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 		index.Values[0] >= 0 && int(index.Values[0]) < len(receiver.Values) {
 		next := append([]float64{}, receiver.Values...)
 		next[int(index.Values[0])] = value.Values[0]
-		dataflowfacts.UpdateTracked(ctx.Aliases, env, name, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+		UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
 		return value, true
 	}
 	if receiver.Kind == abstractdomain.KindObject {
@@ -63,7 +63,7 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 			_, hasKey := objectKeyIndex(receiver, literal)
 			if hasKey {
 				keys := setObjectKey(receiver.Keys, literal, value)
-				dataflowfacts.UpdateTracked(ctx.Aliases, env, name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
+				UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
 				return value, true
 			}
 		}
@@ -98,12 +98,12 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 					idx, _ := objectKeyIndex(receiver, key)
 					keys[idx] = abstractdomain.ObjectKey{Name: key, Value: abstractdomain.JoinKnown(keys[idx].Value, value)}
 				}
-				dataflowfacts.UpdateTracked(ctx.Aliases, env, name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
+				UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
 				return value, true
 			}
 		}
 	}
-	ctx.Aliases.Havoc(env, name)
+	HavocEnv(ctx.Aliases, env, name)
 	return value, true
 }
 

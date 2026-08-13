@@ -50,7 +50,7 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 	env := input.Env
 
 	// ── iterate the effect over the exact join ───────────────────────
-	candidate := cloneEnv(env)
+	candidate := env.Clone()
 	for _, name := range input.Touched {
 		// a declared binding written by the CONDITION is not re-armed to
 		// its stated set — those writes are unseen, so the invariant is
@@ -59,24 +59,24 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 			continue
 		}
 		if stated, ok := ctx.Declared[name]; ok {
-			candidate[name] = AbstractValueOfDeclared(*stated)
+			candidate.Set(name, AbstractValueOfDeclared(*stated))
 		}
 	}
-	iterates := []Env{cloneEnv(candidate)}
+	iterates := []Env{candidate.Clone()}
 	stable := len(input.Fixpointed) == 0
 	for i := 0; i < loopSettleIterations && !stable; i++ {
 		stepped := input.StepImage(candidate, input.Silent)
-		next := cloneEnv(candidate)
+		next := candidate.Clone()
 		changed := false
 		for _, name := range input.Fixpointed {
 			joined := abstractdomain.JoinKnown(envOrResidue(candidate, name), envOrResidue(stepped, name))
 			if !sameKnown(joined, envOrResidue(candidate, name)) {
 				changed = true
 			}
-			next[name] = joined
+			next.Set(name, joined)
 		}
 		candidate = next
-		iterates = append(iterates, cloneEnv(candidate))
+		iterates = append(iterates, candidate.Clone())
 		stable = !changed
 	}
 
@@ -126,7 +126,7 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 			if ok {
 				for i, answer := range answers {
 					if answer.Kind == kernelbridge.LoopVarAnswerSet {
-						candidate[input.Fixpointed[i]] = abstractdomain.KnownSet(answer.Set, nil, premiseFloorOf(input.PremiseEnv, input.Fixpointed), abstractdomain.SetKindTagNone)
+						candidate.Set(input.Fixpointed[i], abstractdomain.KnownSet(answer.Set, nil, premiseFloorOf(input.PremiseEnv, input.Fixpointed), abstractdomain.SetKindTagNone))
 						answered[input.Fixpointed[i]] = struct{}{}
 					}
 				}
@@ -150,7 +150,7 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 				}
 			}
 			if anyNil {
-				candidate[name] = silence.Residue()
+				candidate.Set(name, silence.Residue())
 				continue
 			}
 			last := len(ranges) - 1
@@ -187,7 +187,7 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 			}
 			hasStep := everyStepFinite && !math.IsNaN(step) && !math.IsInf(step, 0)
 			if math.IsInf(lo, -1) && math.IsInf(hi, 1) && !int && !hasStep {
-				candidate[name] = silence.Residue()
+				candidate.Set(name, silence.Residue())
 			} else {
 				forms := []refinementsets.Refinement{refinementsets.AtLeast(lo), refinementsets.AtMost(hi)}
 				if int {
@@ -196,7 +196,7 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 				if hasStep {
 					forms = append(forms, refinementsets.MultipleOf(step))
 				}
-				candidate[name] = abstractdomain.KnownSet(refinementsets.MakeRefinedSet(forms...), nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
+				candidate.Set(name, abstractdomain.KnownSet(refinementsets.MakeRefinedSet(forms...), nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
 			}
 		}
 		// certify the walker-widened bindings — withdrawals CASCADE: a
@@ -225,7 +225,7 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 				}
 				certified := CertifiedInvariant(ctx, envOrResidue(env, name), envOrResidue(stepped, name), invariant.Set)
 				if !certified {
-					candidate[name] = silence.Residue()
+					candidate.Set(name, silence.Residue())
 					recheck = true
 				}
 			}
@@ -237,7 +237,7 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 		// tightened environment or none of it — mixed tightenings could
 		// otherwise lean on each other
 		stepOnce := input.StepImage(candidate, input.Silent)
-		tightened := cloneEnv(candidate)
+		tightened := candidate.Clone()
 		tightenedAny := false
 		for _, name := range input.Fixpointed {
 			if envOrResidue(candidate, name).Kind != abstractdomain.KindSet {
@@ -250,7 +250,7 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 			if !sameKnown(next, envOrResidue(candidate, name)) {
 				tightenedAny = true
 			}
-			tightened[name] = next
+			tightened.Set(name, next)
 		}
 		if tightenedAny {
 			stepAgain := input.StepImage(tightened, input.Silent)
@@ -280,17 +280,18 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 	// the two equal, so this changes how the facts read and never
 	// which facts they are.
 	simplifier := kernelSimplificationAdapter{ctx.Kernel}
-	for name, known := range candidate {
+	candidate.Range(func(name string, known abstractdomain.AbstractValue) bool {
 		if known.Kind != abstractdomain.KindSet {
-			continue
+			return true
 		}
 		plainer := refinementsets.SimplifyScalar(simplifier, known.Set)
 		if kernelbridge.EncodeSet(plainer) != kernelbridge.EncodeSet(known.Set) {
 			out := known
 			out.Set = plainer
-			candidate[name] = out
+			candidate.Set(name, out)
 		}
-	}
+		return true
+	})
 	return candidate
 }
 

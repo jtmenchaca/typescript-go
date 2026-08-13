@@ -201,7 +201,7 @@ func ReadBinaryArithmetic(ctx *FlowContext, env Env, e *ast.Node, left, right ab
 		rightElem := bin.Right.AsElementAccessExpression()
 		if ast.IsIdentifier(leftElem.Expression) && ast.IsIdentifier(rightElem.Expression) &&
 			leftElem.Expression.Text() == rightElem.Expression.Text() {
-			holder, ok := env[leftElem.Expression.Text()]
+			holder, ok := env.Get(leftElem.Expression.Text())
 			if ok && holder.Kind == abstractdomain.KindSet && holder.Measures != nil && holder.Measures.Sorted &&
 				indexAtLeast(ctx, env, leftElem.ArgumentExpression, rightElem.ArgumentExpression) {
 				ordered := TransferOrderedSubGap(left, right, 0)

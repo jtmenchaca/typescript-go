@@ -11,7 +11,6 @@
 package walk
 
 import (
-	"sort"
 	"strings"
 	"sync"
 
@@ -38,21 +37,24 @@ var (
 // sorted names, each value through the memo speller. ("", false)
 // where any value refuses a spelling; the caller walks instead.
 func spellEnvForMemo(env Env) (string, bool) {
-	names := make([]string, 0, len(env))
-	for name := range env {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	// Range already visits in sorted name order, so the spelling is
+	// deterministic without a separate collect-and-sort.
 	var b strings.Builder
-	for _, name := range names {
-		spelled, ok := abstractdomain.SpellForMemoKey(env[name])
+	spellable := true
+	env.Range(func(name string, v abstractdomain.AbstractValue) bool {
+		spelled, ok := abstractdomain.SpellForMemoKey(v)
 		if !ok {
-			return "", false
+			spellable = false
+			return false
 		}
 		b.WriteString(name)
 		b.WriteByte('=')
 		b.WriteString(spelled)
 		b.WriteByte('\x1e')
+		return true
+	})
+	if !spellable {
+		return "", false
 	}
 	return b.String(), true
 }
@@ -82,7 +84,7 @@ func rememberedLoopEffect(p *program.CheckerProgram, loop *ast.Node, state strin
 		return nil, false
 	}
 	tracing.Count("loop.effect.hit", 0)
-	return cloneEnv(image), true
+	return image.Clone(), true
 }
 
 // rememberLoopEffect records one walked step image, copied so the
@@ -94,6 +96,6 @@ func rememberLoopEffect(p *program.CheckerProgram, loop *ast.Node, state string,
 		held = map[loopEffectKey]Env{}
 		loopEffects[p] = held
 	}
-	held[loopEffectKey{loop: loop, state: state}] = cloneEnv(image)
+	held[loopEffectKey{loop: loop, state: state}] = image.Clone()
 	loopEffectMu.Unlock()
 }

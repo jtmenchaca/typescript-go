@@ -10,20 +10,23 @@ package walk
 import "github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 
 func JoinEnvs(a, b Env) Env {
-	out := Env{}
-	for name, known := range a {
-		if other, ok := b[name]; ok {
-			out[name] = abstractdomain.JoinKnown(known, other)
+	out := NewEnv()
+	a.Range(func(name string, known abstractdomain.AbstractValue) bool {
+		if other, ok := b.Get(name); ok {
+			out.Set(name, abstractdomain.JoinKnown(known, other))
 		}
-	}
+		return true
+	})
 	return out
 }
 
 func ReplaceEnv(env, withEnv Env) {
-	for name := range env {
-		delete(env, name)
-	}
-	for name, known := range withEnv {
-		env[name] = known
-	}
+	env.Range(func(name string, _ abstractdomain.AbstractValue) bool {
+		env.Delete(name)
+		return true
+	})
+	withEnv.Range(func(name string, known abstractdomain.AbstractValue) bool {
+		env.Set(name, known)
+		return true
+	})
 }

@@ -194,7 +194,7 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 		if _, isPoisoned := poisoned[nameText]; isPoisoned {
 			continue
 		}
-		env := Env{}
+		env := NewEnv()
 		var value abstractdomain.AbstractValue
 		if pd.Initializer == nil {
 			value = abstractdomain.Undef
@@ -225,12 +225,12 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 		if body == nil {
 			continue
 		}
-		env := Env{}
+		env := NewEnv()
 		if ast.IsConstructorDeclaration(member) || ast.IsMethodDeclaration(member) || ast.IsSetAccessorDeclaration(member) {
 			for _, parameter := range member.Parameters() {
 				pname := parameter.AsParameterDeclaration().Name()
 				if ast.IsIdentifier(pname) {
-					env[pname.Text()] = silence.Residue()
+					env.Set(pname.Text(), silence.Residue())
 				}
 			}
 		}

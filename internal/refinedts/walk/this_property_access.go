@@ -21,7 +21,7 @@ func ReadThisPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdom
 	// …unless the walk HOLDS a narrowed `this` object: then the
 	// general property read below answers through it, so a guard's
 	// narrowing on the key outranks the standing invariant
-	held, hasThis := env["this"]
+	held, hasThis := env.Get("this")
 	thisIsObject := hasThis && held.Kind == abstractdomain.KindObject
 	if !(ast.IsPropertyAccessExpression(e) &&
 		e.AsPropertyAccessExpression().Expression.Kind == ast.KindThisKeyword &&

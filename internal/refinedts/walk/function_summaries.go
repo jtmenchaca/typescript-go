@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
@@ -319,7 +320,7 @@ func ApplyConstantWrites(ctx *FlowContext, env Env, call *ast.Node, writes []Con
 			continue
 		}
 		if ast.IsIdentifier(target) {
-			if held, ok := env[target.Text()]; ok {
+			if held, ok := env.Get(target.Text()); ok {
 				if held.Kind == abstractdomain.KindObject {
 					next := make([]abstractdomain.ObjectKey, 0, len(held.Keys)+1)
 					found := false
@@ -334,9 +335,9 @@ func ApplyConstantWrites(ctx *FlowContext, env Env, call *ast.Node, writes []Con
 					if !found {
 						next = append(next, abstractdomain.ObjectKey{Name: write.Key, Value: abstractdomain.KnownValues([]float64{write.Value}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)})
 					}
-					dataflowfacts.UpdateTracked(ctx.Aliases, env, target.Text(), abstractdomain.KnownObject(next, nil, false, abstractdomain.TrustProved, false))
+					UpdateTrackedEnv(ctx.Aliases, env, target.Text(), abstractdomain.KnownObject(next, nil, false, abstractdomain.TrustProved, false))
 				} else {
-					ctx.Aliases.Havoc(env, target.Text())
+					HavocEnv(ctx.Aliases, env, target.Text())
 				}
 				continue
 			}
@@ -348,11 +349,12 @@ func ApplyConstantWrites(ctx *FlowContext, env Env, call *ast.Node, writes []Con
 }
 
 // recoveryMemoMu guards recoveryMemo: the memoized recovery for a
-// SELF-CONTAINED effect-free callee. The TS source keys this with a
-// `WeakMap<ts.Node, Map<string, AbstractValue>>`; substituted the
-// same way as effectSummaries above.
+// SELF-CONTAINED effect-free callee, keyed by the CHECK first — a
+// recovery composes through the entry's own contract registry, and a
+// cross-entry store made verdicts vary with scheduling order (the
+// same defect inline_replay.go's inlineMemo comment names).
 var recoveryMemoMu sync.Mutex
-var recoveryMemo = map[*ast.Node]map[string]abstractdomain.AbstractValue{}
+var recoveryMemo = map[*program.CheckerProgram]map[*ast.Node]map[string]abstractdomain.AbstractValue{}
 
 // jsonStringifyArgKnowns is the TS source's `JSON.stringify(argKnowns)`
 // inside RecoverPure's try/catch: a memo key from the argument
@@ -398,10 +400,15 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 		key = jsonStringifyArgKnowns(argKnowns)
 		if key != "" {
 			recoveryMemoMu.Lock()
-			memo = recoveryMemo[contract.Declaration]
+			shelf := recoveryMemo[ctx.P]
+			if shelf == nil {
+				shelf = map[*ast.Node]map[string]abstractdomain.AbstractValue{}
+				recoveryMemo[ctx.P] = shelf
+			}
+			memo = shelf[contract.Declaration]
 			if memo == nil {
 				memo = map[string]abstractdomain.AbstractValue{}
-				recoveryMemo[contract.Declaration] = memo
+				shelf[contract.Declaration] = memo
 			}
 			held, ok := memo[key]
 			recoveryMemoMu.Unlock()
@@ -417,7 +424,7 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 	// Composition resolves through the contract registry: a called
 	// name that is a PURE contracted function hands its declaration to
 	// the lowering, which inlines its body into fresh slots.
-	if summarized, ok := SummaryResult(contract.Declaration, argKnowns, func(callee *ast.Node) *ast.Node {
+	if summarized, ok := SummaryResult(ctx.P, contract.Declaration, argKnowns, func(callee *ast.Node) *ast.Node {
 		called := ContractOf(ctx, callee)
 		if called == nil || called.Declaration.Body() == nil {
 			return nil
@@ -456,13 +463,13 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 		return RecursionMarker(symbol)
 	}
 	inlining[symbol] = struct{}{}
-	callEnv := Env{}
+	callEnv := NewEnv()
 	for i, parameter := range contract.Declaration.Parameters() {
 		name := parameter.AsParameterDeclaration().Name()
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		callEnv[name.Text()] = ParameterKnown(parameter, i, call, argKnowns)
+		callEnv.Set(name.Text(), ParameterKnown(parameter, i, call, argKnowns))
 	}
 	var sink []abstractdomain.AbstractValue
 	silent := *ctx

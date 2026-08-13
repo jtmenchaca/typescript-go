@@ -83,13 +83,13 @@ func BindEntryEnv(input BindEntryEnvInput) {
 				source = InitialStateOfPlainParameter(input.P, parameter)
 			}
 			ReadDestructuring(decl.Name(), source, func(name string, held abstractdomain.AbstractValue, at *ast.Node) {
-				input.Env[name] = silence.SeededBinding(input.P.Checker, held, at)
+				input.Env.Set(name, silence.SeededBinding(input.P.Checker, held, at))
 			})
 			continue
 		}
 		name := decl.Name().Text()
 		if stated != nil {
-			input.Env[name] = AbstractValueOfDeclared(*stated)
+			input.Env.Set(name, AbstractValueOfDeclared(*stated))
 			if input.OnStated != nil {
 				input.OnStated(name, stated)
 			}
@@ -97,13 +97,13 @@ func BindEntryEnv(input BindEntryEnvInput) {
 		}
 		if input.CallSiteInitialStates != nil {
 			if fromCall, ok := input.CallSiteInitialStates[name]; ok {
-				input.Env[name] = fromCall
+				input.Env.Set(name, fromCall)
 				continue
 			}
 		}
-		if held, ok := input.Env[name]; ok && held.Kind != abstractdomain.KindUnknown {
+		if held, ok := input.Env.Get(name); ok && held.Kind != abstractdomain.KindUnknown {
 			continue
 		}
-		input.Env[name] = InitialStateOfPlainParameter(input.P, parameter)
+		input.Env.Set(name, InitialStateOfPlainParameter(input.P, parameter))
 	}
 }

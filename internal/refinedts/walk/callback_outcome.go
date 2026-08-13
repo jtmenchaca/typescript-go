@@ -13,7 +13,6 @@ import (
 	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
-	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -84,7 +83,7 @@ func CallbackOutcome(
 		for i, argument := range bound.PreboundArguments {
 			var value abstractdomain.AbstractValue
 			if SyntacticLiteral(argument) {
-				value = analyzers.EvaluateExpression(&silent, Env{}, argument)
+				value = analyzers.EvaluateExpression(&silent, NewEnv(), argument)
 			} else {
 				value = silence.Residue()
 			}
@@ -112,15 +111,12 @@ func CallbackOutcome(
 		// arrow — including the reporting pass that runs on `ctx`
 		owned := *reporting
 		owned.SnapshotOwner = arrow
-		callEnv := Env{}
-		for k, v := range env {
-			callEnv[k] = v
-		}
+		callEnv := env.Clone()
 		for name, known := range preboundBindings {
-			callEnv[name] = known
+			callEnv.Set(name, known)
 		}
 		for name, known := range bindings {
-			callEnv[name] = known
+			callEnv.Set(name, known)
 		}
 		if ast.IsBlock(body) {
 			// the return sink collects what the block returns; its
@@ -158,8 +154,8 @@ func CallbackOutcome(
 		written := map[string]struct{}{}
 		AssignedNames(ctx.P.Checker, body, written)
 		for name := range written {
-			if _, ok := env[name]; ok {
-				ctx.Aliases.Havoc(env, name)
+			if _, ok := env.Get(name); ok {
+				HavocEnv(ctx.Aliases, env, name)
 			}
 		}
 	}
@@ -179,7 +175,7 @@ func CallbackOutcome(
 	ownerParameter, hasOwnerParameter := nameAt(ownerIndex)
 	forgetOwner := func() {
 		if hasOwnerParameter && hasTrackedName && WritesThrough(body, ownerParameter) {
-			ctx.Aliases.Havoc(env, trackedName)
+			HavocEnv(ctx.Aliases, env, trackedName)
 		}
 	}
 
@@ -407,15 +403,12 @@ func forEachOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain
 			if indexParameter, ok := nameAt(1); ok {
 				bindings[indexParameter] = abstractdomain.KnownValues([]float64{float64(i)}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 			}
-			callEnv := Env{}
-			for k, v := range env {
-				callEnv[k] = v
-			}
+			callEnv := env.Clone()
 			for name, known := range preboundBindings {
-				callEnv[name] = known
+				callEnv.Set(name, known)
 			}
 			for name, known := range bindings {
-				callEnv[name] = known
+				callEnv.Set(name, known)
 			}
 			if ast.IsBlock(body) {
 				var sink []abstractdomain.AbstractValue
@@ -425,7 +418,7 @@ func forEachOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain
 			} else {
 				analyzers.EvaluateExpression(silent, callEnv, body)
 			}
-			if v, ok := callEnv[ownerParameter]; ok {
+			if v, ok := callEnv.Get(ownerParameter); ok {
 				tuple = v
 			} else {
 				tuple = silence.Residue()
@@ -434,9 +427,9 @@ func forEachOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain
 		evalBody(ctx, reportPins(nil))
 		forgetWrites()
 		if exact && tuple.Kind == abstractdomain.KindValues {
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, tuple)
+			UpdateTrackedEnv(ctx.Aliases, env, trackedName, tuple)
 		} else {
-			ctx.Aliases.Havoc(env, trackedName)
+			HavocEnv(ctx.Aliases, env, trackedName)
 		}
 		return silence.Residue()
 	}

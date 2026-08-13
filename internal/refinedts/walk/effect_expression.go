@@ -76,6 +76,146 @@ type EffectReader struct {
 	Opaque    func(e *ast.Node) (kernelbridge.LoopEffect, bool)
 }
 
+// stringSlotEffect is a tracked STRING-sorted read as an effect, or
+// (zero, false). Sequence building admits only the string sort: a
+// number-sorted operand of `+` is arithmetic, not concatenation, and
+// an unknown-sorted one is a reread across sorts, which is never a
+// claim.
+func stringSlotEffect(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, bool) {
+	i, ok := IndexOf(context, e)
+	if !ok {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if context.Sorts[i] != BindingKindString {
+		return kernelbridge.LoopEffect{}, false
+	}
+	return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: i}, true
+}
+
+// concatOf pairs two operand effects into one concatenation effect.
+func concatOf(a, b kernelbridge.LoopEffect) kernelbridge.LoopEffect {
+	return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConcat, A: &a, B: &b}
+}
+
+// SequenceEffectOf reads an expression as a SEQUENCE effect — the
+// string world's half of the effect grammar, beside the numeric
+// LowerEffectExpression:
+//
+//   - a string literal is its exact tuple;
+//   - a tracked string-sorted name is a read;
+//   - `a + b` with BOTH sides sequence-readable is their
+//     concatenation (a `+` with a number-sorted operand is arithmetic
+//     and is not read here — it takes the numeric route as before);
+//   - a template literal `a${x}b` is that concatenation spelled out,
+//     its literal chunks as exact tuples and its substitutions as
+//     sequence reads.
+//
+// A non-string or untracked part declines the whole reading, exactly
+// as it did before this route existed. Parens and casts unwrap first.
+func SequenceEffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, bool) {
+	head := Unwrapped(e)
+	if ast.IsStringLiteral(head) {
+		return kernelbridge.LoopEffect{
+			Kind: kernelbridge.LoopEffectConst,
+			Set:  refinementsets.StringTuple(head.AsStringLiteral().Text),
+		}, true
+	}
+	if ast.IsNoSubstitutionTemplateLiteral(head) {
+		return kernelbridge.LoopEffect{
+			Kind: kernelbridge.LoopEffectConst,
+			Set:  refinementsets.StringTuple(head.AsNoSubstitutionTemplateLiteral().Text),
+		}, true
+	}
+	if slot, ok := stringSlotEffect(context, head); ok {
+		return slot, true
+	}
+	if ast.IsBinaryExpression(head) {
+		bin := head.AsBinaryExpression()
+		if bin.OperatorToken.Kind != ast.KindPlusToken {
+			return kernelbridge.LoopEffect{}, false
+		}
+		a, aOk := SequenceEffectOf(context, bin.Left)
+		if !aOk {
+			return kernelbridge.LoopEffect{}, false
+		}
+		b, bOk := SequenceEffectOf(context, bin.Right)
+		if !bOk {
+			return kernelbridge.LoopEffect{}, false
+		}
+		return concatOf(a, b), true
+	}
+	if ast.IsTemplateExpression(head) {
+		return templateSequenceOf(context, head)
+	}
+	return kernelbridge.LoopEffect{}, false
+}
+
+// SpelledSequenceShape is whether an expression is a sequence by its
+// own SYNTAX alone — a string literal, any template literal, or a `+`
+// chain of those. It reads no names and consults no slot vector, so it
+// answers the same in any context: the sort question a caller must
+// settle before the callee's slots exist.
+func SpelledSequenceShape(e *ast.Node) bool {
+	head := Unwrapped(e)
+	if ast.IsStringLiteral(head) || ast.IsNoSubstitutionTemplateLiteral(head) ||
+		ast.IsTemplateExpression(head) {
+		return true
+	}
+	if ast.IsBinaryExpression(head) {
+		bin := head.AsBinaryExpression()
+		if bin.OperatorToken.Kind != ast.KindPlusToken {
+			return false
+		}
+		return SpelledSequenceShape(bin.Left) && SpelledSequenceShape(bin.Right)
+	}
+	return false
+}
+
+// templateSequenceOf is `a${x}b${y}c` as a right-nested chain of the
+// concatenation effect: the head's literal text, then per span the
+// substituted expression's sequence reading followed by that span's
+// literal text. An empty literal chunk contributes the empty tuple,
+// which concatenates to nothing — kept rather than special-cased, so
+// the chain's shape is one rule.
+func templateSequenceOf(context *LoweringContext, head *ast.Node) (kernelbridge.LoopEffect, bool) {
+	template := head.AsTemplateExpression()
+	if template.TemplateSpans == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	parts := []kernelbridge.LoopEffect{{
+		Kind: kernelbridge.LoopEffectConst,
+		Set:  refinementsets.StringTuple(template.Head.AsTemplateHead().Text),
+	}}
+	for _, spanNode := range template.TemplateSpans.Nodes {
+		span := spanNode.AsTemplateSpan()
+		substituted, ok := SequenceEffectOf(context, span.Expression)
+		if !ok {
+			return kernelbridge.LoopEffect{}, false
+		}
+		parts = append(parts, substituted)
+		var text string
+		switch {
+		case ast.IsTemplateMiddle(span.Literal):
+			text = span.Literal.AsTemplateMiddle().Text
+		case ast.IsTemplateTail(span.Literal):
+			text = span.Literal.AsTemplateTail().Text
+		default:
+			return kernelbridge.LoopEffect{}, false
+		}
+		parts = append(parts, kernelbridge.LoopEffect{
+			Kind: kernelbridge.LoopEffectConst,
+			Set:  refinementsets.StringTuple(text),
+		})
+	}
+	// fold right so the chain nests the way the kernel's Concatenation
+	// form does
+	out := parts[len(parts)-1]
+	for i := len(parts) - 2; i >= 0; i-- {
+		out = concatOf(parts[i], out)
+	}
+	return out, true
+}
+
 // LowerEffectExpression is lowerEffectExpression in the TS source.
 func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopEffect, bool) {
 	if ast.IsParenthesizedExpression(e) || ast.IsAsExpression(e) || ast.IsNonNullExpression(e) {

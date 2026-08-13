@@ -72,7 +72,7 @@ func AnalyzeBlockStatement(ctx *FlowContext, env Env, statement *ast.Node, resul
 	shadowSaved := map[string]abstractdomain.AbstractValue{}
 	shadowSavedHas := map[string]bool{}
 	for name := range scoped {
-		if held, ok := env[name]; ok {
+		if held, ok := env.Get(name); ok {
 			shadowSaved[name] = held
 			shadowSavedHas[name] = true
 		} else {
@@ -95,7 +95,7 @@ func AnalyzeBlockStatement(ctx *FlowContext, env Env, statement *ast.Node, resul
 	restoreInto := func(target Env) {
 		for name, held := range shadowSaved {
 			if shadowSavedHas[name] {
-				target[name] = held
+				target.Set(name, held)
 			}
 		}
 	}
@@ -137,8 +137,8 @@ func AnalyzeBlockStatement(ctx *FlowContext, env Env, statement *ast.Node, resul
 			}
 		}
 		for name := range written {
-			if _, ok := env[name]; ok {
-				ctx.Aliases.Havoc(env, name)
+			if _, ok := env.Get(name); ok {
+				HavocEnv(ctx.Aliases, env, name)
 			}
 		}
 	}

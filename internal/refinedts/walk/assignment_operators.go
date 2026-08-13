@@ -48,7 +48,7 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 			ctx.Aliases.Link(bin.Left.Text(), bin.Right.Text())
 		}
 		if bin.Right.Kind == ast.KindThisKeyword {
-			if _, ok := env["this"]; ok {
+			if _, ok := env.Get("this"); ok {
 				ctx.Aliases.Link(bin.Left.Text(), "this")
 			}
 		}
@@ -57,7 +57,7 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 		// candidates, shares the holder's reference — linked
 		if dataflowfacts.ReferenceTyped(ctx.P.Checker, bin.Left) {
 			for _, holder := range ProjectionSources(bin.Right, nil) {
-				if _, ok := env[holder]; ok {
+				if _, ok := env.Get(holder); ok {
 					ctx.Aliases.Link(bin.Left.Text(), holder)
 				}
 			}
@@ -114,7 +114,7 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 		ast.IsIdentifier(bin.Left) {
 		right := evaluateExpression(ctx, env, bin.Right)
 		op, hasOp := compoundOperator(bin.OperatorToken.Kind)
-		before, ok := env[bin.Left.Text()]
+		before, ok := env.Get(bin.Left.Text())
 		if !ok {
 			before = silence.Residue()
 		}
@@ -158,7 +158,7 @@ func ReadStepUnary(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abstr
 				step = OpSub
 			}
 			if ast.IsIdentifier(unary.Operand) {
-				held, ok := env[unary.Operand.Text()]
+				held, ok := env.Get(unary.Operand.Text())
 				if !ok {
 					held = silence.Residue()
 				}
@@ -186,7 +186,7 @@ func ReadStepUnary(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abstr
 				step = OpSub
 			}
 			if ast.IsIdentifier(unary.Operand) {
-				before, ok := env[unary.Operand.Text()]
+				before, ok := env.Get(unary.Operand.Text())
 				if !ok {
 					before = silence.Residue()
 				}

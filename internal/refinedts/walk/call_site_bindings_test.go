@@ -147,11 +147,13 @@ func TestCallSiteBindings_ArrayFromLengthOnlyMapperPinsAbsentAndIndex(t *testing
 	if !ok {
 		t.Fatalf("CallSiteBindings(Array.from mapper) ok = false, want true")
 	}
-	el, hasEl := abstractdomain.FormatAbstractValue(bindings["el"])
+	elHeld, _ := bindings.Get("el")
+	el, hasEl := abstractdomain.FormatAbstractValue(elHeld)
 	if !hasEl || el != "{absent}" {
 		t.Errorf("bindings[el] = %q, %v, want %q, true", el, hasEl, "{absent}")
 	}
-	i, hasI := abstractdomain.FormatAbstractValue(bindings["i"])
+	iHeld, _ := bindings.Get("i")
+	i, hasI := abstractdomain.FormatAbstractValue(iHeld)
 	if !hasI || i != "{integer, 𝑥 ≥ 0}" {
 		t.Errorf("bindings[i] = %q, %v, want %q, true", i, hasI, "{integer, 𝑥 ≥ 0}")
 	}
@@ -172,7 +174,8 @@ func TestCallSiteBindings_MapPinsMatchArrayCallbackPins(t *testing.T) {
 		method:   "map",
 	})
 	for _, name := range []string{"item", "i", "arr"} {
-		fromSitesFormatted, _ := abstractdomain.FormatAbstractValue(fromSites[name])
+		fromSitesHeld, _ := fromSites.Get(name)
+		fromSitesFormatted, _ := abstractdomain.FormatAbstractValue(fromSitesHeld)
 		fromLawFormatted, _ := abstractdomain.FormatAbstractValue(fromLaw[name])
 		if fromSitesFormatted != fromLawFormatted {
 			t.Errorf("bindings[%s] = %q, want %q (arrayCallbackPins)", name, fromSitesFormatted, fromLawFormatted)
@@ -199,7 +202,8 @@ func TestCallSiteBindings_TransformPinsMatchSchemaCallbackPins(t *testing.T) {
 		t.Fatalf("expected compiled receiver")
 	}
 	fromLaw := SchemaCallbackPins(schemaCallbackPinsParams{c: p.Checker, fn: fn, compiled: *compiled.Annotation})
-	fromSitesFormatted, _ := abstractdomain.FormatAbstractValue(fromSites["n"])
+	fromSitesHeld, _ := fromSites.Get("n")
+	fromSitesFormatted, _ := abstractdomain.FormatAbstractValue(fromSitesHeld)
 	fromLawFormatted, _ := abstractdomain.FormatAbstractValue(fromLaw["n"])
 	if fromSitesFormatted != fromLawFormatted {
 		t.Errorf("bindings[n] = %q, want %q (schemaCallbackPins)", fromSitesFormatted, fromLawFormatted)
@@ -213,7 +217,8 @@ func TestCallSiteBindings_ANonExportedFunctionWearsTheJoinOfItsSites(t *testing.
 	if !ok {
 		t.Fatalf("CallSiteBindings(non-exported f) ok = false, want true")
 	}
-	formatted, hasFormatted := abstractdomain.FormatAbstractValue(bindings["n"])
+	held, _ := bindings.Get("n")
+	formatted, hasFormatted := abstractdomain.FormatAbstractValue(held)
 	if !hasFormatted || formatted != "{10 | 25}" {
 		t.Errorf("bindings[n] = %q, %v, want %q, true", formatted, hasFormatted, "{10 | 25}")
 	}

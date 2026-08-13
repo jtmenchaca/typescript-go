@@ -21,12 +21,12 @@ func AnalyzeTryStatement(ctx *FlowContext, env Env, statement *ast.Node, result 
 	// (exceptional exits already joined into the post-call state by
 	// the inline), while a name the try TEXT itself writes can be
 	// caught mid-sequence, so it is forgotten at catch entry
-	tryEnv := cloneEnv(env)
-	snapshots := []Env{cloneEnv(tryEnv)}
+	tryEnv := env.Clone()
+	snapshots := []Env{tryEnv.Clone()}
 	tryExits := false
 	for _, s := range tryStmt.TryBlock.AsBlock().Statements.Nodes {
 		tryExits = AnalyzeStatement(ctx, tryEnv, s, result)
-		snapshots = append(snapshots, cloneEnv(tryEnv))
+		snapshots = append(snapshots, tryEnv.Clone())
 		if tryExits {
 			break
 		}
@@ -34,7 +34,7 @@ func AnalyzeTryStatement(ctx *FlowContext, env Env, statement *ast.Node, result 
 	var catchEnv Env
 	catchExits := false
 	if tryStmt.CatchClause != nil {
-		catchEnv = cloneEnv(env)
+		catchEnv = env.Clone()
 		catchClause := tryStmt.CatchClause.AsCatchClause()
 		// only the try TEXT's own writes havoc here — callee-mediated
 		// effects land whole at their statement, and the snapshots
@@ -42,25 +42,26 @@ func AnalyzeTryStatement(ctx *FlowContext, env Env, statement *ast.Node, result 
 		written := map[string]struct{}{}
 		AssignedNamesDirect(tryStmt.TryBlock, written)
 		for name := range written {
-			if _, ok := catchEnv[name]; ok {
-				ctx.Aliases.Havoc(catchEnv, name)
+			if _, ok := catchEnv.Get(name); ok {
+				HavocEnv(ctx.Aliases, catchEnv, name)
 			}
 		}
-		for name, held := range catchEnv {
+		catchEnv.Range(func(name string, held abstractdomain.AbstractValue) bool {
 			if held.Kind == abstractdomain.KindUnknown {
-				continue
+				return true
 			}
 			joined := held
 			for _, snapshot := range snapshots {
 				joined = abstractdomain.JoinKnown(joined, envOrResidue(snapshot, name))
 			}
-			catchEnv[name] = joined
-		}
+			catchEnv.Set(name, joined)
+			return true
+		})
 		binding := catchClause.VariableDeclaration
 		if binding != nil {
 			bindingName := binding.AsVariableDeclaration().Name()
 			if ast.IsIdentifier(bindingName) {
-				catchEnv[bindingName.Text()] = silence.SeededBinding(ctx.P.Checker, silence.Residue(), bindingName)
+				catchEnv.Set(bindingName.Text(), silence.SeededBinding(ctx.P.Checker, silence.Residue(), bindingName))
 			}
 		}
 		catchExits = AnalyzeStatements(ctx, catchEnv, catchClause.Block.AsBlock().Statements.Nodes, result)

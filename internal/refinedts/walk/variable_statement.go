@@ -67,7 +67,7 @@ func AnalyzeVariableStatement(ctx *FlowContext, env Env, statement *ast.Node) bo
 		if decl.Initializer == nil {
 			// no WRITE to checkAssignability — for an ambient declare, the alert
 			// belongs where the value is read
-			env[decl.Name().Text()] = value
+			env.Set(decl.Name().Text(), value)
 		} else {
 			WriteBinding(ctx, env, decl.Name().Text(), value, decl.Initializer, "an initialized value")
 			// a PLAIN spelled annotation (no refinement read) still
@@ -93,7 +93,7 @@ func AnalyzeVariableStatement(ctx *FlowContext, env Env, statement *ast.Node) bo
 		// `const self = this` shares the instance: linked, so a forget
 		// through either name clears both
 		if direct != nil && direct.Kind == ast.KindThisKeyword {
-			if _, hasThis := env["this"]; hasThis {
+			if _, hasThis := env.Get("this"); hasThis {
 				ctx.Aliases.Link(decl.Name().Text(), "this")
 			}
 		}
@@ -105,7 +105,7 @@ func AnalyzeVariableStatement(ctx *FlowContext, env Env, statement *ast.Node) bo
 		// write through the child reaches the holder(s)
 		if decl.Initializer != nil && dataflowfacts.ReferenceTyped(ctx.P.Checker, decl.Name()) {
 			for _, holder := range ProjectionSources(decl.Initializer, nil) {
-				if _, ok := env[holder]; ok {
+				if _, ok := env.Get(holder); ok {
 					ctx.Aliases.Link(decl.Name().Text(), holder)
 				}
 			}
@@ -173,7 +173,7 @@ func linkReturnedParameterAlias(ctx *FlowContext, env Env, bindingName string, d
 			}
 		}
 		if argument != nil && ast.IsIdentifier(argument) {
-			if _, ok := env[argument.Text()]; ok {
+			if _, ok := env.Get(argument.Text()); ok {
 				ctx.Aliases.Link(bindingName, argument.Text())
 			}
 		}

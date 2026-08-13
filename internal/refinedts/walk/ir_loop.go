@@ -15,24 +15,25 @@ import (
 // LoopHead is the {on, cond, after} shape loopHeadOf returns. A
 // TwoSlot head compares On against a second tracked slot rather than
 // a constant; nothing constant bounds either side, so Cond and After
-// stay nil and the loop narrows nothing at entry and intersects
-// nothing at exit — the reading the kernel's loop form already
-// accepts, and the weakest one that is sound. OnB records which slot
-// the head tested against; the loop lowering claims nothing from it.
+// stay nil and the head rides to the kernel as the loop's CondCmp
+// instead — Test names which comparison, OnB the other slot, and the
+// kernel tightens each slot's exit by the negated comparison's ray
+// read off the other slot's flagless exit.
 type LoopHead struct {
 	On      int
 	Cond    *refinementsets.RefinedSet
 	After   *refinementsets.RefinedSet
 	TwoSlot bool
 	OnB     int
+	Test    kernelbridge.IrBranchTest
 }
 
 // LoopHeadOf is loopHeadOf in the TS source: a while head `binding
 // <cmp> literal`, lowered through the kernel's narrowing question
 // into the condition's truth and falsity sets. A head comparing two
 // tracked number bindings (`i < n`) reads as the two-slot form
-// instead: recognized, so the loop lowers, with no narrowing claimed
-// on either side.
+// instead: no constant set on either side, the comparison itself
+// carried to the kernel.
 func LoopHeadOf(context *LoweringContext, condition *ast.Node) (LoopHead, bool) {
 	if !ast.IsBinaryExpression(condition) {
 		return LoopHead{}, false
@@ -50,7 +51,7 @@ func LoopHeadOf(context *LoweringContext, condition *ast.Node) (LoopHead, bool) 
 		if !onBOk {
 			return LoopHead{}, false
 		}
-		return LoopHead{On: on, TwoSlot: true, OnB: onB}, true
+		return LoopHead{On: on, TwoSlot: true, OnB: onB, Test: irTestOfCmp2(op)}, true
 	}
 	answer := context.Narrow(kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindCmp, Op: op, K: k})
 	head := LoopHead{On: on}
@@ -69,11 +70,13 @@ func LoopHeadOf(context *LoweringContext, condition *ast.Node) (LoopHead, bool) 
 // substitution budget.
 func EffectNodes(e kernelbridge.LoopEffect) int {
 	switch e.Kind {
-	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectConst, kernelbridge.LoopEffectUnknown:
+	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectConst,
+		kernelbridge.LoopEffectConstState, kernelbridge.LoopEffectUnknown:
 		return 1
 	case kernelbridge.LoopEffectUnary:
 		return 1 + EffectNodes(*e.A)
-	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectJoin:
+	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectConcat,
+		kernelbridge.LoopEffectJoin:
 		return 1 + EffectNodes(*e.A) + EffectNodes(*e.B)
 	}
 	panic("EffectNodes: unreached kind")
@@ -89,14 +92,16 @@ func SubstituteVars(e kernelbridge.LoopEffect, current []kernelbridge.LoopEffect
 			return current[e.Index]
 		}
 		return e
-	case kernelbridge.LoopEffectConst, kernelbridge.LoopEffectUnknown:
+	case kernelbridge.LoopEffectConst, kernelbridge.LoopEffectConstState,
+		kernelbridge.LoopEffectUnknown:
 		return e
 	case kernelbridge.LoopEffectUnary:
 		out := e
 		a := SubstituteVars(*e.A, current)
 		out.A = &a
 		return out
-	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectJoin:
+	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectConcat,
+		kernelbridge.LoopEffectJoin:
 		out := e
 		a := SubstituteVars(*e.A, current)
 		b := SubstituteVars(*e.B, current)
@@ -176,11 +181,14 @@ func effectsEqual(a, b kernelbridge.LoopEffect) bool {
 		return a.Index == b.Index
 	case kernelbridge.LoopEffectConst:
 		return setsEqualForFold(a.Set, b.Set)
+	case kernelbridge.LoopEffectConstState:
+		return a.Absent == b.Absent && a.Nan == b.Nan && setsEqualForFold(a.Set, b.Set)
 	case kernelbridge.LoopEffectUnknown:
 		return true
 	case kernelbridge.LoopEffectUnary:
 		return a.Op == b.Op && effectsEqual(*a.A, *b.A)
-	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectJoin:
+	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectConcat,
+		kernelbridge.LoopEffectJoin:
 		return a.Op == b.Op && effectsEqual(*a.A, *b.A) && effectsEqual(*a.B, *b.B)
 	}
 	return false
@@ -247,9 +255,11 @@ func RaisesDone(statements []kernelbridge.IrStatement, done int) bool {
 
 // LoopStatement is loopStatement in the TS source: the IR loop
 // statement from a prepared head and body. A two-slot head leaves
-// every cond and after entry nil — no constant bounds either side, so
-// the pass entry narrows nothing and the exit intersects nothing;
-// the solver still certifies whatever the body's effects support.
+// every cond and after entry nil — no constant bounds either side —
+// and rides in CondCmp instead, which the kernel reads at the exit:
+// the loop left, so the head failed, and a failed ordered comparison
+// between two real values holds its negation. The solver still
+// certifies whatever the body's effects support.
 func LoopStatement(context *LoweringContext, head LoopHead, body LoopBody) kernelbridge.IrStatement {
 	cond := make([]*refinementsets.RefinedSet, len(context.Bindings))
 	after := make([]*refinementsets.RefinedSet, len(context.Bindings))
@@ -259,11 +269,16 @@ func LoopStatement(context *LoweringContext, head LoopHead, body LoopBody) kerne
 			after[i] = head.After
 		}
 	}
+	var condCmp *kernelbridge.IrLoopCondCmp
+	if head.TwoSlot {
+		condCmp = &kernelbridge.IrLoopCondCmp{On: head.On, Test: head.Test, OnB: head.OnB}
+	}
 	return kernelbridge.IrStatement{
 		Kind:    kernelbridge.IrStatementLoop,
 		Written: body.Written,
 		Cond:    cond,
 		After:   after,
 		Body:    body.Effects,
+		CondCmp: condCmp,
 	}
 }

@@ -160,8 +160,8 @@ func readUnmodeledMethod(site MethodCallSite) abstractdomain.AbstractValue {
 		evaluateExpression(ctx, env, argument)
 		// the method may keep and write a reference argument
 		if ast.IsIdentifier(argument) {
-			if _, ok := env[argument.Text()]; ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
-				ctx.Aliases.Havoc(env, argument.Text())
+			if _, ok := env.Get(argument.Text()); ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
+				HavocEnv(ctx.Aliases, env, argument.Text())
 			}
 		}
 	}

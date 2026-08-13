@@ -70,7 +70,7 @@ func entryEnvFunctionNamed(t *testing.T, p *program.CheckerProgram, text string)
 func TestBindEntryEnv_APlainBooleanArrayParameterWearsTheStar(t *testing.T) {
 	p := entryEnvTestProgram(t, "function f(xs: boolean[]) { xs; }\n")
 	fn := entryEnvFunctionNamed(t, p, "f")
-	env := Env{}
+	env := NewEnv()
 	BindEntryEnv(BindEntryEnvInput{
 		P:                     p,
 		Env:                   env,
@@ -78,7 +78,8 @@ func TestBindEntryEnv_APlainBooleanArrayParameterWearsTheStar(t *testing.T) {
 		StatedParams:          nil,
 		CallSiteInitialStates: nil,
 	})
-	formatted, ok := abstractdomain.FormatAbstractValue(env["xs"])
+	held, _ := env.Get("xs")
+	formatted, ok := abstractdomain.FormatAbstractValue(held)
 	if !ok || formatted != "{each 0 | 1}" {
 		t.Errorf("env[xs] = %q, %v, want %q, true", formatted, ok, "{each 0 | 1}")
 	}
@@ -87,7 +88,7 @@ func TestBindEntryEnv_APlainBooleanArrayParameterWearsTheStar(t *testing.T) {
 func TestBindEntryEnv_ACallSiteJoinOutranksThePlainType(t *testing.T) {
 	p := entryEnvTestProgram(t, "function f(xs: boolean[]) { xs; }\n")
 	fn := entryEnvFunctionNamed(t, p, "f")
-	env := Env{}
+	env := NewEnv()
 	BindEntryEnv(BindEntryEnvInput{
 		P:            p,
 		Env:          env,
@@ -97,7 +98,8 @@ func TestBindEntryEnv_ACallSiteJoinOutranksThePlainType(t *testing.T) {
 			"xs": abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustProved),
 		},
 	})
-	formatted, ok := abstractdomain.FormatAbstractValue(env["xs"])
+	held, _ := env.Get("xs")
+	formatted, ok := abstractdomain.FormatAbstractValue(held)
 	if !ok || formatted != "true" {
 		t.Errorf("env[xs] = %q, %v, want %q, true", formatted, ok, "true")
 	}
@@ -106,9 +108,8 @@ func TestBindEntryEnv_ACallSiteJoinOutranksThePlainType(t *testing.T) {
 func TestBindEntryEnv_AnEnclosingPinOnTheEnvIsKeptWhenNothingBetterArrives(t *testing.T) {
 	p := entryEnvTestProgram(t, "function f(xs: boolean[]) { xs; }\n")
 	fn := entryEnvFunctionNamed(t, p, "f")
-	env := Env{
-		"xs": abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustProved),
-	}
+	env := NewEnv()
+	env.Set("xs", abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustProved))
 	BindEntryEnv(BindEntryEnvInput{
 		P:                     p,
 		Env:                   env,
@@ -116,7 +117,8 @@ func TestBindEntryEnv_AnEnclosingPinOnTheEnvIsKeptWhenNothingBetterArrives(t *te
 		StatedParams:          nil,
 		CallSiteInitialStates: nil,
 	})
-	formatted, ok := abstractdomain.FormatAbstractValue(env["xs"])
+	held, _ := env.Get("xs")
+	formatted, ok := abstractdomain.FormatAbstractValue(held)
 	if !ok || formatted != "false" {
 		t.Errorf("env[xs] = %q, %v, want %q, true", formatted, ok, "false")
 	}
@@ -125,7 +127,7 @@ func TestBindEntryEnv_AnEnclosingPinOnTheEnvIsKeptWhenNothingBetterArrives(t *te
 func TestBindEntryEnv_AnExportedAnyParameterIsOpaque(t *testing.T) {
 	p := entryEnvTestProgram(t, "export function f(x: any) { x; }\n")
 	fn := entryEnvFunctionNamed(t, p, "f")
-	env := Env{}
+	env := NewEnv()
 	BindEntryEnv(BindEntryEnvInput{
 		P:                     p,
 		Env:                   env,
@@ -133,7 +135,7 @@ func TestBindEntryEnv_AnExportedAnyParameterIsOpaque(t *testing.T) {
 		StatedParams:          nil,
 		CallSiteInitialStates: nil,
 	})
-	held := env["x"]
+	held, _ := env.Get("x")
 	if held.Kind != abstractdomain.KindUnknown {
 		t.Fatalf("held.Kind = %v, want KindUnknown", held.Kind)
 	}

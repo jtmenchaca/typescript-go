@@ -40,7 +40,7 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 		if pa.Name().Text() == "length" || pa.Name().Text() == "size" {
 			var receiver abstractdomain.AbstractValue
 			if ast.IsIdentifier(pa.Expression) {
-				if held, ok := env[pa.Expression.Text()]; ok {
+				if held, ok := env.Get(pa.Expression.Text()); ok {
 					receiver = held
 				} else {
 					receiver = silence.Residue()
@@ -126,7 +126,7 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 			// could not — `Array.isArray(u)` grounded u.length, and the
 			// branch's comparisons narrowed it in place
 			if ast.IsIdentifier(pa.Expression) {
-				if held, ok := env[pa.Expression.Text()+"."+pa.Name().Text()]; ok {
+				if held, ok := env.Get(pa.Expression.Text() + "." + pa.Name().Text()); ok {
 					return &held
 				}
 			}

@@ -128,7 +128,7 @@ func bindObjectPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer
 		// a destructured REFERENCE is the holder's child — linked,
 		// so a write through it reaches the holder
 		if ast.IsIdentifier(initializer) {
-			if _, ok := env[initializer.Text()]; ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, be.Name()) {
+			if _, ok := env.Get(initializer.Text()); ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, be.Name()) {
 				ctx.Aliases.Link(be.Name().Text(), initializer.Text())
 			}
 		}

@@ -58,8 +58,11 @@ type lengthSide struct {
 // proves length ≥ k — a length is a natural, never NaN, so the
 // refuted comparison decides cleanly (¬(len < k) on naturals IS
 // len ≥ k).
+// held answers a binding's current knowledge — walk hands its Env's
+// own Get, so no whole-environment copy crosses this boundary (the
+// old map parameter forced one per guard on the assignment path).
 func LengthGuardNarrowings(
-	env map[string]abstractdomain.AbstractValue,
+	held func(name string) (abstractdomain.AbstractValue, bool),
 	condition *ast.Node,
 	stringPlace func(e *ast.Node) bool,
 	negated bool,
@@ -82,8 +85,8 @@ func LengthGuardNarrowings(
 		if side == nil || math.IsNaN(k) {
 			return
 		}
-		held, ok := env[side.Binding]
-		if !ok || held.Kind != abstractdomain.KindSet {
+		heldValue, ok := held(side.Binding)
+		if !ok || heldValue.Kind != abstractdomain.KindSet {
 			return
 		}
 		var conjoin *refinementsets.RefinedSet
@@ -101,7 +104,7 @@ func LengthGuardNarrowings(
 			if !isFiniteNumber(floor) || floor <= 0 {
 				return
 			}
-			tightened, tightenedOk = refinementsets.TightenRepetition(held.Set, "min", int(floor), conjoin)
+			tightened, tightenedOk = refinementsets.TightenRepetition(heldValue.Set, "min", int(floor), conjoin)
 		case "max":
 			// `len ≤ k` caps the count at ⌊k⌋; the strict form one under
 			ceiling := math.Floor(k)
@@ -111,12 +114,12 @@ func LengthGuardNarrowings(
 			if !isFiniteNumber(ceiling) || ceiling < 0 {
 				return
 			}
-			tightened, tightenedOk = refinementsets.TightenRepetition(held.Set, "max", int(ceiling), conjoin)
+			tightened, tightenedOk = refinementsets.TightenRepetition(heldValue.Set, "max", int(ceiling), conjoin)
 		default:
 			if !isInteger(k) || k < 0 {
 				return
 			}
-			tightened, tightenedOk = refinementsets.TightenRepetition(held.Set, "length", int(k), conjoin)
+			tightened, tightenedOk = refinementsets.TightenRepetition(heldValue.Set, "length", int(k), conjoin)
 		}
 		if !tightenedOk {
 			return
@@ -126,8 +129,8 @@ func LengthGuardNarrowings(
 		rows = append(rows, LengthGuardNarrowing{
 			Binding: side.Binding,
 			Known: abstractdomain.KnownWithMeasures(
-				abstractdomain.KnownSet(tightened, nil, abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(held), abstractdomain.TrustSpec), abstractdomain.SetKindTagNone),
-				held.Measures,
+				abstractdomain.KnownSet(tightened, nil, abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(heldValue), abstractdomain.TrustSpec), abstractdomain.SetKindTagNone),
+				heldValue.Measures,
 			),
 		})
 	}

@@ -112,8 +112,9 @@ type TestOfResult struct {
 // strict equality under the literal's sort, definedness against
 // `undefined`, ordered comparison under the number sort (against a
 // constant, against a second tracked slot, or mirrored for a literal
-// left), bare truthiness under the binding's own sort. Swapped arms
-// carry a negated head.
+// left), equality between two number-sorted slots (`===` and `==`
+// alike, which agree there), bare truthiness under the binding's own
+// sort. Swapped arms carry a negated head.
 func TestOf(context *LoweringContext, head *ast.Node) (TestOfResult, bool) {
 	if ast.IsBinaryExpression(head) {
 		bin := head.AsBinaryExpression()
@@ -146,6 +147,25 @@ func TestOf(context *LoweringContext, head *ast.Node) (TestOfResult, bool) {
 					points = append(points, float64(r))
 				}
 				return TestOfResult{On: on, Test: kernelbridge.IrTestEqSeq, Points: points, Swapped: false}, true
+			}
+			if result, ok := eqSlotTestOf(context, bin, on, onOk); ok {
+				return result, true
+			}
+			// `s === t` between two string slots: the join-only two-slot
+			// sequence equality
+			if result, ok := eqSeqSlotTestOf(context, bin, on, onOk); ok {
+				return result, true
+			}
+			return TestOfResult{}, false
+		}
+		if kind == ast.KindEqualsEqualsToken {
+			// LOOSE equality lowers ONLY as the two-slot number form.
+			// Between two number-sorted slots `==` and `===` agree —
+			// no coercion is reachable, both operands already being
+			// numbers — so the same eqSlot test reads it. Every other
+			// `==` head coerces and is not read here.
+			if result, ok := eqSlotTestOf(context, bin, on, onOk); ok {
+				return result, true
 			}
 			return TestOfResult{}, false
 		}
@@ -183,6 +203,66 @@ func TestOf(context *LoweringContext, head *ast.Node) (TestOfResult, bool) {
 		return TestOfResult{On: on, Test: kernelbridge.IrTestTruthyStr, Swapped: false}, true
 	}
 	return TestOfResult{}, false
+}
+
+// eqSlotTestOf reads an equality head between two tracked NUMBER
+// slots (`i === n`, `i == n`) as the two-slot equality test. Both
+// sides must be number-sorted tracked slots: that is exactly where
+// `==` and `===` agree, and it is the only shape the kernel's eqSlot
+// narrowing speaks. Anything else — a literal side, a string sort, an
+// untracked read — reads as nothing here.
+func eqSlotTestOf(context *LoweringContext, bin *ast.BinaryExpression, on int, onOk bool) (TestOfResult, bool) {
+	if !onOk || context.Sorts[on] != BindingKindNumber {
+		return TestOfResult{}, false
+	}
+	onRight, onRightOk := NumberIndexOf(context, bin.Right)
+	if !onRightOk {
+		return TestOfResult{}, false
+	}
+	return TestOfResult{
+		On: on, Test: kernelbridge.IrTestEqSlot,
+		OnB: onRight, HasOnB: true, Swapped: false,
+	}, true
+}
+
+// stringIndexOf is a tracked STRING-sorted read, the string twin of
+// NumberIndexOf.
+func stringIndexOf(context *LoweringContext, name *ast.Node) (int, bool) {
+	i, ok := IndexOf(context, name)
+	if !ok {
+		return 0, false
+	}
+	if context.Sorts[i] == BindingKindString {
+		return i, true
+	}
+	return 0, false
+}
+
+// eqSeqSlotTestOf reads a STRICT equality head between two tracked
+// STRING slots (`s === t`) as the two-slot sequence-equality test.
+//
+// It narrows neither arm — the kernel walks both from the state as it
+// stood and joins them. The two-slot tightening the number shapes get
+// is built from enclosure bounds, and a word has none: readEnclosure
+// answers nothing for a Concatenation, so there is no window to cross
+// over. What this unlocks is bodies that decline TODAY because the
+// guard has no lowering at all.
+//
+// Strict equality only. `==` between two strings agrees with `===`,
+// but the loose form is not read anywhere else here either, and the
+// one-shape rule keeps the recognition honest.
+func eqSeqSlotTestOf(context *LoweringContext, bin *ast.BinaryExpression, on int, onOk bool) (TestOfResult, bool) {
+	if !onOk || context.Sorts[on] != BindingKindString {
+		return TestOfResult{}, false
+	}
+	onRight, onRightOk := stringIndexOf(context, bin.Right)
+	if !onRightOk {
+		return TestOfResult{}, false
+	}
+	return TestOfResult{
+		On: on, Test: kernelbridge.IrTestEqSeqSlot,
+		OnB: onRight, HasOnB: true, Swapped: false,
+	}, true
 }
 
 func irTestOfCmp(cmp kernelbridge.NarrowCmpOp) kernelbridge.IrBranchTest {
@@ -266,7 +346,8 @@ func TestShaped(context *LoweringContext, e *ast.Node) bool {
 		if kind == ast.KindAmpersandAmpersandToken || kind == ast.KindBarBarToken {
 			return TestShaped(context, bin.Left) && TestShaped(context, bin.Right)
 		}
-		if kind == ast.KindEqualsEqualsEqualsToken || kind == ast.KindExclamationEqualsEqualsToken {
+		if kind == ast.KindEqualsEqualsEqualsToken || kind == ast.KindExclamationEqualsEqualsToken ||
+			kind == ast.KindEqualsEqualsToken {
 			return true
 		}
 		_, hasCmp := CmpOps[kind]
@@ -390,6 +471,11 @@ func SortOfArg(context *LoweringContext, e *ast.Node) BindingKind {
 	if ast.IsStringLiteral(head) {
 		return BindingKindString
 	}
+	// a template or a concatenation of string-sorted parts is a string
+	// argument — the same reading RhsEffect gives a string-sorted slot
+	if _, ok := SequenceEffectOf(context, e); ok {
+		return BindingKindString
+	}
 	if _, ok := EffectOf(context, e); ok {
 		return BindingKindNumber
 	}
@@ -411,6 +497,9 @@ func TypeofOfArg(context *LoweringContext, e *ast.Node) TypeofTag {
 	}
 	if head.Kind == ast.KindTrueKeyword || head.Kind == ast.KindFalseKeyword {
 		return TypeofTagBoolean
+	}
+	if _, ok := SequenceEffectOf(context, e); ok {
+		return TypeofTagString
 	}
 	if _, ok := EffectOf(context, e); ok {
 		return TypeofTagNumber

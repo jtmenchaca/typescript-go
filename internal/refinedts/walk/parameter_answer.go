@@ -66,7 +66,7 @@ func answerCallbackParameter(ctx CallSiteCtx, token *ast.Node, parameter *ast.No
 	if !ok {
 		return Answer{}, false
 	}
-	held, ok := bindings[token.Text()]
+	held, ok := bindings.Get(token.Text())
 	if !ok {
 		return Answer{}, false
 	}
@@ -105,7 +105,7 @@ func AnswerParameter(
 	hasWorn := false
 	if ast.IsFunctionDeclaration(declaration.Parent) {
 		if bindings, ok := CallSiteBindings(ctx, declaration.Parent); ok {
-			if v, ok := bindings[token.Text()]; ok {
+			if v, ok := bindings.Get(token.Text()); ok {
 				worn, hasWorn = v, true
 			}
 		}

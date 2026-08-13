@@ -54,7 +54,7 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 			spa := property.AsShorthandPropertyAssignment()
 			if ast.IsIdentifier(spa.Name()) {
 				name := spa.Name().Text()
-				if held, ok := env[name]; ok {
+				if held, ok := env.Get(name); ok {
 					setKey(name, held)
 				} else {
 					setKey(name, silence.Residue())

@@ -10,7 +10,6 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
-	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
@@ -128,7 +127,7 @@ func readCollectionGetHas(site MethodCallSite) *abstractdomain.AbstractValue {
 	ctx, env, e, receiver, method := site.Ctx, site.Env, site.E, site.Receiver, site.Method
 	collectionReceiver := receiver
 	if site.HasTrackedName {
-		if held, ok := env[site.TrackedName]; ok {
+		if held, ok := env.Get(site.TrackedName); ok {
 			collectionReceiver = held
 		}
 	}
@@ -183,7 +182,7 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 	ctx, env, e, receiverExpression, receiver, method := site.Ctx, site.Env, site.E, site.ReceiverExpression, site.Receiver, site.Method
 	collectionReceiver := receiver
 	if site.HasTrackedName {
-		if held, ok := env[site.TrackedName]; ok {
+		if held, ok := env.Get(site.TrackedName); ok {
 			collectionReceiver = held
 		}
 	}
@@ -205,7 +204,7 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 			if grade != abstractdomain.TrustProved {
 				next.Grade = grade
 			}
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, trackedName, next)
+			UpdateTrackedEnv(ctx.Aliases, env, trackedName, next)
 			return next
 		}
 		if method == "clear" && len(arguments) == 0 {

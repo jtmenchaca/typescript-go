@@ -532,7 +532,7 @@ func readStringMatchWithConstRegex(site MethodCallSite) *abstractdomain.Abstract
 	}
 	receiverKnown := receiver
 	if site.HasTrackedName {
-		if held, ok := env[site.TrackedName]; ok {
+		if held, ok := env.Get(site.TrackedName); ok {
 			receiverKnown = held
 		} else {
 			receiverKnown = silence.Residue()

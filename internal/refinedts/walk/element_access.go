@@ -41,7 +41,7 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 			break
 		}
 		if ast.IsIdentifier(root) {
-			if held, ok := env[root.Text()]; ok {
+			if held, ok := env.Get(root.Text()); ok {
 				if held.Kind == abstractdomain.KindUnknown && held.Opaque {
 					evaluateExpression(ctx, env, elem.ArgumentExpression)
 					out := abstractdomain.Opaque
@@ -84,8 +84,8 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 	if ast.IsElementAccessExpression(e) {
 		elem := e.AsElementAccessExpression()
 		if ast.IsIdentifier(elem.Expression) {
-			if _, ok := env[elem.Expression.Text()]; ok {
-				receiver, hasReceiver := env[elem.Expression.Text()]
+			if _, ok := env.Get(elem.Expression.Text()); ok {
+				receiver, hasReceiver := env.Get(elem.Expression.Text())
 				if !hasReceiver {
 					receiver = silence.Residue()
 				}

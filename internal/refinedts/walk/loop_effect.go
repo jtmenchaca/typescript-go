@@ -155,7 +155,7 @@ func LowerLoopEffect(
 		if held, ok := state[name]; ok {
 			return held
 		}
-		known, ok := readEnv[name]
+		known, ok := readEnv.Get(name)
 		if !ok {
 			return unknownEffect
 		}
@@ -184,7 +184,7 @@ func LowerLoopEffect(
 				if held, ok := state[spelled]; ok {
 					return held, true
 				}
-				known, ok := readEnv[spelled]
+				known, ok := readEnv.Get(spelled)
 				if !ok {
 					return kernelbridge.LoopEffect{}, false
 				}

@@ -112,7 +112,7 @@ func OutOfBoundsEvidence(p OutOfBoundsEvidenceParams) (string, bool) {
 	var heldIndex abstractdomain.AbstractValue
 	hasHeldIndex := false
 	if ast.IsIdentifier(argument) {
-		heldIndex, hasHeldIndex = p.Env[argument.Text()]
+		heldIndex, hasHeldIndex = p.Env.Get(argument.Text())
 	}
 	if hasHeldIndex && heldIndex.Kind == abstractdomain.KindSet && heldIndex.SetKindTag == abstractdomain.SetKindTagNone {
 		r := RangeOfSet(heldIndex.Set)

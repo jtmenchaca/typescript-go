@@ -24,6 +24,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
@@ -61,9 +62,13 @@ type summaryEntry struct {
 	Ok      bool
 }
 
+// Keyed by the CHECK first: the lowering composes callees through the
+// entry's own contract registry (resolveCallee closes over ctx), so a
+// cross-entry store held entry-dependent lowerings under an
+// entry-free key — the scheduling-order verdict flicker.
 var (
 	kernelSummariesMu sync.Mutex
-	kernelSummaries   = map[*ast.Node]map[string]summaryEntry{}
+	kernelSummaries   = map[*program.CheckerProgram]map[*ast.Node]map[string]summaryEntry{}
 )
 
 // absentState is ABSENT in the TS source: the definitely-undefined
@@ -366,6 +371,7 @@ func syntheticReturnStatement(expression *ast.Node) *ast.Node {
 // the kernel decline; the JS inline walk then serves exactly as
 // before.
 func SummaryResult(
+	p *program.CheckerProgram,
 	declaration *ast.Node,
 	argKnowns []abstractdomain.AbstractValue,
 	resolveCallee func(callee *ast.Node) *ast.Node,
@@ -405,10 +411,15 @@ func SummaryResult(
 	sortsKey := strings.Join(sortsParts, ",") + "|" + strings.Join(typeofParts, ",")
 
 	kernelSummariesMu.Lock()
-	byKey := kernelSummaries[declaration]
+	shelf := kernelSummaries[p]
+	if shelf == nil {
+		shelf = map[*ast.Node]map[string]summaryEntry{}
+		kernelSummaries[p] = shelf
+	}
+	byKey := shelf[declaration]
 	if byKey == nil {
 		byKey = map[string]summaryEntry{}
-		kernelSummaries[declaration] = byKey
+		shelf[declaration] = byKey
 	}
 	entry, has := byKey[sortsKey]
 	kernelSummariesMu.Unlock()
@@ -500,7 +511,7 @@ func KernelSummaryDirect(ctx *FlowContext, argKnowns []abstractdomain.AbstractVa
 	if !summaryLowerable(contract.Declaration) {
 		return abstractdomain.AbstractValue{}, false
 	}
-	return SummaryResult(contract.Declaration, argKnowns, func(callee *ast.Node) *ast.Node {
+	return SummaryResult(ctx.P, contract.Declaration, argKnowns, func(callee *ast.Node) *ast.Node {
 		called := ContractOf(ctx, callee)
 		if called == nil || !summaryLowerable(called.Declaration) {
 			return nil

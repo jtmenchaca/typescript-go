@@ -71,7 +71,7 @@ func InfeasibleBranch(env Env, ns []narrowing.Narrowed) bool {
 		if len(n.Path) != 0 {
 			continue
 		}
-		held, ok := env[n.Binding]
+		held, ok := env.Get(n.Binding)
 		if !ok || held.Kind != abstractdomain.KindValues {
 			continue
 		}
@@ -164,13 +164,13 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 		windows = SideBoundsIn(ctx, env)
 	}
 	branches := narrowing.Narrowings(ctx.P.Checker, expression, func(name string) bool {
-		_, ok := env[name]
+		_, ok := env.Get(name)
 		return ok
 	}, windows, site.ReadElsewhere)
 	// a held product guard (`x * y > k`) inverted: each factor narrows
 	// by the quotient of k and the other factor's window
 	inverse := InverseFactorNarrowings(ctx.Kernel, condition, func(name string) bool {
-		_, ok := env[name]
+		_, ok := env.Get(name)
 		return ok
 	}, windows)
 	// a VALUE COPY rides its source's narrowing: `const n = o.n` with
@@ -180,7 +180,7 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 	// the copy narrows the source place
 	applySide := func(into Env, ns []narrowing.Narrowed) {
 		for _, n := range ns {
-			into[n.Binding] = narrowing.ApplyNarrowed(envOrResidue(into, n.Binding), n)
+			into.Set(n.Binding, narrowing.ApplyNarrowed(envOrResidue(into, n.Binding), n))
 			if len(n.Path) > 0 {
 				// the PLACE-VALUE memory: a root whose own shape cannot
 				// absorb the path — an unknown behind Array.isArray, a
@@ -198,26 +198,26 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 					}
 					pathless := n
 					pathless.Path = nil
-					into[pathKey] = narrowing.ApplyNarrowed(envOrResidue(into, pathKey), pathless)
+					into.Set(pathKey, narrowing.ApplyNarrowed(envOrResidue(into, pathKey), pathless))
 				}
 				for _, copy := range narrowing.CopyBindingsOf(ctx.P.Checker, site.At, dataflowfacts.TrackedPlace{Binding: n.Binding, Path: n.Path}) {
-					if _, ok := into[copy]; !ok {
+					if _, ok := into.Get(copy); !ok {
 						continue
 					}
 					renamed := n
 					renamed.Binding = copy
 					renamed.Path = nil
-					into[copy] = narrowing.ApplyNarrowed(envOrResidue(into, copy), renamed)
+					into.Set(copy, narrowing.ApplyNarrowed(envOrResidue(into, copy), renamed))
 				}
 			}
 			if len(n.Path) == 0 {
 				source, ok := narrowing.CopySourcePlaceOf(ctx.P.Checker, site.At, n.Binding)
 				if ok {
-					if _, has := into[source.Binding]; has {
+					if _, has := into.Get(source.Binding); has {
 						renamed := n
 						renamed.Binding = source.Binding
 						renamed.Path = source.Path
-						into[source.Binding] = narrowing.ApplyNarrowed(envOrResidue(into, source.Binding), renamed)
+						into.Set(source.Binding, narrowing.ApplyNarrowed(envOrResidue(into, source.Binding), renamed))
 					}
 				}
 			}
@@ -232,27 +232,27 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 		ApplyWhenTrue: func(into Env) {
 			applySide(into, branches.WhenTrue)
 			for _, n := range inverse {
-				into[n.Binding] = narrowing.ApplyNarrowed(envOrResidue(into, n.Binding), n)
+				into.Set(n.Binding, narrowing.ApplyNarrowed(envOrResidue(into, n.Binding), n))
 			}
 			// a held length guard (`xs.length >= k`) raises a repetition's
 			// counting floor — read from the target state, which the test
 			// just passed
-			for _, n := range dataflowfacts.LengthGuardNarrowings(into, condition, isStringKindAt, false) {
-				into[n.Binding] = n.Known
+			for _, n := range dataflowfacts.LengthGuardNarrowings(into.Get, condition, isStringKindAt, false) {
+				into.Set(n.Binding, n.Known)
 			}
 		},
 		ApplyWhenFalse: func(into Env) {
 			applySide(into, branches.WhenFalse)
 			// refuted, the length guard caps the floor instead
-			for _, n := range dataflowfacts.LengthGuardNarrowings(into, condition, isStringKindAt, true) {
-				into[n.Binding] = n.Known
+			for _, n := range dataflowfacts.LengthGuardNarrowings(into.Get, condition, isStringKindAt, true) {
+				into.Set(n.Binding, n.Known)
 			}
 		},
 	}
 }
 
 func envOrResidue(env Env, name string) abstractdomain.AbstractValue {
-	if v, ok := env[name]; ok {
+	if v, ok := env.Get(name); ok {
 		return v
 	}
 	return silence.Residue()
@@ -404,9 +404,9 @@ func assumeCondition(
 		(hasComputedVerdict && computedVerdict) ||
 		InfeasibleBranch(env, transfers.WhenFalse)
 
-	whenTrueEnv := cloneEnv(env)
+	whenTrueEnv := env.Clone()
 	transfers.ApplyWhenTrue(whenTrueEnv)
-	whenFalseEnv := cloneEnv(env)
+	whenFalseEnv := env.Clone()
 	transfers.ApplyWhenFalse(whenFalseEnv)
 
 	// the rows ride the branch contexts — held on the true side,
@@ -461,8 +461,8 @@ func assumeCondition(
 			if len(exitSumConstraints) > 0 {
 				dataflowfacts.NoteSumExitConstraints(statement, exitSumConstraints)
 			}
-			for _, n := range dataflowfacts.LengthGuardNarrowings(env, condition, func(e *ast.Node) bool { return primitives.IsStringKind(ctx.P.Checker, e) }, true) {
-				continuation[n.Binding] = n.Known
+			for _, n := range dataflowfacts.LengthGuardNarrowings(env.Get, condition, func(e *ast.Node) bool { return primitives.IsStringKind(ctx.P.Checker, e) }, true) {
+				continuation.Set(n.Binding, n.Known)
 			}
 		},
 	}
@@ -474,12 +474,4 @@ func registerDifferenceConstraints(ctx *FlowContext, rows []dataflowfacts.Differ
 		facts[i] = &rows[i]
 	}
 	ctx.Aliases.Register(facts)
-}
-
-func cloneEnv(env Env) Env {
-	out := make(Env, len(env))
-	for k, v := range env {
-		out[k] = v
-	}
-	return out
 }

@@ -35,8 +35,8 @@ func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.A
 	ctx.Aliases.Invalidate(name)
 	// ...and every PLACE-VALUE entry rooted here (the dotted keys a
 	// guard recorded): the path spoke about the value that just moved
-	dataflowfacts.ForgetPlaceEntries(env, name)
-	env[name] = value
+	ForgetPlaceEntriesEnv(env, name)
+	env.Set(name, value)
 }
 
 // WriteElement is a write through an index. `name[i] = v` must land
@@ -106,7 +106,7 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 			ForgetThrough(ctx, env, pae.Expression)
 			return
 		}
-		if _, has := env[rootName]; !rooted || !has {
+		if _, has := env.Get(rootName); !rooted || !has {
 			ForgetThrough(ctx, env, pae.Expression)
 			return
 		}
@@ -162,16 +162,16 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 			}
 			return abstractdomain.KnownObject(next, nil, false, abstractdomain.TrustProved, false), true
 		}
-		rootHeld, hasRoot := env[rootName]
+		rootHeld, hasRoot := env.Get(rootName)
 		if !hasRoot {
 			rootHeld = silence.Residue()
 		}
 		next, ok := rebuild(rootHeld, path)
 		if !ok {
-			ctx.Aliases.Havoc(env, rootName)
+			HavocEnv(ctx.Aliases, env, rootName)
 			return
 		}
-		dataflowfacts.UpdateTracked(ctx.Aliases, env, rootName, next)
+		UpdateTrackedEnv(ctx.Aliases, env, rootName, next)
 		return
 	}
 	name, rooted := rootOfReceiver(pae.Expression)
@@ -179,7 +179,7 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 		ForgetThrough(ctx, env, pae.Expression)
 		return
 	}
-	held, hasHeld := env[name]
+	held, hasHeld := env.Get(name)
 	// a receiver with NO object knowledge — untracked, or tracked as
 	// unknown (a cast from `unknown`/`any` carries nothing). The WRITE
 	// is a fact regardless of where the object came from: a LOCAL
@@ -202,7 +202,7 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 			ast.GetSourceFileOfNode(declaration) == ctx.P.Entry
 		if !local {
 			if hasHeld {
-				ctx.Aliases.Havoc(env, name)
+				HavocEnv(ctx.Aliases, env, name)
 			}
 			return
 		}
@@ -226,11 +226,11 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 				keys[i].Value = value
 			}
 		}
-		env[name] = abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false)
+		env.Set(name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
 		return
 	}
 	if held.Kind != abstractdomain.KindObject {
-		ctx.Aliases.Havoc(env, name)
+		HavocEnv(ctx.Aliases, env, name)
 		return
 	}
 	key := pae.Name().Text()
@@ -316,7 +316,7 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 	// every name sharing this reference sees the write — the class-
 	// aware update: same-shaped aliases follow, embedders and
 	// candidate sharers join, the rest forget
-	dataflowfacts.UpdateTracked(ctx.Aliases, env, name, nextObject)
+	UpdateTrackedEnv(ctx.Aliases, env, name, nextObject)
 }
 
 // embeddedReferences collects reference-typed names a literal
@@ -414,16 +414,16 @@ func ForgetThrough(ctx *FlowContext, env Env, receiver *ast.Node) {
 		return
 	}
 	if ast.IsIdentifier(receiver) {
-		if _, ok := env[receiver.Text()]; ok {
-			ctx.Aliases.Havoc(env, receiver.Text())
+		if _, ok := env.Get(receiver.Text()); ok {
+			HavocEnv(ctx.Aliases, env, receiver.Text())
 		}
 		return
 	}
 	// a write through `this` forgets the tracked instance the same way
 	// a named holder forgets
 	if receiver.Kind == ast.KindThisKeyword {
-		if _, ok := env["this"]; ok {
-			ctx.Aliases.Havoc(env, "this")
+		if _, ok := env.Get("this"); ok {
+			HavocEnv(ctx.Aliases, env, "this")
 		}
 		return
 	}
@@ -455,8 +455,8 @@ func ForgetThrough(ctx *FlowContext, env Env, receiver *ast.Node) {
 				ForgetThrough(ctx, env, property.AsPropertyAssignment().Initializer)
 			} else if ast.IsShorthandPropertyAssignment(property) {
 				spa := property.AsShorthandPropertyAssignment()
-				if _, ok := env[spa.Name().Text()]; ok {
-					ctx.Aliases.Havoc(env, spa.Name().Text())
+				if _, ok := env.Get(spa.Name().Text()); ok {
+					HavocEnv(ctx.Aliases, env, spa.Name().Text())
 				}
 			} else if ast.IsSpreadAssignment(property) {
 				ForgetThrough(ctx, env, property.AsSpreadAssignment().Expression)

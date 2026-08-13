@@ -48,8 +48,8 @@ func AnalyzeStatements(ctx *FlowContext, env Env, statements []*ast.Node, result
 	if len(held) < 2 {
 		gate, ok := CorrelationGateOf(ctx, statements, held)
 		if ok {
-			envTrue := cloneEnv(env)
-			envFalse := cloneEnv(env)
+			envTrue := env.Clone()
+			envFalse := env.Clone()
 			trueCtx := *ctx
 			trueCtx.GateAssumptions = append(append([]GateAssumption{}, held...), GateAssumption{Base: gate.Base, Detail: gate.Detail, Truthy: true})
 			exitsTrue := AnalyzeStatements(&trueCtx, envTrue, statements, result)
@@ -158,12 +158,12 @@ func walkStatementForm(ctx *FlowContext, env Env, statement *ast.Node, result *a
 		// callee's guard did not throw, so its whenFalse claims land
 		if ast.IsCallExpression(expr) {
 			survived, ok := narrowing.AssertionCallNarrowings(ctx.P.Checker, expr, func(name string) bool {
-				_, has := env[name]
+				_, has := env.Get(name)
 				return has
 			})
 			if ok {
 				for _, n := range survived {
-					env[n.Binding] = narrowing.ApplyNarrowed(envOrResidue(env, n.Binding), n)
+					env.Set(n.Binding, narrowing.ApplyNarrowed(envOrResidue(env, n.Binding), n))
 				}
 			}
 		}
@@ -175,7 +175,7 @@ func walkStatementForm(ctx *FlowContext, env Env, statement *ast.Node, result *a
 	if ast.IsThrowStatement(statement) {
 		evaluateExpression(ctx, env, statement.AsThrowStatement().Expression)
 		if ctx.ThrowSink != nil {
-			*ctx.ThrowSink = append(*ctx.ThrowSink, cloneEnv(env))
+			*ctx.ThrowSink = append(*ctx.ThrowSink, env.Clone())
 		}
 		return true
 	}
@@ -198,16 +198,16 @@ func walkStatementForm(ctx *FlowContext, env Env, statement *ast.Node, result *a
 		// break records its state for the label's rejoin point, and a
 		// bare continue records its state for the next iteration's entry
 		if ast.IsContinueStatement(statement) && statement.AsContinueStatement().Label == nil && ctx.ContinueSink != nil {
-			*ctx.ContinueSink = append(*ctx.ContinueSink, cloneEnv(env))
+			*ctx.ContinueSink = append(*ctx.ContinueSink, env.Clone())
 		}
 		if ast.IsBreakStatement(statement) && statement.AsBreakStatement().Label != nil {
 			if sink, ok := ctx.LabelSinks[statement.AsBreakStatement().Label.Text()]; ok {
-				*sink = append(*sink, cloneEnv(env))
+				*sink = append(*sink, env.Clone())
 			}
 		} else if ast.IsBreakStatement(statement) && ctx.BreakSink != nil {
 			// a bare break inside a switch clause: control resumes AFTER the
 			// switch, carrying this state, not out of the enclosing list
-			*ctx.BreakSink = append(*ctx.BreakSink, cloneEnv(env))
+			*ctx.BreakSink = append(*ctx.BreakSink, env.Clone())
 		}
 		return true
 	}
@@ -285,8 +285,8 @@ func havocAssigned(ctx *FlowContext, env Env, node *ast.Node) {
 	AssignedNames(ctx.P.Checker, node, written)
 	CallMediatedWrites(ctx.P.Checker, ctx.Contracts, node, written, nil)
 	for name := range written {
-		if _, ok := env[name]; ok {
-			ctx.Aliases.Havoc(env, name)
+		if _, ok := env.Get(name); ok {
+			HavocEnv(ctx.Aliases, env, name)
 		}
 	}
 }

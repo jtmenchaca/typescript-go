@@ -251,7 +251,7 @@ func readDateMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 	ctx, env, e, receiverExpression, receiver, method := site.Ctx, site.Env, site.E, site.ReceiverExpression, site.Receiver, site.Method
 	collectionReceiver := receiver
 	if site.HasTrackedName {
-		if held, ok := env[site.TrackedName]; ok {
+		if held, ok := env.Get(site.TrackedName); ok {
 			collectionReceiver = held
 		}
 	}

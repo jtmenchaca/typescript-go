@@ -85,12 +85,9 @@ func InlineCallback(
 		}
 		BindParameter(ctx.P.Checker, parameter1, *indexArgument, bindings)
 	}
-	callEnv := Env{}
-	for k, v := range env {
-		callEnv[k] = v
-	}
+	callEnv := env.Clone()
 	for name, known := range bindings {
-		callEnv[name] = known
+		callEnv.Set(name, known)
 	}
 	body := callback.Body()
 	result := silence.Residue()
@@ -116,8 +113,8 @@ func InlineCallback(
 		AssignedNames(ctx.P.Checker, body, written)
 	}
 	for name := range written {
-		if _, ok := env[name]; ok {
-			ctx.Aliases.Havoc(env, name)
+		if _, ok := env.Get(name); ok {
+			HavocEnv(ctx.Aliases, env, name)
 		}
 	}
 	return result

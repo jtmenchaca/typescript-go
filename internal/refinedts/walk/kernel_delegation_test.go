@@ -46,14 +46,15 @@ func kernelDelegationLoadKernel(t *testing.T) *kernelbridge.RefinedTSKernel {
 func TestKernelDelegation_ABranchOverAnUnknownBindingWalksKernelSideAndTightensTheEnvironmentToTheArmsUnion(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
-	env := Env{"x": silence.Residue()}
+	env := NewEnv()
+	env.Set("x", silence.Residue())
 	statement := kernelDelegationStatementOf(t, "if (x === 0) { x = 1; } else { x = 2; }")
 	entry, ok := EngineEntryOf(env, statement, func(*ast.Node) BindingKind { return BindingKindNumber })
 	if !ok {
 		t.Fatalf("EngineEntryOf ok = false, want true")
 	}
 	EngineMeetInto(env, entry)
-	after, ok := env["x"]
+	after, ok := env.Get("x")
 	if !ok {
 		t.Fatalf("env[x] missing")
 	}
@@ -78,9 +79,8 @@ func TestKernelDelegation_ABranchOverAnUnknownBindingWalksKernelSideAndTightensT
 func TestKernelDelegation_ADefinednessGuardWalksTheElseArmsWriteAndTheThenArmsSurvivalBothLandInTheExit(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	narrowing.SetNarrowKernel(kernel) // the production handover route
-	env := Env{
-		"x": abstractdomain.PossiblyUndefined(abstractdomain.KnownValues([]float64{5}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved), "", false, false),
-	}
+	env := NewEnv()
+	env.Set("x", abstractdomain.PossiblyUndefined(abstractdomain.KnownValues([]float64{5}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved), "", false, false))
 	statement := kernelDelegationStatementOf(t, "if (x === undefined) { x = 0; }")
 	entry, ok := EngineEntryOf(env, statement, func(*ast.Node) BindingKind { return BindingKindNumber })
 	if !ok {
@@ -88,9 +88,9 @@ func TestKernelDelegation_ADefinednessGuardWalksTheElseArmsWriteAndTheThenArmsSu
 	}
 	// production meets AFTER the checker's own walk updated the env;
 	// simulate a post-state the checker could not pin
-	env["x"] = silence.Residue()
+	env.Set("x", silence.Residue())
 	EngineMeetInto(env, entry)
-	after, ok := env["x"]
+	after, ok := env.Get("x")
 	if !ok {
 		t.Fatalf("binding lost")
 	}
@@ -117,9 +117,8 @@ func TestKernelDelegation_ADefinednessGuardWalksTheElseArmsWriteAndTheThenArmsSu
 func TestKernelDelegation_ANonScalarParticipantDeclinesTheRoute(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
-	env := Env{
-		"o": abstractdomain.KnownObject(nil, nil, true, abstractdomain.TrustProved, false),
-	}
+	env := NewEnv()
+	env.Set("o", abstractdomain.KnownObject(nil, nil, true, abstractdomain.TrustProved, false))
 	statement := kernelDelegationStatementOf(t, "if (o) { o = null; }")
 	_, ok := EngineEntryOf(env, statement, func(*ast.Node) BindingKind { return BindingKindUnknown })
 	if ok {
@@ -130,16 +129,15 @@ func TestKernelDelegation_ANonScalarParticipantDeclinesTheRoute(t *testing.T) {
 func TestKernelDelegation_AnObjectsScalarFieldWalksAsABindingAndTheMeetLandsBackInsideTheObject(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
-	env := Env{
-		"o": abstractdomain.KnownObject([]abstractdomain.ObjectKey{{Name: "count", Value: silence.Residue()}}, nil, true, abstractdomain.TrustProved, false),
-	}
+	env := NewEnv()
+	env.Set("o", abstractdomain.KnownObject([]abstractdomain.ObjectKey{{Name: "count", Value: silence.Residue()}}, nil, true, abstractdomain.TrustProved, false))
 	statement := kernelDelegationStatementOf(t, "if (o.count === 0) { o.count = 1; } else { o.count = 2; }")
 	entry, ok := EngineEntryOf(env, statement, func(*ast.Node) BindingKind { return BindingKindNumber })
 	if !ok {
 		t.Fatalf("EngineEntryOf ok = false, want true")
 	}
 	EngineMeetInto(env, entry)
-	o, ok := env["o"]
+	o, ok := env.Get("o")
 	if !ok || o.Kind != abstractdomain.KindObject {
 		t.Fatalf("env[o].Kind = %v, %v, want KindObject", o.Kind, ok)
 	}

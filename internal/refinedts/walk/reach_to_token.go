@@ -253,18 +253,13 @@ func enterToToken(ctx *FlowContext, env Env, from *ast.Node, token *ast.Node, wr
 			if child != loopBody {
 				return false
 			}
-			bodyEntry := Env{}
+			bodyEntry := NewEnv()
 			SolveLoop(ctx, env, node, nil, LoopAnalyzers{
 				AnalyzeStatement:   AnalyzeStatement,
 				EvaluateExpression: evaluateExpression,
 				IterationElement:   IterationElementOf,
 			}, bodyEntry)
-			for k := range env {
-				delete(env, k)
-			}
-			for name, known := range bodyEntry {
-				env[name] = known
-			}
+			ReplaceEnv(env, bodyEntry)
 			node = child
 			continue
 		}

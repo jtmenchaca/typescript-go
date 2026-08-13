@@ -245,12 +245,12 @@ func ReadBinary(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractV
 			return leftKnown
 		}
 		if leftKnown.Kind == abstractdomain.KindPossiblyUndefined {
-			rightEnv := copyEnv(env)
+			rightEnv := env.Clone()
 			rightKnown := evaluateExpression(ctx, rightEnv, bin.Right)
 			havocAssigned(ctx, env, bin.Right)
 			return abstractdomain.JoinKnown(*leftKnown.Inner, rightKnown)
 		}
-		rightEnv := copyEnv(env)
+		rightEnv := env.Clone()
 		rightKnown := evaluateExpression(ctx, rightEnv, bin.Right)
 		havocAssigned(ctx, env, bin.Right)
 		return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{leftKnown, rightKnown})
@@ -291,14 +291,4 @@ func isZeroOneOneOf(set refinementsets.RefinedSet) bool {
 		}
 	}
 	return true
-}
-
-// copyEnv is the TS source's `new Map(env)`: a shallow copy of the
-// environment.
-func copyEnv(env Env) Env {
-	out := make(Env, len(env))
-	for k, v := range env {
-		out[k] = v
-	}
-	return out
 }

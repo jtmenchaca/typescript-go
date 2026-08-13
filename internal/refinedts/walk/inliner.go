@@ -162,7 +162,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 		if SyntacticLiteral(argument) {
 			silentCtx := *ctx
 			silentCtx.Report = func(d assignability.RefinementDiagnostic) {}
-			preboundKnowns[i] = evaluateExpression(&silentCtx, Env{}, argument)
+			preboundKnowns[i] = evaluateExpression(&silentCtx, NewEnv(), argument)
 		} else {
 			preboundKnowns[i] = silence.Residue()
 		}
@@ -209,19 +209,19 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		if v, ok := env[name.Text()]; ok {
+		if v, ok := env.Get(name.Text()); ok {
 			saved[name.Text()] = savedEntry{value: v, has: true}
 		} else {
 			saved[name.Text()] = savedEntry{}
 		}
-		env[name.Text()] = ParameterKnown(parameter, i, call, allArgKnowns)
+		env.Set(name.Text(), ParameterKnown(parameter, i, call, allArgKnowns))
 	}
 	{
 		locals := map[string]struct{}{}
 		declaredNames(body, locals)
 		for name := range locals {
 			if _, already := saved[name]; !already {
-				if v, ok := env[name]; ok {
+				if v, ok := env.Get(name); ok {
 					saved[name] = savedEntry{value: v, has: true}
 				} else {
 					saved[name] = savedEntry{}
@@ -262,7 +262,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		if v, ok := env[name.Text()]; ok {
+		if v, ok := env.Get(name.Text()); ok {
 			posts[i] = v
 		} else {
 			posts[i] = silence.Residue()
@@ -270,9 +270,9 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 	}
 	for name, entry := range saved {
 		if entry.has {
-			env[name] = entry.value
+			env.Set(name, entry.value)
 		} else {
-			delete(env, name)
+			env.Delete(name)
 		}
 	}
 	for i, parameter := range closureParameters {
@@ -293,7 +293,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 			var collect func(node *ast.Node)
 			collect = func(node *ast.Node) {
 				if ast.IsIdentifier(node) {
-					if _, ok := env[node.Text()]; ok {
+					if _, ok := env.Get(node.Text()); ok {
 						roots[node.Text()] = struct{}{}
 					}
 				}
@@ -304,7 +304,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 			}
 			collect(preboundArguments[i])
 			for name := range roots {
-				ctx.Aliases.Havoc(env, name)
+				HavocEnv(ctx.Aliases, env, name)
 			}
 			continue
 		}
@@ -357,8 +357,8 @@ func forgetRestArguments(ctx *FlowContext, env Env, restArguments []*ast.Node) {
 	for _, argument := range restArguments {
 		source := unwrapArgument(argument)
 		if ast.IsIdentifier(source) {
-			if _, ok := env[source.Text()]; ok {
-				ctx.Aliases.Havoc(env, source.Text())
+			if _, ok := env.Get(source.Text()); ok {
+				HavocEnv(ctx.Aliases, env, source.Text())
 				continue
 			}
 		}
@@ -404,8 +404,8 @@ func WriteBackParameter(ctx *FlowContext, env Env, p writeBackParameterParams) {
 	}
 	target := unwrapArgument(p.argument)
 	if ast.IsIdentifier(target) {
-		if _, ok := env[target.Text()]; ok {
-			dataflowfacts.UpdateTracked(ctx.Aliases, env, target.Text(), p.post)
+		if _, ok := env.Get(target.Text()); ok {
+			UpdateTrackedEnv(ctx.Aliases, env, target.Text(), p.post)
 			return
 		}
 	}
@@ -440,12 +440,12 @@ func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Call
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		if v, ok := env[name.Text()]; ok {
+		if v, ok := env.Get(name.Text()); ok {
 			saved[name.Text()] = savedEntry{value: v, has: true}
 		} else {
 			saved[name.Text()] = savedEntry{}
 		}
-		env[name.Text()] = ParameterKnown(parameter, i, call, argKnowns)
+		env.Set(name.Text(), ParameterKnown(parameter, i, call, argKnowns))
 	}
 	body := callback.Body()
 	// the body's own declarations shadow too — see InlineStoredClosure
@@ -454,7 +454,7 @@ func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Call
 		declaredNames(body, locals)
 		for name := range locals {
 			if _, already := saved[name]; !already {
-				if v, ok := env[name]; ok {
+				if v, ok := env.Get(name); ok {
 					saved[name] = savedEntry{value: v, has: true}
 				} else {
 					saved[name] = savedEntry{}
@@ -486,7 +486,7 @@ func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Call
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		if v, ok := env[name.Text()]; ok {
+		if v, ok := env.Get(name.Text()); ok {
 			posts[i] = v
 		} else {
 			posts[i] = silence.Residue()
@@ -494,9 +494,9 @@ func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Call
 	}
 	for name, entry := range saved {
 		if entry.has {
-			env[name] = entry.value
+			env.Set(name, entry.value)
 		} else {
-			delete(env, name)
+			env.Delete(name)
 		}
 	}
 	for i, parameter := range callbackParameters {

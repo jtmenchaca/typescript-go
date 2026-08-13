@@ -123,13 +123,13 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 		var trackedName string
 		hasTrackedName := false
 		if ast.IsIdentifier(receiverExpression) {
-			if _, ok := env[receiverExpression.Text()]; ok {
+			if _, ok := env.Get(receiverExpression.Text()); ok {
 				trackedName, hasTrackedName = receiverExpression.Text(), true
 			}
 		}
 		var receiver abstractdomain.AbstractValue
 		if hasTrackedName {
-			held, ok := env[trackedName]
+			held, ok := env.Get(trackedName)
 			if ok {
 				receiver = held
 			} else {

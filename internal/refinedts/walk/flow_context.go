@@ -154,19 +154,4 @@ type FlowContext struct {
 	// under that seeding is false for today's callers, not for every
 	// admissible input — so the dead-guard report stays quiet here.
 	CallSiteSeeded bool
-	// InlineDepth: how many contract bodies are nested inside one
-	// another to reach this point. Copied by value at every inline —
-	// nesting increments naturally as inline walks copy the context —
-	// so a chain 24 deep (inlineBudgetOpen's depth axis) reads off
-	// this field with no separate stack to maintain.
-	InlineDepth int
-	// InlineBudget: the inline calls left for the WHOLE entry walk
-	// this context descends from — one pointer, shared and decremented
-	// across every inline the entry reaches, not copied per inline.
-	// Nil means unbudgeted on this axis: the single-file Check paths
-	// and the tests build FlowContext directly and never set one.
-	InlineBudget *int
 }
-
-// Env is the environment: a binding's name to its AbstractValue.
-type Env = map[string]abstractdomain.AbstractValue

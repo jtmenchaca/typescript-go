@@ -525,17 +525,15 @@ func runRefinements(p *program.CheckerProgram, shape []*ast.Diagnostic, kernel *
 	detail.NotePhase("objectGraphs", tObj)
 
 	// ── pass 3: facts flow; the kernel judges ────────────────────────
-	inlineBudgetForEntry := walk.InlineCallLimit
 	ctx := &walk.FlowContext{
-		P:            p,
-		Kernel:       kernel,
-		Registry:     facts.registry,
-		Objects:      facts.objects,
-		Contracts:    facts.contracts,
-		Report:       report,
-		Aliases:      dataflowfacts.NewAliasClasses(),
-		Declared:     map[string]*annotations.DeclaredRefinement{},
-		InlineBudget: &inlineBudgetForEntry,
+		P:         p,
+		Kernel:    kernel,
+		Registry:  facts.registry,
+		Objects:   facts.objects,
+		Contracts: facts.contracts,
+		Report:    report,
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
 	}
 	tTop := time.Now()
 	tracing.Span("pass3.topLevel", func() any {
@@ -549,7 +547,7 @@ func runRefinements(p *program.CheckerProgram, shape []*ast.Diagnostic, kernel *
 				statements = append(statements, s)
 			}
 		}
-		walk.AnalyzeStatements(&topLevelCtx, walk.Env{}, statements, nil)
+		walk.AnalyzeStatements(&topLevelCtx, walk.NewEnv(), statements, nil)
 		return nil
 	}, tracing.GrainStep)
 	detail.NotePhase("topLevel", tTop)
@@ -859,7 +857,9 @@ func walkContractBodies(
 			env, ok := walk.CallSiteBindings(walk.CallSiteCtx{P: p, Registry: ctx.Registry, Objects: ctx.Objects, Contracts: contracts, Kernel: kernel}, declaration)
 			detail.NotePhase("callSiteJoin", tJoin)
 			if ok {
-				initialStates = env
+				// AnalyzeFunction takes the call-site join as a plain map;
+				// the Env is read once here, at the boundary.
+				initialStates = env.AsMap()
 			}
 		}
 		tFn := time.Now()

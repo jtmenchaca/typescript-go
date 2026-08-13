@@ -65,7 +65,7 @@ func RecordCallSnapshot(p *program.CheckerProgram, owner *ast.Node, call *ast.No
 		store = map[*ast.Node]Env{}
 		snapshotStores[p] = store
 	}
-	store[call] = cloneEnv(env)
+	store[call] = env.Clone()
 }
 
 // callBelongsToOwner reports whether `call` sits in `owner`'s lexical
@@ -108,5 +108,5 @@ func CallSnapshotOf(p *program.CheckerProgram, call *ast.Node) (Env, bool) {
 		return nil, false
 	}
 	tracing.Count("snapshot.hit", 0)
-	return cloneEnv(held), true
+	return held.Clone(), true
 }

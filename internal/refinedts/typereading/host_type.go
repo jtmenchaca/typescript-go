@@ -24,7 +24,14 @@ const absentFlags = checker.TypeFlagsUndefined | checker.TypeFlagsNull | checker
 // through ReadHostType (host_type_memo.go), which remembers each
 // (type, depth) answer per checker — the recursive calls below go
 // through the memo too, so a big union's arms remember individually.
-func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, depth int) (abstractdomain.AbstractValue, bool) {
+//
+// usedAt reports whether the answer depended on the `at` fallback (a
+// member symbol with no declaration of its own): such an answer is a
+// function of the call SITE, not the type alone, so the memo must not
+// remember it — under the parallel sweep, which entry reads a type
+// first varies per run, and a site-dependent first write would make
+// the cached answer nondeterministic across runs.
+func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, depth int, usedAt *bool) (abstractdomain.AbstractValue, bool) {
 	flags := t.Flags()
 	if (flags & checker.TypeFlagsStringLiteral) != 0 {
 		value, ok := t.AsLiteralType().Value().(string)
@@ -99,7 +106,7 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 		if constrained == nil || constrained == t {
 			return abstractdomain.AbstractValue{}, false
 		}
-		return ReadHostType(c, constrained, at, depth+1)
+		return readHostTypeMemoized(c, constrained, at, depth+1, usedAt)
 	}
 	if (flags&checker.TypeFlagsUnion) != 0 && depth < 3 {
 		var arms []abstractdomain.AbstractValue
@@ -109,7 +116,7 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 				sawAbsent = true
 				continue
 			}
-			inner, ok := ReadHostType(c, part, at, depth+1)
+			inner, ok := readHostTypeMemoized(c, part, at, depth+1, usedAt)
 			if !ok {
 				return abstractdomain.AbstractValue{}, false
 			}
@@ -141,7 +148,7 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 			var element abstractdomain.AbstractValue
 			haveElement := false
 			for _, slot := range slots {
-				inner, ok := ReadHostType(c, slot, at, depth+1)
+				inner, ok := readHostTypeMemoized(c, slot, at, depth+1, usedAt)
 				if !ok {
 					return abstractdomain.AbstractValue{}, false
 				}
@@ -176,12 +183,13 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 			}
 			if site == nil {
 				site = at
+				*usedAt = true
 			}
 			memberType := c.GetTypeOfSymbolAtLocation(member, site)
 			if memberType == nil {
 				continue
 			}
-			inner, ok := ReadHostType(c, memberType, at, depth+1)
+			inner, ok := readHostTypeMemoized(c, memberType, at, depth+1, usedAt)
 			if !ok {
 				continue
 			}

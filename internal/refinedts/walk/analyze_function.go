@@ -47,7 +47,7 @@ func analyzeFunctionBody(outer *FlowContext, contract *FunctionContract, callSit
 	// record their environments as read-once snapshots
 	ctx.SnapshotOwner = contract.Declaration
 
-	env := Env{}
+	env := NewEnv()
 	parameters := contract.Declaration.Parameters()
 	for i, parameter := range parameters {
 		decl := parameter.AsParameterDeclaration()
@@ -78,7 +78,7 @@ func analyzeFunctionBody(outer *FlowContext, contract *FunctionContract, callSit
 	// same way
 	initialThisState := InitialThisStateOf(&ctx, contract.Declaration)
 	if initialThisState != nil {
-		env["this"] = *initialThisState
+		env.Set("this", *initialThisState)
 	}
 	// a DEPENDENT signature holds inside its own body: the stated
 	// relation between parameters initialStates the order ledger at entry, so

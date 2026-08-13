@@ -60,7 +60,7 @@ func NoteNegatedLoopExit(input NoteNegatedLoopExitInput) {
 	single := hasKind && (kind == ast.KindLessThanToken || kind == ast.KindLessThanEqualsToken ||
 		kind == ast.KindGreaterThanToken || kind == ast.KindGreaterThanEqualsToken)
 	real := func(baseName, path string) bool {
-		known, ok := input.After[baseName]
+		known, ok := input.After.Get(baseName)
 		if !ok {
 			return false
 		}

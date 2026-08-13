@@ -87,7 +87,11 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 		locals = result.Locals
 	}
 	// the result slot's sort: string only where EVERY return spells a
-	// string literal; a mix has no one truthiness reading — decline
+	// SEQUENCE by its own syntax — a string literal, a template, or a
+	// `+` chain of those; a mix has no one truthiness reading, so it
+	// declines. This scan runs BEFORE the callee's slots exist, so it
+	// reads no names: a return of a bare name is "other" here, exactly
+	// as it was before templates and concatenation were recognized.
 	sawString := false
 	sawOther := false
 	var scanReturns func(node *ast.Node)
@@ -95,7 +99,7 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 		if ast.IsReturnStatement(node) {
 			rs := node.AsReturnStatement()
 			if rs.Expression != nil {
-				if ast.IsStringLiteral(Unwrapped(rs.Expression)) {
+				if SpelledSequenceShape(rs.Expression) {
 					sawString = true
 				} else {
 					sawOther = true

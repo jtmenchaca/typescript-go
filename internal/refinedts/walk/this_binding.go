@@ -101,12 +101,12 @@ func PlacedThisChain(target *ast.Node) bool {
 // join of every write the class's own text can make. Narrowings die
 // here; that is the point.
 func ForgetThisHeld(ctx *FlowContext, env Env, site *ast.Node) {
-	if _, ok := env["this"]; !ok {
+	if _, ok := env.Get("this"); !ok {
 		return
 	}
-	ctx.Aliases.Havoc(env, "this")
+	HavocEnv(ctx.Aliases, env, "this")
 	reseed := InitialThisStateOf(ctx, site)
 	if reseed != nil {
-		env["this"] = *reseed
+		env.Set("this", *reseed)
 	}
 }

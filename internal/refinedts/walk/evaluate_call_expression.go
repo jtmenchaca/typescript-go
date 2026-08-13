@@ -155,8 +155,8 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			written := map[string]struct{}{}
 			AssignedNames(ctx.P.Checker, handed, written)
 			for name := range written {
-				if _, ok := env[name]; ok {
-					ctx.Aliases.Havoc(env, name)
+				if _, ok := env.Get(name); ok {
+					HavocEnv(ctx.Aliases, env, name)
 				}
 			}
 		}
@@ -210,8 +210,8 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 	// world — and a stated result earns no knowledge
 	for _, argument := range arguments {
 		if ast.IsIdentifier(argument) {
-			if _, ok := env[argument.Text()]; ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
-				ctx.Aliases.Havoc(env, argument.Text())
+			if _, ok := env.Get(argument.Text()); ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
+				HavocEnv(ctx.Aliases, env, argument.Text())
 			}
 		}
 	}

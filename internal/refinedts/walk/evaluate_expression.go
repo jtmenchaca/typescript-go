@@ -99,7 +99,7 @@ func evaluateExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.A
 	// any field: what is held about `this` forgets, and the field
 	// invariants (which every such write respects) reseed it
 	if ast.IsCallExpression(e) || ast.IsNewExpression(e) || ast.IsTaggedTemplateExpression(e) {
-		if _, hasThis := env["this"]; hasThis && MentionsThis(e) {
+		if _, hasThis := env.Get("this"); hasThis && MentionsThis(e) {
 			ForgetThisHeld(ctx, env, e)
 		}
 	}
@@ -147,7 +147,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 			operator, operand = post.Operator, post.Operand
 		}
 		if operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken {
-			if _, hasThis := env["this"]; hasThis && MentionsThis(operand) && !PlacedThisChain(operand) {
+			if _, hasThis := env.Get("this"); hasThis && MentionsThis(operand) && !PlacedThisChain(operand) {
 				ForgetThisHeld(ctx, env, e)
 			}
 		}
@@ -165,7 +165,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		// the global `undefined` is an INTRINSIC — no lib declaration —
 		// so "not shadowed by any user binding" is the whole test
 		if e.Text() == "undefined" {
-			if _, tracked := env[e.Text()]; !tracked {
+			if _, tracked := env.Get(e.Text()); !tracked {
 				symbol := ctx.P.Checker.GetSymbolAtLocation(e)
 				shadowed := false
 				if symbol != nil {
@@ -181,7 +181,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 				}
 			}
 		}
-		if held, ok := env[e.Text()]; ok {
+		if held, ok := env.Get(e.Text()); ok {
 			// an OPAQUE value at a position tsc NARROWS: the file's own
 			// text determined more than the outside sent, and the walk did
 			// not read it — the walk's own gap, never the outside's silence
@@ -200,7 +200,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	// method's — never reads the tracked one.
 	if e.Kind == ast.KindThisKeyword {
 		if dataflowfacts.EnclosingThisClass(e) != nil {
-			if held, ok := env["this"]; ok {
+			if held, ok := env.Get("this"); ok {
 				return held
 			}
 		}
@@ -260,7 +260,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		ForgetThrough(ctx, env, del.Expression)
 		// a ThisKeyword receiver is no binding, so forgetThrough cannot
 		// place it — the tracked `this` forgets here instead
-		if _, hasThis := env["this"]; hasThis && MentionsThis(del.Expression) {
+		if _, hasThis := env.Get("this"); hasThis && MentionsThis(del.Expression) {
 			ForgetThisHeld(ctx, env, e)
 		}
 		// ...and the DELETED KEY itself is now absent: on a plain named
@@ -270,9 +270,9 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		if ast.IsPropertyAccessExpression(del.Expression) {
 			pa := del.Expression.AsPropertyAccessExpression()
 			if ast.IsIdentifier(pa.Expression) {
-				if _, tracked := env[pa.Expression.Text()]; tracked {
+				if _, tracked := env.Get(pa.Expression.Text()); tracked {
 					receiverName := pa.Expression.Text()
-					held, ok := env[receiverName]
+					held, ok := env.Get(receiverName)
 					if !ok {
 						held = silence.Residue()
 					}
@@ -286,7 +286,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 					} else {
 						keys = []abstractdomain.ObjectKey{{Name: pa.Name().Text(), Value: abstractdomain.Undef}}
 					}
-					dataflowfacts.UpdateTracked(ctx.Aliases, env, receiverName, abstractdomain.KnownObject(keys, stated, complete, abstractdomain.TrustSpec, false))
+					UpdateTrackedEnv(ctx.Aliases, env, receiverName, abstractdomain.KnownObject(keys, stated, complete, abstractdomain.TrustSpec, false))
 				}
 			}
 		}
@@ -311,7 +311,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		bin := e.AsBinaryExpression()
 		op := bin.OperatorToken.Kind
 		if op >= ast.KindFirstAssignment && op <= ast.KindLastAssignment {
-			if _, hasThis := env["this"]; hasThis && MentionsThis(bin.Left) && !PlacedThisChain(bin.Left) {
+			if _, hasThis := env.Get("this"); hasThis && MentionsThis(bin.Left) && !PlacedThisChain(bin.Left) {
 				ForgetThisHeld(ctx, env, e)
 			}
 		}

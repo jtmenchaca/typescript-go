@@ -113,7 +113,7 @@ func EvaluateNewExpression(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 			receiverExpr = calleeCore.AsElementAccessExpression().Expression
 		}
 		if ast.IsIdentifier(receiverExpr) {
-			held, ok := env[receiverExpr.Text()]
+			held, ok := env.Get(receiverExpr.Text())
 			if ok && held.Kind == abstractdomain.KindUnknown && held.Opaque {
 				if newExpr.Arguments != nil {
 					for _, argument := range newExpr.Arguments.Nodes {

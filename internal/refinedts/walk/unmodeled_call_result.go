@@ -78,7 +78,7 @@ func UnmodeledCallResult(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.
 		calleeRoot = call.Expression.AsElementAccessExpression().Expression
 	}
 	if ast.IsIdentifier(calleeRoot) {
-		if held, ok := env[calleeRoot.Text()]; ok && held.Kind == abstractdomain.KindUnknown && held.Opaque {
+		if held, ok := env.Get(calleeRoot.Text()); ok && held.Kind == abstractdomain.KindUnknown && held.Opaque {
 			return abstractdomain.Opaque
 		}
 	}

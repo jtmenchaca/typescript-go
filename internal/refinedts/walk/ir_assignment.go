@@ -50,16 +50,50 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 	})
 }
 
+// IsAbsentKeyword is whether an expression spells the ABSENT value:
+// `null` or `undefined`. JavaScript's two absent spellings are one
+// outcome kernel-side (KnownState's absent flag conflates them), so
+// both lower to the same state constant.
+//
+// `undefined` is an ordinary identifier in the grammar, not a keyword
+// token — a local named `undefined` would shadow it, so the tracked
+// slots are consulted first by the caller (a tracked name COPIES) and
+// only a free spelling reaches here.
+func IsAbsentKeyword(e *ast.Node) bool {
+	head := Unwrapped(e)
+	if head.Kind == ast.KindNullKeyword {
+		return true
+	}
+	return ast.IsIdentifier(head) && head.Text() == "undefined"
+}
+
 // RhsEffect is rhsEffect in the TS source: an assigned RIGHT side as
-// an effect — a tracked name COPIES under any sort, a string
-// literal writes its exact tuple into a string-sorted slot, and
-// everything else reads numerically.
+// an effect — a tracked name COPIES under any sort, `null`/`undefined`
+// write the absent state constant under ANY sort, a string literal
+// writes its exact tuple into a string-sorted slot, a string-sorted
+// concatenation or template builds its sequence, and everything else
+// reads numerically.
 func RhsEffect(context *LoweringContext, targetSort BindingKind, e *ast.Node) (kernelbridge.LoopEffect, bool) {
 	if copy, ok := IndexOf(context, e); ok {
 		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: copy}, true
 	}
+	// `x = null` / `return undefined`: the absent outcome, which no set
+	// can hold — it rides in the state constant's flag instead. Under
+	// any target sort: absence is neither a number nor a word.
+	if IsAbsentKeyword(e) {
+		return kernelbridge.AbsentConst(), true
+	}
 	if ast.IsStringLiteral(e) && targetSort == BindingKindString {
 		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.StringTuple(e.AsStringLiteral().Text)}, true
+	}
+	// a string-sorted right side reads as a SEQUENCE first: `a + b`
+	// between two string-sorted operands concatenates, and a template
+	// literal is that concatenation spelled out. Numeric reading
+	// follows for everything else.
+	if targetSort == BindingKindString {
+		if seq, ok := SequenceEffectOf(context, e); ok {
+			return seq, true
+		}
 	}
 	return EffectOf(context, e)
 }

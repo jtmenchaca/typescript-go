@@ -173,7 +173,7 @@ func SumIndexInBounds(
 		if place.Path != "" {
 			return false
 		}
-		held, ok := env[place.BaseName]
+		held, ok := env.Get(place.BaseName)
 		if !ok {
 			return false
 		}

@@ -85,10 +85,10 @@ func readSchemaRuntimeCall(site MethodCallSite) *abstractdomain.AbstractValue {
 		argument := arguments[0]
 		argumentKnown := evaluateExpression(ctx, env, argument)
 		if ast.IsIdentifier(argument) {
-			if _, tracked := env[argument.Text()]; tracked && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
+			if _, tracked := env.Get(argument.Text()); tracked && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
 				// parse may return its input — the result shares the
 				// argument's reference (the caller may hold both)
-				ctx.Aliases.Havoc(env, argument.Text())
+				HavocEnv(ctx.Aliases, env, argument.Text())
 			}
 		}
 		outcome, hasOutcome := EvaluateParseOutcome(receiverExpression, argumentKnown, ParseEvalTools{
@@ -152,7 +152,7 @@ func readSchemaRuntimeCall(site MethodCallSite) *abstractdomain.AbstractValue {
 				trackedName = site.TrackedName
 			}
 			if hasTrackedName && dataflowfacts.ReferenceTyped(ctx.P.Checker, receiverExpression) {
-				ctx.Aliases.Havoc(env, trackedName)
+				HavocEnv(ctx.Aliases, env, trackedName)
 			}
 			// an UNKNOWN input still has a known result shape: success
 			// is one of the two booleans, and data wears the stated set
@@ -227,7 +227,7 @@ func readSchemaRuntimeCall(site MethodCallSite) *abstractdomain.AbstractValue {
 			trackedName = site.TrackedName
 		}
 		if hasTrackedName && dataflowfacts.ReferenceTyped(ctx.P.Checker, receiverExpression) {
-			ctx.Aliases.Havoc(env, trackedName)
+			HavocEnv(ctx.Aliases, env, trackedName)
 		}
 		if ast.IsIdentifier(receiverExpression) {
 			schemaSymbol := symbolAt(ctx.P.Checker, receiverExpression)

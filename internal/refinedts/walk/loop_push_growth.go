@@ -54,7 +54,7 @@ func GrowPushedArrays(input GrowPushedArraysInput) {
 		}
 		sound := true
 		for _, argument := range pushed {
-			known := input.EvaluateExpression(ctx, cloneEnv(input.Candidate), argument)
+			known := input.EvaluateExpression(ctx, input.Candidate.Clone(), argument)
 			var set refinementsets.RefinedSet
 			setOk := false
 			if known.Kind == abstractdomain.KindValues && known.KindTag == abstractdomain.PrimitiveNumber {
@@ -93,12 +93,12 @@ func GrowPushedArrays(input GrowPushedArraysInput) {
 				if hasCount && hasPerIteration && perIteration == len(pushed) {
 					lo := len(entry.Values) + count*perIteration
 					hi := lo
-					input.After[name] = abstractdomain.KnownSet(
+					input.After.Set(name, abstractdomain.KnownSet(
 						refinementsets.MakeRefinedSet(refinementsets.RepeatOf(*element, lo, &hi)),
 						nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone,
-					)
+					))
 				} else {
-					input.After[name] = abstractdomain.KnownSet(sequence, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
+					input.After.Set(name, abstractdomain.KnownSet(sequence, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
 				}
 			}
 		}()

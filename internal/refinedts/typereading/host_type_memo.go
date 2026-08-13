@@ -8,9 +8,11 @@
 // from different checkers must never mix", and a type pointer is
 // unique to its checker, so the per-checker map is the mixing guard.
 //
-// The `at` node is NOT in the key: it only serves as the fallback
-// declaration site for a member symbol with no declaration of its
-// own, where the member's declared type does not vary by location.
+// The `at` node is NOT in the key — and any answer that actually
+// USED the `at` fallback (a member symbol with no declaration of its
+// own) is never cached at all: such an answer is a function of the
+// call site, and a site-dependent first write under a site-free key
+// varies with the parallel sweep's scheduling order.
 
 package typereading
 
@@ -40,6 +42,17 @@ var (
 // ReadHostType is the memoized face of readHostType: the same answer
 // a fresh read gives, remembered per (checker, type, depth).
 func ReadHostType(c *checker.Checker, t *checker.Type, at *ast.Node, depth int) (abstractdomain.AbstractValue, bool) {
+	usedAt := false
+	return readHostTypeMemoized(c, t, at, depth, &usedAt)
+}
+
+// readHostTypeMemoized answers from the memo, computing and
+// remembering on a miss — but a result that depended on the `at`
+// fallback anywhere in its recursion is answered WITHOUT being
+// remembered: it is a function of the call site, and caching the
+// first site's answer under a site-free key made verdicts vary with
+// the parallel sweep's scheduling order (the flickering-fire class).
+func readHostTypeMemoized(c *checker.Checker, t *checker.Type, at *ast.Node, depth int, usedAt *bool) (abstractdomain.AbstractValue, bool) {
 	key := hostTypeMemoKey{t: t, depth: depth}
 	hostTypeMemoMu.Lock()
 	memo := hostTypeMemos[c]
@@ -52,7 +65,12 @@ func ReadHostType(c *checker.Checker, t *checker.Type, at *ast.Node, depth int) 
 	if hit {
 		return row.known, row.ok
 	}
-	known, ok := readHostTypeUncached(c, t, at, depth)
+	inner := false
+	known, ok := readHostTypeUncached(c, t, at, depth, &inner)
+	if inner {
+		*usedAt = true
+		return known, ok
+	}
 	hostTypeMemoMu.Lock()
 	memo[key] = hostTypeMemoRow{known: known, ok: ok}
 	hostTypeMemoMu.Unlock()

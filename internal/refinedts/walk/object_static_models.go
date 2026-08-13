@@ -11,7 +11,6 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
-	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
@@ -228,8 +227,8 @@ func readObjectStaticMethods(site MethodCallSite) *abstractdomain.AbstractValue 
 	isReflectReceiver := ast.IsIdentifier(receiverExpression) && receiverExpression.Text() == "Reflect" && resolvesToDefaultLib(ctx, receiverExpression)
 	if (isObjectReceiver || isReflectReceiver) && len(arguments) >= 1 && ast.IsIdentifier(arguments[0]) {
 		targetName := arguments[0].Text()
-		if _, tracked := env[targetName]; tracked {
-			held, ok := env[targetName]
+		if _, tracked := env.Get(targetName); tracked {
+			held, ok := env.Get(targetName)
 			if !ok {
 				held = silence.Residue()
 			}
@@ -256,14 +255,14 @@ func readObjectStaticMethods(site MethodCallSite) *abstractdomain.AbstractValue 
 					}
 				}
 				keys := setObjectKey(append([]abstractdomain.ObjectKey{}, held.Keys...), key, written)
-				dataflowfacts.UpdateTracked(ctx.Aliases, env, targetName, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
+				UpdateTrackedEnv(ctx.Aliases, env, targetName, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
 				out := silence.Residue()
 				return &out
 			}
 			if isReflectReceiver && method == "set" && hasKey && held.Kind == abstractdomain.KindObject && len(arguments) >= 3 {
 				written := evaluateExpression(ctx, env, arguments[2])
 				keys := setObjectKey(append([]abstractdomain.ObjectKey{}, held.Keys...), key, written)
-				dataflowfacts.UpdateTracked(ctx.Aliases, env, targetName, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
+				UpdateTrackedEnv(ctx.Aliases, env, targetName, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
 				out := silence.Residue()
 				return &out
 			}
@@ -285,10 +284,10 @@ func readObjectStaticMethods(site MethodCallSite) *abstractdomain.AbstractValue 
 				}
 				if readable {
 					next := abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false)
-					dataflowfacts.UpdateTracked(ctx.Aliases, env, targetName, next)
+					UpdateTrackedEnv(ctx.Aliases, env, targetName, next)
 					return &next
 				}
-				ctx.Aliases.Havoc(env, targetName)
+				HavocEnv(ctx.Aliases, env, targetName)
 				out := silence.Residue()
 				return &out
 			}

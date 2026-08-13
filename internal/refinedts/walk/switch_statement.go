@@ -154,7 +154,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 			clauseStatements := caseOrDefaultStatements(clauses[i])
 			for _, s := range clauseStatements {
 				if ast.IsBreakStatement(s) && s.AsBreakStatement().Label == nil {
-					broke = append(broke, cloneEnv(env))
+					broke = append(broke, env.Clone())
 					fellOut = false
 					break walkLoop
 				}
@@ -285,14 +285,14 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 		if len(clauseStatements) == 0 {
 			continue
 		}
-		clauseEnv := cloneEnv(env)
+		clauseEnv := env.Clone()
 		// inside a case's body the discriminant WEARS the label: the
 		// runtime took `scrutinee === label` to get here (fallthrough
 		// from a non-empty clause lands in the havoc path, never
 		// here). Empty clauses share the next body, so the pin is the
 		// union of the contiguous labels above it and its own.
 		if ast.IsCaseClause(clause) && ast.IsIdentifier(switchStmt.Expression) {
-			if _, has := clauseEnv[switchStmt.Expression.Text()]; has {
+			if _, has := clauseEnv.Get(switchStmt.Expression.Text()); has {
 				labels := []*ast.Node{clause.AsCaseOrDefaultClause().Expression}
 				for back := index - 1; back >= 0; back-- {
 					previous := clauses[back]
@@ -302,7 +302,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 					labels = append(labels, previous.AsCaseOrDefaultClause().Expression)
 				}
 				if pinned, ok := SwitchLabelValues(labels); ok {
-					clauseEnv[switchStmt.Expression.Text()] = pinned
+					clauseEnv.Set(switchStmt.Expression.Text(), pinned)
 				}
 			}
 		}
@@ -310,7 +310,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 		// exact-values discriminant sheds every readable label, and a
 		// set-known one sheds them as a difference form
 		if ast.IsDefaultClause(clause) && ast.IsIdentifier(switchStmt.Expression) {
-			held, hasHeld := clauseEnv[switchStmt.Expression.Text()]
+			held, hasHeld := clauseEnv.Get(switchStmt.Expression.Text())
 			var caseLabels []*abstractdomain.AbstractValue
 			for _, c := range clauses {
 				if !ast.IsCaseClause(c) {
@@ -353,7 +353,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 					}
 				}
 				if len(remaining) > 0 && len(remaining) < len(held.Values) {
-					clauseEnv[switchStmt.Expression.Text()] = abstractdomain.KnownValues(remaining, held.KindTag, abstractdomain.TrustLevelOf(held))
+					clauseEnv.Set(switchStmt.Expression.Text(), abstractdomain.KnownValues(remaining, held.KindTag, abstractdomain.TrustLevelOf(held)))
 				}
 			} else if hasHeld && held.Kind == abstractdomain.KindSet && held.SetKindTag == abstractdomain.SetKindTagNone &&
 				numericAllValid && len(numericLabels) > 0 {
@@ -362,7 +362,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 					A_:   &held.Set,
 					B:    ptrRefinedSet(refinementsets.MakeRefinedSet(refinementsets.OneOf(numericLabels))),
 				})
-				clauseEnv[switchStmt.Expression.Text()] = abstractdomain.KnownSet(diff, nil, abstractdomain.TrustLevelOf(held), abstractdomain.SetKindTagNone)
+				clauseEnv.Set(switchStmt.Expression.Text(), abstractdomain.KnownSet(diff, nil, abstractdomain.TrustLevelOf(held), abstractdomain.SetKindTagNone))
 			}
 		}
 		// `switch (true)` runs a case body exactly when its test held:
@@ -380,9 +380,10 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 				WhenFalseScope: clause,
 				At:             clause,
 			}, false, false)
-			for name, held := range assumed.WhenTrue.Env {
-				clauseEnv[name] = held
-			}
+			assumed.WhenTrue.Env.Range(func(name string, held abstractdomain.AbstractValue) bool {
+				clauseEnv.Set(name, held)
+				return true
+			})
 			clauseCtx = assumed.WhenTrue.Ctx
 		}
 		var broke []Env
@@ -460,7 +461,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 		mayFallPast = !covered
 	}
 	if mayFallPast {
-		contributions = append(contributions, cloneEnv(env))
+		contributions = append(contributions, env.Clone())
 	}
 	if len(contributions) == 0 {
 		return true // every path exits

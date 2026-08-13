@@ -66,7 +66,7 @@ func AnnotateActionAt(p *program.CheckerProgram, registry annotations.Annotation
 	if !ok {
 		return AnnotateAction{}, false
 	}
-	held, ok := bindings[token.Text()]
+	held, ok := bindings.Get(token.Text())
 	if !ok {
 		return AnnotateAction{}, false
 	}
@@ -177,17 +177,18 @@ func AnswerFlowAt(
 		Aliases:  dataflowfacts.NewAliasClasses(),
 		Declared: map[string]*annotations.DeclaredRefinement{},
 	}
-	env := Env{}
+	env := NewEnv()
 	siteCtx := CallSiteCtx{P: p, Registry: registry, Objects: objects, Contracts: contracts, Kernel: kernel}
 	if site.Contract == nil && site.Fn != nil {
 		InitializeEnclosingCallbacks(siteCtx, env, site.Fn)
 	}
-	callSite := Env{}
+	callSite := map[string]abstractdomain.AbstractValue{}
 	if site.Fn != nil && ast.IsFunctionDeclaration(site.Fn) {
 		if joined, ok := CallSiteBindings(siteCtx, site.Fn); ok {
-			for name, known := range joined {
+			joined.Range(func(name string, known abstractdomain.AbstractValue) bool {
 				callSite[name] = known
-			}
+				return true
+			})
 		}
 	}
 	var callSiteInitialStates map[string]abstractdomain.AbstractValue
@@ -204,7 +205,7 @@ func AnswerFlowAt(
 	})
 	if site.Fn != nil {
 		if initialThisState := InitialThisStateOf(ctx, site.Fn); initialThisState != nil {
-			env["this"] = *initialThisState
+			env.Set("this", *initialThisState)
 		}
 	}
 
@@ -248,7 +249,7 @@ func AnswerFlowAt(
 		return AnswerUnreached(p, kernel, token, binding, shownByHost)
 	}
 
-	known, hasKnown := env[token.Text()]
+	known, hasKnown := env.Get(token.Text())
 	if !hasKnown {
 		holder := binding
 		for holder != nil && (ast.IsBindingElement(holder) || ast.IsArrayBindingPattern(holder) || ast.IsObjectBindingPattern(holder)) {
@@ -265,13 +266,13 @@ func AnswerFlowAt(
 			}
 		}
 		if loop != nil {
-			bodyEntry := Env{}
+			bodyEntry := NewEnv()
 			SolveLoop(ctx, env, loop, nil, LoopAnalyzers{
 				AnalyzeStatement:   AnalyzeStatement,
 				EvaluateExpression: evaluateExpression,
 				IterationElement:   IterationElementOf,
 			}, bodyEntry)
-			known, hasKnown = bodyEntry[token.Text()]
+			known, hasKnown = bodyEntry.Get(token.Text())
 		}
 	}
 	if !hasKnown {

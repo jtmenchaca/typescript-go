@@ -120,7 +120,7 @@ func fillSnapshotsUnder(ctx CallSiteCtx, owner *ast.Node) {
 		}
 		if needsJoin {
 			if env, ok := CallSiteBindings(ctx, owner); ok {
-				initialStates = env
+				initialStates = env.AsMap()
 			}
 		}
 	}

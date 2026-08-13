@@ -132,17 +132,18 @@ func CollectLocals(body *ast.Node) (CollectLocalsResult, bool) {
 }
 
 // LocalSort is a local's sort, read from its initializer's syntax:
-// a string literal is a string; anything else the lowering reads
-// numerically, and an unreadable initializer leaves the sort
-// unknown — tests on it then decline, which only loses coverage,
-// never soundness.
+// a sequence-shaped initializer — a string literal, a template, a
+// `+` chain of those (SpelledSequenceShape) — is a string; anything
+// else the lowering reads numerically, and an unreadable initializer
+// leaves the sort unknown — tests on it then decline, which only
+// loses coverage, never soundness.
 func LocalSort(declaration *ast.Node) BindingKind {
 	decl := declaration.AsVariableDeclaration()
 	initializer := decl.Initializer
 	if initializer == nil {
 		return BindingKindUnknown
 	}
-	if ast.IsStringLiteral(initializer) {
+	if SpelledSequenceShape(initializer) {
 		return BindingKindString
 	}
 	return BindingKindNumber
@@ -157,7 +158,7 @@ func LocalTypeof(declaration *ast.Node) TypeofTag {
 		return TypeofTagNone
 	}
 	e := Unwrapped(initializer)
-	if ast.IsStringLiteral(e) {
+	if SpelledSequenceShape(e) {
 		return TypeofTagString
 	}
 	if _, ok := NumberOf(e); ast.IsNumericLiteral(e) || ok {
