@@ -157,16 +157,46 @@ func typeofOfKnown(k abstractdomain.AbstractValue) TypeofTag {
 	}
 }
 
+// summaryLowerable gates the declarations a summary may lower at all:
+// an async body's value is a Promise and a generator's an iterator —
+// walking either as its raw return set would mistype the call. (The
+// TS source reaches lowering only behind the effect-free scan and
+// carries no such gate; an awaitless async pure body could slip
+// through there — noted for the correspondence.)
+func summaryLowerable(declaration *ast.Node) bool {
+	if declaration == nil || declaration.Body() == nil {
+		return false
+	}
+	if ast.HasSyntacticModifier(declaration, ast.ModifierFlagsAsync) {
+		return false
+	}
+	switch declaration.Kind {
+	case ast.KindFunctionDeclaration:
+		if declaration.AsFunctionDeclaration().AsteriskToken != nil {
+			return false
+		}
+	case ast.KindFunctionExpression:
+		if declaration.AsFunctionExpression().AsteriskToken != nil {
+			return false
+		}
+	case ast.KindMethodDeclaration:
+		if declaration.AsMethodDeclaration().AsteriskToken != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func lowerSummary(
 	declaration *ast.Node,
 	paramSorts []BindingKind,
 	paramTypeofs []TypeofTag,
 	resolveCallee func(callee *ast.Node) *ast.Node,
 ) (kernelSummary, bool) {
-	body := declaration.Body()
-	if body == nil {
+	if !summaryLowerable(declaration) {
 		return kernelSummary{}, false
 	}
+	body := declaration.Body()
 	kernel := EngineKernelHeld()
 	if kernel == nil {
 		return kernelSummary{}, false
@@ -401,6 +431,32 @@ func SummaryResult(
 	}
 	tracing.Count("summaryServed", 0)
 	return abstractdomain.AtTrustLevel(answer, floor), true
+}
+
+// KernelSummaryDirect is the summary route tried for EVERY contracted
+// call, ahead of the effect scan — this port's completion of
+// speed-ladder S5 ("apply per distinct argument tuple, not per
+// call"; the TS source reaches the route only behind the effect-free
+// gate). Sound without an effect pre-scan because the lowering is
+// TOTAL-OR-DECLINE over effects: an assignment lowers only onto a
+// param or local slot (a property write, an outer name, `this` — no
+// slot, decline), a call lowers only as a resolvable contracted
+// body's own slots (anything else, decline), throw/try/await/yield
+// have no lowering, and scalar-only argument states mean no reference
+// argument exists for the caller to observe. Whatever the lowering
+// admits therefore has exactly one caller-visible outcome — the
+// return value — which the kernel's walk_sound answer covers.
+func KernelSummaryDirect(ctx *FlowContext, argKnowns []abstractdomain.AbstractValue, contract *FunctionContract) (abstractdomain.AbstractValue, bool) {
+	if !summaryLowerable(contract.Declaration) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	return SummaryResult(contract.Declaration, argKnowns, func(callee *ast.Node) *ast.Node {
+		called := ContractOf(ctx, callee)
+		if called == nil || !summaryLowerable(called.Declaration) {
+			return nil
+		}
+		return called.Declaration
+	})
 }
 
 // runKernelWalk asks kernel.Walk, turning a refused question (the
