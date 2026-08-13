@@ -265,6 +265,10 @@ func TestUsesAreAllAwaits_ATotalAwaitReadingIsRecognizedAndAnyOtherUseDeclines(t
 			const p = f(1);
 			return p;
 		}
+		async function caught() {
+			const p = f(1);
+			p.catch(k);
+		}
 	`)
 	readingOf := func(index int) (body *ast.Node, declaration *ast.Node) {
 		body = statements[index].AsFunctionDeclaration().Body
@@ -276,13 +280,19 @@ func TestUsesAreAllAwaits_ATotalAwaitReadingIsRecognizedAndAnyOtherUseDeclines(t
 	if !usesAreAllAwaits(body, declaration, "p") {
 		t.Errorf("a p used only as `await p` was not recognized")
 	}
+	// `p.then(cb)` is now a recognized use: the receiver reads through
+	// the settled slot the then-lowering serves
+	thenBody, thenDeclaration := readingOf(2)
+	if !usesAreAllAwaits(thenBody, thenDeclaration, "p") {
+		t.Errorf("a p chained with .then was not recognized — the then-lowering serves it")
+	}
 	declining := []struct {
 		Index int
 		What  string
 	}{
 		{1, "passed as an argument"},
-		{2, "chained with .then"},
 		{3, "returned"},
+		{4, "chained with .catch"},
 	}
 	for _, row := range declining {
 		body, declaration := readingOf(row.Index)

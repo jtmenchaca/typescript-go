@@ -18,6 +18,223 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 )
 
+/* ── record parameters ───────────────────────────────────────────── */
+
+// recordParamMember is one member of a parameter's TYPE LITERAL
+// annotation: the key it is spelled under, the slot name the body reads
+// it by ("p.lo"), and the sort and typeof evidence its OWN annotation
+// states.
+type recordParamMember struct {
+	Key       string
+	SlotName  string
+	Sort      BindingKind
+	TypeofTag TypeofTag
+}
+
+// recordParamMembersOf reads a parameter's annotation as a SYNTACTIC
+// TYPE LITERAL of scalar members — `p: { lo: number, hi: string }` — and
+// answers one member per property signature, spelled "p.lo"/"p.hi".
+//
+// Nothing but that shape is admitted: a class name, an interface name,
+// a type alias, a union, an intersection, an optional member (`lo?:`),
+// a method signature, an index signature, a call signature, a nested
+// literal, or a member whose own annotation is not number/boolean/string
+// answers false and the parameter keeps its single whole-name slot —
+// exactly today's behaviour. The rule is deliberately syntactic: a
+// declaration's summary quantifies over every caller, and only what the
+// annotation itself spells is promised to every entry.
+//
+// Each member's sort and typeof read through declaredParamSort's own
+// reading, member-wise: number and boolean ride the number sort (their
+// typeof differs), string rides the string sort.
+func recordParamMembersOf(parameter *ast.Node) ([]recordParamMember, bool) {
+	pd := parameter.AsParameterDeclaration()
+	if pd.Type == nil || !ast.IsIdentifier(pd.Name()) {
+		return nil, false
+	}
+	if !ast.IsTypeLiteralNode(pd.Type) {
+		return nil, false
+	}
+	holder := pd.Name().Text()
+	members := pd.Type.AsTypeLiteralNode().Members.Nodes
+	if len(members) == 0 {
+		return nil, false
+	}
+	seen := map[string]struct{}{}
+	out := make([]recordParamMember, 0, len(members))
+	for _, member := range members {
+		if !ast.IsPropertySignatureDeclaration(member) {
+			return nil, false
+		}
+		signature := member.AsPropertySignatureDeclaration()
+		// `lo?: number` admits absence, which a scalar entry slot cannot
+		// carry apart from its value; the whole parameter declines
+		if signature.PostfixToken != nil || signature.Initializer != nil {
+			return nil, false
+		}
+		if signature.Type == nil || !ast.IsIdentifier(signature.Name()) {
+			return nil, false
+		}
+		var sort BindingKind
+		var tag TypeofTag
+		switch signature.Type.Kind {
+		case ast.KindNumberKeyword:
+			sort, tag = BindingKindNumber, TypeofTagNumber
+		case ast.KindBooleanKeyword:
+			// booleans ride the number sort — declaredParamSort's own rule
+			sort, tag = BindingKindNumber, TypeofTagBoolean
+		case ast.KindStringKeyword:
+			sort, tag = BindingKindString, TypeofTagString
+		default:
+			return nil, false
+		}
+		key := signature.Name().Text()
+		if _, already := seen[key]; already {
+			return nil, false
+		}
+		seen[key] = struct{}{}
+		out = append(out, recordParamMember{
+			Key:       key,
+			SlotName:  holder + "." + key,
+			Sort:      sort,
+			TypeofTag: tag,
+		})
+	}
+	return out, true
+}
+
+// SummaryParameterEntries is the ONE expansion both the layout and the
+// call sites read: the entry slots one declared parameter contributes.
+//
+// A scalar (or richer-typed, or unannotated) parameter contributes
+// exactly ONE entry under its own spelled name, wearing declaredParamSort
+// / declaredParamTypeof — today's layout, unchanged. A parameter whose
+// annotation is a type literal of scalar members contributes ONE ENTRY
+// PER MEMBER, spelled "p.lo"/"p.hi", each sorted by its own member
+// annotation.
+//
+// (false) where the parameter itself declines outright: a binding
+// pattern, a default, or a rest — the same three the lowering has always
+// refused, kept here so the two seams cannot disagree about how many
+// entries a parameter is worth.
+//
+// Both the body layout (lowerSummaryBodyWithCaptures) and the call-site
+// argument vector (summaryCallStatement) build their entry lists by
+// walking the declared parameters through THIS function, so the callee's
+// arity, the caller's argument order, and the apply side's entry states
+// are three readings of one answer.
+func SummaryParameterEntries(parameter *ast.Node) ([]bodySlot, bool) {
+	pd := parameter.AsParameterDeclaration()
+	if !ast.IsIdentifier(pd.Name()) || pd.Initializer != nil || pd.DotDotDotToken != nil {
+		return nil, false
+	}
+	if members, isRecord := recordParamMembersOf(parameter); isRecord {
+		out := make([]bodySlot, 0, len(members))
+		for _, member := range members {
+			out = append(out, bodySlot{
+				Name:      member.SlotName,
+				Sort:      member.Sort,
+				TypeofTag: member.TypeofTag,
+			})
+		}
+		return out, true
+	}
+	return []bodySlot{{
+		Name:      pd.Name().Text(),
+		Sort:      declaredParamSort(parameter),
+		TypeofTag: declaredParamTypeof(parameter),
+	}}, true
+}
+
+// recordParameterUsesAreDeclaredReads scans a body for every occurrence
+// of an EXPANDED parameter's name and answers whether each one is a
+// READ of a declared member — `p.lo` in value position.
+//
+// Everything else declines the body:
+//
+//   - a whole-name use (`f(p)`, `return p`, `q = p`, `p[e]`, `p?.lo`) —
+//     after the expansion there is no one value for it to denote;
+//   - a member the annotation never declared (`p.mid`) — no slot holds
+//     it, and reading it would silently answer another slot's state;
+//   - a WRITE to a member (`p.lo = 1`, `p.lo += 1`, `p.lo++`, `delete
+//     p.lo`) — the caller's own object would move, and a summary carries
+//     no effect back out through its entries;
+//   - a deep path (`p.lo.x`) — the members are scalars, so no such leaf
+//     exists.
+func recordParameterUsesAreDeclaredReads(body *ast.Node, name string, members []recordParamMember) bool {
+	declared := map[string]struct{}{}
+	for _, member := range members {
+		declared[member.Key] = struct{}{}
+	}
+	// a node that WRITES through this parameter's spelling
+	writesThroughParameter := func(node *ast.Node) bool {
+		if ast.IsBinaryExpression(node) {
+			bin := node.AsBinaryExpression()
+			if bin.OperatorToken.Kind >= ast.KindFirstAssignment && bin.OperatorToken.Kind <= ast.KindLastAssignment {
+				if root, _, ok := propertyPathOf(Unwrapped(bin.Left)); ok && root == name {
+					return true
+				}
+			}
+		}
+		if ast.IsPrefixUnaryExpression(node) {
+			unary := node.AsPrefixUnaryExpression()
+			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+				if root, _, ok := propertyPathOf(Unwrapped(unary.Operand)); ok && root == name {
+					return true
+				}
+			}
+		}
+		if ast.IsPostfixUnaryExpression(node) {
+			unary := node.AsPostfixUnaryExpression()
+			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+				if root, _, ok := propertyPathOf(Unwrapped(unary.Operand)); ok && root == name {
+					return true
+				}
+			}
+		}
+		if ast.IsDeleteExpression(node) {
+			if root, _, ok := propertyPathOf(Unwrapped(node.AsDeleteExpression().Expression)); ok && root == name {
+				return true
+			}
+		}
+		return false
+	}
+	ok := true
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if !ok {
+			return true
+		}
+		if writesThroughParameter(node) {
+			ok = false
+			return true
+		}
+		// a declared member READ consumes the root and the step name, so
+		// neither reaches the bare-name test below
+		if root, path, isPath := propertyPathOf(Unwrapped(node)); isPath && root == name {
+			if len(path) != 1 {
+				ok = false
+				return true
+			}
+			if _, isDeclared := declared[path[0]]; !isDeclared {
+				ok = false
+				return true
+			}
+			return false
+		}
+		// every other occurrence of the bare name is the WHOLE record in a
+		// position the expansion cannot spell
+		if ast.IsIdentifier(node) && node.Text() == name {
+			ok = false
+			return true
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	visit(body)
+	return ok
+}
+
 // summarySlotBudget is the summary route's own slot ceiling — the same
 // figure the whole-body route uses, kept here so the two routes admit
 // the same bodies.
@@ -341,17 +558,40 @@ func lowerSummaryBodyWithCaptures(
 	if kernel == nil {
 		return LoweredSummary{}, false
 	}
-	// parameters: plain identifiers, no defaults, no rest
+	// parameters: plain identifiers, no defaults, no rest. A type-literal
+	// parameter EXPANDS to one entry per member (SummaryParameterEntries)
+	// — the entry vector is no longer one-to-one with the declared
+	// parameters, so the arrow route's per-parameter sorts are indexed by
+	// DECLARATION position while the entry vector runs ahead of it.
 	parameters := declaration.Parameters()
 	paramNames := make([]string, 0, len(parameters))
 	paramSorts := make([]BindingKind, 0, len(parameters))
 	paramTypeofs := make([]TypeofTag, 0, len(parameters))
 	for index, parameter := range parameters {
-		pd := parameter.AsParameterDeclaration()
-		if !ast.IsIdentifier(pd.Name()) || pd.Initializer != nil || pd.DotDotDotToken != nil {
+		entries, entriesOk := SummaryParameterEntries(parameter)
+		if !entriesOk {
 			return LoweredSummary{}, false
 		}
-		paramNames = append(paramNames, pd.Name().Text())
+		if members, expanded := recordParamMembersOf(parameter); expanded {
+			// an EXPANDED parameter's every use in the body must be a read of
+			// a declared member; a whole-p use, an undeclared member, or a
+			// write through it declines the body outright
+			if !recordParameterUsesAreDeclaredReads(body, parameter.AsParameterDeclaration().Name().Text(), members) {
+				return LoweredSummary{}, false
+			}
+			// the arrow route fills ONE entry per declared parameter with a
+			// site sort, which an expanded parameter has no single entry for
+			if index < len(parameterSorts) {
+				return LoweredSummary{}, false
+			}
+			for _, entry := range entries {
+				paramNames = append(paramNames, entry.Name)
+				paramSorts = append(paramSorts, entry.Sort)
+				paramTypeofs = append(paramTypeofs, entry.TypeofTag)
+			}
+			continue
+		}
+		paramNames = append(paramNames, entries[0].Name)
 		// the site's sort where the arrow route supplied one, the
 		// declaration's own annotation otherwise. A supplied sort is what
 		// the entry the site fills already wears, so the summary quantifies
@@ -361,8 +601,8 @@ func lowerSummaryBodyWithCaptures(
 			paramTypeofs = append(paramTypeofs, parameterSorts[index].TypeofTag)
 			continue
 		}
-		paramSorts = append(paramSorts, declaredParamSort(parameter))
-		paramTypeofs = append(paramTypeofs, declaredParamTypeof(parameter))
+		paramSorts = append(paramSorts, entries[0].Sort)
+		paramTypeofs = append(paramTypeofs, entries[0].TypeofTag)
 	}
 	// the captures ride as EXTRA entries immediately after the declared
 	// parameters, in the scan's own order — the call site fills entry
@@ -405,6 +645,16 @@ func lowerSummaryBodyWithCaptures(
 	parameterNames := map[string]struct{}{}
 	for _, name := range paramNames {
 		parameterNames[name] = struct{}{}
+	}
+	// an EXPANDED parameter's entries are spelled "p.lo", so the HOLDER
+	// name is not among them; a local named `p` would then take its own
+	// slot beside the leaves. (Such a body already declined above — the
+	// declaration's own `p` is a whole-name occurrence the use scan
+	// refuses — so this only keeps the two readings agreeing.)
+	for _, parameter := range parameters {
+		if _, expanded := recordParamMembersOf(parameter); expanded {
+			parameterNames[parameter.AsParameterDeclaration().Name().Text()] = struct{}{}
+		}
 	}
 	slots := localSlotsOf(body, locals, patterns, parameterNames)
 	// MUTABLE vectors: composition allocates fresh slots past #ret
@@ -459,9 +709,12 @@ func lowerSummaryBodyWithCaptures(
 	if !ok {
 		return LoweredSummary{}, false
 	}
-	// ParamCount counts the declared parameters AND the capture entries:
-	// both are entries the caller fills, and the apply route's "everything
-	// past ParamCount enters absent" rule has to leave the captures alone.
+	// ParamCount counts the ENTRIES the caller fills, not the declared
+	// parameters: an expanded type-literal parameter contributes one entry
+	// per member, and the captures contribute one each. The apply route's
+	// "everything past ParamCount enters absent" rule reads this number, so
+	// it has to be the entry count or a record parameter's later leaves
+	// would enter absent.
 	return LoweredSummary{
 		Stmts:      stmts,
 		ParamCount: len(paramNames),

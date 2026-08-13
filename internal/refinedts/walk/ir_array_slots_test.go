@@ -390,12 +390,13 @@ func TestArraySlots_ABareSpreadOfAMapDeclinesBothTheBridgeAndTheCollection(t *te
 }
 
 func TestArraySlots_ABridgeOverAnUnflattenedCollectionDeclines(t *testing.T) {
-	// the has() takes the collection down, so there are no source slots
-	// for the bridge to read
+	// a has() OUT of test position takes the collection down (in test
+	// position the opaque branch serves it now), so there are no source
+	// slots for the bridge to read
 	collections, arrays := bridgeLocalsOfSource(t,
-		"function f(k: number) { const m = new Map(); m.set(k, 1); if (m.has(k)) { return 0; } const a = [...m.values()]; return a.length; }")
+		"function f(k: number) { const m = new Map(); m.set(k, 1); const b = m.has(k); const a = [...m.values()]; return a.length; }")
 	if len(collections) != 0 {
-		t.Fatalf("the has() left the collection flattened, want it declined")
+		t.Fatalf("the out-of-test has() left the collection flattened, want it declined")
 	}
 	if len(arrays) != 0 {
 		t.Errorf("a bridge over an unflattened collection flattened — there is nothing to copy from")

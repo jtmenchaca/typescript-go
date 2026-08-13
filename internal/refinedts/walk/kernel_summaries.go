@@ -338,17 +338,9 @@ func applySummary(
 	// locals and composition's grown ones — starts absent, and each
 	// inlined done flag is assigned {0} in the statements themselves;
 	// a state the wire cannot spell declines THIS call, not the summary
-	states := make([]kernelbridge.KnownStateWire, 0, summary.SlotCount)
-	for i := 0; i < summary.ParamCount; i++ {
-		if i >= len(argKnowns) {
-			states = append(states, absentState)
-			continue
-		}
-		wire, ok := StateOfKnown(argKnowns[i])
-		if !ok {
-			return abstractdomain.AbstractValue{}, false
-		}
-		states = append(states, wire)
+	states, statesOk := summaryEntryStates(declaration, summary, argKnowns)
+	if !statesOk {
+		return abstractdomain.AbstractValue{}, false
 	}
 	for len(states) < summary.SlotCount {
 		states = append(states, absentState)
@@ -383,15 +375,102 @@ func applySummary(
 	if !allReturned {
 		answer = abstractdomain.PossiblyUndefined(answer, "", false, false)
 	}
-	// the claim's grade floors at the arguments' own standing
+	// the claim's grade floors at the arguments' own standing. Indexed by
+	// DECLARED PARAMETER, not by entry — and an EXPANDED parameter's
+	// entries were built from the object's FIELDS, so each read field's
+	// own grade joins the floor beside the object's: an object at proved
+	// standing whose lo came from a spec row states no more than spec.
 	floor := abstractdomain.TrustProved
-	for i := 0; i < summary.ParamCount; i++ {
-		if i < len(argKnowns) {
-			floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(argKnowns[i]))
+	for index, parameter := range declaration.Parameters() {
+		if index >= len(argKnowns) {
+			continue
+		}
+		argument := argKnowns[index]
+		floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(argument))
+		members, expanded := recordParamMembersOf(parameter)
+		if !expanded {
+			continue
+		}
+		for _, member := range members {
+			if at, has := objectKeyIndex(argument, member.Key); has {
+				floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(argument.Keys[at].Value))
+			}
 		}
 	}
 	tracing.Count("summaryServed", 0)
 	return promiseWrappedIfAsync(declaration, abstractdomain.AtTrustLevel(answer, floor)), true
+}
+
+// summaryEntryStates builds the entry states a call sends, one per
+// ENTRY — which is no longer one per declared parameter: a type-literal
+// parameter expands to one entry per member (SummaryParameterEntries,
+// ir_summary_body.go), and its argKnown is one OBJECT abstract value
+// that has to be read apart field by field.
+//
+// argKnowns is indexed by DECLARED PARAMETER; the state vector runs
+// ahead of it wherever a parameter expanded. Everything else is the
+// existing scalar rule verbatim: a missing argument enters absent, and a
+// value the wire cannot spell declines THIS call (never the summary,
+// which quantifies over every entry).
+//
+// A NON-OBJECT argument for an expanded parameter declines the call —
+// the entries were laid out expecting the members, and no scalar spells
+// them. So does an object missing a declared member, or one whose field
+// is itself unspellable.
+//
+// The walk stops once ParamCount entries are built: past the declared
+// parameters the vector holds an arrow route's captures, which this
+// route (the declaration route, no captures) never has, and the caller
+// fills the rest absent.
+func summaryEntryStates(
+	declaration *ast.Node,
+	summary LoweredSummary,
+	argKnowns []abstractdomain.AbstractValue,
+) ([]kernelbridge.KnownStateWire, bool) {
+	states := make([]kernelbridge.KnownStateWire, 0, summary.SlotCount)
+	for index, parameter := range declaration.Parameters() {
+		if len(states) >= summary.ParamCount {
+			break
+		}
+		members, expanded := recordParamMembersOf(parameter)
+		if !expanded {
+			if index >= len(argKnowns) {
+				states = append(states, absentState)
+				continue
+			}
+			wire, ok := StateOfKnown(argKnowns[index])
+			if !ok {
+				return nil, false
+			}
+			states = append(states, wire)
+			continue
+		}
+		if index >= len(argKnowns) {
+			for range members {
+				states = append(states, absentState)
+			}
+			continue
+		}
+		argument := argKnowns[index]
+		if argument.Kind != abstractdomain.KindObject {
+			return nil, false
+		}
+		for _, member := range members {
+			at, has := objectKeyIndex(argument, member.Key)
+			if !has {
+				return nil, false
+			}
+			wire, ok := StateOfKnown(argument.Keys[at].Value)
+			if !ok {
+				return nil, false
+			}
+			states = append(states, wire)
+		}
+	}
+	for len(states) < summary.ParamCount {
+		states = append(states, absentState)
+	}
+	return states, true
 }
 
 // promiseWrappedIfAsync is the ret-as-inner convention's boundary: an

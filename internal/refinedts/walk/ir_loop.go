@@ -348,7 +348,10 @@ func RaisesDone(statements []kernelbridge.IrStatement, done int) bool {
 			if s.Target == done {
 				return true
 			}
-		case kernelbridge.IrStatementBranch:
+		case kernelbridge.IrStatementBranch, kernelbridge.IrStatementBranchBoth:
+			// the opaque branch carries its arms in the same two fields, so
+			// a return inside either one raises the flag exactly as a
+			// tested branch's does
 			if RaisesDone(s.Then, done) || RaisesDone(s.Else, done) {
 				return true
 			}

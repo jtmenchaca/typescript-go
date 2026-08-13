@@ -192,7 +192,16 @@ type IrStatementKind string
 const (
 	IrStatementAssign IrStatementKind = "assign"
 	IrStatementBranch IrStatementKind = "branch"
-	IrStatementLoop   IrStatementKind = "loop"
+	// IrStatementBranchBoth is the branch whose CONDITION the walk does
+	// not read: `if (m.has(k)) { … } else { … }` and every other
+	// write-free test no leaf lowers. It reuses the Then and Else fields
+	// and carries no On, Test, or operand — the walk claims nothing about
+	// the condition, so both arms walk from the state as it stood and
+	// their exits join. A concrete run may take either arm and the join
+	// admits both, so an unreadable test costs precision at the merge and
+	// never costs the body its lowering.
+	IrStatementBranchBoth IrStatementKind = "branchBoth"
+	IrStatementLoop       IrStatementKind = "loop"
 	// IrStatementCall applies a callee's already-built summary. Callee
 	// indexes the summary table the question carries beside the
 	// statements; each Args entry is an effect over the CALLER's
@@ -250,7 +259,8 @@ func IsTwoSlotTest(t IrBranchTest) bool {
 
 // IrStatement is a lowered statement for the kernel's flow walk: an
 // assignment of an effect to a binding, a branch that tests one
-// binding and carries both arms, or a loop. The `w` operand rides only
+// binding and carries both arms, a branch that tests NOTHING and
+// carries both arms (branchBoth), or a loop. The `w` operand rides only
 // with test "eq". A loop carries, per binding of the whole walk:
 // whether it writes the binding, the condition's narrowing set if one
 // reads, and the body's effect ("var i" for a binding the body leaves
@@ -367,6 +377,22 @@ func StmtWire(s IrStatement) string {
 			`{"loop":{"written":[%s],"cond":[%s],"after":[%s],"body":[%s]%s}}`,
 			strings.Join(written, ","), strings.Join(cond, ","),
 			strings.Join(after, ","), strings.Join(body, ","), condCmp,
+		)
+	}
+	if s.Kind == IrStatementBranchBoth {
+		// no on, no test, no operand: the walk reads nothing about the
+		// condition and both arms ride
+		thn := make([]string, len(s.Then))
+		for i, t := range s.Then {
+			thn[i] = StmtWire(t)
+		}
+		els := make([]string, len(s.Else))
+		for i, e := range s.Else {
+			els[i] = StmtWire(e)
+		}
+		return fmt.Sprintf(
+			`{"branchBoth":{"thn":[%s],"els":[%s]}}`,
+			strings.Join(thn, ","), strings.Join(els, ","),
 		)
 	}
 	operand := ""

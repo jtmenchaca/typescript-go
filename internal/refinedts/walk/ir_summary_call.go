@@ -155,11 +155,33 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 	if !shapeKnown {
 		return kernelbridge.IrStatement{}, false
 	}
+	// the callee's parameters no longer map 1:1 onto entries: a type-
+	// literal parameter EXPANDS to one entry per member. The entry list is
+	// built by walking the declared parameters through the very expansion
+	// the layout used (SummaryParameterEntries), so a drift between the
+	// two is impossible — one function answers both.
 	args := make([]kernelbridge.LoopEffect, 0, calleeShape.SlotCount)
 	for index, parameter := range parameters {
-		pd := parameter.AsParameterDeclaration()
-		if !ast.IsIdentifier(pd.Name()) || pd.Initializer != nil || pd.DotDotDotToken != nil {
+		entries, entriesOk := SummaryParameterEntries(parameter)
+		if !entriesOk {
 			return kernelbridge.IrStatement{}, false
+		}
+		members, expanded := recordParamMembersOf(parameter)
+		if expanded {
+			// a missing argument leaves every leaf absent — the same "entered
+			// absent" the scalar case gives an omitted argument
+			if index >= len(callArguments) {
+				for range entries {
+					args = append(args, kernelbridge.AbsentConst())
+				}
+				continue
+			}
+			leafEffects, leavesOk := recordArgumentEffects(context, members, callArguments[index])
+			if !leavesOk {
+				return kernelbridge.IrStatement{}, false
+			}
+			args = append(args, leafEffects...)
+			continue
 		}
 		if index >= len(callArguments) {
 			args = append(args, kernelbridge.AbsentConst())
@@ -197,6 +219,92 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 		Args:   args,
 		Rets:   rets,
 	}, true
+}
+
+// recordArgumentEffects maps ONE argument onto an expanded parameter's
+// leaf entries, IN THE PARAMETER'S MEMBER ORDER — the order
+// SummaryParameterEntries laid the entries out, so effect j fills member
+// j's slot whatever order the argument spelled its keys.
+//
+// Two argument shapes lower, and nothing else:
+//
+//	(a) an OBJECT LITERAL whose keys are exactly the members — each
+//	    member's value lowers as an ordinary effect through the shared
+//	    RHS grammar, under the member's own sort;
+//	(b) a FLATTENED RECORD LOCAL of exactly those leaves — each member
+//	    reads the caller slot spelled "q.<member>" as a var.
+//
+// Anything else declines the whole call: a call's result, a parameter
+// the caller itself holds unexpanded, a literal with an extra or missing
+// key, a spread. There is no partial fill — a leaf left at its absent
+// entry state would read inside the callee as undefined, which is not
+// what the caller passed.
+func recordArgumentEffects(
+	context *LoweringContext,
+	members []recordParamMember,
+	argument *ast.Node,
+) ([]kernelbridge.LoopEffect, bool) {
+	head := Unwrapped(argument)
+	// (a) `f({ lo: 1, hi: n })`
+	if ast.IsObjectLiteralExpression(head) {
+		valueOfKey := map[string]*ast.Node{}
+		for _, property := range head.AsObjectLiteralExpression().Properties.Nodes {
+			if !ast.IsPropertyAssignment(property) {
+				return nil, false
+			}
+			assignment := property.AsPropertyAssignment()
+			if !ast.IsIdentifier(assignment.Name()) || assignment.Initializer == nil {
+				return nil, false
+			}
+			key := assignment.Name().Text()
+			if _, already := valueOfKey[key]; already {
+				return nil, false
+			}
+			valueOfKey[key] = assignment.Initializer
+		}
+		// EXACTLY the members: an extra key is a shape the parameter did
+		// not declare, a missing one leaves a leaf unwritten
+		if len(valueOfKey) != len(members) {
+			return nil, false
+		}
+		out := make([]kernelbridge.LoopEffect, 0, len(members))
+		for _, member := range members {
+			value, has := valueOfKey[member.Key]
+			if !has {
+				return nil, false
+			}
+			effect, ok := RhsEffect(context, member.Sort, value)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, effect)
+		}
+		return out, true
+	}
+	// (b) `f(q)` where q is a flattened record local of exactly these
+	// leaves. leafSlotsUnder is the same reader the record-to-record
+	// assignment uses, so "the caller flattened q" and "q's leaves have
+	// slots" are one question.
+	if ast.IsIdentifier(head) {
+		leaves, leavesOk := leafSlotsUnder(context, head.Text())
+		if !leavesOk || len(leaves) != len(members) {
+			return nil, false
+		}
+		slotOfPath := map[string]int{}
+		for _, leaf := range leaves {
+			slotOfPath[leaf.Path] = leaf.Index
+		}
+		out := make([]kernelbridge.LoopEffect, 0, len(members))
+		for _, member := range members {
+			slot, has := slotOfPath[member.Key]
+			if !has {
+				return nil, false
+			}
+			out = append(out, varEffect(slot))
+		}
+		return out, true
+	}
+	return nil, false
 }
 
 // SummaryCallStatementOf is the lowering-side entry: a call expression

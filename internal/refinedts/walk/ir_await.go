@@ -368,7 +368,9 @@ func enclosingBodyOf(statement *ast.Node) *ast.Node {
 }
 
 // usesAreAllAwaits scans a body for every occurrence of the name and
-// answers whether each one is the operand of an `await`. The
+// answers whether each one is the operand of an `await` or the
+// receiver of a `.then(…)` call — the two positions the flattened
+// "p.inner" slot can serve (thenStatements lowers the then). The
 // declaration's own name position is not a use.
 func usesAreAllAwaits(body *ast.Node, declaration *ast.Node, name string) bool {
 	declarationName := declaration.AsVariableDeclaration().Name()
@@ -385,8 +387,26 @@ func usesAreAllAwaits(body *ast.Node, declaration *ast.Node, name string) bool {
 				return false
 			}
 		}
+		// `p.then(cb)` — the receiver reads through the settled slot the
+		// then-lowering serves; the CALLBACK still scans on its own
+		if ast.IsCallExpression(node) {
+			access := Unwrapped(node.AsCallExpression().Expression)
+			if ast.IsPropertyAccessExpression(access) {
+				pa := access.AsPropertyAccessExpression()
+				if pa.QuestionDotToken == nil && ast.IsIdentifier(pa.Expression) &&
+					pa.Expression.Text() == name && ast.IsIdentifier(pa.Name()) &&
+					pa.Name().Text() == "then" {
+					if node.AsCallExpression().Arguments != nil {
+						for _, argument := range node.AsCallExpression().Arguments.Nodes {
+							argument.ForEachChild(visit)
+						}
+					}
+					return false
+				}
+			}
+		}
 		// every other occurrence of the bare name — an argument, a return,
-		// `p.then(…)`, an alias — is the PROMISE itself in a position one
+		// an alias, `.catch` — is the PROMISE itself in a position one
 		// settled-value slot cannot spell
 		if ast.IsIdentifier(node) && node.Text() == name && node != declarationName {
 			ok = false

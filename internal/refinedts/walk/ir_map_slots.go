@@ -42,15 +42,24 @@
 //   - `const a = [...m.values()]` / `Array.from(m.values())` / `[...s]`
 //     → an ARRAY local bridged onto these slots (ir_array_slots.go).
 //
+//   - `if (m.has(k))`, the has call standing as the WHOLE test of an if
+//     (parens and any leading `!` stripped) → nothing. The slots carry no
+//     per-key knowledge, so the read answers no slot and writes none; the
+//     statement lowers through the opaque branch, which claims nothing
+//     about the condition and joins both arms. The has ARGUMENT still
+//     scans — it may mention the collection again, and that occurrence
+//     gets its own ruling.
+//
 // Everything else declines the collection: an alias, an argument, a
-// return, `m.has(k)`, `clear()`, `forEach`, a computed method name, an
-// element access `m[k]`, or any method not listed. `m.has(k)` declines
-// rather than lowering to "no claim" because this tree's statement
-// discipline has no opaque-test form — LowerGuard declines a head it
-// cannot read, and a declined head declines the body, so a `has` result
-// feeding a test would take the body down anyway. Declining the
-// COLLECTION says the same thing one layer earlier and lets the rest of
-// the body keep its former route.
+// return, `clear()`, `forEach`, a computed method name, an element
+// access `m[k]`, or any method not listed. A `has` ANYWHERE but an if
+// test declines too — `const b = m.has(k)` would put a value in a slot
+// that has no reading for it, `f(m.has(k))` hands it out of sight, a
+// conjunct in `m.has(k) && k > 0` sits under a reading that would have
+// to speak for it, and a `while` head reaches the loop form, which has
+// no opaque variant and declines on its own. Only the if test is
+// admitted, because there the opaque branch spells exactly what is known
+// about the result: nothing.
 
 package walk
 
@@ -259,6 +268,38 @@ func admitBridgeSource(source *ast.Node, name string, isMap bool) (admitted bool
 	return false, true
 }
 
+// hasCallInTestPosition reads a test expression as `m.has(k)` — the one
+// shape a `has` is admitted in. Parens, casts, and any number of leading
+// `!` are stripped first: `if (!m.has(k))` and `if (!!(m.has(k)))` say
+// the same thing about the collection as the bare form, and the opaque
+// branch reads none of them. Answers the has call's arguments, which
+// still scan.
+func hasCallInTestPosition(test *ast.Node, name string) (arguments []*ast.Node, ok bool) {
+	head := Unwrapped(test)
+	for ast.IsPrefixUnaryExpression(head) &&
+		head.AsPrefixUnaryExpression().Operator == ast.KindExclamationToken {
+		head = Unwrapped(head.AsPrefixUnaryExpression().Operand)
+	}
+	method, arguments, isCall := collectionMethodCallOf(head, name)
+	if !isCall || method != "has" || len(arguments) != 1 {
+		return nil, false
+	}
+	return arguments, true
+}
+
+// testPositionOf is the condition an IF tests, or nil for every other
+// statement — the one position a `has` is admitted in. A while head is
+// NOT admitted: the loop form carries per-binding condition sets and a
+// body effect, and there is no opaque-head loop, so `while (m.has(k))`
+// declines at the loop whether or not the collection flattened.
+// Admitting it here would flatten a collection whose body still declines.
+func testPositionOf(node *ast.Node) *ast.Node {
+	if ast.IsIfStatement(node) {
+		return node.AsIfStatement().Expression
+	}
+	return nil
+}
+
 // mapUseAdmission is what one occurrence of the collection name is
 // admitted as while the recognizer scans, so the scan and the lowering
 // agree on exactly one vocabulary.
@@ -320,6 +361,19 @@ func admitCollectionUse(node *ast.Node, name string, isMap bool) (mapUseAdmissio
 			return mapUseAdmission{}, true
 		}
 		return mapUseAdmission{Children: arguments, Admitted: true}, true
+	}
+	// `if (m.has(k)) { … } else { … }` — the has call standing as the
+	// whole test. The read touches no slot and the opaque branch claims
+	// nothing about the condition, so the collection keeps its
+	// flattening. Only the test itself is consumed: the has argument and
+	// both arms still scan.
+	if test := testPositionOf(node); test != nil {
+		if arguments, isHasTest := hasCallInTestPosition(test, name); isHasTest {
+			ifStmt := node.AsIfStatement()
+			children := append([]*ast.Node{}, arguments...)
+			children = append(children, ifStmt.ThenStatement, ifStmt.ElseStatement)
+			return mapUseAdmission{Children: children, Admitted: true}, true
+		}
 	}
 	// `for (const … of m)` / `of m.values()` — the collection in the
 	// iterated position

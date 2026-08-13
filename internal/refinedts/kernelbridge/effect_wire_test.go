@@ -73,6 +73,43 @@ func TestACallWithNoArgsOrRetsWiresEmptyLists(t *testing.T) {
 	}
 }
 
+func TestTheOpaqueBranchWiresBothArmsAndNoTest(t *testing.T) {
+	got := StmtWire(IrStatement{
+		Kind: IrStatementBranchBoth,
+		Then: []IrStatement{{
+			Kind:   IrStatementAssign,
+			Target: 0,
+			Effect: LoopEffect{
+				Kind: LoopEffectConst,
+				Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1})),
+			},
+		}},
+		Else: []IrStatement{{
+			Kind:   IrStatementAssign,
+			Target: 0,
+			Effect: LoopEffect{
+				Kind: LoopEffectConst,
+				Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{2})),
+			},
+		}},
+	})
+	// 2 spells (num 1, exp 1) — the canonical dyadic form the encoder
+	// normalizes to
+	want := `{"branchBoth":{"thn":[{"assign":{"target":0,"e":{"set":{"forms":[{"form":"oneOf","w":[{"num":1,"exp":0}]}]}}}}],` +
+		`"els":[{"assign":{"target":0,"e":{"set":{"forms":[{"form":"oneOf","w":[{"num":1,"exp":1}]}]}}}}]}}`
+	if got != want {
+		t.Errorf("StmtWire(branchBoth) = %q, want %q", got, want)
+	}
+}
+
+func TestAnOpaqueBranchWithNoElseArmWiresAnEmptyElseList(t *testing.T) {
+	got := StmtWire(IrStatement{Kind: IrStatementBranchBoth})
+	want := `{"branchBoth":{"thn":[],"els":[]}}`
+	if got != want {
+		t.Errorf("StmtWire(branchBoth, empty) = %q, want %q", got, want)
+	}
+}
+
 func TestTheSequenceEqualityGuardWiresWithOnBLikeTheScalarTwoSlotTests(t *testing.T) {
 	if !IsTwoSlotTest(IrTestEqSeqSlot) {
 		t.Fatalf("IsTwoSlotTest(eqSeqSlot) = false, want true")

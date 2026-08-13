@@ -269,7 +269,20 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 			// folds, `!`/`&&`/`||` nesting, and inlined call guards
 			guarded, ok := LowerGuard(context, ifStmt.Expression, thn, els)
 			if !ok {
-				return nil, false
+				// the LAST route, after every reading declined: a condition
+				// that RUNS nothing the lowering must account for still gets
+				// its statement, as the branch that tests nothing. Both arms
+				// walk from the state as it stood and the kernel joins their
+				// exits, so an unreadable test costs precision at the merge
+				// and never costs the body its lowering.
+				if !OpaqueTestableCondition(ifStmt.Expression) {
+					return nil, false
+				}
+				guarded = []kernelbridge.IrStatement{{
+					Kind: kernelbridge.IrStatementBranchBoth,
+					Then: thn,
+					Else: els,
+				}}
 			}
 			out = append(out, guarded...)
 			// an arm that may have RETURNED: the block's remainder runs
@@ -363,6 +376,58 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 		return nil, false
 	}
 	return out, true
+}
+
+// OpaqueTestableCondition is whether an `if` head no reading lowered may
+// still stand as the branch that tests NOTHING. The walk claims nothing
+// about the condition, so the only thing it must be sure of is that
+// EVALUATING the condition changes no state the walk carries and hands
+// nothing to a route that would otherwise have lowered it:
+//
+//   - no write anywhere in the subtree (ContainsWrite) — `if (m.has(k++))`
+//     steps k, and skipping the step would leave the walk's slot behind
+//     the real one;
+//   - no `await` and no `yield`. Neither has a reading in a CONDITION:
+//     ir_await.go's routes are statement-position and return-position
+//     only (AwaitStatementOf, AwaitReturnStatements), and LowerGuard has
+//     no await leaf — an awaited call in a head reaches LowerGuard's
+//     final call-expression route, whose head is the await node, not a
+//     call, so InlineCall declines and the guard declines. So today such
+//     a head has no lowering anywhere and this gate is what keeps it a
+//     DECLINE rather than a silently skipped settle;
+//   - no `new`, no `delete`, no tagged template, no spread, and no
+//     nested function, class, or loop shape. Each either constructs
+//     something the slots do not carry, mutates through an operand, or
+//     hides a body — none has a condition-position reading, so each
+//     declines rather than riding as "no claim".
+//
+// An ordinary CALL is admitted: a callee cannot write the caller's
+// tracked slots — a collection or record passed to one declines the
+// local outright (ir_map_slots.go, the record recognizers), and a scalar
+// is passed by value — so a call in the head runs nothing this walk
+// carries. Its RESULT is exactly what the branch declines to read.
+func OpaqueTestableCondition(condition *ast.Node) bool {
+	if ContainsWrite(condition) {
+		return false
+	}
+	admitted := true
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if !admitted {
+			return true
+		}
+		if ast.IsAwaitExpression(node) || ast.IsYieldExpression(node) ||
+			ast.IsNewExpression(node) || ast.IsDeleteExpression(node) ||
+			ast.IsTaggedTemplateExpression(node) || ast.IsSpreadElement(node) ||
+			ast.IsFunctionLike(node) || ast.IsClassLike(node) {
+			admitted = false
+			return true
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	visit(condition)
+	return admitted
 }
 
 // assignsOf turns a per-slot assignment list into the IR statements

@@ -415,7 +415,7 @@ func writtenTargets(stmts []kernelbridge.IrStatement, into map[int]struct{}) {
 		switch s.Kind {
 		case kernelbridge.IrStatementAssign:
 			into[s.Target] = struct{}{}
-		case kernelbridge.IrStatementBranch:
+		case kernelbridge.IrStatementBranch, kernelbridge.IrStatementBranchBoth:
 			writtenTargets(s.Then, into)
 			writtenTargets(s.Else, into)
 		case kernelbridge.IrStatementLoop:

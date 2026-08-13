@@ -225,6 +225,94 @@ func TestWalkProbe_ALoopInsideTheWalkedBodyCertifiesThroughTheSolverAndAnUntouch
 	}
 }
 
+// The opaque branch through the kernel walk: the same body shape as the
+// first probe, but the branch tests NOTHING —
+//
+//	y = x + 1
+//	if (<unreadable>) { y = 100 } else { y = y * 2 }
+//
+// A concrete run may take either arm, so the walk must admit both: y
+// reads 100 or [2, 22] exactly as the tested branch's join did, while
+// x — which neither arm writes and no test narrowed — stays [0, 10]
+// with both ends still admitted.
+func TestWalkProbe_TheOpaqueBranchWalksBothArmsAndJoinsThemWithoutReadingAnyTest(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	entry := []kernelbridge.KnownStateWire{
+		{Set: refinementsets.MakeRefinedSet(refinementsets.AtLeast(0), refinementsets.AtMost(10))},
+		{Top: true},
+	}
+	exit := kernel.Walk(entry, []kernelbridge.IrStatement{
+		{
+			Kind:   kernelbridge.IrStatementAssign,
+			Target: 1,
+			Effect: kernelbridge.LoopEffect{
+				Kind: kernelbridge.LoopEffectBinary,
+				Op:   kernelbridge.LoopOpAdd,
+				A:    &kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: 0},
+				B:    &kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1}))},
+			},
+		},
+		{
+			Kind: kernelbridge.IrStatementBranchBoth,
+			Then: []kernelbridge.IrStatement{
+				{
+					Kind:   kernelbridge.IrStatementAssign,
+					Target: 1,
+					Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{100}))},
+				},
+			},
+			Else: []kernelbridge.IrStatement{
+				{
+					Kind:   kernelbridge.IrStatementAssign,
+					Target: 1,
+					Effect: kernelbridge.LoopEffect{
+						Kind: kernelbridge.LoopEffectBinary,
+						Op:   kernelbridge.LoopOpMul,
+						A:    &kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: 1},
+						B:    &kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{2}))},
+					},
+				},
+			},
+		},
+	})
+	if len(exit) != 2 {
+		t.Fatalf("len(exit) = %d, want 2", len(exit))
+	}
+
+	x := exit[0]
+	if x.Top {
+		t.Fatalf("x.Top = true, want false")
+	}
+	// no test read x, so neither arm narrowed it
+	for _, reading := range []float64{0, 10} {
+		if !kernel.Member(x.Set, []float64{reading}) {
+			t.Errorf("member(x, [%v]) = false, want true", reading)
+		}
+	}
+	if kernel.Member(x.Set, []float64{11}) {
+		t.Errorf("member(x, [11]) = true, want false")
+	}
+
+	y := exit[1]
+	if y.Top {
+		t.Fatalf("y.Top = true, want false")
+	}
+	if y.Absent {
+		t.Errorf("y.Absent = true, want false")
+	}
+	if y.Nan {
+		t.Errorf("y.Nan = true, want false")
+	}
+	for _, reading := range []float64{100, 2, 22} {
+		if !kernel.Member(y.Set, []float64{reading}) {
+			t.Errorf("member(y, [%v]) = false, want true — both arms ride", reading)
+		}
+	}
+	if kernel.Member(y.Set, []float64{23}) {
+		t.Errorf("member(y, [23]) = true, want false")
+	}
+}
+
 func floatPtr(v float64) *float64 {
 	return &v
 }

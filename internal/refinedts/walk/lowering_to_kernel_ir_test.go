@@ -287,14 +287,28 @@ func TestLoweringToKernelIR_UnreadableStatementsDeclineTheWholeLowering(t *testi
 	if ok {
 		t.Errorf("LowerStatements(fetch call) ok = true, want false")
 	}
-	// a value test on an unknown-sorted binding is a reread — refused
-	_, ok = LowerStatements(&LoweringContext{
+	// a value test on an unknown-sorted binding has no reading — the
+	// OPAQUE BRANCH now serves it: both arms walk, nothing is claimed
+	// about the condition
+	stmts, ok := LowerStatements(&LoweringContext{
 		Bindings: []string{"x"},
 		Sorts:    []BindingKind{BindingKindUnknown},
 		Narrow:   kernel.Narrow,
 	}, loweringParse(t, `if (x === 5) { x = 1; }`))
+	if !ok {
+		t.Fatalf("LowerStatements(unknown-sort test) ok = false, want the opaque branch")
+	}
+	if len(stmts) != 1 || stmts[0].Kind != kernelbridge.IrStatementBranchBoth {
+		t.Errorf("stmts = %+v, want one branchBoth", stmts)
+	}
+	// a condition that WRITES is not opaque-lowerable — still a decline
+	_, ok = LowerStatements(&LoweringContext{
+		Bindings: []string{"x"},
+		Sorts:    []BindingKind{BindingKindUnknown},
+		Narrow:   kernel.Narrow,
+	}, loweringParse(t, `if ((x = 1)) { x = 2; }`))
 	if ok {
-		t.Errorf("LowerStatements(unknown-sort test) ok = true, want false")
+		t.Errorf("LowerStatements(writing test) ok = true, want false")
 	}
 }
 
