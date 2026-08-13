@@ -27,6 +27,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
@@ -147,17 +148,24 @@ func mayContainZero(set refinementsets.RefinedSet) bool {
 // evidence now comes from the declaration's own annotations, through
 // declaredParamTypeof below.)
 
-// summaryLowerable gates the declarations a summary may lower at all:
-// an async body's value is a Promise and a generator's an iterator —
-// walking either as its raw return set would mistype the call. (The
-// TS source reaches lowering only behind the effect-free scan and
-// carries no such gate; an awaitless async pure body could slip
-// through there — noted for the correspondence.)
+// summaryLowerable gates the declarations a summary may lower at all.
+//
+// An ASYNC body lowers. The convention the lowering and this file
+// share: a lowered async body's #ret slot holds the SETTLED INNER
+// value, never the promise — `return e` writes e's own state, and an
+// awaited call writes the callee's settled ret. The Promise wrapper is
+// the ADAPTER's job, applied once at the boundary where the caller
+// reads the call's value (AsCalleeResult for the inline route,
+// applySummary's own wrap below for every summary route). Keeping the
+// wrapper out of the slots is what lets one body's ret compose into
+// another body's slot: an awaited call reads a settled value, which is
+// exactly what the callee's ret already holds.
+//
+// A GENERATOR still declines: its call's value is an iterator, and no
+// slot in this grammar spells one, so there is no inner value for a
+// boundary wrapper to adopt.
 func summaryLowerable(declaration *ast.Node) bool {
 	if declaration == nil || declaration.Body() == nil {
-		return false
-	}
-	if ast.HasSyntacticModifier(declaration, ast.ModifierFlagsAsync) {
 		return false
 	}
 	switch declaration.Kind {
@@ -242,6 +250,19 @@ func LowerSummaryBody(ctx *FlowContext, declaration *ast.Node) (LoweredSummary, 
 	return summary, ok
 }
 
+// RelowerSummaryBody lowers a declaration's body WITHOUT reading or
+// writing the memo — the same lowering LowerSummaryBody runs behind its
+// memo. The fixpoint (summary_fixpoint.go) needs it: each round
+// re-lowers the same declaration under a different self table entry, and
+// the memo would hand back the first round's statements every time.
+//
+// The lowering itself is a pure function of the declaration and the
+// blobs the registry answers for its callees, so re-running it is
+// exactly as sound as running it once.
+func RelowerSummaryBody(ctx *FlowContext, declaration *ast.Node) (LoweredSummary, bool) {
+	return lowerSummaryBody(ctx, declaration)
+}
+
 // (The body lowering itself lives in ir_summary_body.go's
 // lowerSummaryBody — the slot layout there flattens records by leaf
 // path, arrays to len/elem pairs, and admits destructuring, and its
@@ -259,14 +280,14 @@ func syntheticReturnStatement(expression *ast.Node) *ast.Node {
 	return factory.NewReturnStatement(expression)
 }
 
-// SummaryResult is the summary route as the older call sites spell
-// it — a program handle and a callee resolver, with no walk context.
-// The route now runs off the DECLARATION alone and resolves callees
-// through the walk's own contract registry, so a caller that hands
-// over only a program handle gets a context with no registry: its
-// bodies lower, and any call inside them declines. The one such
-// caller is function_summaries.go's RecoverPure (another agent's
-// file); moving it to SummaryResultIn is a report item.
+// SummaryResult is the summary route as an older call site would
+// spell it — a program handle and a callee resolver, with no walk
+// context. The route runs off the DECLARATION alone and resolves
+// callees through the walk's own contract registry, so a caller that
+// hands over only a program handle gets a context with no registry:
+// its bodies lower, and any call inside them declines. Every live
+// caller has moved to SummaryResultIn; this spelling stays for the
+// signature's one historical shape.
 func SummaryResult(
 	p *program.CheckerProgram,
 	declaration *ast.Node,
@@ -370,7 +391,46 @@ func applySummary(
 		}
 	}
 	tracing.Count("summaryServed", 0)
-	return abstractdomain.AtTrustLevel(answer, floor), true
+	return promiseWrappedIfAsync(declaration, abstractdomain.AtTrustLevel(answer, floor)), true
+}
+
+// promiseWrappedIfAsync is the ret-as-inner convention's boundary: an
+// async declaration's #ret holds the settled inner value, so the
+// caller's view of the call is a PROMISE of it. The rule is exactly
+// AsCalleeResult's — an unknown inner is silence.Residue() (no promise
+// of nothing is worth spelling), a value already Promise-kinded passes
+// through unwrapped (a returned promise is adopted, never double-
+// wrapped), and everything else becomes Promise{Inner}. Read from the
+// same ModifierFlagsAsync bit AsCalleeResult reads, so the two answer
+// on the same declarations.
+//
+// WHERE it lands, and why here: the inline route wraps LAST. In
+// InlineContractBody the walk finishes, the returned value takes its
+// absence and its grade, and only then does `return AsCalleeResult(…)`
+// run — the absence rides INSIDE the promise's inner there, because
+// the wrapper closes over a value that already carries it. The Direct
+// route is the same shape: inline_contract_body.go calls
+// AsCalleeResult on whatever KernelSummaryDirect answered, after the
+// answer is complete. So the wrap goes AFTER the fall-off
+// PossiblyUndefined and AFTER the trust floor here too, which makes
+// this line byte-identical to what the Direct route's outer
+// AsCalleeResult already produced — the same inner, the same flags in
+// the same order, the same grade. AsCalleeResult passes a
+// KindPromise through untouched, so the Direct route's second
+// application on this already-wrapped answer is the identity: no
+// double wrap, and no route sees a different value than before.
+func promiseWrappedIfAsync(declaration *ast.Node, answer abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	if ast.GetCombinedModifierFlags(declaration)&ast.ModifierFlagsAsync == 0 {
+		return answer
+	}
+	if answer.Kind == abstractdomain.KindPromise {
+		return answer
+	}
+	if answer.Kind == abstractdomain.KindUnknown {
+		return silence.Residue()
+	}
+	inner := answer
+	return abstractdomain.AbstractValue{Kind: abstractdomain.KindPromise, Inner: &inner}
 }
 
 // KernelSummaryDirect is the summary route tried for EVERY contracted

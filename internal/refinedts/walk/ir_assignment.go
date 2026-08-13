@@ -66,6 +66,12 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			if slot, ok := ArrayElementSlotOf(context, node); ok && context.Sorts[slot] == BindingKindNumber {
 				return ArrayIndexReadEffect(context, node)
 			}
+			// `m.get(k)`: the collection's values slot, always or-absent
+			// (no per-key knowledge can rule the miss out), under the
+			// same number-sort gate
+			if slot, ok := MapValueSlotOf(context, node); ok && context.Sorts[slot] == BindingKindNumber {
+				return MapGetReadEffect(context, node)
+			}
 			return kernelbridge.LoopEffect{}, false
 		},
 	})

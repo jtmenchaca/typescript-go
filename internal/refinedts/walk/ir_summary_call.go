@@ -41,6 +41,71 @@ func summaryCalleeOf(context *LoweringContext, call *ast.Node) *ast.Node {
 	return context.ResolveCallee(call.AsCallExpression().Expression)
 }
 
+// SummaryCallOrHavoc is the one call-lowering door every route uses: a
+// callee with a compiled summary takes the call statement, and a callee
+// whose own summary build is STILL IN FLIGHT — a recursive call, which
+// cannot splice itself — takes the HAVOC route instead of declining.
+//
+// `target` is the caller slot the call's value lands in, or -1 for a
+// bare call whose value nothing reads. The answer is the statements the
+// site contributes: one call statement, one havoc assignment, or none
+// at all for a bare cycle call.
+func SummaryCallOrHavoc(context *LoweringContext, call *ast.Node, target int) ([]kernelbridge.IrStatement, bool) {
+	if statement, ok := summaryCallStatement(context, call, target); ok {
+		return []kernelbridge.IrStatement{statement}, true
+	}
+	return summaryCycleHavoc(context, call, target)
+}
+
+// summaryCycleHavoc is the RECURSION floor: a callee that resolves but
+// has no blob BECAUSE its own build is in flight (SummaryCycleInFlight)
+// still lowers — writing TOP into whatever the call's value lands in is
+// sound unconditionally, and it is what the kernel's own walk answers
+// for a call through an empty summary. Without this a body containing a
+// recursive call would decline whole, and the recursive declaration
+// itself would never compile.
+//
+// The route never asks SummaryOutShapeFor: that would re-enter the
+// in-flight lowering it is standing in for.
+//
+// No leaf-slot havoc is needed beyond the target. Only SCALAR arguments
+// lower into calls — the argument loop in summaryCallStatement below
+// declines a spread or a writing argument, and a record or array
+// argument has no scalar effect for RhsEffect to build, so it declines
+// the call before any of this — and a scalar passes by value, so a
+// callee cannot write back through it.
+func summaryCycleHavoc(context *LoweringContext, call *ast.Node, target int) ([]kernelbridge.IrStatement, bool) {
+	if context.Flow == nil {
+		return nil, false
+	}
+	callee := summaryCalleeOf(context, call)
+	if callee == nil {
+		return nil, false
+	}
+	// the in-flight bit is asked FIRST: it is a mutex read of the
+	// registry's building set, where SummaryBlobFor would start a build
+	// for any callee that has none yet
+	if !SummaryCycleInFlight(callee) {
+		return nil, false
+	}
+	// a callee already holding a blob took the call statement above; if
+	// it did not, its blob is absent for a reason other than the cycle
+	// (a declined body), and the havoc floor does not apply
+	if _, has := SummaryBlobFor(context.Flow, callee); has {
+		return nil, false
+	}
+	// a bare cycle call contributes no statement: nothing reads its
+	// value, and the havoc has nowhere to land
+	if target < 0 {
+		return nil, true
+	}
+	return []kernelbridge.IrStatement{{
+		Kind:   kernelbridge.IrStatementAssign,
+		Target: target,
+		Effect: unknownEffect,
+	}}, true
+}
+
 // summaryCallStatement builds the call statement for a resolved callee
 // with a compiled summary: each argument lowers as an effect over the
 // caller's bindings (any that does not declines the whole call), and
@@ -136,20 +201,17 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 
 // SummaryCallStatementOf is the lowering-side entry: a call expression
 // STATEMENT (`f(…)`), or a call assigned into a tracked slot (`x =
-// f(…)`, `const x = f(…)`), where the callee has a compiled summary.
-// Declines where the callee has none, where an argument does not lower,
-// or where an assignment's target has no slot — and the statement then
-// takes the inlining route, exactly as before.
+// f(…)`, `const x = f(…)`), where the callee has a compiled summary —
+// or, where the callee's own build is in flight, the havoc floor.
+// Declines where the callee resolves to nothing, where an argument does
+// not lower, or where an assignment's target has no slot — and the
+// statement then takes the inlining route, exactly as before.
 func SummaryCallStatementOf(context *LoweringContext, statement *ast.Node) ([]kernelbridge.IrStatement, bool) {
 	// `f(…);` — the value goes nowhere, but the call still runs
 	if ast.IsExpressionStatement(statement) {
 		e := Unwrapped(statement.AsExpressionStatement().Expression)
 		if ast.IsCallExpression(e) {
-			call, ok := summaryCallStatement(context, e, -1)
-			if !ok {
-				return nil, false
-			}
-			return []kernelbridge.IrStatement{call}, true
+			return SummaryCallOrHavoc(context, e, -1)
 		}
 	}
 	target, rhs, ok := callAssignmentShapeOf(context, statement)
@@ -160,11 +222,7 @@ func SummaryCallStatementOf(context *LoweringContext, statement *ast.Node) ([]ke
 	if !ast.IsCallExpression(head) {
 		return nil, false
 	}
-	call, callOk := summaryCallStatement(context, head, target)
-	if !callOk {
-		return nil, false
-	}
-	return []kernelbridge.IrStatement{call}, true
+	return SummaryCallOrHavoc(context, head, target)
 }
 
 // callAssignmentShapeOf is the `let x = e` / `x = e` shape both call

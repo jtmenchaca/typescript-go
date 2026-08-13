@@ -30,6 +30,8 @@ func clearSummaryStore() {
 	summaryBlobsMu.Lock()
 	summaryBlobs = map[*ast.Node]summaryBlobEntry{}
 	summaryBuilding = map[*ast.Node]struct{}{}
+	summaryCycled = map[*ast.Node]struct{}{}
+	summarySelfBlobs = map[*ast.Node]kernelbridge.SummaryBlob{}
 	summaryBlobsMu.Unlock()
 }
 
@@ -145,8 +147,11 @@ func TestSummaryBlobFor_ACycleAnswersFalseWithoutStoringADecline(t *testing.T) {
 		t.Fatalf("the builder never re-entered — the test proves nothing")
 	}
 	if reentryOk {
-		t.Errorf("the re-entry answered true; a cycle must answer false (recursive bodies keep the Go route)")
+		t.Errorf("the re-entry answered true; a cycle must answer false so the lowering havocs that call")
 	}
+	// the cycle is remembered, so the fixpoint upgrade is attempted once
+	// after this build — with no kernel loaded it declines immediately and
+	// the floor blob below is what stands
 	if !ok || blob != "blob-f" {
 		t.Fatalf("outer SummaryBlobFor = (%q, %v), want (%q, true) — the cycle must not poison the entry", blob, ok, "blob-f")
 	}

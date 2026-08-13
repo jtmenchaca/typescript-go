@@ -114,6 +114,16 @@ func IndexOf(context *LoweringContext, name *ast.Node) (int, bool) {
 	if index, ok := ArrayLengthSlotOf(context, name); ok {
 		return index, true
 	}
+	// `m.size` on a flattened Map or Set is the size slot, spelled
+	// "m.size". SpelledNameOf already spells that one step, so the branch
+	// above answers it in the ordinary case; this is the resolver the
+	// flattening OWNS, so a caller that reaches IndexOf with a size read
+	// lands on the same slot whichever route it took — the same shape
+	// ArrayLengthSlotOf has, and what keeps guards and loop heads reading
+	// the collection's count with no special case of their own.
+	if index, ok := MapSizeSlotOf(context, name); ok {
+		return index, true
+	}
 	return PathSlotIndexOf(context, name)
 }
 

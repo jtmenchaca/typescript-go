@@ -140,6 +140,11 @@ func SequenceEffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopE
 	if slot, ok := ArrayElementSlotOf(context, head); ok && context.Sorts[slot] == BindingKindString {
 		return ArrayIndexReadEffect(context, head)
 	}
+	// `m.get(k)` on a string-sorted collection is the same or-absent
+	// read of the values slot
+	if slot, ok := MapValueSlotOf(context, head); ok && context.Sorts[slot] == BindingKindString {
+		return MapGetReadEffect(context, head)
+	}
 	if ast.IsBinaryExpression(head) {
 		bin := head.AsBinaryExpression()
 		if bin.OperatorToken.Kind != ast.KindPlusToken {

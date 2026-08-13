@@ -17,6 +17,11 @@ import (
 // by its symbol, falling back to a declaration-node index when the
 // use-site symbol differs from the registration-site symbol.
 func ContractBySymbol(ctx *FlowContext, callee *ast.Node) *FunctionContract {
+	// a context without a program has no checker to resolve symbols
+	// through and no registry to hold them — nothing to answer
+	if ctx == nil || ctx.P == nil {
+		return nil
+	}
 	var name *ast.Node
 	if ast.IsIdentifier(callee) {
 		name = callee

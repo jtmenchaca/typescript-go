@@ -15,7 +15,9 @@
 // effect_expression.go (shared with loop_effect.ts, not yet ported
 // — see its own file). Slot context: ir_lowering_context.go.
 // Assignments: ir_assignment.go. Guards: ir_guard.go. Loops:
-// ir_loop.go. Call inlining: ir_inline_call.go.
+// ir_loop.go. Call inlining: ir_inline_call.go. Summary call
+// statements and the recursion havoc floor: ir_summary_call.go.
+// Await, promise-held locals, and Promise.all: ir_await.go.
 
 package walk
 
@@ -62,6 +64,19 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 				if ok {
 					out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: effect})
 					out = append(out, raise)
+					return out, true
+				}
+				// `return await f(…)`: the ret-as-inner convention means the
+				// callee's ret slot already holds the SETTLED value, so this
+				// is exactly the `return f(…)` call lowering with the await
+				// peeled off its operand. From an ASYNC body a bare `return
+				// f(…)` with a resolvable callee settles the same way —
+				// returning a promise from async adopts it — and `return
+				// await s` on a tracked scalar is the identity read. Tried
+				// ahead of the inlining route, which lowers the callee's body
+				// into fresh slots instead.
+				if awaited, awaitedOk := AwaitReturnStatements(context, rs.Expression, raise); awaitedOk {
+					out = append(out, awaited...)
 					return out, true
 				}
 				// `return f(…)`: the callee inlines and its result slot is
@@ -125,6 +140,12 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		// `const m = new Map(…)` / `new Set(…)` — a collection flattened
+		// into its size, values, and (Map) keys slots.
+		if assignments, ok := MapDeclarationAssignmentsOf(context, s); ok {
+			out = append(out, assignsOf(assignments)...)
+			continue
+		}
 		// `const { x, y } = p` — a flattened record read leaf by leaf into
 		// the destructured names.
 		if assignments, ok := DestructuringAssignmentsOf(context, s); ok {
@@ -147,8 +168,36 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 			out = append(out, assignsOf(assignments)...)
 			continue
 		}
+		// `m.set(k, v)` / `s.add(v)` — the size may step, the keys and
+		// values slots join.
+		if assignments, ok := MapSetAssignmentsOf(context, s); ok {
+			out = append(out, assignsOf(assignments)...)
+			continue
+		}
+		// `m.delete(k)` — the size may shrink (never below zero); the
+		// keys and values slots keep their joins.
+		if assignments, ok := MapDeleteAssignmentsOf(context, s); ok {
+			out = append(out, assignsOf(assignments)...)
+			continue
+		}
 		if assignment, ok := AssignmentOf(context, s); ok {
 			out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: assignment.Target, Effect: assignment.Effect})
+			continue
+		}
+		// `await f(…)` in every statement position, plus the two promise
+		// shapes: a promise HELD in a local and only ever awaited, and
+		// `await Promise.all([…])` whose value is unused. Tried ahead of
+		// the plain call route, which has no reading for an await node.
+		if viaAwait, ok := AwaitStatementOf(context, s); ok {
+			out = append(out, viaAwait...)
+			continue
+		}
+		// a CALLBACK-taking call (`xs.map(cb)` and its siblings) whose
+		// callback converts: the hook lowers the whole site. Tried ahead
+		// of the plain call route, whose callee resolution has no reading
+		// for a collection method.
+		if viaCallback, ok := SummaryCallbackStatementOf(context, s); ok {
+			out = append(out, viaCallback...)
 			continue
 		}
 		// `f(…)` / `x = f(…)` where the callee has a compiled summary:
@@ -166,6 +215,12 @@ func LowerStatements(context *LoweringContext, statements []*ast.Node) ([]kernel
 		// `for (const x of a)` over a flattened array — the loop whose
 		// per-pass element effect is the element slot's var.
 		if loop, ok := ArrayForOfLowering(context, s); ok {
+			out = append(out, loop)
+			continue
+		}
+		// `for (const v of m.values())` and the entries/keys forms over a
+		// flattened collection — the same loop against the map's slots.
+		if loop, ok := MapForOfLowering(context, s); ok {
 			out = append(out, loop)
 			continue
 		}

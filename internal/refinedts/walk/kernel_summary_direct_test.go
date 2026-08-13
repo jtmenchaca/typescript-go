@@ -70,16 +70,46 @@ func TestKernelSummaryDirect_APropertyWritingBodyDeclines(t *testing.T) {
 	}
 }
 
-func TestKernelSummaryDirect_AnAsyncBodyDeclines(t *testing.T) {
+func TestKernelSummaryDirect_AnAsyncBodySummarizesAndAnswersAPromiseOfItsRet(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
-	// awaitless and pure — the raw return set would still mistype the
-	// call, whose value is a Promise
+	// the ret-as-inner convention: the lowered body's #ret holds the
+	// SETTLED value (n + 1), and the boundary wraps it — so the body
+	// summarizes and the caller's view is a Promise of the return set
 	declaration := summaryDeclarationOf(t,
 		"async function f(n: number) { return n + 1; }")
 	contract := &FunctionContract{Declaration: declaration}
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	answer, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{exactNumber(t, 1)}, contract)
+	if !ok {
+		t.Fatalf("an async body declined — the ret-as-inner convention makes it lowerable")
+	}
+	if answer.Kind != abstractdomain.KindPromise {
+		t.Fatalf("async summary answered kind %v, want a Promise wrapper", answer.Kind)
+	}
+	if answer.Inner == nil {
+		t.Fatalf("the Promise carries no inner value")
+	}
+	state, stateOk := StateOfKnown(*answer.Inner)
+	if !stateOk || state.Top {
+		t.Fatalf("the promise's inner did not spell as a scalar state: %+v", *answer.Inner)
+	}
+	// f(1) settles at 2; the inner set must ADMIT it
+	if !kernel.Member(state.Set, []float64{2}) {
+		t.Errorf("the promise's inner excludes the true settled value 2: %+v", state.Set)
+	}
+}
+
+func TestKernelSummaryDirect_AGeneratorBodyDeclines(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	// the call's value is an ITERATOR, and no slot spells one — there is
+	// no inner value for a boundary wrapper to adopt
+	declaration := summaryDeclarationOf(t,
+		"function* f(n: number) { yield n + 1; }")
+	contract := &FunctionContract{Declaration: declaration}
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	if _, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{exactNumber(t, 1)}, contract); ok {
-		t.Errorf("an async body summarized — the call's value is a Promise, not the return set")
+		t.Errorf("a generator body summarized — the call's value is an iterator, not the yield set")
 	}
 }

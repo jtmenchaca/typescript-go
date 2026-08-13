@@ -150,7 +150,10 @@ func localSlotsOf(
 	parameterNames map[string]struct{},
 ) []bodySlot {
 	objectLocals := ObjectLocalsOf(body, locals)
-	arrayLocals := ArrayLocalsOf(body, locals)
+	// the collections flatten first: the array recognizer needs them to
+	// admit the bridge (`[...m.values()]` reads the map's slots)
+	collectionLocals := MapLocalsOf(body, locals)
+	arrayLocals := ArrayLocalsOf(body, locals, collectionLocals)
 	var order []string
 	declaredOf := map[string]*ast.Node{}
 	for _, declaration := range locals {
@@ -166,11 +169,16 @@ func localSlotsOf(
 			_, isRecord := objectLocals[declaration]
 			_, wasArray := arrayLocals[previous]
 			_, isArray := arrayLocals[declaration]
-			if wasRecord != isRecord || wasArray != isArray {
+			_, wasCollection := collectionLocals[previous]
+			_, isCollection := collectionLocals[declaration]
+			if wasRecord != isRecord || wasArray != isArray ||
+				wasCollection != isCollection {
 				delete(objectLocals, previous)
 				delete(objectLocals, declaration)
 				delete(arrayLocals, previous)
 				delete(arrayLocals, declaration)
+				delete(collectionLocals, previous)
+				delete(collectionLocals, declaration)
 			}
 		} else {
 			order = append(order, name)
@@ -199,6 +207,16 @@ func localSlotsOf(
 				bodySlot{Name: local.LenSlotName, Sort: BindingKindNumber, TypeofTag: TypeofTagNumber},
 				bodySlot{Name: local.ElemSlotName, Sort: ArrayElementSort(local), TypeofTag: ArrayElementTypeof(local)},
 			)
+			continue
+		}
+		if local, flattened := collectionLocals[declared]; flattened {
+			for _, slot := range MapLocalSlots(local) {
+				out = append(out, bodySlot{
+					Name:      slot.Name,
+					Sort:      slot.Sort,
+					TypeofTag: slot.TypeofTag,
+				})
+			}
 			continue
 		}
 		out = append(out, bodySlot{
@@ -235,6 +253,22 @@ func localSlotsOf(
 // array literal. It therefore takes an ordinary whole-name slot, which
 // is exactly what ArrayForOfLowering writes the per-pass element into.
 
+// capturedSlot is one READ-ONLY capture an arrow argument closes over:
+// the name it is spelled under in the enclosing body, and the sort and
+// typeof evidence its caller slot wears. Each one becomes an EXTRA
+// entry of the arrow's summary, laid out immediately after the declared
+// parameters — so entry k for k < len(parameters) is the k-th
+// parameter, and entry len(parameters)+j is the j-th capture, in the
+// order the free-variable scan reported them (source order of first
+// read). The call site binds each to a `var` of the caller slot the
+// name resolves to, which is why the layout has to be the scan's own
+// deterministic order and not a map's.
+type capturedSlot struct {
+	Name      string
+	Sort      BindingKind
+	TypeofTag TypeofTag
+}
+
 // lowerSummaryBody lowers a declaration's whole body for the summary
 // compiler: the parameter slots first (the compiler's arity), then the
 // locals' slots, then the done flag and the result slot, with the
@@ -245,6 +279,60 @@ func localSlotsOf(
 // leaves the grammar answers false and the caller keeps its existing
 // route.
 func lowerSummaryBody(ctx *FlowContext, declaration *ast.Node) (LoweredSummary, bool) {
+	return lowerSummaryBodyWithCaptures(ctx, declaration, nil, nil)
+}
+
+// lowerArrowSummary lowers an ARROW (or function expression) ARGUMENT
+// closure-converted: its declared parameters first, then one entry per
+// READ-ONLY capture in the scan's order, then the locals, the done flag
+// and the result slot. Everything past the extra entries is the
+// ordinary body lowering — a capture is just another entry as far as
+// the compiled summary is concerned, which is exactly why closure
+// conversion needs nothing new kernel-side.
+//
+// The declared parameters wear the SITE's sorts rather than the
+// declaration's annotations. A top-level declaration's summary must read
+// sorts from its own annotations, since it quantifies over callers a
+// lowering cannot see; an arrow argument has exactly ONE call site, and
+// that site fills entry 0 with a `var` of the receiver's element slot
+// whose sort the caller's layout already carries. Reading the sort off
+// the annotation instead would make every unannotated `x => x + 1`
+// unknown-sorted and decline its own arithmetic — the parameter would be
+// the one entry whose sort the site knows and the summary refuses. The
+// captures already ride their caller slots' sorts for the same reason;
+// this puts the parameters on the same footing.
+//
+// The async gate is NOT consulted here beyond what summaryLowerable
+// says: a lowered async body's #ret holds the SETTLED inner value (the
+// ret-as-inner convention), so an async arrow converts exactly like a
+// sync one and the awaiting site adds nothing.
+func lowerArrowSummary(
+	ctx *FlowContext,
+	arrow *ast.Node,
+	parameters []parameterSlotSort,
+	captures []capturedSlot,
+) (LoweredSummary, bool) {
+	return lowerSummaryBodyWithCaptures(ctx, arrow, parameters, captures)
+}
+
+// parameterSlotSort is the sort and typeof evidence ONE declared
+// parameter entry wears when the call site knows them. A nil entry list
+// (the declaration route) leaves every parameter reading its own
+// annotation.
+type parameterSlotSort struct {
+	Sort      BindingKind
+	TypeofTag TypeofTag
+}
+
+// lowerSummaryBodyWithCaptures is the one lowering both doors share:
+// nil parameters and nil captures is the plain declaration route, a
+// supplied pair is the closure-converted arrow route.
+func lowerSummaryBodyWithCaptures(
+	ctx *FlowContext,
+	declaration *ast.Node,
+	parameterSorts []parameterSlotSort,
+	captures []capturedSlot,
+) (LoweredSummary, bool) {
 	if !summaryLowerable(declaration) {
 		return LoweredSummary{}, false
 	}
@@ -258,14 +346,45 @@ func lowerSummaryBody(ctx *FlowContext, declaration *ast.Node) (LoweredSummary, 
 	paramNames := make([]string, 0, len(parameters))
 	paramSorts := make([]BindingKind, 0, len(parameters))
 	paramTypeofs := make([]TypeofTag, 0, len(parameters))
-	for _, parameter := range parameters {
+	for index, parameter := range parameters {
 		pd := parameter.AsParameterDeclaration()
 		if !ast.IsIdentifier(pd.Name()) || pd.Initializer != nil || pd.DotDotDotToken != nil {
 			return LoweredSummary{}, false
 		}
 		paramNames = append(paramNames, pd.Name().Text())
+		// the site's sort where the arrow route supplied one, the
+		// declaration's own annotation otherwise. A supplied sort is what
+		// the entry the site fills already wears, so the summary quantifies
+		// over exactly the values that entry can take.
+		if index < len(parameterSorts) {
+			paramSorts = append(paramSorts, parameterSorts[index].Sort)
+			paramTypeofs = append(paramTypeofs, parameterSorts[index].TypeofTag)
+			continue
+		}
 		paramSorts = append(paramSorts, declaredParamSort(parameter))
 		paramTypeofs = append(paramTypeofs, declaredParamTypeof(parameter))
+	}
+	// the captures ride as EXTRA entries immediately after the declared
+	// parameters, in the scan's own order — the call site fills entry
+	// len(parameters)+j with a var of the caller slot capture j resolved
+	// to, so the two orders must agree exactly. A capture whose name a
+	// parameter already claims is the parameter's, not the capture's:
+	// the inner binding shadows, and the scan never reported it free.
+	declaredCount := len(paramNames)
+	for _, capture := range captures {
+		shadowed := false
+		for _, name := range paramNames[:declaredCount] {
+			if name == capture.Name {
+				shadowed = true
+				break
+			}
+		}
+		if shadowed {
+			return LoweredSummary{}, false
+		}
+		paramNames = append(paramNames, capture.Name)
+		paramSorts = append(paramSorts, capture.Sort)
+		paramTypeofs = append(paramTypeofs, capture.TypeofTag)
 	}
 	// a concise arrow body IS a single return
 	var statements []*ast.Node
@@ -340,6 +459,9 @@ func lowerSummaryBody(ctx *FlowContext, declaration *ast.Node) (LoweredSummary, 
 	if !ok {
 		return LoweredSummary{}, false
 	}
+	// ParamCount counts the declared parameters AND the capture entries:
+	// both are entries the caller fills, and the apply route's "everything
+	// past ParamCount enters absent" rule has to leave the captures alone.
 	return LoweredSummary{
 		Stmts:      stmts,
 		ParamCount: len(paramNames),

@@ -41,12 +41,25 @@ import (
 // ArrayLocal is one flattened array local: the declaration it came
 // from, the name it was spelled under, the two slot names, and the
 // literal's own element expressions in source order.
+//
+// A BRIDGED array — `const a = [...m.values()]` over a flattened Map or
+// Set — has no literal elements of its own; it carries the collection it
+// was built from instead, and its two slots are written from that
+// collection's size and value slots. Every OTHER field, and every
+// recognizer answer below, is identical to a literal-initialized
+// array's: downstream readers (`a.length`, `a[i]`, `a.push(v)`, a
+// for-of, and a concurrent agent's `.map(cb)`) cannot tell the two
+// apart, which is the whole point of the bridge.
 type ArrayLocal struct {
 	Declaration  *ast.Node // VariableDeclaration
 	Name         string
 	LenSlotName  string // "a.len"
 	ElemSlotName string // "a.elem"
 	Elements     []*ast.Node
+	// BridgedFrom: the spelled name of the Map or Set this array was
+	// built from, or "" for an ordinary array literal. Its slots are
+	// "<BridgedFrom>.size" and "<BridgedFrom>.vals".
+	BridgedFrom string
 }
 
 // arrayLenSuffix and arrayElemSuffix are the two slot spellings a
@@ -89,6 +102,103 @@ func arrayElementsOf(literal *ast.Node) ([]*ast.Node, bool) {
 		out = append(out, element)
 	}
 	return out, true
+}
+
+// arrayFromReceiverOf is the single argument of `Array.from(x)` — the
+// call half of the bridge below. Answers nil for anything else,
+// including a two-argument `Array.from(x, cb)`, whose mapping callback
+// changes every element.
+func arrayFromReceiverOf(call *ast.CallExpression) *ast.Node {
+	if !ast.IsPropertyAccessExpression(call.Expression) {
+		return nil
+	}
+	access := call.Expression.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return nil
+	}
+	if !ast.IsIdentifier(access.Expression) || access.Expression.Text() != "Array" {
+		return nil
+	}
+	if !ast.IsIdentifier(access.Name()) || access.Name().Text() != "from" {
+		return nil
+	}
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+		return nil
+	}
+	if ast.IsSpreadElement(call.Arguments.Nodes[0]) {
+		return nil
+	}
+	return call.Arguments.Nodes[0]
+}
+
+// collectionSourceOf reads an expression as a COLLECTION the bridge can
+// stand on: a bare Set `s`, or one of the Map views `m.values()` /
+// `m.keys()`. Answers the collection's spelled name and which of its
+// slots the resulting array's elements come from.
+//
+// `m.entries()` and a bare Map are NOT sources: their elements are
+// pairs, and one element slot holds one scalar.
+func collectionSourceOf(node *ast.Node) (name string, view string, ok bool) {
+	head := Unwrapped(node)
+	if ast.IsIdentifier(head) {
+		// a bare name — a Set's members, or a Map, which the caller rules
+		// out by asking whether it has a keys slot
+		return head.Text(), "values", true
+	}
+	if !ast.IsCallExpression(head) {
+		return "", "", false
+	}
+	property := head.AsCallExpression().Expression
+	if !ast.IsPropertyAccessExpression(property) {
+		return "", "", false
+	}
+	receiver := property.AsPropertyAccessExpression().Expression
+	if !ast.IsIdentifier(receiver) {
+		return "", "", false
+	}
+	called, isView := iteratorCallOf(head, receiver.Text())
+	if !isView {
+		return "", "", false
+	}
+	if called != "values" && called != "keys" {
+		return "", "", false
+	}
+	return receiver.Text(), called, true
+}
+
+// bridgeSourceOfDeclaration reads a declaration's initializer as the
+// BRIDGE: `const a = [...m.values()]`, `const a = Array.from(s)`, or
+// `const a = [...s]`. Answers the collection's spelled name and which
+// slot feeds the elements.
+//
+// A spread array literal with anything BESIDE the one spread — an extra
+// element, a second spread — is not the bridge: the count would be the
+// collection's size plus those, which the one-var length effect does not
+// spell.
+func bridgeSourceOfDeclaration(declaration *ast.Node) (name string, view string, ok bool) {
+	if !ast.IsVariableDeclaration(declaration) {
+		return "", "", false
+	}
+	initializer := declaration.AsVariableDeclaration().Initializer
+	if initializer == nil {
+		return "", "", false
+	}
+	head := Unwrapped(initializer)
+	if ast.IsArrayLiteralExpression(head) {
+		elements := head.AsArrayLiteralExpression().Elements.Nodes
+		if len(elements) != 1 || !ast.IsSpreadElement(elements[0]) {
+			return "", "", false
+		}
+		return collectionSourceOf(elements[0].AsSpreadElement().Expression)
+	}
+	if ast.IsCallExpression(head) {
+		source := arrayFromReceiverOf(head.AsCallExpression())
+		if source == nil {
+			return "", "", false
+		}
+		return collectionSourceOf(source)
+	}
+	return "", "", false
 }
 
 // pushCallOf is `a.push(v)` with exactly one argument — the one growth
@@ -254,12 +364,22 @@ func usesAreAllArrayForms(body *ast.Node, declaration *ast.Node, name string) bo
 // ArrayLocalOf is the recognizer: a declaration `const a = [e, …]`
 // whose every use in the body is one of the recognized forms becomes
 // the two slots "a.len" and "a.elem"; anything else declines.
-func ArrayLocalOf(body *ast.Node, declaration *ast.Node) (ArrayLocal, bool) {
-	literal := arrayLiteralOfDeclaration(declaration)
-	if literal == nil {
+//
+// `flattenedCollection` answers whether a spelled name is a flattened
+// Map or Set — what the BRIDGE (`const a = [...m.values()]`) needs, and
+// the one thing the array recognizer cannot read off its own
+// declaration. A lone call may pass nil, admitting no bridge.
+func ArrayLocalOf(body *ast.Node, declaration *ast.Node, flattenedCollection func(name string) (MapLocal, bool)) (ArrayLocal, bool) {
+	if !ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
 		return ArrayLocal{}, false
 	}
-	if !ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+	// the BRIDGE, tried first: its initializer IS an array literal (a lone
+	// spread), which the literal reader below would otherwise decline
+	if bridged, ok := bridgedArrayLocalOf(body, declaration, flattenedCollection); ok {
+		return bridged, true
+	}
+	literal := arrayLiteralOfDeclaration(declaration)
+	if literal == nil {
 		return ArrayLocal{}, false
 	}
 	name := declaration.AsVariableDeclaration().Name().Text()
@@ -286,12 +406,112 @@ func ArrayLocalOf(body *ast.Node, declaration *ast.Node) (ArrayLocal, bool) {
 	}, true
 }
 
+// bridgedArrayLocalOf is the BRIDGE recognizer: `const a =
+// [...m.values()]`, `const a = Array.from(m.values())`, `const a =
+// [...s]` over a Map or Set the collection recognizer already admitted.
+// The result is an ArrayLocal in every respect — the same two slot
+// spellings, the same use scan, the same sort and typeof answers — so
+// every downstream reader treats it exactly as it treats an array
+// literal's local. What differs is only where the two slots' VALUES come
+// from: the collection's size and value (or key) slots.
+//
+// A bridge over a collection that is NOT flattened declines: without the
+// source slots there is nothing to copy from.
+func bridgedArrayLocalOf(body *ast.Node, declaration *ast.Node, flattenedCollection func(name string) (MapLocal, bool)) (ArrayLocal, bool) {
+	if flattenedCollection == nil {
+		return ArrayLocal{}, false
+	}
+	source, view, isBridge := bridgeSourceOfDeclaration(declaration)
+	if !isBridge {
+		return ArrayLocal{}, false
+	}
+	collection, flattened := flattenedCollection(source)
+	if !flattened {
+		return ArrayLocal{}, false
+	}
+	// a bare name spreads a SET's members; a bare Map spreads its
+	// ENTRIES, which are pairs and have no one element slot — a Map has
+	// to be bridged through a named view
+	if collection.IsMap && bareCollectionSpread(declaration.AsVariableDeclaration().Initializer) {
+		return ArrayLocal{}, false
+	}
+	// `m.keys()` over a Set has no slot; the collection recognizer already
+	// refused such a body, and this is the second gate
+	if view == "keys" && !collection.IsMap {
+		return ArrayLocal{}, false
+	}
+	name := declaration.AsVariableDeclaration().Name().Text()
+	if !usesAreAllArrayForms(body, declaration, name) {
+		return ArrayLocal{}, false
+	}
+	return ArrayLocal{
+		Declaration:  declaration,
+		Name:         name,
+		LenSlotName:  name + arrayLenSuffix,
+		ElemSlotName: name + arrayElemSuffix,
+		BridgedFrom:  source,
+		// the collection's seeded expressions ride in the ordinary
+		// Elements field, so ArrayElementSort and ArrayElementTypeof answer
+		// for this local exactly as they answer for a literal one
+		Elements: bridgedElementsOf(collection, view),
+	}, true
+}
+
+// bareCollectionSpread is whether an initializer spreads the collection
+// BY NAME (`[...s]`, `Array.from(s)`) rather than through a view
+// (`[...m.values()]`).
+func bareCollectionSpread(initializer *ast.Node) bool {
+	head := Unwrapped(initializer)
+	if ast.IsArrayLiteralExpression(head) {
+		elements := head.AsArrayLiteralExpression().Elements.Nodes
+		if len(elements) != 1 || !ast.IsSpreadElement(elements[0]) {
+			return false
+		}
+		return ast.IsIdentifier(Unwrapped(elements[0].AsSpreadElement().Expression))
+	}
+	if ast.IsCallExpression(head) {
+		source := arrayFromReceiverOf(head.AsCallExpression())
+		return source != nil && ast.IsIdentifier(Unwrapped(source))
+	}
+	return false
+}
+
+// bridgedElementsOf is the seed expressions a bridged array's ELEMENT
+// slot inherits — the collection's seeded values, or its seeded keys for
+// a `keys()` bridge. Carrying them in the ordinary Elements field is
+// what makes ArrayElementSort and ArrayElementTypeof answer for a
+// bridged array exactly as they answer for a literal one: the element
+// slot's sort is the sort of the values it will hold.
+//
+// The COUNT of these expressions is never read as the array's length —
+// a bridged array's len slot is written from the collection's size slot,
+// not from a literal's row count (see ArrayDeclarationAssignmentsOf).
+func bridgedElementsOf(collection MapLocal, view string) []*ast.Node {
+	if view == "keys" {
+		return collection.SeedKeys
+	}
+	return collection.SeedVals
+}
+
 // ArrayLocalsOf runs the recognizer over a body's collected locals and
 // answers the ones that flatten, keyed by declaration.
-func ArrayLocalsOf(body *ast.Node, locals []*ast.Node) map[*ast.Node]ArrayLocal {
+//
+// `collections` is the flattened Map/Set table (MapLocalsOf's answer),
+// which the BRIDGE consults — `const a = [...m.values()]` needs it to
+// know m is flattened. Passing nil admits no bridge, which is the
+// behaviour before the bridge existed.
+func ArrayLocalsOf(body *ast.Node, locals []*ast.Node, collections map[*ast.Node]MapLocal) map[*ast.Node]ArrayLocal {
+	byName := map[string]MapLocal{}
+	for _, collection := range collections {
+		byName[collection.Name] = collection
+	}
+	flattenedCollection := func(name string) (MapLocal, bool) {
+		held, found := byName[name]
+		return held, found
+	}
 	out := map[*ast.Node]ArrayLocal{}
 	for _, declaration := range locals {
-		if local, ok := ArrayLocalOf(body, declaration); ok {
+		if local, ok := ArrayLocalOf(body, declaration, flattenedCollection); ok {
 			out[declaration] = local
 		}
 	}
@@ -431,6 +651,54 @@ func constNumber(w float64) kernelbridge.LoopEffect {
 	}
 }
 
+// bridgedDeclarationAssignmentsOf is the BRIDGE's lowering: `const a =
+// [...m.values()]` writes `a.len := var m.size` and `a.elem := var
+// m.vals` (or `var m.keys` for a `keys()` bridge). Two ordinary slot
+// reads — the array's slots hold exactly what the collection's held, so
+// every later `a.length`, `a[i]`, `a.push(v)` and for-of over `a` reads
+// the same shapes it would over a literal-built array.
+//
+// The syntax alone decides here, as everywhere in the lowering: the
+// recognizer's admission is already recorded in the slot vector, so the
+// gate is that both the array's slots and the collection's resolve.
+func bridgedDeclarationAssignmentsOf(context *LoweringContext, declaration *ast.Node) ([]AssignmentTarget, bool) {
+	source, view, isBridge := bridgeSourceOfDeclaration(declaration)
+	if !isBridge {
+		return nil, false
+	}
+	if !ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+		return nil, false
+	}
+	lenSlot, elemSlot, ok := arraySlotsOf(context, declaration.AsVariableDeclaration().Name().Text())
+	if !ok {
+		return nil, false
+	}
+	sizeSlot, valsSlot, keysSlot, keysOk, found := mapSlotsOf(context, source)
+	if !found {
+		return nil, false
+	}
+	elementSource := valsSlot
+	switch view {
+	case "values":
+		// a BARE spread of a Map spreads its entries, which are pairs; the
+		// recognizer refused that, and this is the second gate
+		if keysOk && bareCollectionSpread(declaration.AsVariableDeclaration().Initializer) {
+			return nil, false
+		}
+	case "keys":
+		if !keysOk {
+			return nil, false
+		}
+		elementSource = keysSlot
+	default:
+		return nil, false
+	}
+	return []AssignmentTarget{
+		{Target: lenSlot, Effect: varEffect(sizeSlot)},
+		{Target: elemSlot, Effect: varEffect(elementSource)},
+	}, true
+}
+
 // ArrayDeclarationAssignmentsOf is the lowering-side entry for a
 // flattened array's declaration: the len slot takes the literal's
 // count as an exact constant, and the elem slot takes the JOIN of the
@@ -447,6 +715,14 @@ func ArrayDeclarationAssignmentsOf(context *LoweringContext, statement *ast.Node
 		return nil, false
 	}
 	declaration := declarations[0]
+	// the BRIDGE, tried first: `const a = [...m.values()]` writes the two
+	// array slots from the collection's own — the count from its size and
+	// the element join from its values (or its keys, for a `keys()`
+	// bridge). Both are plain slot reads, so what the array's readers see
+	// afterwards is indistinguishable from a literal's lowering.
+	if bridged, ok := bridgedDeclarationAssignmentsOf(context, declaration); ok {
+		return bridged, true
+	}
 	literal := arrayLiteralOfDeclaration(declaration)
 	if literal == nil {
 		return nil, false
