@@ -451,6 +451,14 @@ func accessorReceiverPathOf(access *ast.Node) (string, bool) {
 		return "", false
 	}
 	property := access.AsPropertyAccessExpression()
+	// AN OPEN GAP, and it is left open deliberately. `o?.x` where x is an
+	// accessor is a determinable shape — when the receiver is present the
+	// accessor runs, and a conditional call would spell it — but the
+	// absence half is the maybe-receiver machinery's, which lives outside
+	// this file. Nothing here may claim the call happened, so the path
+	// spelling declines and the read keeps the floor. The resolution's own
+	// optional gate (AccessorDeclarationsOf) refuses the same shape first;
+	// this is the second wall behind it.
 	if property.QuestionDotToken != nil {
 		return "", false
 	}
@@ -523,17 +531,34 @@ func accessorReturnEvidence(getter *ast.Node) (BindingKind, TypeofTag) {
 // parameter's own declared sort, and the write is the setter's call
 // statement (SetterWriteStatements) — the value at entry 0, the
 // written this-fields riding back through rets.
+//
+// The door reads THREE assigning shapes, each the same call statement
+// with a different value at entry 0:
+//
+//   - `o.x = e` — the plain write, the value being e itself;
+//   - `o.x += e` and its arithmetic siblings — the read-modify-write
+//     the runtime performs: the GETTER's call, the arithmetic, the
+//     SETTER's call (setterCompoundWriteOf);
+//   - `o.x++` / `--o.x` — the same, with the constant 1 for e
+//     (setterUpdateWriteOf).
 func SetterWriteOf(context *LoweringContext, statement *ast.Node) ([]kernelbridge.IrStatement, bool) {
 	if !ast.IsExpressionStatement(statement) {
 		return nil, false
 	}
 	e := Unwrapped(statement.AsExpressionStatement().Expression)
+	// `o.x++` / `--o.x`: no binary node at all, so the update route reads
+	// it ahead of the binary shapes below
+	if written, ok := setterUpdateWriteOf(context, e); ok {
+		return written, true
+	}
 	if !ast.IsBinaryExpression(e) {
 		return nil, false
 	}
 	bin := e.AsBinaryExpression()
 	if bin.OperatorToken.Kind != ast.KindEqualsToken {
-		return nil, false
+		// `o.x += e` and its siblings: the compound reads through the
+		// getter before it writes through the setter
+		return setterCompoundWriteOf(context, bin)
 	}
 	access := Unwrapped(bin.Left)
 	if !ast.IsPropertyAccessExpression(access) {
@@ -542,19 +567,272 @@ func SetterWriteOf(context *LoweringContext, statement *ast.Node) ([]kernelbridg
 	if context.Flow == nil {
 		return nil, false
 	}
-	_, setter, resolved := AccessorDeclarationsOf(context.Flow, access)
-	if !resolved || setter == nil {
-		return nil, false
-	}
-	// the assigned value lowers under the setter PARAMETER's own
-	// declared sort — the entry it fills is that parameter's
-	sort := BindingKindUnknown
-	if parameters := setter.Parameters(); len(parameters) == 1 {
-		sort = declaredParamSort(parameters[0])
-	}
-	value, valueOk := RhsEffect(context, sort, bin.Right)
+	value, valueOk := setterValueEffect(context, access, bin.Right)
 	if !valueOk {
 		return nil, false
 	}
 	return SetterWriteStatements(context, access, value)
+}
+
+// setterValueEffect lowers a written RIGHT SIDE under the SETTER
+// parameter's own declared sort — the entry it fills is that
+// parameter's, so the sort the value is read at is the parameter's and
+// never the site's.
+//
+// Declines where the access resolves to no setter (a get-only property
+// or a plain field, neither of which this file's routes claim) and
+// where the right side itself fails to lower.
+func setterValueEffect(
+	context *LoweringContext,
+	access *ast.Node,
+	right *ast.Node,
+) (kernelbridge.LoopEffect, bool) {
+	if context == nil || context.Flow == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	_, setter, resolved := AccessorDeclarationsOf(context.Flow, access)
+	if !resolved || setter == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	sort := BindingKindUnknown
+	if parameters := setter.Parameters(); len(parameters) == 1 {
+		sort = declaredParamSort(parameters[0])
+	}
+	return RhsEffect(context, sort, right)
+}
+
+/* ── the compound: a read, the arithmetic, a write ───────────────── */
+
+// setterCompoundOps is the compound assignment's operator, as the
+// effect grammar's own arithmetic. It is compoundOps' table
+// (ir_assignment.go) read for the accessor route: the same four
+// operators, because the same effect grammar carries them, and a
+// compound through a setter must compute what a compound through a slot
+// computes or the two spell different arithmetic for the same source.
+var setterCompoundOps = map[ast.Kind]kernelbridge.LoopEffectOp{
+	ast.KindPlusEqualsToken:     kernelbridge.LoopOpAdd,
+	ast.KindMinusEqualsToken:    kernelbridge.LoopOpSub,
+	ast.KindAsteriskEqualsToken: kernelbridge.LoopOpMul,
+	ast.KindSlashEqualsToken:    kernelbridge.LoopOpDiv,
+}
+
+// setterCompoundWriteOf lowers `o.x += e` where x resolves to a get/set
+// PAIR: the read-modify-write the runtime itself performs, spelled as
+// the two calls it really is —
+//
+//	#get.o.x := call getter(…)        (hoisted, GetterReadEffect's own shape)
+//	          call setter(#get.o.x + e)
+//
+// The getter's call statement rides out through context.Hoisted, which
+// the statement dispatch flushes AHEAD of whatever this route returns
+// (TakeHoisted) — so the read runs before the write, which is the order
+// the language runs them in.
+//
+// THE PAIR IS REQUIRED, both halves. A compound through a get-only
+// property writes nothing the language defines, and a compound through
+// a set-only property reads `undefined` from a property with no getter
+// — the arithmetic is then NaN, a value this route does not claim. So
+// the route wants a getter AND a setter, and declines otherwise.
+//
+// The `||=`/`&&=`/`??=` family is NOT read here. Those short-circuit:
+// the setter may not run at all, and no call statement stands for a
+// call that may not have happened — the same reason the optional step
+// declines at the resolution. The refusal is named so the report points
+// at the syntax.
+//
+// Every other decline is the two halves' own: GetterReadEffect's
+// (CanHoist, the allocator, the getter's blob) and
+// SetterWriteStatements' (the setter's blob, the receiver path, the
+// statement builder). Neither is second-guessed here — where either
+// half declines, so does the compound, and the statement falls to the
+// floor exactly as it did before this route existed.
+func setterCompoundWriteOf(
+	context *LoweringContext,
+	bin *ast.BinaryExpression,
+) ([]kernelbridge.IrStatement, bool) {
+	if context == nil || context.Flow == nil {
+		return nil, false
+	}
+	access := Unwrapped(bin.Left)
+	if !ast.IsPropertyAccessExpression(access) {
+		return nil, false
+	}
+	switch bin.OperatorToken.Kind {
+	case ast.KindBarBarEqualsToken, ast.KindAmpersandAmpersandEqualsToken,
+		ast.KindQuestionQuestionEqualsToken:
+		// a short-circuiting compound: the setter runs on SOME runs and not
+		// others, and one call statement claims it ran on every one
+		if _, setter, resolved := AccessorDeclarationsOf(context.Flow, access); resolved && setter != nil {
+			NoteDeclinedConstruct(context, "a short-circuiting compound assignment through a setter")
+		}
+		return nil, false
+	}
+	op, isArithmetic := setterCompoundOps[bin.OperatorToken.Kind]
+	if !isArithmetic {
+		return nil, false
+	}
+	right, rightOk := EffectOf(context, bin.Right)
+	if !rightOk {
+		return nil, false
+	}
+	return setterReadModifyWrite(context, access, op, right)
+}
+
+/* ── the update: the compound with a constant operand ────────────── */
+
+// setterUpdateWriteOf lowers `o.x++` and `--o.x` where x resolves to a
+// get/set PAIR: the compound case with the constant 1 for its operand.
+//
+// PREFIX AND POSTFIX LOWER THE SAME. The two differ only in the VALUE
+// the expression itself answers — the stepped value for a prefix, the
+// value before the step for a postfix — and in a statement position
+// nothing reads that value. The EFFECT is identical: the getter runs,
+// one is added or subtracted, the setter runs. An update read for its
+// value belongs to the expression route, which does not claim it
+// (setterAssignmentEffect below reads only the assigning form, whose
+// value is the right side by the language's own rule).
+func setterUpdateWriteOf(context *LoweringContext, e *ast.Node) ([]kernelbridge.IrStatement, bool) {
+	if context == nil || context.Flow == nil {
+		return nil, false
+	}
+	var operator ast.Kind
+	var operand *ast.Node
+	switch {
+	case ast.IsPostfixUnaryExpression(e):
+		unary := e.AsPostfixUnaryExpression()
+		operator, operand = unary.Operator, unary.Operand
+	case ast.IsPrefixUnaryExpression(e):
+		unary := e.AsPrefixUnaryExpression()
+		operator, operand = unary.Operator, unary.Operand
+	default:
+		return nil, false
+	}
+	if operator != ast.KindPlusPlusToken && operator != ast.KindMinusMinusToken {
+		return nil, false
+	}
+	access := Unwrapped(operand)
+	if !ast.IsPropertyAccessExpression(access) {
+		return nil, false
+	}
+	op := kernelbridge.LoopOpAdd
+	if operator == ast.KindMinusMinusToken {
+		op = kernelbridge.LoopOpSub
+	}
+	return setterReadModifyWrite(context, access, op, constNumber(1))
+}
+
+// setterReadModifyWrite is the one body the compound and the update
+// share: the getter's read, the arithmetic against a lowered operand,
+// and the setter's call statement.
+//
+// The GETTER IS ASKED FIRST, and the order matters twice. It matters
+// for the run — the language reads before it writes — and it matters
+// for the lowering, because GetterReadEffect appends its call statement
+// to context.Hoisted, and a decline AFTER that append would leave a
+// hoist behind for a statement that lowered no other way. The statement
+// dispatch's own DropHoistedFrom truncates back to the statement's mark
+// on every decline, so a half-read compound leaves nothing — the same
+// contract every hoisting reader in the dispatch runs under.
+func setterReadModifyWrite(
+	context *LoweringContext,
+	access *ast.Node,
+	op kernelbridge.LoopEffectOp,
+	operand kernelbridge.LoopEffect,
+) ([]kernelbridge.IrStatement, bool) {
+	getter, setter, resolved := AccessorDeclarationsOf(context.Flow, access)
+	// both halves, or nothing: a compound through a get-only property
+	// writes what the language does not define, and one through a
+	// set-only property reads a property that has no getter
+	if !resolved || getter == nil || setter == nil {
+		return nil, false
+	}
+	held, readOk := GetterReadEffect(context, access)
+	if !readOk {
+		return nil, false
+	}
+	stepped := kernelbridge.LoopEffect{
+		Kind: kernelbridge.LoopEffectBinary,
+		Op:   op,
+		A:    &held,
+		B:    &operand,
+	}
+	return SetterWriteStatements(context, access, stepped)
+}
+
+/* ── the setter in expression position ───────────────────────────── */
+
+// SetterAssignmentEffect lowers `o.x = e` used as a VALUE — `f(o.x =
+// e)`, `y = (o.x = e)`, an arm of a ternary — rather than as a bare
+// statement.
+//
+// The language's own rule makes this the getter read's shape exactly.
+// An assignment expression's value is its RIGHT SIDE, not whatever the
+// setter did with it: `f(o.x = 3)` passes 3 to f however the setter
+// stored it, and reads the property back not at all. So the whole
+// lowering is
+//
+//	         call setter(e)      (hoisted)
+//	the expression's value := e
+//
+// — the setter's call statement pushed into context.Hoisted, which the
+// statement route flushes ahead of its own statements, and the answered
+// effect being the value the caller already lowered.
+//
+// A SETTER IN EXPRESSION POSITION WITH NO STATEMENT POSITION is the one
+// shape this cannot carry, and it is named rather than dropped. Where
+// CanHoist is false — a loop head, a branch test, any reading with no
+// statement stream (ir_lowering_context.go's own list) — there is
+// nowhere to put the call, and a call that runs on a path the IR does
+// not spell is a wrong answer, not a weak one. That decline calls
+// NoteDeclinedConstruct so the outcome report names the syntax someone
+// can act on.
+//
+// The COMPOUND and UPDATE forms in expression position are not read
+// here. Their value is the stepped value (or, for a postfix, the value
+// before the step), which is the GETTER's temp and not the right side —
+// a different reading, and one that also has to answer which of the two
+// the position wanted. This route claims the plain assignment alone,
+// whose value the language pins without any reading of the accessor at
+// all.
+func SetterAssignmentEffect(
+	context *LoweringContext,
+	e *ast.Node,
+) (kernelbridge.LoopEffect, bool) {
+	if context == nil || context.Flow == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	head := Unwrapped(e)
+	if !ast.IsBinaryExpression(head) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	bin := head.AsBinaryExpression()
+	if bin.OperatorToken.Kind != ast.KindEqualsToken {
+		return kernelbridge.LoopEffect{}, false
+	}
+	access := Unwrapped(bin.Left)
+	if !ast.IsPropertyAccessExpression(access) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	_, setter, resolved := AccessorDeclarationsOf(context.Flow, access)
+	if !resolved || setter == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if !context.CanHoist {
+		NoteDeclinedConstruct(context, "a setter in expression position")
+		return kernelbridge.LoopEffect{}, false
+	}
+	value, valueOk := setterValueEffect(context, access, bin.Right)
+	if !valueOk {
+		return kernelbridge.LoopEffect{}, false
+	}
+	written, writeOk := SetterWriteStatements(context, access, value)
+	if !writeOk {
+		NoteDeclinedConstruct(context, "a setter in expression position")
+		return kernelbridge.LoopEffect{}, false
+	}
+	context.Hoisted = append(context.Hoisted, written...)
+	// the assignment's value is the RIGHT SIDE by the language's rule —
+	// what the setter stored is the setter's business, and nothing here
+	// reads the property back
+	return value, true
 }

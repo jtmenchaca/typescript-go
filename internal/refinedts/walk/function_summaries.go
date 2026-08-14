@@ -451,6 +451,12 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 		inlining = map[*ast.Symbol]struct{}{}
 	}
 	if _, ok := inlining[symbol]; ok {
+		// no reference-argument forget here, deliberately — unlike the
+		// inline route's recursion arm (inline_contract_body.go, the
+		// tailwindcss fix): this route serves only through Summarize's
+		// EffectFree && SelfContained gate, and an effect-free callee
+		// cannot have mutated a reference argument or a closed-over name
+		// on any path, recursive ones included. The gate is the guard.
 		return RecursionMarker(symbol)
 	}
 	inlining[symbol] = struct{}{}

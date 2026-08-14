@@ -154,6 +154,20 @@ func LocalSort(declaration *ast.Node) BindingKind {
 	if SpelledSequenceShape(initializer) {
 		return BindingKindString
 	}
+	// a shape that is DEFINITELY not a number — an object, an array, a
+	// function value, a construction, a regex, a bigint — wears unknown,
+	// as this comment always promised: tests on it decline, which loses
+	// coverage and never soundness. Everything else reads numerically
+	// (booleans ride the number sort by the package's own rule).
+	head := Unwrapped(initializer)
+	if head != nil {
+		switch {
+		case ast.IsObjectLiteralExpression(head), ast.IsArrayLiteralExpression(head),
+			ast.IsFunctionLike(head), ast.IsNewExpression(head),
+			ast.IsRegularExpressionLiteral(head), ast.IsBigIntLiteral(head):
+			return BindingKindUnknown
+		}
+	}
 	return BindingKindNumber
 }
 

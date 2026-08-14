@@ -19,6 +19,38 @@ import (
 // admittedSortsOf is the TS source's admittedSortsOf: the sorts one
 // type states, or (nil, false) where it states no usable sort (an
 // unresolved alias, `any`, a bare object).
+//
+// A union is read member by member, and the two off-vocabulary sorts
+// are read differently because they say different things about what
+// the position lets through:
+//
+//   - SortOpaque is `any`/`unknown`. That member admits EVERY sort, so
+//     the union admits every sort: the answer for the whole union is
+//     "no usable sort" and the check must not fire. One opaque member
+//     does veto the union, and that veto is the sound reading, not a
+//     gap — `string | any` genuinely refutes nothing.
+//   - SortOther is a type outside the scalar vocabulary (an object, a
+//     function, a symbol, `undefined`/`null`/`void`, an alias that
+//     resolved to one of those). That member admits no scalar sort at
+//     all, so it contributes NOTHING to the admitted set rather than
+//     erasing what its siblings state. `string | Point` still states
+//     that a number is not allowed; the old code discarded that.
+//
+// The remaining question is what an all-other union means. A union
+// stating no scalar sort anywhere (`Point | Shape`) leaves the
+// admitted set empty, and an empty set would refute every word — which
+// is exactly the SortOpaque situation read backwards, since the sort
+// question does not apply to those types at all. So an empty result
+// answers (nil, false) too: this function only ever reports a set it
+// can defend, and the caller reads false as "this reading told me
+// nothing", never as "nothing is allowed".
+//
+// The caller (CheckAssignability, via CheckAdmittedSort) treats the
+// return as a boolean "was a refutation reported" — so a partial
+// answer is sound for it: the sorts the resolvable members state are
+// a genuine over-approximation of what the position admits, and a word
+// wearing none of them is refuted whatever the unresolvable members
+// turn out to be, since those members admit no scalar word either.
 func admittedSortsOf(ctx *FlowContext, t *checker.Type) (map[primitives.Sort]bool, bool) {
 	var parts []*checker.Type
 	if t.IsUnion() {
@@ -29,10 +61,19 @@ func admittedSortsOf(ctx *FlowContext, t *checker.Type) (map[primitives.Sort]boo
 	admitted := map[primitives.Sort]bool{}
 	for _, part := range parts {
 		s := primitives.PrimitiveKindOf(ctx.P.Checker, part)
-		if s == primitives.SortOpaque || s == primitives.SortOther {
+		if s == primitives.SortOpaque {
+			// `any` anywhere in the union admits every word
 			return nil, false
 		}
+		if s == primitives.SortOther {
+			// wears no scalar sort: adds nothing, vetoes nothing
+			continue
+		}
 		admitted[s] = true
+	}
+	if len(admitted) == 0 {
+		// no member states a scalar sort — the question does not apply
+		return nil, false
 	}
 	return admitted, true
 }

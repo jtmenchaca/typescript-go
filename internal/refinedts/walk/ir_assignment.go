@@ -319,6 +319,20 @@ func AssignmentOfExpression(context *LoweringContext, e *ast.Node) (AssignmentTa
 			Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectJoin, A: &targetVar, B: &right},
 		}, true
 	}
+	// `s += suffix` on a STRING-sorted slot is concatenation — exactly
+	// `s = s + suffix`, which already lowers; the compound spelling gets
+	// the same sequence reading instead of refusing on the number gate
+	if bin.OperatorToken.Kind == ast.KindPlusEqualsToken && context.Sorts[target] == BindingKindString {
+		right, rightOk := SequenceEffectOf(context, bin.Right)
+		if !rightOk {
+			return AssignmentTarget{}, false
+		}
+		targetVar := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: target}
+		return AssignmentTarget{
+			Target: target,
+			Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConcat, A: &targetVar, B: &right},
+		}, true
+	}
 	op, ok := compoundOps[bin.OperatorToken.Kind]
 	if !ok {
 		return AssignmentTarget{}, false

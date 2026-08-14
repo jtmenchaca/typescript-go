@@ -51,18 +51,29 @@ func analyzeFunctionBody(outer *FlowContext, contract *FunctionContract, callSit
 	parameters := contract.Declaration.Parameters()
 	for i, parameter := range parameters {
 		decl := parameter.AsParameterDeclaration()
-		if !ast.IsIdentifier(decl.Name()) {
-			continue
-		}
 		var stated *annotations.DeclaredRefinement
 		if i < len(contract.Params) {
 			stated = contract.Params[i]
 		}
+		if stated == nil {
+			continue
+		}
 		// a DEFAULT value flows into the stated position whenever the
 		// caller omits the argument — checked here, once, where it is
-		// written
-		if decl.Initializer != nil && stated != nil {
+		// written. The parameter's OWN default checks against the
+		// parameter's statement whatever its name spells: a
+		// destructured parameter (`function f({x}: T = {x: 1})`) states
+		// the same position an identifier parameter does, so the check
+		// no longer waits on the name being an identifier.
+		if decl.Initializer != nil {
 			CheckAssignability(&ctx, evaluateExpression(&ctx, env, decl.Initializer), *stated, decl.Initializer, "a default value", nil)
+		}
+		// a default written INSIDE the pattern (`function f({x = 1}: T)`,
+		// `function f([a = 0]: [N])`) fills its own key, not the whole
+		// parameter, so it checks against that key's statement — walked
+		// at every depth
+		if name := decl.Name(); name != nil && ast.IsBindingPattern(name) {
+			checkPatternDefaults(&ctx, env, name, stated)
 		}
 	}
 	BindEntryEnv(BindEntryEnvInput{
@@ -103,5 +114,91 @@ func analyzeFunctionBody(outer *FlowContext, contract *FunctionContract, callSit
 	returned := evaluateExpression(bodyCtx, env, body)
 	if result != nil {
 		CheckAssignability(bodyCtx, returned, *result, body, "a returned value", nil)
+	}
+}
+
+// checkPatternDefaults checks every default value written inside a
+// binding pattern against the statement the position it fills makes,
+// at any depth. `function f({x = 1}: T)` fills T's `x` key when the
+// caller omits it, exactly as a plain parameter's default fills the
+// parameter — so it owes the same check, and got none before this.
+//
+// The statement is walked down alongside the pattern: an object
+// pattern's element takes its key's statement out of the DeclaredObject
+// it is destructuring, and a nested pattern recurses under that key.
+// Where the walk cannot name the position a default fills — an array
+// pattern (an element index states no key here), a computed or
+// non-identifier property name, a rest element (it holds the
+// remainder, not one key), or a statement that is not an object —
+// nothing is checked and nothing is claimed: the default is left
+// unjudged rather than judged against the wrong statement.
+func checkPatternDefaults(ctx *FlowContext, env Env, pattern *ast.Node, stated *annotations.DeclaredRefinement) {
+	// a maybe-wrapped statement states its inner shape for the keys
+	// the pattern names; absence is the caller's question, not the
+	// default's — the default runs exactly when the value is absent
+	for stated != nil && stated.Kind == annotations.DeclaredPossiblyUndefined {
+		stated = stated.Inner
+	}
+	var keys map[string]annotations.ObjectKeySpec
+	if stated != nil && stated.Kind == annotations.DeclaredObject && stated.Object != nil {
+		keys = map[string]annotations.ObjectKeySpec{}
+		for _, key := range stated.Object.Keys {
+			keys[key.Name] = key
+		}
+	}
+	for _, element := range pattern.AsBindingPattern().Elements.Nodes {
+		if element == nil || !ast.IsBindingElement(element) {
+			// an omitted hole (`[, b]`) binds nothing
+			continue
+		}
+		binding := element.AsBindingElement()
+		// a rest element holds the REMAINDER, which no single key
+		// states
+		if binding.DotDotDotToken != nil {
+			continue
+		}
+		// which key this element reads: its property name when it
+		// renames (`{a: b}`), otherwise its own bound name
+		var keyName string
+		hasKey := false
+		if binding.PropertyName != nil {
+			if ast.IsIdentifier(binding.PropertyName) {
+				keyName, hasKey = binding.PropertyName.Text(), true
+			} else if ast.IsStringLiteral(binding.PropertyName) {
+				keyName, hasKey = binding.PropertyName.Text(), true
+			}
+		} else if name := binding.Name(); name != nil && ast.IsIdentifier(name) {
+			keyName, hasKey = name.Text(), true
+		}
+		// the statement this element's position makes, when the key
+		// is named and the surrounding statement spells it
+		var elementStated *annotations.DeclaredRefinement
+		if hasKey && keys != nil {
+			if key, found := keys[keyName]; found {
+				switch key.Value.Kind {
+				case annotations.KeyValueSet:
+					elementStated = &annotations.DeclaredRefinement{
+						Kind:     annotations.DeclaredSet,
+						Set:      key.Value.Set,
+						KindTag:  key.Value.KindTag,
+						Measures: key.Value.Measures,
+						Word:     key.Value.Word,
+					}
+				case annotations.KeyValueObject:
+					elementStated = &annotations.DeclaredRefinement{
+						Kind:   annotations.DeclaredObject,
+						Object: key.Value.Object,
+					}
+				}
+			}
+		}
+		if binding.Initializer != nil && elementStated != nil {
+			CheckAssignability(ctx, evaluateExpression(ctx, env, binding.Initializer), *elementStated,
+				binding.Initializer, "a default value", nil)
+		}
+		// a nested pattern's own defaults check one level down
+		if name := binding.Name(); name != nil && ast.IsBindingPattern(name) {
+			checkPatternDefaults(ctx, env, name, elementStated)
+		}
 	}
 }

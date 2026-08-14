@@ -40,13 +40,49 @@
 // `xs.map(async cb)` and `xs.map(cb)` lower identically and the await
 // over the result adds nothing.
 //
-// The recognized statement forms — each total-or-decline. The first four
-// stand over a FLATTENED array receiver whose "xs.len"/"xs.elem" slots
-// resolve:
+// A callback does NOT have to be spelled inline. A callback argument
+// that NAMES a function — `xs.forEach(handler)`, `xs.map(this.render)`
+// — converts on exactly the arrow's terms, with the named declaration's
+// own parameters and body standing where the arrow's would (see
+// callbackFunctionOf). What the reference costs is the receiver: a
+// method handed over BARE loses its binding, so at the traversal's call
+// the runtime `this` is undefined rather than the object the method was
+// read off. The rule that keeps that honest is the narrowest sound one
+// — a referenced body that mentions `this` anywhere DECLINES, whatever
+// the spelling it was reached through, and a body free of `this` cannot
+// tell the difference between being called bare and being called on its
+// owner, so it converts.
+//
+// The recognized statement forms — each total-or-decline. The array
+// forms stand over a FLATTENED array receiver whose "xs.len"/"xs.elem"
+// slots resolve:
 //
 //	ys = xs.map(cb)     → ys.len := var xs.len; call cb at xs.elem → ys.elem
 //	xs.forEach(cb)      → call cb at xs.elem, no ret
 //	ys = xs.filter(cb)  → ys.elem := var xs.elem; ys.len := integer ≥ 0
+//	ys = xs.find(cb)    → call cb at xs.elem with no ret (the predicate's
+//	                      own answer is not what find returns), then
+//	                      ys := xs.elem OR-ABSENT — find hands back an
+//	                      element the array held, or undefined where no
+//	                      element passed, and the or-absent effect is
+//	                      exactly that pair
+//	ys = xs.reduce(cb, seed)  → call cb with the ACCUMULATOR entry first
+//	                      and the element second (reduce shifts every
+//	                      slot one over, which is the same shift
+//	                      ArrayCallbackPins spells), ret → ys. The seed
+//	                      fills the accumulator entry; the FOLD is not
+//	                      unrolled — the entry is the JOIN of the seed
+//	                      and cb's own ret, which covers the accumulator
+//	                      at every pass, the same join-of-elements
+//	                      argument the element slot already rides
+//	ys = xs.flatMap(cb) → call cb at xs.elem for its EFFECTS, ys := unknown
+//	                      — flatMap's result is the CONCATENATION of cb's
+//	                      per-element arrays, and the two-slot flattening
+//	                      has no spelling for an array of arrays flattened
+//	                      one level. The callback still converts, which is
+//	                      the point: an effectful or unconvertible cb
+//	                      declines the statement instead of passing
+//	                      unread, and the result honestly answers nothing
 //	ys = await Promise.all(xs.map(cb))  → the map lowering above
 //
 // over a FLATTENED Map or Set whose "m.size"/"m.vals"(/"m.keys") family
@@ -123,6 +159,127 @@ func arrowFunctionOf(argument *ast.Node) *ast.Node {
 		return head
 	}
 	return nil
+}
+
+// mentionsThis is whether a subtree reads `this` ANYWHERE — as a value,
+// as a call receiver, as a property root. Unlike scanFreeNames, which
+// lets `this.m(…)` pass because the receiver is consumed by the callee
+// resolution, this one admits no position at all: it answers the
+// question a REFERENCE asks, which is whether the body would notice
+// being called with a different receiver, and a `this.m(…)` call would
+// notice as surely as a `this.field` read.
+//
+// A nested function is walked into as well, and that over-reports: an
+// inner function expression's own `this` is its own. The over-report
+// only ever declines more, which is the safe direction here, and the
+// free-name scan declines nested functions outright anyway.
+func mentionsThis(node *ast.Node) bool {
+	if node == nil {
+		return false
+	}
+	found := false
+	var visit func(child *ast.Node) bool
+	visit = func(child *ast.Node) bool {
+		if found {
+			return true
+		}
+		if child.Kind == ast.KindThisKeyword {
+			found = true
+			return true
+		}
+		child.ForEachChild(visit)
+		return false
+	}
+	visit(node)
+	return found
+}
+
+// referencedFunctionOf is the declaration a callback argument NAMES,
+// where the argument is a bare identifier (`xs.forEach(handler)`) or a
+// `this.<name>` property read (`xs.forEach(this.onItem)`), resolved
+// through the lowering context's own ResolveCallee — the same
+// resolution the call routes use, so a name never stands for one
+// declaration here and another there.
+//
+// The RECEIVER RULE, and why it is the one below. Handing a method over
+// by name does not hand its receiver over with it: `xs.forEach(this.f)`
+// calls f with `this` undefined (or the traversal's own thisArg), not
+// with the object f was read off. A conversion that lowered f's body as
+// though `this` were still bound would read the caller's this-bundle
+// slots for values the run never sees there — a wrong answer, not a
+// weak one.
+//
+// So the rule is a body census rather than a spelling census: a
+// referenced body that mentions `this` in ANY position declines, naming
+// a method reference losing its receiver. A body with no `this` at all
+// cannot observe which receiver it was called on, so the bare call and
+// the bound call agree on every value, and the conversion is sound
+// whether the name was reached as a free function, an arrow held in a
+// const, or a method read off `this`. Free functions and const-held
+// arrows pass this census by construction, which is why they are the
+// shapes that convert in practice.
+//
+// A body-less declaration, a generator, and an overridden method all
+// answer nil through summaryLowerable and ResolveCallee's own gates.
+func referencedFunctionOf(context *LoweringContext, argument *ast.Node) *ast.Node {
+	if context == nil || context.ResolveCallee == nil || argument == nil {
+		return nil
+	}
+	head := Unwrapped(argument)
+	if head == nil {
+		return nil
+	}
+	// the two reference spellings a slot-shaped lowering can name: a bare
+	// identifier, and one `this.` step. Anything deeper (`a.b.f`) or
+	// computed (`a[k]`) is left alone — ResolveCallee would answer for
+	// the property name, and the extra steps are receiver structure this
+	// route makes no claim about.
+	switch {
+	case ast.IsIdentifier(head):
+	case ast.IsPropertyAccessExpression(head):
+		access := head.AsPropertyAccessExpression()
+		if access.QuestionDotToken != nil || !ast.IsIdentifier(access.Name()) {
+			return nil
+		}
+		if Unwrapped(access.Expression).Kind != ast.KindThisKeyword {
+			return nil
+		}
+	default:
+		return nil
+	}
+	declaration := context.ResolveCallee(head)
+	if declaration == nil || !summaryLowerable(declaration) {
+		return nil
+	}
+	// a method reference losing its receiver: the body would read a
+	// `this` the bare call does not supply
+	if mentionsThis(declaration.Body()) {
+		return nil
+	}
+	return declaration
+}
+
+// callbackFunctionOf is the function a callback argument stands for,
+// whichever way it was spelled: the inline arrow or function expression
+// arrowFunctionOf reads, or the declaration a name refers to. Every
+// route in this file that used to ask arrowFunctionOf asks this
+// instead, so an inline arrow and a named reference convert on one set
+// of terms rather than two.
+//
+// The answer is a node with .Parameters() and .Body(), which is all the
+// conversion below reads — lowerArrowSummary lowers a function
+// declaration through the same door it lowers an arrow, and the blob
+// cache keys on the node either way. A referenced declaration reached
+// from two different traversals is ONE node, so the cache's
+// layout-agreement check (sameParameterSorts / sameCaptures) is what
+// keeps two sites from sharing a blob they disagree about — the same
+// protection an arrow gets, now doing real work, since a named function
+// genuinely can be passed to two collections of different element sorts.
+func callbackFunctionOf(context *LoweringContext, argument *ast.Node) *ast.Node {
+	if arrow := arrowFunctionOf(argument); arrow != nil {
+		return arrow
+	}
+	return referencedFunctionOf(context, argument)
 }
 
 // arrowParameterNames is an arrow's declared parameter names, or
@@ -505,7 +662,7 @@ func arrowParameterSorts(entries []callbackEntry) []parameterSlotSort {
 // The blob is remembered under the arrow NODE, not in the declaration-
 // keyed registry: an arrow belongs to its one site.
 func convertArrow(context *LoweringContext, argument *ast.Node, entries []callbackEntry) (convertedArrow, bool) {
-	arrow := arrowFunctionOf(argument)
+	arrow := callbackFunctionOf(context, argument)
 	if arrow == nil {
 		return convertedArrow{}, false
 	}

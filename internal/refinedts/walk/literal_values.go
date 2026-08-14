@@ -8,6 +8,7 @@ package walk
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
@@ -45,9 +46,14 @@ func EvaluateLiteral(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abs
 		if len(trimmed) > 0 && trimmed[len(trimmed)-1] == 'n' {
 			trimmed = trimmed[:len(trimmed)-1]
 		}
-		v, err := strconv.ParseInt(trimmed, 10, 64)
+		// numeric separators are spelling, not value; base 0 reads the
+		// 0x/0o/0b prefixes the literal grammar admits. A magnitude past
+		// int64 has no representation here — the reading DECLINES and the
+		// caller treats the literal as unrecognized, never a crash.
+		trimmed = strings.ReplaceAll(trimmed, "_", "")
+		v, err := strconv.ParseInt(trimmed, 0, 64)
 		if err != nil {
-			panic(err)
+			return abstractdomain.AbstractValue{}, false
 		}
 		return abstractdomain.AbstractValue{Kind: abstractdomain.KindBigints, BigintValues: []int64{v}}, true
 	}
