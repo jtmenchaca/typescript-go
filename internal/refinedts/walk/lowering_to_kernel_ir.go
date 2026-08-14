@@ -585,6 +585,33 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			}
 			continue
 		}
+		// `try { … } catch { … }` — the opaque branch over the two
+		// completions: the try whole, or an interrupted prefix's havoc
+		// then the catch (ir_try_lowering.go).
+		if ast.IsTryStatement(s) {
+			if viaTry, ok := LowerTryStatement(context, s); ok {
+				out = append(out, viaTry...)
+				// an arm that RETURNED gates the rest on the done flag,
+				// exactly as a returning switch arm does
+				if context.Result != nil && RaisesDone(viaTry, context.Result.Done) {
+					rest, restOk := LowerStatements(context, statements[index+1:])
+					if !restOk {
+						return nil, false
+					}
+					if len(rest) > 0 {
+						out = append(out, kernelbridge.IrStatement{
+							Kind: kernelbridge.IrStatementBranch,
+							On:   context.Result.Done,
+							Test: kernelbridge.IrTestTruthyNum,
+							Then: nil,
+							Else: rest,
+						})
+					}
+					return out, true
+				}
+				continue
+			}
+		}
 		if ast.IsIfStatement(s) {
 			ifStmt := s.AsIfStatement()
 			// `if (i < a.length) { … a[i] … }`: inside the THEN arm the
