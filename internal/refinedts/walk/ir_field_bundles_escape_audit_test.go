@@ -204,13 +204,22 @@ func TestEscapeAudit_ThisReadByANestedArrow(t *testing.T) {
 	}
 }
 
-// an arrow that CALLS a method keeps the escape: the method's body may
-// write fields at a time the scan cannot place.
-func TestEscapeAudit_AMethodCallingArrowStillEscapes(t *testing.T) {
+// an arrow that CALLS a method is collected, not blindly escaped — and
+// the PROPERTY that matters holds: no consumer without the capture-
+// havoc machinery may believe the bundle (Believable refuses), and the
+// one consumer that admits it must compute the methods' transitive
+// write set first (thisBundleOf keeps the escape when it cannot).
+func TestEscapeAudit_AMethodCallingArrowIsCollectedAndNotBelievable(t *testing.T) {
 	census := auditMethodCensus(t,
 		"class C { count: number; m(xs: number[]) { xs.forEach(() => { this.bump(); }); } }")
-	if !census.Escapes {
-		t.Errorf("an arrow calling this.bump() did not escape: %+v — the method may write count", census)
+	if census.Escapes {
+		t.Errorf("an arrow calling this.bump() escaped at the census: %+v — the call is collected, not blind", census)
+	}
+	if len(census.CapturedMethodCalls) != 1 || census.CapturedMethodCalls[0] != "bump" {
+		t.Errorf("CapturedMethodCalls = %v, want [bump]", census.CapturedMethodCalls)
+	}
+	if census.Believable() {
+		t.Errorf("a method-calling capture answered believable — a consumer without the havoc machinery would trust fields the method can move")
 	}
 }
 

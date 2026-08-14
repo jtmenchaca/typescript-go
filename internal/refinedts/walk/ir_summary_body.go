@@ -460,6 +460,13 @@ type thisBundleLayout struct {
 	Written  map[string]struct{}
 	Expanded bool
 	Escaped  bool
+	// CaptureHavocNames: the slot spellings ("this.count") of the fields a
+	// method-calling CAPTURE can move — the captured methods' transitive
+	// write set. Non-empty puts the body's statement walk in havoc mode
+	// (LoweringContext.CaptureHavocSlots); each named field is also in
+	// Written, so the call sites read its exit state instead of keeping
+	// the caller's own.
+	CaptureHavocNames []string
 }
 
 // thisBundleOf reads a declaration's `this` bundle: (nothing) for
@@ -510,18 +517,34 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 		return thisBundleLayout{}
 	}
 	census := FieldCensusOf(body, "this", BundleFieldsAs("this", fields))
-	// an escape and a computed STORE both move the object through
-	// something no slot names, so neither leaves a believable bundle; both
-	// ride out under the one flag the callers already read
-	if !census.Believable() {
+	// a METHOD-CALLING capture is admissible HERE, because this consumer
+	// has the havoc machinery: the captured methods' transitive write set
+	// becomes the havoc slots every code-running statement brackets, and
+	// each of those fields is marked written so the call sites read its
+	// exit state. An incomputable write set keeps the escape.
+	var captureHavocNames []string
+	if len(census.CapturedMethodCalls) > 0 && !census.Escapes && !census.ComputedWrite {
+		wipes, computable := CaptureWriteSet(classLike, fields, census.CapturedMethodCalls)
+		if !computable {
+			return thisBundleLayout{Escaped: true}
+		}
+		for _, field := range wipes {
+			captureHavocNames = append(captureHavocNames, "this."+field.Name)
+		}
+	} else if !census.Believable() {
+		// an escape and a computed STORE both move the object through
+		// something no slot names — no believable bundle either way
 		return thisBundleLayout{Escaped: true}
 	}
-	if len(census.Reads) == 0 && len(census.Writes) == 0 {
+	if len(census.Reads) == 0 && len(census.Writes) == 0 && len(captureHavocNames) == 0 {
 		return thisBundleLayout{}
 	}
 	written := map[string]struct{}{}
 	for _, field := range census.Writes {
 		written[field.SlotName] = struct{}{}
+	}
+	for _, name := range captureHavocNames {
+		written[name] = struct{}{}
 	}
 	// the READ fields carry entries. A write-only field has no entry state
 	// for the caller to fill — its slot is one the body creates, which the
@@ -535,7 +558,12 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 			TypeofTag: field.TypeofTag,
 		})
 	}
-	return thisBundleLayout{Entries: entries, Written: written, Expanded: len(entries) > 0}
+	return thisBundleLayout{
+		Entries:           entries,
+		Written:           written,
+		Expanded:          len(entries) > 0,
+		CaptureHavocNames: captureHavocNames,
+	}
 }
 
 // summarySlotBudget is the summary route's own slot ceiling — the same
@@ -1239,6 +1267,15 @@ func lowerSummaryBodyReporting(
 	// sight before any statement could.
 	if bundle.Escaped {
 		NoteFirstHavoc(context, "this escapes")
+	}
+	// a method-calling capture's havoc set, resolved to slot indices —
+	// non-empty puts the statement walk in havoc mode. A havocked FIELD with
+	// no slot (a write-only field the layout gave no entry) needs none:
+	// no slot means no belief to invalidate.
+	for _, havocName := range bundle.CaptureHavocNames {
+		if slot, held := slotIndexOfName(context, havocName); held {
+			context.CaptureHavocSlots = append(context.CaptureHavocSlots, slot)
+		}
 	}
 	// allocate grows the CONTEXT's own vectors, not copies of them: a slot
 	// handed out past the initial layout must be readable through

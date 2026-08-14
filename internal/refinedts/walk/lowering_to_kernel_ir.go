@@ -104,6 +104,22 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 	flush := func(out []kernelbridge.IrStatement) []kernelbridge.IrStatement {
 		return append(out, TakeHoisted(context)...)
 	}
+	// THE CAPTURE HAVOCS: a body that admitted a method-calling capture
+	// carries the captured methods' transitive write set in
+	// CaptureHavocSlots. The stored closure may run inside ANY code the
+	// body executes, so every code-running statement is bracketed by
+	// unknown-assigns of that set — BEFORE, so nothing the statement
+	// reads pretends those fields held still across earlier code, and
+	// AFTER, so nothing later does. A code-running statement that is not
+	// a return or a throw is floored outright: its fine-grained routes
+	// could interleave a served call between a havoc and a field read.
+	captureHavocSet := map[int]struct{}{}
+	for _, slot := range context.CaptureHavocSlots {
+		if slot >= 0 {
+			captureHavocSet[slot] = struct{}{}
+		}
+	}
+	captureHavocAfter := false
 	for index := 0; index < len(statements); index++ {
 		s := statements[index]
 		// the readers may hoist for THIS statement, and the ordering gate
@@ -116,6 +132,22 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 		context.HoistedTemp = nil
 		mark := HoistedMark(context)
 		dropHoists := func() { DropHoistedFrom(context, mark) }
+		if captureHavocAfter {
+			out = append(out, havocAssignments(captureHavocSet)...)
+			captureHavocAfter = false
+		}
+		if len(captureHavocSet) > 0 && StatementRunsCode(s) {
+			out = append(out, havocAssignments(captureHavocSet)...)
+			captureHavocAfter = true
+			if !ast.IsReturnStatement(s) && !throwCarryingStatement(s) {
+				havoc, havocOk := havocFloor(s)
+				if !havocOk {
+					return nil, false
+				}
+				out = append(out, havoc...)
+				continue
+			}
+		}
 		// `return e`: the result slot takes e, the done flag raises, and
 		// the rest of this block never runs — dead statements simply do
 		// not lower. A bare `return` raises the flag alone; the result
@@ -690,6 +722,12 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			return nil, false
 		}
 		out = append(out, havoc...)
+	}
+	// the trailing havoc: a code-running LAST statement (a return whose
+	// expression called, a final registration) leaves the havoc set
+	// moved, and the write-back reads the exit state
+	if captureHavocAfter {
+		out = append(out, havocAssignments(captureHavocSet)...)
 	}
 	return out, true
 }

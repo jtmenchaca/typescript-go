@@ -538,6 +538,35 @@ func throwCarryingStatement(node *ast.Node) bool {
 	return ast.IsThrowStatement(node)
 }
 
+// StatementRunsCode answers whether a statement's subtree can execute
+// a callee — a call, a construction, an await, a yield, a tagged
+// template. The capture-havoc bracketing reads it: any such execution
+// may run a stored closure. (A getter behind a plain property read
+// still runs code this test does not see — the standing gap every
+// syntactic write/call test in this package accepts.)
+func StatementRunsCode(node *ast.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case ast.KindCallExpression, ast.KindNewExpression, ast.KindAwaitExpression,
+		ast.KindYieldExpression, ast.KindTaggedTemplateExpression:
+		return true
+	}
+	runs := false
+	node.ForEachChild(func(child *ast.Node) bool {
+		if runs {
+			return true
+		}
+		if StatementRunsCode(child) {
+			runs = true
+			return true
+		}
+		return false
+	})
+	return runs
+}
+
 /* ── the enumeration ─────────────────────────────────────────────── */
 
 // havocSlotsOfStatement collects (a), (b) and (c) for one statement.

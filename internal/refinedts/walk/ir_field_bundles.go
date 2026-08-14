@@ -321,6 +321,20 @@ type FieldCensus struct {
 	Computed      bool
 	ComputedWrite bool
 	Escapes       bool
+	// CapturedMethodCalls: the receiver METHODS a nested closure calls
+	// (`xs.forEach(x => this.insert(x))`). Such a capture is not an
+	// escape by itself — the closure may run at any later time, so the
+	// consumer must treat every field those methods can write
+	// (transitively) as movable at EVERY call statement in the body,
+	// and refuse the bundle when that write set cannot be computed.
+	// Deduplicated, in first-mention order.
+	CapturedMethodCalls []string
+	// DirectMethodCalls: the receiver methods the body calls in plain
+	// statement position (`this.register(x)`). These lower as real call
+	// statements and need nothing from the census — the field exists for
+	// CaptureWriteSet's closure, where a captured method's own direct
+	// calls carry its transitive writes.
+	DirectMethodCalls []string
 }
 
 // FieldCensusOf scans a body for what it does with `receiverName` —
@@ -606,9 +620,21 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 			if !mentionsReceiver(node, receiverName) {
 				return false
 			}
-			if reads, readOnly := readOnlyFieldMentions(node, isReceiver, byName); readOnly {
+			if reads, called, admissible := captureMentions(node, isReceiver, byName); admissible {
 				for _, name := range reads {
 					noteRead(name)
+				}
+				for _, method := range called {
+					already := false
+					for _, held := range census.CapturedMethodCalls {
+						if held == method {
+							already = true
+							break
+						}
+					}
+					if !already {
+						census.CapturedMethodCalls = append(census.CapturedMethodCalls, method)
+					}
 				}
 				return false
 			}
@@ -713,7 +739,20 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 			call := node.AsCallExpression()
 			if call.QuestionDotToken == nil {
 				if name, isField := fieldAccessOf(Unwrapped(call.Expression)); isField {
-					noteRead(name)
+					if !noteRead(name) {
+						// the callee is a METHOD name, not a field — recorded
+						// for CaptureWriteSet's closure, nothing else
+						already := false
+						for _, held := range census.DirectMethodCalls {
+							if held == name {
+								already = true
+								break
+							}
+						}
+						if !already {
+							census.DirectMethodCalls = append(census.DirectMethodCalls, name)
+						}
+					}
 					consumeReceiver(consumed, Unwrapped(call.Expression))
 					consumed[call.Expression] = struct{}{}
 					for _, argument := range call.Arguments.Nodes {
@@ -781,7 +820,75 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 // agree about which bodies expand, and three spellings of one condition
 // is three chances to drift.
 func (census FieldCensus) Believable() bool {
-	return !census.Escapes && !census.ComputedWrite
+	// a method-calling capture is not believable HERE: the consumer that
+	// can compute the captured methods' transitive write set (and havoc
+	// those fields at every call statement) admits it through its own
+	// gate — every consumer without that machinery refuses, exactly as
+	// it refused when the shape was an escape.
+	return !census.Escapes && !census.ComputedWrite && len(census.CapturedMethodCalls) == 0
+}
+
+// CaptureWriteSet answers every field the collected capture-called
+// methods can WRITE, transitively through the class's own methods — the
+// havoc set a consumer applies at every call statement when it admits a
+// method-calling capture.
+//
+// The closure is over the class's declared methods alone. Each visited
+// method's own census must itself be tame: no escape, no computed
+// write; its Writes accumulate, and its own captured method calls join
+// the worklist. Any method the class does not declare as a plain
+// method-with-body (an inherited name, an accessor, an overload
+// signature, a computed name) makes the whole set incomputable and the
+// answer is (nil, false) — the caller then keeps the escape.
+func CaptureWriteSet(classLike *ast.Node, fields []BundleField, methods []string) ([]BundleField, bool) {
+	if classLike == nil || !ast.IsClassLike(classLike) {
+		return nil, false
+	}
+	spelled := BundleFieldsAs("this", fields)
+	written := map[string]struct{}{}
+	seen := map[string]struct{}{}
+	worklist := append([]string{}, methods...)
+	for len(worklist) > 0 {
+		name := worklist[0]
+		worklist = worklist[1:]
+		if _, visited := seen[name]; visited {
+			continue
+		}
+		seen[name] = struct{}{}
+		var body *ast.Node
+		for _, member := range classLike.ClassLikeData().Members.Nodes {
+			if !ast.IsMethodDeclaration(member) {
+				continue
+			}
+			memberName := member.Name()
+			if memberName == nil || !ast.IsIdentifier(memberName) || memberName.Text() != name {
+				continue
+			}
+			body = member.Body()
+			break
+		}
+		if body == nil {
+			// an inherited method, an accessor, an arrow-valued property, a
+			// bodyless overload — its writes are unenumerable
+			return nil, false
+		}
+		census := FieldCensusOf(body, "this", spelled)
+		if census.Escapes || census.ComputedWrite {
+			return nil, false
+		}
+		for _, field := range census.Writes {
+			written[field.Name] = struct{}{}
+		}
+		worklist = append(worklist, census.CapturedMethodCalls...)
+		worklist = append(worklist, census.DirectMethodCalls...)
+	}
+	out := make([]BundleField, 0, len(written))
+	for _, field := range fields {
+		if _, wrote := written[field.Name]; wrote {
+			out = append(out, field)
+		}
+	}
+	return out, true
 }
 
 // consumeReceiver marks the receiver spelling inside a recognized access
@@ -824,23 +931,25 @@ func isPropertyStepName(node *ast.Node) bool {
 	return false
 }
 
-// readOnlyFieldMentions walks a NESTED FUNCTION's subtree and answers
-// the declared fields it reads through the receiver — provided every
-// receiver mention is exactly such a read. The moment any mention is
-// anything else — a write target, a method-call callee (the method's
-// body may write), an optional or computed step, an undeclared member,
-// a bare mention — the answer is (nil, false) and the caller keeps the
-// escape.
+// captureMentions walks a NESTED FUNCTION's subtree and answers the
+// declared fields it READS through the receiver and the receiver
+// METHODS it CALLS — provided every receiver mention is one of exactly
+// those two shapes. Anything else — a write target, an optional or
+// computed step, an undeclared member read, a bare mention — answers
+// (nil, nil, false) and the caller keeps the escape.
 //
 // A read is admissible from inside a closure that runs at ANY later
-// time because reading moves nothing: no belief the enclosing body
-// holds about a field is invalidated by a read interleaving with it.
-func readOnlyFieldMentions(
+// time because reading moves nothing. A method CALL is admissible only
+// conditionally: the consumer must compute the transitive write set of
+// every collected method and treat those fields as movable at every
+// call statement — captureMentions only collects the names.
+func captureMentions(
 	node *ast.Node,
 	isReceiver func(*ast.Node) bool,
 	byName map[string]BundleField,
-) ([]string, bool) {
+) ([]string, []string, bool) {
 	var reads []string
+	var calledMethods []string
 	readOnly := true
 	var visit func(child *ast.Node) bool
 	visit = func(child *ast.Node) bool {
@@ -879,14 +988,29 @@ func readOnlyFieldMentions(
 			readOnly = false
 			return true
 		}
-		// a CALL whose callee is a receiver access is a METHOD call — the
-		// method's body may write fields this scan cannot see
+		// a CALL whose callee is a receiver access is a METHOD call. The
+		// method's body may write fields, so the call is not a read — but
+		// it is not blind either: the method NAME is collected, and the
+		// consumer decides whether the transitive write set of every
+		// collected method is computable. A non-identifier or optional
+		// callee step fails outright. The ARGUMENTS walk on under the
+		// same rules.
 		if ast.IsCallExpression(child) {
-			callee := Unwrapped(child.AsCallExpression().Expression)
+			call := child.AsCallExpression()
+			callee := Unwrapped(call.Expression)
 			if ast.IsPropertyAccessExpression(callee) &&
 				isReceiver(Unwrapped(callee.AsPropertyAccessExpression().Expression)) {
-				readOnly = false
-				return true
+				access := callee.AsPropertyAccessExpression()
+				if call.QuestionDotToken != nil || access.QuestionDotToken != nil ||
+					!ast.IsIdentifier(access.Name()) {
+					readOnly = false
+					return true
+				}
+				calledMethods = append(calledMethods, access.Name().Text())
+				for _, argument := range call.Arguments.Nodes {
+					visit(argument)
+				}
+				return false
 			}
 		}
 		// a plain declared-field READ: record it and step over the
@@ -917,9 +1041,9 @@ func readOnlyFieldMentions(
 	}
 	node.ForEachChild(visit)
 	if !readOnly {
-		return nil, false
+		return nil, nil, false
 	}
-	return reads, true
+	return reads, calledMethods, true
 }
 
 // mentionsReceiverNode is mentionsReceiver over a receiver PREDICATE

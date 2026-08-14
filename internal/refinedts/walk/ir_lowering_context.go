@@ -71,6 +71,13 @@ type LoweringContext struct {
 	// lowering appends to the SAME table the whole body rides with.
 	// Nil: call statements decline (no table to grow).
 	SummaryTable *SummaryTableBuilder
+	// CaptureHavocSlots: the this-bundle slots a method-calling CAPTURE
+	// can move (the captured methods' transitive write set, resolved to
+	// slot indices). Non-empty puts the statement walk in havoc mode:
+	// every statement that runs code is bracketed by unknown-assigns of
+	// these slots, because the stored closure may run inside any callee.
+	// Empty (the routine case) changes nothing.
+	CaptureHavocSlots []int
 	// FirstHavoc: the spelling of the FIRST construct this lowering
 	// havocked, or "" where nothing did. Set once — the first havoc
 	// route to reach it wins, and every later one leaves it alone — so
