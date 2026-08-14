@@ -1094,15 +1094,11 @@ func TestKernelSummaryDirect_ABodyDeclaringANestedArrowLowersPorouslyAndKeepsIts
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
-	if outcome != SummaryPorous {
-		t.Errorf("outcome = %q, want porous — the declaration statement havocked", outcome)
-	}
-	// THE FLOOR'S OWN SPELLING for this statement, recorded rather than
-	// asserted finer: havocConstructName (ir_opaque_havoc.go) names a
-	// VariableStatement "declaration", not "a nested function". Naming it
-	// finely is that file's vocabulary work, not this one's.
-	if construct != "declaration" {
-		t.Errorf("construct = %q, want %q — the floor's own naming for a variable statement", construct, "declaration")
+	// the closure touches no tracked state — creating it runs nothing,
+	// `cb` takes unknown by the function-valued declaration's own rule,
+	// and the body is read whole
+	if outcome != SummaryComplete {
+		t.Errorf("outcome = %q (construct %q), want complete — an inert closure declaration is read, not floored", outcome, construct)
 	}
 	// THE OTHER STATEMENTS' KNOWLEDGE SURVIVES. A porous body is never
 	// compiled (it can never serve), so the property is read off the

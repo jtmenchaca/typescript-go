@@ -87,20 +87,27 @@ func TestDefaultedParameter_TheBodyRecordsComplete(t *testing.T) {
 	}
 }
 
-// A default the effect grammar cannot spell — an object literal —
-// havocs its own slot and the body stays porous, never complete: a
-// complete claim would serve an answer the inline walk (which reads
-// the default) could beat.
-func TestDefaultedParameter_AnUnspellableDefaultIsPorousNotComplete(t *testing.T) {
+// An OBJECT-LITERAL default is read as the inert value it is: creating
+// `{}` moves nothing, its value has no scalar spelling, and the slot
+// takes unknown under the definedness branch — the body is complete,
+// and a default whose construction RUNS CODE still havocs and names
+// itself.
+func TestDefaultedParameter_AnObjectDefaultIsReadAsUnknown(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearSummaryOutcomes()
 	outcome, construct := outcomeOf(t, summaryDeclarationOf(t,
 		"function f(opts: object = {}) { return 1; }"))
-	if outcome == SummaryComplete {
-		t.Errorf("outcome = complete — the object default was not read, so complete overstates")
+	if outcome != SummaryComplete {
+		t.Errorf("outcome = %q (construct %q), want complete — `{}` moves nothing and unknown is its honest value", outcome, construct)
 	}
-	if outcome == SummaryPorous && construct != "a defaulted parameter" {
-		t.Errorf("construct = %q, want %q", construct, "a defaulted parameter")
+	ClearSummaryOutcomes()
+	running, runningConstruct := outcomeOf(t, summaryDeclarationOf(t,
+		"function f(opts: object = make()) { return 1; }"))
+	if running == SummaryComplete {
+		t.Errorf("outcome = complete for a default that CALLS — make() runs code the prelude never spelled")
+	}
+	if running == SummaryPorous && runningConstruct != "a defaulted parameter" {
+		t.Errorf("construct = %q, want %q", runningConstruct, "a defaulted parameter")
 	}
 }

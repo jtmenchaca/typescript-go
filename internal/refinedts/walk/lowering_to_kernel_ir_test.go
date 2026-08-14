@@ -380,8 +380,10 @@ func TestLoweringToKernelIR_AReturnNoReadingLoweredKeepsItsControlAndLosesOnlyIt
 	// inlinable callee, no guard shape. The control flow is still exact:
 	// `#ret := unknown` then the done raise, the readable return's own
 	// two statements with the value part standing in.
+	// A write-and-call-free literal return is READ (no havoc); a literal
+	// whose construction RUNS CODE still havocs.
 	context := loweringResultContext([]string{"x"}, []BindingKind{BindingKindNumber})
-	stmts, ok := LowerStatements(context, loweringParse(t, "return { lo: 1, hi: 2 };"))
+	stmts, ok := LowerStatements(context, loweringParse(t, "return { lo: f() };"))
 	if !ok {
 		t.Fatalf("an opaque return declined — its control flow is exact")
 	}
@@ -408,9 +410,9 @@ func TestLoweringToKernelIR_AnOpaqueReturnNamesTheReturnedExpressionsOwnSyntax(t
 		source string
 		want   string
 	}{
-		{"return { lo: 1 };", "return (object literal)"},
+		{"return { lo: f() };", "return (object literal)"},
 		{"return this.x.y(q);", "return (call this.x.y)"},
-		{"return [1, 2];", "return (array literal)"},
+		{"return [f()];", "return (array literal)"},
 		{"return new Thing();", "return (new)"},
 		{"return tag`raw`;", "return (tagged template)"},
 	}
@@ -468,18 +470,23 @@ func TestLoweringToKernelIR_AThrowOutsideAnyTryReturnsNothingAndEndsTheBlock(t *
 	if !ok {
 		t.Fatalf("a throw outside any try declined — it leaves the body outright")
 	}
-	if len(stmts) != 2 {
-		t.Fatalf("len(stmts) = %d, want 2 — the absent ret and the raise: %+v", len(stmts), stmts)
+	// the thrown expression's mentions havoc first (none here), then the
+	// absent ret and the raise — and the statement is READ whole: the
+	// mention havoc covers the constructor's effects, so no porous mark
+	if len(stmts) < 2 {
+		t.Fatalf("len(stmts) = %d, want at least the absent ret and the raise: %+v", len(stmts), stmts)
 	}
-	if stmts[0].Target != context.Result.Ret ||
-		stmts[0].Effect.Kind != kernelbridge.LoopEffectConstState || !stmts[0].Effect.Absent {
-		t.Errorf("stmts[0] = %+v, want `assign #ret absent`", stmts[0])
+	retAssign := stmts[len(stmts)-2]
+	raise := stmts[len(stmts)-1]
+	if retAssign.Target != context.Result.Ret ||
+		retAssign.Effect.Kind != kernelbridge.LoopEffectConstState || !retAssign.Effect.Absent {
+		t.Errorf("stmts[-2] = %+v, want `assign #ret absent`", retAssign)
 	}
-	if stmts[1].Target != context.Result.Done {
-		t.Errorf("stmts[1] = %+v, want the done raise", stmts[1])
+	if raise.Target != context.Result.Done {
+		t.Errorf("stmts[-1] = %+v, want the done raise", raise)
 	}
-	if context.FirstHavoc != "throw" {
-		t.Errorf("FirstHavoc = %q, want %q", context.FirstHavoc, "throw")
+	if context.FirstHavoc != "" {
+		t.Errorf("FirstHavoc = %q, want none — the throw's mentions are enumerable, so the statement is read", context.FirstHavoc)
 	}
 }
 

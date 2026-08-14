@@ -467,6 +467,10 @@ type thisBundleLayout struct {
 	// Written, so the call sites read its exit state instead of keeping
 	// the caller's own.
 	CaptureHavocNames []string
+	// ReturnsSelf: the body ends `return this` — the serving seams must
+	// forget the caller's receiver knowledge (LoweredSummary
+	// .ReturnsReceiver carries the requirement out).
+	ReturnsSelf bool
 }
 
 // thisBundleOf reads a declaration's `this` bundle: (nothing) for
@@ -499,7 +503,8 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 	// field compile at all (the accessor-call route reads it)
 	if !ast.IsMethodDeclaration(declaration) &&
 		!ast.IsGetAccessorDeclaration(declaration) &&
-		!ast.IsSetAccessorDeclaration(declaration) {
+		!ast.IsSetAccessorDeclaration(declaration) &&
+		!ast.IsConstructorDeclaration(declaration) {
 		return thisBundleLayout{}
 	}
 	body := declaration.Body()
@@ -523,7 +528,17 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 	// each of those fields is marked written so the call sites read its
 	// exit state. An incomputable write set keeps the escape.
 	var captureHavocNames []string
-	if len(census.CapturedMethodCalls) > 0 && !census.Escapes && !census.ComputedWrite {
+	switch {
+	case census.Escapes:
+		return thisBundleLayout{Escaped: true}
+	case census.ComputedWrite:
+		// `this[k] = v` moves a slot nothing names — the DECLARATION
+		// bounds the set, so EVERY field joins the havoc set and every
+		// code-running or element-storing statement brackets them
+		for _, field := range fields {
+			captureHavocNames = append(captureHavocNames, "this."+field.Name)
+		}
+	case len(census.CapturedMethodCalls) > 0:
 		wipes, computable := CaptureWriteSet(classLike, fields, census.CapturedMethodCalls)
 		if !computable {
 			return thisBundleLayout{Escaped: true}
@@ -531,10 +546,6 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 		for _, field := range wipes {
 			captureHavocNames = append(captureHavocNames, "this."+field.Name)
 		}
-	} else if !census.Believable() {
-		// an escape and a computed STORE both move the object through
-		// something no slot names — no believable bundle either way
-		return thisBundleLayout{Escaped: true}
 	}
 	if len(census.Reads) == 0 && len(census.Writes) == 0 && len(captureHavocNames) == 0 {
 		return thisBundleLayout{}
@@ -563,6 +574,7 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 		Written:           written,
 		Expanded:          len(entries) > 0,
 		CaptureHavocNames: captureHavocNames,
+		ReturnsSelf:       census.ReturnsSelf,
 	}
 }
 
@@ -1290,6 +1302,58 @@ func lowerSummaryBodyReporting(
 		context.Typeofs = append(context.Typeofs, typeofTag)
 		return len(context.Bindings) - 1, true
 	}
+	// THE CONSTRUCTOR PRELUDE: a constructor's body begins life the
+	// runtime already lived — the class's field INITIALIZERS have run,
+	// and each PARAMETER PROPERTY holds its argument. Both are ordinary
+	// assignments onto the bundle's own slots, emitted ahead of the
+	// statements; an initializer the effect grammar cannot spell leaves
+	// its slot unknown (never a stale absent), and every touched field
+	// joins Written through the census's own store recognition upstream.
+	var constructorPrelude []kernelbridge.IrStatement
+	if ast.IsConstructorDeclaration(declaration) {
+		if classLike := declaration.Parent; classLike != nil && ast.IsClassLike(classLike) {
+			for _, member := range classLike.ClassLikeData().Members.Nodes {
+				if !ast.IsPropertyDeclaration(member) {
+					continue
+				}
+				property := member.AsPropertyDeclaration()
+				if property.Initializer == nil || property.Name() == nil || !ast.IsIdentifier(property.Name()) {
+					continue
+				}
+				slot, has := slotIndexOfName(context, "this."+property.Name().Text())
+				if !has {
+					continue
+				}
+				effect, lowered := RhsEffect(context, context.Sorts[slot], property.Initializer)
+				if !lowered {
+					effect = kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}
+				}
+				constructorPrelude = append(constructorPrelude, kernelbridge.IrStatement{
+					Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: effect,
+				})
+			}
+		}
+		for _, parameter := range parameters {
+			if !isParameterPropertyDeclaration(parameter) {
+				continue
+			}
+			pd := parameter.AsParameterDeclaration()
+			if pd.Name() == nil || !ast.IsIdentifier(pd.Name()) {
+				continue
+			}
+			fieldSlot, hasField := slotIndexOfName(context, "this."+pd.Name().Text())
+			if !hasField {
+				continue
+			}
+			effect := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}
+			if paramSlot, hasParam := slotIndexOfName(context, pd.Name().Text()); hasParam {
+				effect = kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: paramSlot}
+			}
+			constructorPrelude = append(constructorPrelude, kernelbridge.IrStatement{
+				Kind: kernelbridge.IrStatementAssign, Target: fieldSlot, Effect: effect,
+			})
+		}
+	}
 	// THE DEFAULT PRELUDE: each defaulted parameter applies its default
 	// exactly where the runtime does — only when the call left the entry
 	// undefined. The branch tests the slot's definedness (the kernel's
@@ -1346,20 +1410,25 @@ func lowerSummaryBodyReporting(
 	// FirstHavoc is the set-once field the havoc routes fill: empty means
 	// every statement was READ, non-empty names the first construct that
 	// was stood in for. The door above turns the two into complete/porous.
-	// the prelude runs FIRST: a default is applied before any body
-	// statement can read the parameter
+	// the preludes run FIRST, in the runtime's own order: defaults land
+	// before anything reads a parameter, then a constructor's field
+	// initializers and parameter properties, then the body
+	if len(constructorPrelude) > 0 {
+		stmts = append(constructorPrelude, stmts...)
+	}
 	if len(prelude) > 0 {
 		stmts = append(prelude, stmts...)
 	}
 	return LoweredSummary{
-		Stmts:          stmts,
-		ParamCount:     len(paramNames),
-		DoneIndex:      doneIndex,
-		RetIndex:       retIndex,
-		SlotCount:      len(context.Bindings),
-		Table:          table.Blobs,
-		BundleEntries:  bundleEntries,
-		DefaultEffects: defaultEffects,
+		Stmts:           stmts,
+		ParamCount:      len(paramNames),
+		DoneIndex:       doneIndex,
+		RetIndex:        retIndex,
+		SlotCount:       len(context.Bindings),
+		Table:           table.Blobs,
+		BundleEntries:   bundleEntries,
+		DefaultEffects:  defaultEffects,
+		ReturnsReceiver: bundle.ReturnsSelf,
 	}, context.FirstHavoc, "", true
 }
 

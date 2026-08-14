@@ -37,10 +37,42 @@ func summaryCalleeOf(context *LoweringContext, call *ast.Node) *ast.Node {
 	if context.ResolveCallee == nil {
 		return nil
 	}
+	if ast.IsNewExpression(call) {
+		return constructorDeclarationOf(context, call.AsNewExpression().Expression)
+	}
 	if !ast.IsCallExpression(call) {
 		return nil
 	}
 	return context.ResolveCallee(call.AsCallExpression().Expression)
+}
+
+// constructorDeclarationOf resolves `new X(...)`'s X — a plain
+// identifier, through import aliases — to the class's CONSTRUCTOR
+// declaration, the node the summary registry keys the constructor's
+// blob by. A class with no constructor body, a declaration-file class,
+// and every non-identifier callee answer nil.
+func constructorDeclarationOf(context *LoweringContext, callee *ast.Node) *ast.Node {
+	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
+		return nil
+	}
+	core := Unwrapped(callee)
+	if core == nil || !ast.IsIdentifier(core) {
+		return nil
+	}
+	symbol := symbolAt(context.Flow.P.Checker, core)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return nil
+	}
+	classLike := symbol.ValueDeclaration
+	if !ast.IsClassDeclaration(classLike) || ast.GetSourceFileOfNode(classLike).IsDeclarationFile {
+		return nil
+	}
+	for _, member := range classLike.ClassLikeData().Members.Nodes {
+		if ast.IsConstructorDeclaration(member) && member.Body() != nil {
+			return member
+		}
+	}
+	return nil
 }
 
 // SummaryCallOrHavoc is the one call-lowering door every route uses,
@@ -66,6 +98,27 @@ func summaryCalleeOf(context *LoweringContext, call *ast.Node) *ast.Node {
 // `target` is the caller slot the call's value lands in, or -1 for a
 // bare call whose value nothing reads.
 func SummaryCallOrHavoc(context *LoweringContext, call *ast.Node, target int) ([]kernelbridge.IrStatement, bool) {
+	// a NEW takes the blob tier alone: an unresolvable or declining
+	// constructor falls back to the caller's own routes and floor, whose
+	// havoc enumeration reads calls. The instance value itself has no
+	// scalar spelling, so the target takes unknown AFTER the call — the
+	// ctor's unwritten ret would read as "undefined", which is a claim
+	// and a wrong one.
+	if ast.IsNewExpression(call) {
+		statement, ok := summaryCallStatement(context, call, -1)
+		if !ok {
+			return nil, false
+		}
+		out := []kernelbridge.IrStatement{statement}
+		if target >= 0 {
+			out = append(out, kernelbridge.IrStatement{
+				Kind:   kernelbridge.IrStatementAssign,
+				Target: target,
+				Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown},
+			})
+		}
+		return out, true
+	}
 	if statement, ok := summaryCallStatement(context, call, target); ok {
 		return []kernelbridge.IrStatement{statement}, true
 	}
@@ -182,10 +235,23 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 	if !shapeOk {
 		return kernelbridge.IrStatement{}, false
 	}
-	callExpr := call.AsCallExpression()
+	// a NEW expression serves through the same statement, with three
+	// differences the code below branches on: its this-entries stay
+	// ABSENT (a fresh instance's fields before the initializers run —
+	// never any caller receiver's slots), its unwritten ret maps nowhere
+	// (the instance is a value, not undefined — the caller assigns
+	// unknown separately), and an expanded-parameter argument declines
+	// (the threading below reads a CallExpression).
+	isNew := ast.IsNewExpression(call)
 	var callArguments []*ast.Node
-	if callExpr.Arguments != nil {
-		callArguments = callExpr.Arguments.Nodes
+	if isNew {
+		if newArguments := call.AsNewExpression().Arguments; newArguments != nil {
+			callArguments = newArguments.Nodes
+		}
+	} else {
+		if a := call.AsCallExpression().Arguments; a != nil {
+			callArguments = a.Nodes
+		}
 	}
 	parameters := callee.Parameters()
 	if len(callArguments) > len(parameters) {
@@ -207,6 +273,13 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 	if !shapeKnown {
 		return kernelbridge.IrStatement{}, false
 	}
+	// a callee that RETURNS ITS RECEIVER hands the composed caller an
+	// alias it may write through later — writes this route's rets could
+	// never carry back. The call declines to the opaque tier, whose
+	// receiver-bundle havoc is the honest answer.
+	if calleeShape.ReturnsReceiver {
+		return kernelbridge.IrStatement{}, false
+	}
 	// the callee's parameters no longer map 1:1 onto entries: a type-
 	// literal parameter EXPANDS to one entry per member. The entry list is
 	// built by walking the declared parameters through the very expansion
@@ -222,6 +295,12 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 		// placeholders hold the positions and bundleParamRetsAndArgs
 		// below overwrites them from the argument's own spelled path
 		if _, census, _, isBundle := BundleParamCensus(context.Flow, callee.Body(), parameter); isBundle && census.Believable() && len(census.Reads) > 0 {
+			if isNew {
+				// the placeholder rows below are overwritten by the
+				// threading this route skips for a new — absent rows would
+				// CLAIM the argument's fields are undefined
+				return kernelbridge.IrStatement{}, false
+			}
 			for range census.Reads {
 				args = append(args, kernelbridge.AbsentConst())
 			}
@@ -284,19 +363,22 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 	for index := range rets {
 		rets[index] = -1
 	}
-	if target >= 0 {
+	if target >= 0 && !isNew {
 		rets[outIndex] = target
 	}
 	// the RECEIVER decides the this-entry fill: the callee's own
 	// "this.<field>" entries take the caller's "<receiverPath>.<field>"
-	// slots, and the ones it writes ride back out through rets
-	if !bundleRetsAndArgs(context, call, calleeShape, args, rets) {
-		return kernelbridge.IrStatement{}, false
-	}
-	// a class-typed PARAMETER's bundle rows fill the same way, one step
-	// over: the ARGUMENT's spelled path prefixes the field name
-	if !bundleParamRetsAndArgs(context, call, callee, calleeShape, args, rets) {
-		return kernelbridge.IrStatement{}, false
+	// slots, and the ones it writes ride back out through rets. A NEW
+	// skips both threadings whole: its instance is FRESH — the absent
+	// fill already in place is exactly a field before its initializer —
+	// and its writes land on an object no caller slot spells yet.
+	if !isNew {
+		if !bundleRetsAndArgs(context, call, calleeShape, args, rets) {
+			return kernelbridge.IrStatement{}, false
+		}
+		if !bundleParamRetsAndArgs(context, call, callee, calleeShape, args, rets) {
+			return kernelbridge.IrStatement{}, false
+		}
 	}
 	return kernelbridge.IrStatement{
 		Kind:   kernelbridge.IrStatementCall,
@@ -647,7 +729,7 @@ func SummaryCallStatementOf(context *LoweringContext, statement *ast.Node) ([]ke
 	// `f(…);` — the value goes nowhere, but the call still runs
 	if ast.IsExpressionStatement(statement) {
 		e := Unwrapped(statement.AsExpressionStatement().Expression)
-		if ast.IsCallExpression(e) {
+		if ast.IsCallExpression(e) || ast.IsNewExpression(e) {
 			return SummaryCallOrHavoc(context, e, -1)
 		}
 	}
@@ -656,7 +738,7 @@ func SummaryCallStatementOf(context *LoweringContext, statement *ast.Node) ([]ke
 		return nil, false
 	}
 	head := Unwrapped(rhs)
-	if !ast.IsCallExpression(head) {
+	if !ast.IsCallExpression(head) && !ast.IsNewExpression(head) {
 		return nil, false
 	}
 	return SummaryCallOrHavoc(context, head, target)

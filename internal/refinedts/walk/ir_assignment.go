@@ -86,6 +86,13 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			if held, ok := GetterReadEffect(context, node); ok {
 				return held, true
 			}
+			// an IMPORTED (or same-file free) CONST whose initializer is a
+			// literal: the declaration is one stable node in the program's
+			// shared AST forest, so its initializer reads directly —
+			// `contextId = STATIC_CONTEXT` takes the const's own value.
+			if held, ok := FreeConstEffect(context, node); ok {
+				return held, true
+			}
 			// a CALL inside the expression — `count + this.bump()`, an
 			// argument, a ternary arm: it HOISTS to a temp-slot call
 			// statement emitted before this statement, and the expression
@@ -96,6 +103,61 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			return HoistCallEffect(context, node)
 		},
 	})
+}
+
+// FreeConstEffect reads a free identifier that resolves — through
+// import aliases — to a CONST declaration, and answers the effect of
+// the const's own initializer where that initializer carries no
+// binding of its own: a numeric, string, or boolean literal, null or
+// undefined, or a write-and-call-free object/array/template literal
+// (whose value rides unknown). A `let`/`var` declaration answers
+// nothing — module state can move — and so does any initializer that
+// reads names or runs code: those belong to the exporting file's own
+// bindings, which this context does not hold.
+func FreeConstEffect(context *LoweringContext, node *ast.Node) (kernelbridge.LoopEffect, bool) {
+	if node == nil || !ast.IsIdentifier(node) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	symbol := symbolAt(context.Flow.P.Checker, node)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	declaration := symbol.ValueDeclaration
+	if !ast.IsVariableDeclaration(declaration) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	list := declaration.Parent
+	if list == nil || !ast.IsVariableDeclarationList(list) || list.Flags&ast.NodeFlagsConst == 0 {
+		return kernelbridge.LoopEffect{}, false
+	}
+	initializer := declaration.AsVariableDeclaration().Initializer
+	if initializer == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	head := Unwrapped(initializer)
+	if ast.IsNumericLiteral(head) || head.Kind == ast.KindTrueKeyword ||
+		head.Kind == ast.KindFalseKeyword || IsAbsentKeyword(head) {
+		return LowerEffectExpression(head, EffectReader{
+			ReadPlace: func(string) (kernelbridge.LoopEffect, bool) { return kernelbridge.LoopEffect{}, false },
+			Opaque: func(e *ast.Node) (kernelbridge.LoopEffect, bool) {
+				if IsAbsentKeyword(e) {
+					return kernelbridge.AbsentConst(), true
+				}
+				return kernelbridge.LoopEffect{}, false
+			},
+		})
+	}
+	if (ast.IsObjectLiteralExpression(head) || ast.IsArrayLiteralExpression(head) ||
+		ast.IsStringLiteral(head) || ast.IsTemplateExpression(head)) && writeAndCallFree(head) {
+		// the value has no scalar spelling in a number-sorted read (a
+		// string const's tuple belongs to the sequence route) — unknown
+		// is what this reader can hold of it, and it is exact about that
+		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}, true
+	}
+	return kernelbridge.LoopEffect{}, false
 }
 
 // IsAbsentKeyword is whether an expression spells the ABSENT value:
@@ -201,6 +263,21 @@ func AssignmentOfExpression(context *LoweringContext, e *ast.Node) (AssignmentTa
 		}
 		return AssignmentTarget{Target: target, Effect: effect}, true
 	}
+	// `x ||= e`, `x &&= e`, `x ??= e`: the result is x itself or e —
+	// the JOIN of the two admits every run, under any sort, exactly as
+	// the short-circuit operators read in expression position
+	switch bin.OperatorToken.Kind {
+	case ast.KindBarBarEqualsToken, ast.KindAmpersandAmpersandEqualsToken, ast.KindQuestionQuestionEqualsToken:
+		right, rightOk := RhsEffect(context, context.Sorts[target], bin.Right)
+		if !rightOk {
+			return AssignmentTarget{}, false
+		}
+		targetVar := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: target}
+		return AssignmentTarget{
+			Target: target,
+			Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectJoin, A: &targetVar, B: &right},
+		}, true
+	}
 	op, ok := compoundOps[bin.OperatorToken.Kind]
 	if !ok {
 		return AssignmentTarget{}, false
@@ -250,6 +327,100 @@ func declaratorAssignment(context *LoweringContext, declaration *ast.Node) (Assi
 		return AssignmentTarget{}, false
 	}
 	return AssignmentTarget{Target: target, Effect: effect}, true
+}
+
+// FunctionValuedDeclarationOf lowers `const f = () => { … }` — a
+// closure held in a local. CREATING a closure runs nothing, and a
+// function value has no scalar spelling, so the name takes unknown —
+// provided the closure can never move state this body tracks when it
+// DOES run: it must write no name that has a slot here, and mention no
+// flattened local (a mention hands the object to code that runs at a
+// time nothing places). A closure that touches tracked state keeps the
+// floor, whose one-shot havoc is only sound at the declaration — the
+// capture-havoc machinery is the this-bundle's answer, not a plain
+// local's.
+func FunctionValuedDeclarationOf(context *LoweringContext, statement *ast.Node) ([]kernelbridge.IrStatement, bool) {
+	if !ast.IsVariableStatement(statement) {
+		return nil, false
+	}
+	declarations := statement.AsVariableStatement().DeclarationList.AsVariableDeclarationList().Declarations.Nodes
+	if len(declarations) != 1 {
+		return nil, false
+	}
+	d := declarations[0].AsVariableDeclaration()
+	if !ast.IsIdentifier(d.Name()) || d.Initializer == nil {
+		return nil, false
+	}
+	closure := Unwrapped(d.Initializer)
+	if !ast.IsFunctionLike(closure) || closure.Body() == nil {
+		return nil, false
+	}
+	if closureTouchesTrackedState(context, closure.Body()) {
+		return nil, false
+	}
+	var out []kernelbridge.IrStatement
+	if slot, has := IndexOf(context, d.Name()); has {
+		out = append(out, kernelbridge.IrStatement{
+			Kind:   kernelbridge.IrStatementAssign,
+			Target: slot,
+			Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown},
+		})
+	}
+	return out, true
+}
+
+// closureTouchesTrackedState answers whether a closure's body, run at
+// any later time, could move state this lowering tracks: a write form
+// whose target identifier has a slot, or any mention of a name whose
+// flattened leaves have slots. A shadowing inner declaration makes the
+// syntactic reading over-approximate toward refusal, which is the safe
+// direction.
+func closureTouchesTrackedState(context *LoweringContext, body *ast.Node) bool {
+	touches := false
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if touches || node == nil {
+			return true
+		}
+		if ast.IsBinaryExpression(node) {
+			bin := node.AsBinaryExpression()
+			if bin.OperatorToken.Kind >= ast.KindFirstAssignment && bin.OperatorToken.Kind <= ast.KindLastAssignment {
+				if target := Unwrapped(bin.Left); ast.IsIdentifier(target) {
+					if _, has := IndexOf(context, target); has {
+						touches = true
+						return true
+					}
+				}
+			}
+		}
+		if ast.IsPrefixUnaryExpression(node) || ast.IsPostfixUnaryExpression(node) {
+			var operator ast.Kind
+			var operand *ast.Node
+			if ast.IsPrefixUnaryExpression(node) {
+				operator, operand = node.AsPrefixUnaryExpression().Operator, node.AsPrefixUnaryExpression().Operand
+			} else {
+				operator, operand = node.AsPostfixUnaryExpression().Operator, node.AsPostfixUnaryExpression().Operand
+			}
+			if operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken {
+				if target := Unwrapped(operand); ast.IsIdentifier(target) {
+					if _, has := IndexOf(context, target); has {
+						touches = true
+						return true
+					}
+				}
+			}
+		}
+		if ast.IsIdentifier(node) {
+			if len(flattenedSlotsUnder(context, node.Text())) > 0 {
+				touches = true
+				return true
+			}
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	visit(body)
+	return touches
 }
 
 // MultiDeclarationAssignmentsOf lowers `let a = 1, b = 2` — a variable

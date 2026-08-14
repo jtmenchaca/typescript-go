@@ -172,29 +172,33 @@ func TestIrRecordLowering_AShorthandDestructuringReadsTheSameNamedLeaf(t *testin
 	}
 }
 
-func TestIrRecordLowering_ADestructuringDefaultTakesTheHavocFloor(t *testing.T) {
+func TestIrRecordLowering_ADestructuringDefaultLowersExactly(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	context := recordLoweringContext(kernel,
 		[]string{"p.lo", "lo"},
 		[]BindingKind{BindingKindNumber, BindingKindNumber})
-	// the leaf-read route refuses a default (the leaf's absence would
-	// take it, which a plain read does not spell), and the floor havocs
-	// the bound name — unknown covers both the leaf and the default
+	// `const { lo = 3 } = p` from a flattened holder: the leaf read into
+	// the bound name, then the definedness branch — only an undefined
+	// leaf takes the default, exactly the runtime's rule
 	stmts, ok := LowerStatements(context, loweringParse(t, `const { lo = 3 } = p;`))
 	if !ok {
-		t.Fatalf("a destructuring default declined outright, want the havoc floor")
+		t.Fatalf("a destructuring default declined outright")
 	}
-	sawBoundName := false
-	for _, s := range stmts {
-		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
-			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
-		}
-		if s.Target == 1 {
-			sawBoundName = true
-		}
+	if len(stmts) != 2 {
+		t.Fatalf("stmts = %+v, want the leaf read then the definedness branch", stmts)
 	}
-	if !sawBoundName {
-		t.Errorf("the bound name (slot 1) was not havocked — its old knowledge would survive the binding")
+	if stmts[0].Kind != kernelbridge.IrStatementAssign || stmts[0].Target != 1 ||
+		stmts[0].Effect.Kind != kernelbridge.LoopEffectVar || stmts[0].Effect.Index != 0 {
+		t.Errorf("stmts[0] = %+v, want lo := p.lo", stmts[0])
+	}
+	branch := stmts[1]
+	if branch.Kind != kernelbridge.IrStatementBranch || branch.On != 1 ||
+		branch.Test != kernelbridge.IrTestDefined {
+		t.Fatalf("stmts[1] = %+v, want a definedness branch on lo", branch)
+	}
+	if len(branch.Else) != 1 || branch.Else[0].Target != 1 ||
+		branch.Else[0].Effect.Kind != kernelbridge.LoopEffectConst {
+		t.Errorf("the else arm = %+v, want lo := {3}", branch.Else)
 	}
 }
 

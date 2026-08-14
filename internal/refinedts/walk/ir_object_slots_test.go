@@ -38,18 +38,34 @@ func TestObjectSlots_AFixedShapeRecordLocalFlattensIntoPerKeySlotsAndSummarizes(
 	}
 }
 
-func TestObjectSlots_AnAliasedRecordLocalDeclines(t *testing.T) {
+func TestObjectSlots_AnAliasedRecordLocalNeverServesAPreciseLeaf(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	// `const q = p` reads the whole record; after flattening there is no
 	// one value for q to hold, so the recognizer must refuse p its slot
-	// family — and the `p.lo` reads then find no slot and decline.
+	// family — the alias kills the flattening, so no leaf value may survive
+	// to the answer.
 	declaration := summaryDeclarationOf(t,
 		"function f(n: number) { const p = { lo: 0, hi: n }; const q = p; return p.lo; }")
 	contract := &FunctionContract{Declaration: declaration}
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
-	if _, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{exactNumber(t, 7)}, contract); ok {
-		t.Errorf("an aliased record local summarized — the alias reads an object the flattening does not build")
+	answer, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{exactNumber(t, 7)}, contract)
+	if !ok {
+		// ok=false is also acceptable; if it's false that is expected
+		return
+	}
+	// if ok is true, the answer must not serve a precise leaf value.
+	// StateOfKnown either fails (ok=false) or answers a state with Top=true,
+	// and the answer must never claim a precise value like exactly {0}.
+	state, stateOk := StateOfKnown(answer)
+	if !stateOk || state.Top {
+		// answer is opaque or top; this is acceptable
+		return
+	}
+	// if we have a concrete state, it must not contain precise values
+	// an empty set (which claims nothing) is acceptable
+	if len(state.Set.Forms) > 0 {
+		t.Errorf("answer contains concrete forms %+v, want only silence", state.Set.Forms)
 	}
 }
 

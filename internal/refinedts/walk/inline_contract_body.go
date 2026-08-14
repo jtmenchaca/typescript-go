@@ -144,6 +144,27 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	// argument), so the remembered outcome carries no posts.
 	if summarized, ok := KernelSummaryDirectOn(ctx, argKnowns, contract, SummaryCallReceiver(ctx, env, callExpr)); ok {
 		tracing.Count("inline.summaryDirect", 0)
+		// THE SERVED-CALL FORGET: a summary whose body writes receiver
+		// fields, writes a parameter bundle's fields, or returns its
+		// receiver moves object knowledge the caller holds — the same
+		// knowledge the OPAQUE path forgets through ForgetThrough. A
+		// served answer forgets exactly the same way, and such calls are
+		// never memoized: a replay would skip the forget.
+		if receiverTouched, writtenArguments := SummaryReceiverEffects(ctx, contract.Declaration); receiverTouched || len(writtenArguments) > 0 {
+			if receiverTouched && ast.IsPropertyAccessExpression(callExpr.Expression) {
+				ForgetThrough(ctx, env, callExpr.Expression.AsPropertyAccessExpression().Expression)
+			}
+			var callArguments []*ast.Node
+			if callExpr.Arguments != nil {
+				callArguments = callExpr.Arguments.Nodes
+			}
+			for _, index := range writtenArguments {
+				if index < len(callArguments) {
+					ForgetThrough(ctx, env, callArguments[index])
+				}
+			}
+			return AsCalleeResult(*contract, summarized)
+		}
 		if memoKey != "" {
 			inlineMemoMu.Lock()
 			memo := inlineMemoOf(ctx.P)[contract.Declaration]

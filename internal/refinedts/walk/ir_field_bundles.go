@@ -335,6 +335,13 @@ type FieldCensus struct {
 	// CaptureWriteSet's closure, where a captured method's own direct
 	// calls carry its transitive writes.
 	DirectMethodCalls []string
+	// ReturnsSelf: the body ends `return this` (this-receivers only —
+	// the fluent-builder shape). Not an escape: nothing moves during
+	// the body. The CALLER gains an alias it may write through later,
+	// so the serving seams must forget the caller's receiver knowledge
+	// (the direct route) or decline the composed call (the statement
+	// route) — LoweredSummary.ReturnsReceiver carries the requirement.
+	ReturnsSelf bool
 }
 
 // FieldCensusOf scans a body for what it does with `receiverName` —
@@ -729,6 +736,45 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 				return false
 			}
 		}
+		// `return this` — the fluent-builder tail. Nothing moves during
+		// the body; the serving seams carry the caller-alias requirement
+		// (ReturnsSelf's doc). This-receivers only: a named receiver
+		// returned would need the parameter-bundle seams taught the same
+		// forgetting, which they are not.
+		if ast.IsReturnStatement(node) {
+			returned := node.AsReturnStatement().Expression
+			if returned != nil && Unwrapped(returned).Kind == ast.KindThisKeyword && receiverName == "this" {
+				census.ReturnsSelf = true
+				consumed[returned] = struct{}{}
+				consumed[Unwrapped(returned)] = struct{}{}
+				return false
+			}
+		}
+		// `this.onData.bind(this)` — a DEFERRED method call: the bound
+		// function may run at any later time, exactly like a closure
+		// calling the method, and is collected the same way. The shape
+		// is exact: callee `<receiver>.<m>.bind`, first argument the
+		// receiver itself; anything looser falls through to the rules
+		// below.
+		if method, isBind := receiverMethodBindOf(node, isReceiver); isBind {
+			already := false
+			for _, held := range census.CapturedMethodCalls {
+				if held == method {
+					already = true
+					break
+				}
+			}
+			if !already {
+				census.CapturedMethodCalls = append(census.CapturedMethodCalls, method)
+			}
+			consumeBindMentions(consumed, node)
+			// partial-application arguments past the bound receiver are
+			// ordinary expressions and may mention the receiver themselves
+			for _, argument := range node.AsCallExpression().Arguments.Nodes[1:] {
+				visit(argument)
+			}
+			return false
+		}
 		// a CALL whose callee is `<receiver>.<name>`: the name is a METHOD,
 		// which resolves through ContractBySymbol carrying its own summary,
 		// not a slot. So an undeclared name in callee position is not a
@@ -889,6 +935,58 @@ func CaptureWriteSet(classLike *ast.Node, fields []BundleField, methods []string
 		}
 	}
 	return out, true
+}
+
+// receiverMethodBindOf recognizes `<receiver>.<m>.bind(<receiver>)` —
+// the deferred method call. The callee must be a plain two-step access
+// ending in `bind`, no optional steps, and the FIRST argument must be
+// the receiver itself; extra arguments (partial application) are
+// allowed and walk as ordinary expressions.
+func receiverMethodBindOf(node *ast.Node, isReceiver func(*ast.Node) bool) (string, bool) {
+	if node == nil || !ast.IsCallExpression(node) {
+		return "", false
+	}
+	call := node.AsCallExpression()
+	if call.QuestionDotToken != nil || call.Arguments == nil || len(call.Arguments.Nodes) == 0 {
+		return "", false
+	}
+	if !isReceiver(Unwrapped(call.Arguments.Nodes[0])) {
+		return "", false
+	}
+	outer := Unwrapped(call.Expression)
+	if !ast.IsPropertyAccessExpression(outer) {
+		return "", false
+	}
+	outerAccess := outer.AsPropertyAccessExpression()
+	if outerAccess.QuestionDotToken != nil || !ast.IsIdentifier(outerAccess.Name()) ||
+		outerAccess.Name().Text() != "bind" {
+		return "", false
+	}
+	inner := Unwrapped(outerAccess.Expression)
+	if !ast.IsPropertyAccessExpression(inner) {
+		return "", false
+	}
+	innerAccess := inner.AsPropertyAccessExpression()
+	if innerAccess.QuestionDotToken != nil || !ast.IsIdentifier(innerAccess.Name()) ||
+		!isReceiver(Unwrapped(innerAccess.Expression)) {
+		return "", false
+	}
+	return innerAccess.Name().Text(), true
+}
+
+// consumeBindMentions marks a recognized bind's receiver spellings as
+// accounted for: the method access chain and the first argument.
+func consumeBindMentions(consumed map[*ast.Node]struct{}, node *ast.Node) {
+	call := node.AsCallExpression()
+	consumed[call.Arguments.Nodes[0]] = struct{}{}
+	consumed[Unwrapped(call.Arguments.Nodes[0])] = struct{}{}
+	outer := Unwrapped(call.Expression)
+	consumed[call.Expression] = struct{}{}
+	consumed[outer] = struct{}{}
+	inner := Unwrapped(outer.AsPropertyAccessExpression().Expression)
+	consumed[outer.AsPropertyAccessExpression().Expression] = struct{}{}
+	consumed[inner] = struct{}{}
+	consumeReceiver(consumed, inner)
 }
 
 // consumeReceiver marks the receiver spelling inside a recognized access

@@ -481,6 +481,15 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 		}
 		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectJoin, A: &a, B: &b}, true
 	}
+	// an OBJECT LITERAL, ARRAY LITERAL, or TEMPLATE whose evaluation
+	// moves nothing: the value has no scalar spelling — unknown IS what
+	// a slot can hold of it — and building it changed no state, so the
+	// unknown claim costs the read and nothing else. A literal whose
+	// parts run code keeps the old path (its effects need a statement).
+	if (ast.IsObjectLiteralExpression(e) || ast.IsArrayLiteralExpression(e) ||
+		ast.IsTemplateExpression(e)) && writeAndCallFree(e) {
+		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}, true
+	}
 	if ast.IsCallExpression(e) {
 		call := e.AsCallExpression()
 		if ast.IsPropertyAccessExpression(call.Expression) {

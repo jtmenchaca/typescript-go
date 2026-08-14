@@ -655,6 +655,92 @@ func sortLeafSlots(slots []leafSlot) {
 	}
 }
 
+// DestructuringWithDefaultsOf is the leaf-exact destructuring with
+// per-element DEFAULTS: `const { x = 1, y } = p` from a flattened
+// holder. Each element assigns its leaf's slot, and a defaulted element
+// follows with the definedness branch the defaulted parameters ride —
+// only an undefined leaf takes the default. Rests, nested patterns,
+// computed keys, and defaults the effect grammar cannot spell decline
+// to the routes after.
+func DestructuringWithDefaultsOf(context *LoweringContext, statement *ast.Node) ([]kernelbridge.IrStatement, bool) {
+	if !ast.IsVariableStatement(statement) {
+		return nil, false
+	}
+	declarations := statement.AsVariableStatement().DeclarationList.AsVariableDeclarationList().Declarations.Nodes
+	if len(declarations) != 1 {
+		return nil, false
+	}
+	decl := declarations[0].AsVariableDeclaration()
+	if decl.Initializer == nil || !ast.IsObjectBindingPattern(decl.Name()) {
+		return nil, false
+	}
+	initializer := Unwrapped(decl.Initializer)
+	var holder string
+	switch {
+	case ast.IsIdentifier(initializer):
+		holder = initializer.Text()
+	case initializer.Kind == ast.KindThisKeyword:
+		holder = "this"
+	default:
+		return nil, false
+	}
+	var out []kernelbridge.IrStatement
+	sawDefault := false
+	for _, element := range decl.Name().AsBindingPattern().Elements.Nodes {
+		binding := element.AsBindingElement()
+		if binding.DotDotDotToken != nil || !ast.IsIdentifier(binding.Name()) {
+			return nil, false
+		}
+		read := binding.Name().Text()
+		if binding.PropertyName != nil {
+			if !ast.IsIdentifier(binding.PropertyName) {
+				return nil, false
+			}
+			read = binding.PropertyName.Text()
+		}
+		source, sourceOk := slotIndexOfName(context, holder+"."+read)
+		if !sourceOk {
+			return nil, false
+		}
+		target, targetOk := slotIndexOfName(context, binding.Name().Text())
+		if !targetOk {
+			return nil, false
+		}
+		out = append(out, kernelbridge.IrStatement{
+			Kind:   kernelbridge.IrStatementAssign,
+			Target: target,
+			Effect: varEffect(source),
+		})
+		if binding.Initializer == nil {
+			continue
+		}
+		sawDefault = true
+		if !writeAndCallFree(binding.Initializer) {
+			return nil, false
+		}
+		defaultEffect, lowered := RhsEffect(context, context.Sorts[target], binding.Initializer)
+		if !lowered {
+			return nil, false
+		}
+		out = append(out, kernelbridge.IrStatement{
+			Kind: kernelbridge.IrStatementBranch,
+			On:   target,
+			Test: kernelbridge.IrTestDefined,
+			Else: []kernelbridge.IrStatement{{
+				Kind:   kernelbridge.IrStatementAssign,
+				Target: target,
+				Effect: defaultEffect,
+			}},
+		})
+	}
+	// with no default present the plain route already served — this one
+	// only exists for the defaulted shape
+	if !sawDefault || len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
 // PatternAssignmentsOf is the destructuring lowering for every SOURCE
 // the leaf-exact route above does not read: `const { a } = call()`,
 // `const { b } = holder.path`, `const [x, y] = xs`. The bound values
@@ -695,6 +781,42 @@ func PatternAssignmentsOf(context *LoweringContext, statement *ast.Node) ([]kern
 		out = append(out, called...)
 	} else if !writeAndCallFree(source) {
 		return nil, false
+	}
+	// an ARRAY pattern from a FLATTENED array local reads each element
+	// as element-or-undefined — the elem slot's join wrapped orAbsent —
+	// instead of unknown: nothing bounds WHICH element each name took,
+	// but every element is inside the elem join, and a short array
+	// leaves undefined, which orAbsent spells exactly.
+	if ast.IsArrayBindingPattern(name) && ast.IsIdentifier(source) {
+		if _, elemSlot, slotsOk := arraySlotsOf(context, source.Text()); slotsOk {
+			handled := true
+			var precise []kernelbridge.IrStatement
+			for _, element := range name.AsBindingPattern().Elements.Nodes {
+				if element == nil || !ast.IsBindingElement(element) {
+					continue
+				}
+				binding := element.AsBindingElement()
+				bound := binding.Name()
+				if binding.DotDotDotToken != nil || binding.Initializer != nil ||
+					bound == nil || !ast.IsIdentifier(bound) {
+					handled = false
+					break
+				}
+				slot, has := slotIndexOfName(context, bound.Text())
+				if !has {
+					continue
+				}
+				elemVar := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: elemSlot}
+				precise = append(precise, kernelbridge.IrStatement{
+					Kind:   kernelbridge.IrStatementAssign,
+					Target: slot,
+					Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectOrAbsent, A: &elemVar},
+				})
+			}
+			if handled {
+				return append(out, precise...), true
+			}
+		}
 	}
 	for _, bound := range boundPatternNames(name) {
 		slot, has := slotIndexOfName(context, bound)

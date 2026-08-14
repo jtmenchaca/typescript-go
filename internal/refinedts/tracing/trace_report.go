@@ -666,7 +666,7 @@ func SummaryOutcomeSectionText(counts SummaryOutcomeCounts) string {
 	say(strings.Repeat("─", 65))
 	say(pad("bodies with an outcome", 40) + padLeft(commaInt(total), 16) + padLeft("100.0", 9))
 	sayBlank()
-	if named := counts.TopConstructs(12); len(named) > 0 {
+	if named := counts.TopConstructs(0); len(named) > 0 {
 		say(pad("construct", 40) + padLeft("bodies", 16))
 		say(strings.Repeat("─", 56))
 		for _, n := range named {

@@ -79,17 +79,45 @@ func TestWriteAudit_AForOfBoundStoreIsNamedInTheLayout(t *testing.T) {
 
 // A COMPUTED STORE — `this[k] = v` — names no field, so nothing bounds
 // WHICH slot moved. The declaration bounds the SET, so the honest
-// answers are to havoc every slot or to refuse the bundle; what is not
-// honest is to expand the bundle and keep believing entries a store
-// could have moved.
+// answer is to expand the bundle with every field and mark them all
+// written, bracketing the store with havocing.
 //
-// The census reports the flag. This asserts a CONSUMER acts on it: the
-// layout must not hand back a believed bundle.
-func TestWriteAudit_AComputedStoreDoesNotLeaveTheBundleBelieved(t *testing.T) {
+// A computed store moves a field nothing names, so every field is havocked
+// around code-running and element-storing statements and marked written.
+func TestWriteAudit_AComputedStoreExpandsUnderBracketedHavocs(t *testing.T) {
 	layout := bundleLayoutOf(t,
 		"class C { count: number; other: number; m(k: string) { this[k] = 1; return this.count + this.other; } }")
-	if layout.Expanded && !layout.Escaped {
-		t.Errorf("a body doing `this[k] = 1` expanded its bundle with entries %+v — the store could have moved any of them, and nothing here says so", layout.Entries)
+	if layout.Escaped {
+		t.Errorf("layout.Escaped = true, want false — the body stays in bundle")
+	}
+	if !layout.Expanded {
+		t.Errorf("layout.Expanded = false, want true — the store expands with every field")
+	}
+	if !contains(layout.CaptureHavocNames, "this.count") || !contains(layout.CaptureHavocNames, "this.other") {
+		t.Errorf("CaptureHavocNames = %v, want it to contain this.count and this.other", layout.CaptureHavocNames)
+	}
+	if !contains(layout.Written, "this.count") || !contains(layout.Written, "this.other") {
+		t.Errorf("Written = %v, want it to contain this.count and this.other", layout.Written)
+	}
+}
+
+// Helper to check if a map/slice contains a key/value
+func contains(m interface{}, key string) bool {
+	switch v := m.(type) {
+	case map[string]struct{}:
+		_, ok := v[key]
+		return ok
+	case map[string]bool:
+		return v[key]
+	case []string:
+		for _, s := range v {
+			if s == key {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
 	}
 }
 

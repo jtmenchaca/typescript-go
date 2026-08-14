@@ -20,6 +20,7 @@
 package walk
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -65,6 +66,14 @@ type LoweredSummary struct {
 	// cross a call boundary this way: every other kind indexes the
 	// callee's own binding space.
 	DefaultEffects map[int]kernelbridge.LoopEffect
+	// ReturnsReceiver: the body ends `return this`. The value has no
+	// scalar spelling (the ret rides unknown), and the CALLER gains an
+	// alias to the receiver it may write through later — so the direct
+	// apply route must FORGET the caller's knowledge of the receiver
+	// (parity with the opaque path's ForgetThrough), and the statement
+	// route must decline outright: a composed caller's later writes
+	// through the alias would leave the receiver's slots stale.
+	ReturnsReceiver bool
 	// BundleEntries: one row per expanded bundle entry — this-fields
 	// and record-parameter leaves — in slot order. Path is the slot
 	// spelling ("this.container", "p.lo"), Index its slot index, and
@@ -493,6 +502,49 @@ func applySummary(
 	}
 	tracing.Count("summaryServed", 0)
 	return promiseWrappedIfAsync(declaration, abstractdomain.AtTrustLevel(answer, floor)), true
+}
+
+// SummaryReceiverEffects answers what a served summary moves in the
+// CALLER's world: whether the receiver must be forgotten (a written
+// this-field, or a returned receiver — the caller would otherwise keep
+// object knowledge the body moved or may move through the alias), and
+// which ARGUMENT positions carry a parameter bundle the body writes.
+// The direct apply route reads this and applies the same ForgetThrough
+// the opaque path applies; without it a served answer leaves stale
+// Keys behind — the exact asymmetry the opaque path never had.
+func SummaryReceiverEffects(ctx *FlowContext, declaration *ast.Node) (receiverTouched bool, writtenArguments []int) {
+	summary, ok := LowerSummaryBody(ctx, declaration)
+	if !ok {
+		return false, nil
+	}
+	receiverTouched = summary.ReturnsReceiver
+	parameters := declaration.Parameters()
+	names := make([]string, len(parameters))
+	for index, parameter := range parameters {
+		pd := parameter.AsParameterDeclaration()
+		if pd.Name() != nil && ast.IsIdentifier(pd.Name()) {
+			names[index] = pd.Name().Text()
+		}
+	}
+	seen := map[int]struct{}{}
+	for _, entry := range summary.BundleEntries {
+		if !entry.Written {
+			continue
+		}
+		if strings.HasPrefix(entry.Path, "this.") {
+			receiverTouched = true
+			continue
+		}
+		for index, name := range names {
+			if name != "" && strings.HasPrefix(entry.Path, name+".") {
+				if _, held := seen[index]; !held {
+					seen[index] = struct{}{}
+					writtenArguments = append(writtenArguments, index)
+				}
+			}
+		}
+	}
+	return receiverTouched, writtenArguments
 }
 
 // constEffectState reads a CONST or CONSTSTATE effect as the entry

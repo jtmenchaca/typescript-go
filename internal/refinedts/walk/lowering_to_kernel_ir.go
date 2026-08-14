@@ -136,7 +136,7 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			out = append(out, havocAssignments(captureHavocSet)...)
 			captureHavocAfter = false
 		}
-		if len(captureHavocSet) > 0 && StatementRunsCode(s) {
+		if len(captureHavocSet) > 0 && (StatementRunsCode(s) || StatementStoresElement(s)) {
 			out = append(out, havocAssignments(captureHavocSet)...)
 			captureHavocAfter = true
 			if !ast.IsReturnStatement(s) && !throwCarryingStatement(s) {
@@ -248,6 +248,23 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 						return out, true
 					}
 				}
+				// THE INERT RETURN: a returned FUNCTION LITERAL (creating one
+				// runs nothing, whatever its body holds — the census rules its
+				// captures), and any other returned expression that MOVES
+				// NOTHING (write- and call-free) — `return this`,
+				// `return host && host.instance`, `return x ? a[k] : a`,
+				// `return { }`. The value has no scalar spelling, so unknown
+				// IS what the ret slot can say, and evaluating the expression
+				// changed no state — the statement is READ, not floored.
+				if ast.IsFunctionLike(head) || writeAndCallFree(head) {
+					out = flush(out)
+					out = append(out, kernelbridge.IrStatement{
+						Kind:   kernelbridge.IrStatementAssign,
+						Target: context.Result.Ret,
+						Effect: unknownEffect,
+					}, raise)
+					return out, true
+				}
 				// THE OPAQUE RETURN. Every reading of the returned VALUE
 				// declined — the effect grammar, the await forms, the inlining
 				// route, the guard shape. What did NOT decline is the control
@@ -323,6 +340,19 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 				dropHoists()
 				return nil, false
 			}
+			// the thrown EXPRESSION's own effects: `throw new E(x)` runs a
+			// constructor that may move whatever the arguments mention. The
+			// mention havoc covers exactly that — the floor's own rule —
+			// and with it the whole statement is READ: control exact (ret
+			// absent, done raised — a throw produces no value, and code
+			// after the call only runs when no throw happened), value
+			// nothing, effects covered. Only an unenumerable expression
+			// keeps the porous mark.
+			if slots, enumerable := havocSlotsOfStatement(context, s); enumerable {
+				out = append(out, havocAssignments(slots)...)
+			} else {
+				NoteFirstHavoc(context, "throw")
+			}
 			out = append(out, kernelbridge.IrStatement{
 				Kind:   kernelbridge.IrStatementAssign,
 				Target: context.Result.Ret,
@@ -333,7 +363,6 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 				Target: context.Result.Done,
 				Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1}))},
 			})
-			NoteFirstHavoc(context, "throw")
 			return out, true
 		}
 		// `const p = { lo: 0, hi: n }` — a record local flattened into one
@@ -367,6 +396,14 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 		if assignments, ok := DestructuringAssignmentsOf(context, s); ok {
 			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
+			continue
+		}
+		dropHoists()
+		// `const { x = 1 } = p` — the leaf-exact destructuring with
+		// per-element defaults under the definedness branch.
+		if viaDefaults, ok := DestructuringWithDefaultsOf(context, s); ok {
+			out = flush(out)
+			out = append(out, viaDefaults...)
 			continue
 		}
 		dropHoists()
@@ -416,6 +453,15 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 		if assignments, ok := MapDeleteAssignmentsOf(context, s); ok {
 			out = flush(out)
 			out = append(out, assignsOf(assignments)...)
+			continue
+		}
+		dropHoists()
+		// `const f = () => { … }` — a closure held in a local: creation
+		// runs nothing, the name takes unknown, admitted only when the
+		// closure touches no tracked state.
+		if viaClosure, ok := FunctionValuedDeclarationOf(context, s); ok {
+			out = flush(out)
+			out = append(out, viaClosure...)
 			continue
 		}
 		dropHoists()
