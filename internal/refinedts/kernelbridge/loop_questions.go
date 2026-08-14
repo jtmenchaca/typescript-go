@@ -202,6 +202,13 @@ const (
 	// never costs the body its lowering.
 	IrStatementBranchBoth IrStatementKind = "branchBoth"
 	IrStatementLoop       IrStatementKind = "loop"
+	// IrStatementLoopStmts is the loop whose body is STATEMENTS rather
+	// than one effect per binding. No condition is read, so any number
+	// of trips may run — zero included — and the kernel havocs the
+	// body's own write set, which it computes from the body statements
+	// itself and never trusts from this wire. It carries Stmts and
+	// nothing else: no Written, Cond, After, or CondCmp.
+	IrStatementLoopStmts IrStatementKind = "loopStmts"
 	// IrStatementCall applies a callee's already-built summary. Callee
 	// indexes the summary table the question carries beside the
 	// statements; each Args entry is an effect over the CALLER's
@@ -300,6 +307,12 @@ type IrStatement struct {
 	// ray read off the other slot's flagless exit.
 	CondCmp *IrLoopCondCmp
 
+	// "loopStmts"
+	// Stmts: the body of a statement-bodied loop. This is the whole
+	// carrying field for that kind — Body above is the effect-bodied
+	// loop's and stays nil here.
+	Stmts []IrStatement
+
 	// "call"
 	// Callee: which summary of the question's table this call applies.
 	Callee int
@@ -393,6 +406,18 @@ func StmtWire(s IrStatement) string {
 		return fmt.Sprintf(
 			`{"branchBoth":{"thn":[%s],"els":[%s]}}`,
 			strings.Join(thn, ","), strings.Join(els, ","),
+		)
+	}
+	if s.Kind == IrStatementLoopStmts {
+		// no condition and no per-binding sets: the body statements ride
+		// alone and the kernel reads the write set off them
+		stmts := make([]string, len(s.Stmts))
+		for i, st := range s.Stmts {
+			stmts[i] = StmtWire(st)
+		}
+		return fmt.Sprintf(
+			`{"loopStmts":{"body":[%s]}}`,
+			strings.Join(stmts, ","),
 		)
 	}
 	operand := ""

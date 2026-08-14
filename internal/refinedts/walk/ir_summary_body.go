@@ -324,8 +324,70 @@ func SummaryParameterEntries(parameter *ast.Node) ([]bodySlot, bool) {
 // (recordParamMembersIn's memo).
 func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlot, bool) {
 	pd := parameter.AsParameterDeclaration()
-	if pd.Name() == nil || !ast.IsIdentifier(pd.Name()) || pd.DotDotDotToken != nil {
+	// a BINDING-PATTERN parameter (`({ transform, whitelist }: Options)`)
+	// binds locals from the argument object's members: one entry per
+	// element, slot name the BOUND name, Key the annotation member it
+	// fills from, sort the member's own. Defaults, rests, computed keys,
+	// nested patterns, a member the annotation does not spell, and a
+	// duplicate bound name all refuse.
+	if pd.Name() != nil && ast.IsObjectBindingPattern(pd.Name()) && pd.DotDotDotToken == nil && pd.Initializer == nil {
+		members, isRecord := recordParamMembersIn(ctx, parameter)
+		if !isRecord {
+			return nil, false
+		}
+		byKey := map[string]recordParamMember{}
+		for _, member := range members {
+			byKey[member.Key] = member
+		}
+		seen := map[string]struct{}{}
+		var out []bodySlot
+		for _, element := range pd.Name().AsBindingPattern().Elements.Nodes {
+			binding := element.AsBindingElement()
+			if binding.DotDotDotToken != nil || binding.Initializer != nil ||
+				binding.Name() == nil || !ast.IsIdentifier(binding.Name()) {
+				return nil, false
+			}
+			key := binding.Name().Text()
+			if binding.PropertyName != nil {
+				if !ast.IsIdentifier(binding.PropertyName) {
+					return nil, false
+				}
+				key = binding.PropertyName.Text()
+			}
+			member, declared := byKey[key]
+			if !declared {
+				return nil, false
+			}
+			bound := binding.Name().Text()
+			if _, duplicate := seen[bound]; duplicate {
+				return nil, false
+			}
+			seen[bound] = struct{}{}
+			out = append(out, bodySlot{
+				Name:      bound,
+				Key:       key,
+				Sort:      member.Sort,
+				TypeofTag: member.TypeofTag,
+			})
+		}
+		if len(out) == 0 {
+			return nil, false
+		}
+		return out, true
+	}
+	if pd.Name() == nil || !ast.IsIdentifier(pd.Name()) {
 		return nil, false
+	}
+	// a REST parameter binds an ARRAY — always defined, possibly empty,
+	// its contents unspellable in a scalar slot. One entry under the
+	// parameter's own name, unknown-sorted: reads of it answer nothing,
+	// which is exactly what is known, and the body no longer refuses.
+	if pd.DotDotDotToken != nil {
+		return []bodySlot{{
+			Name:      pd.Name().Text(),
+			Sort:      BindingKindUnknown,
+			TypeofTag: TypeofTagNone,
+		}}, true
 	}
 	if members, isRecord := recordParamMembersIn(ctx, parameter); isRecord {
 		// a defaulted RECORD parameter would need the default object
@@ -594,6 +656,11 @@ type bodySlot struct {
 	Name      string
 	Sort      BindingKind
 	TypeofTag TypeofTag
+	// Key: the annotation MEMBER this entry fills from at call sites,
+	// where it differs from Name — the binding-pattern parameter's
+	// renaming (`{ transform: t }` binds t from member transform).
+	// Empty for every other entry kind.
+	Key string
 }
 
 // collectSummaryLocals is CollectLocals widened by exactly two shapes,
@@ -1076,6 +1143,22 @@ func lowerSummaryBodyReporting(
 		entries, entriesOk := SummaryParameterEntriesIn(ctx, parameter)
 		if !entriesOk {
 			return LoweredSummary{}, "", declinedParameterConstruct(parameter), false
+		}
+		// a BINDING-PATTERN parameter: its entries are the BOUND names,
+		// each an ordinary scalar slot the call sites fill from the
+		// argument object's member (entry.Key). Before the record branch,
+		// which reads the same annotation but keys by member order — the
+		// pattern's order and subset are the entries' own.
+		if pd := parameter.AsParameterDeclaration(); pd.Name() != nil && ast.IsObjectBindingPattern(pd.Name()) {
+			if index < len(parameterSorts) {
+				return LoweredSummary{}, "", "a binding-pattern parameter of an arrow argument", false
+			}
+			for _, entry := range entries {
+				paramNames = append(paramNames, entry.Name)
+				paramSorts = append(paramSorts, entry.Sort)
+				paramTypeofs = append(paramTypeofs, entry.TypeofTag)
+			}
+			continue
 		}
 		if members, expanded := recordParamMembersIn(ctx, parameter); expanded {
 			// an EXPANDED parameter's every use in the body must be a read of

@@ -562,6 +562,20 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			out = append(out, loop)
 			continue
 		}
+		// EVERY OTHER for-of and for-in: an iterable nothing flattened, a
+		// binding pattern the two routes above do not spell, `for await`.
+		// Both of those routes need the collection's slots to give the
+		// binding its per-pass value; this one does not read the value at
+		// all — the bound names take unknown and the body's statements ride
+		// under the statement-bodied loop. Before this, every such head fell
+		// to the floor and havocked each leaf the loop so much as MENTIONED.
+		if ast.IsForOfStatement(s) || ast.IsForInStatement(s) {
+			if prelude, loop, stmtsOk := LowerLoopStatements(context, s); stmtsOk {
+				out = append(out, prelude...)
+				out = append(out, loop)
+				continue
+			}
+		}
 		// `switch (x) { case "a": … }` — the chain of equality branches.
 		if chain, ok := LowerSwitch(context, s); ok {
 			out = append(out, chain...)
@@ -688,11 +702,21 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			head, headOk := LoopHeadOf(context, while.Expression)
 			body, bodyOk := LoopBodyOf(context, while.Statement, nil)
 			if !headOk || !bodyOk {
-				// a head or body the loop form cannot spell: the whole loop
-				// havocs the union of what its head and body could write, ONCE.
-				// A loop is its statements repeated and havoc is idempotent —
-				// writing unknown into a slot twice leaves the same state — so
-				// one pass covers every trip count, the zero-trip case included.
+				// a head or body the SOLVER's form cannot spell still has the
+				// statement-bodied form: no condition read, any trip count, and
+				// the body's own write set havocked kernel-side while every
+				// other slot keeps its knowledge (ir_loop_stmts.go)
+				if prelude, loop, stmtsOk := LowerLoopStatements(context, s); stmtsOk {
+					out = append(out, prelude...)
+					out = append(out, loop)
+					continue
+				}
+				// and where THAT declines too — a head that moves state, a body
+				// statement nothing read — the whole loop havocs the union of
+				// what its head and body could write, ONCE. A loop is its
+				// statements repeated and havoc is idempotent — writing unknown
+				// into a slot twice leaves the same state — so one pass covers
+				// every trip count, the zero-trip case included.
 				havoc, havocOk := havocFloor(s)
 				if !havocOk {
 					return nil, false
@@ -719,6 +743,14 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			// express — the two proved halves do not compose there
 			returns := onceOk && context.Result != nil && RaisesDone(once, context.Result.Done)
 			if !onceOk || !headOk || !bodyOk || returns {
+				// the statement-bodied form before the floor: it admits any
+				// trip count including zero, which is weaker than "at least
+				// once" and never wrong about a run that took more
+				if prelude, loop, stmtsOk := LowerLoopStatements(context, s); stmtsOk {
+					out = append(out, prelude...)
+					out = append(out, loop)
+					continue
+				}
 				havoc, havocOk := havocFloor(s)
 				if !havocOk {
 					return nil, false
@@ -753,11 +785,20 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 				}
 			}
 			if !headOk || !bodyOk || !initOk {
-				// no condition (`for (;;)`), an unreadable head, an unreadable
-				// body, or an init the assignment grammar declines: the whole
-				// for havocs the union of what its three clauses and its body
-				// could write, once — idempotent, so one pass covers every trip
-				// count including zero
+				// no condition (`for (;;)`), an unreadable head, or a body the
+				// FOLD's grammar declines: the statement-bodied form takes it —
+				// the init before the loop, the step as the body's last
+				// statement, and no claim about the trip count
+				if prelude, loop, stmtsOk := LowerLoopStatements(context, s); stmtsOk {
+					out = append(out, prelude...)
+					out = append(out, loop)
+					continue
+				}
+				// and where that declines too — an init the assignment grammar
+				// refuses, a head that moves state — the whole for havocs the
+				// union of what its three clauses and its body could write,
+				// once — idempotent, so one pass covers every trip count
+				// including zero
 				havoc, havocOk := havocFloor(s)
 				if !havocOk {
 					return nil, false

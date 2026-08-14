@@ -542,19 +542,40 @@ func TestLoweringToKernelIR_ALoopCarryingABareBreakHavocsInsteadOfDecliningTheBo
 		Sorts:    []BindingKind{BindingKindNumber},
 		Typeofs:  []TypeofTag{TypeofTagNumber},
 	}
-	// a for-in has no loop reading at all; its body's break stays inside
+	// a for-in has no reading in the SOLVER's loop form at all, and its
+	// body's break stays inside. The statement-bodied loop takes it
+	// (ir_loop_stmts.go): the body's own statements ride under a loop
+	// that reads no condition, and the kernel havocs the body's write
+	// set — which is `x` — leaving every other slot alone.
+	//
+	// Before that form existed this body was the havoc FLOOR's, and the
+	// floor's answer was one `assign x unknown` naming "for-in". The
+	// exit state for `x` is the same either way (the loop wrote it under
+	// an unbounded trip count, so nothing about it survives); what
+	// changed is that the slots the loop merely MENTIONS are no longer
+	// havocked with it, and the body keeps a real loop rather than a
+	// stand-in.
 	stmts, ok := LowerStatements(context, loweringParse(t, `
 		for (const k in o) { x = 1; break; }
 	`))
 	if !ok {
 		t.Fatalf("a for-in carrying a bare break declined — the break cannot leave it")
 	}
-	if len(stmts) != 1 || stmts[0].Target != 0 ||
-		stmts[0].Effect.Kind != kernelbridge.LoopEffectUnknown {
-		t.Errorf("stmts = %+v, want one `assign 0 unknown`", stmts)
+	if len(stmts) != 1 || stmts[0].Kind != kernelbridge.IrStatementLoopStmts {
+		t.Fatalf("stmts = %+v, want one statement-bodied loop", stmts)
 	}
-	if context.FirstHavoc != "for-in" {
-		t.Errorf("FirstHavoc = %q, want %q", context.FirstHavoc, "for-in")
+	// the body is the loop's whole carrying field, and the write to x is
+	// in it — the effect-bodied loop's fields stay empty
+	if len(stmts[0].Stmts) == 0 {
+		t.Errorf("the loop carries no statements — the body's write to x must ride inside it")
+	}
+	if stmts[0].Written != nil || stmts[0].Cond != nil || stmts[0].Body != nil {
+		t.Errorf("the loop carries an effect-bodied loop's fields: %+v", stmts[0])
+	}
+	// the `break` itself has no reading, so it takes the floor INSIDE the
+	// body and names itself — the body is porous, and it says so
+	if context.FirstHavoc == "" {
+		t.Errorf("nothing was named — the break has no reading and must name its own stand-in")
 	}
 }
 

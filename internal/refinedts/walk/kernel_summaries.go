@@ -613,6 +613,32 @@ func summaryEntryStates(
 			states = append(states, row...)
 			continue
 		}
+		// a REST parameter's entry is TOP whatever the call passed: the
+		// bound array is always defined and its contents unspellable —
+		// never absent, which would claim an array that always exists is
+		// undefined
+		if parameter.AsParameterDeclaration().DotDotDotToken != nil {
+			states = append(states, kernelbridge.KnownStateWire{Top: true})
+			continue
+		}
+		// a BINDING-PATTERN parameter: one state per bound entry, each
+		// read from the argument object's member by the entry's Key —
+		// thisEntryState's TOP fallbacks for a non-object argument or an
+		// unnamed member, exactly the bundle rule
+		if pd := parameter.AsParameterDeclaration(); pd.Name() != nil && ast.IsObjectBindingPattern(pd.Name()) {
+			entries, entriesOk := SummaryParameterEntriesIn(ctx, parameter)
+			if !entriesOk {
+				return nil, false
+			}
+			var argument abstractdomain.AbstractValue
+			if index < len(argKnowns) {
+				argument = argKnowns[index]
+			}
+			for _, entry := range entries {
+				states = append(states, thisEntryState(argument, entry.Key))
+			}
+			continue
+		}
 		members, expanded := recordParamMembersIn(ctx, parameter)
 		if !expanded {
 			if index >= len(argKnowns) {

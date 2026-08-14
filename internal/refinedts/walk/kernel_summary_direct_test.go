@@ -500,18 +500,20 @@ func TestKernelSummaryDirect_ADecliningBodyRecordsTheConstructItRefused(t *testi
 	}
 }
 
-func TestKernelSummaryDirect_ADeclinedParameterNamesItsOwnConstruct(t *testing.T) {
+func TestKernelSummaryDirect_ARestParameterLowersAsOneUnknownEntry(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearResolvedRecordMembers()
 	ClearSummaryOutcomes()
+	// a rest parameter binds an ARRAY — always defined, its contents
+	// unspellable: one unknown-sorted entry, and the body reads whole
 	declaration := summaryDeclarationOf(t, "function f(...rest: number[]) { return 1; }")
-	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); ok {
-		t.Fatalf("a rest parameter lowered")
+	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
+		t.Fatalf("a rest-parameter body declined — one unknown entry spells it")
 	}
 	outcome, construct, _ := SummaryOutcomeOf(declaration)
-	if outcome != SummaryDeclined || construct != "a rest parameter" {
-		t.Errorf("outcome = %q / construct = %q, want declined naming the rest parameter", outcome, construct)
+	if outcome != SummaryComplete {
+		t.Errorf("outcome = %q (construct %q), want complete", outcome, construct)
 	}
 }
 

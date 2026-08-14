@@ -293,14 +293,21 @@ func TestEscapeAudit_AComputedWriteIsReported(t *testing.T) {
 	}
 }
 
-// `Object.assign(this, source)` moves every field through a callee the
-// scan cannot follow — the receiver is a bare argument, so the bare
-// mention rule is what must catch it
+// `Object.assign(this, source)` moves fields nothing names — the
+// computed store's own shape. It is admitted as ComputedWrite (every
+// field havocked around code-running statements and marked written),
+// never believed plainly, and never a whole-body escape.
 func TestEscapeAudit_ObjectAssignIntoTheReceiver(t *testing.T) {
 	census := auditMethodCensus(t,
 		"class C { count: number; m(source: object) { Object.assign(this, source); } }")
-	if !census.Escapes {
-		t.Errorf("`Object.assign(this, source)` did not escape: %+v", census)
+	if census.Escapes {
+		t.Errorf("`Object.assign(this, source)` escaped: %+v — it is the computed store's shape", census)
+	}
+	if !census.ComputedWrite {
+		t.Errorf("`Object.assign(this, source)` did not report a computed write: %+v — every field may have moved", census)
+	}
+	if census.Believable() {
+		t.Errorf("a computed write answered believable — a consumer without the havoc machinery would trust moved fields")
 	}
 }
 

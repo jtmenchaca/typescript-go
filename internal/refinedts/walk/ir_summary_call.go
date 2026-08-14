@@ -254,8 +254,21 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 		}
 	}
 	parameters := callee.Parameters()
+	// arity: extra arguments are admitted only into a trailing REST
+	// parameter, and each extra one must MOVE NOTHING — its value lands
+	// in the rest array, whose entry is unknown regardless, so only its
+	// evaluation effects matter and an inert one has none
+	restParameter := len(parameters) > 0 &&
+		parameters[len(parameters)-1].AsParameterDeclaration().DotDotDotToken != nil
 	if len(callArguments) > len(parameters) {
-		return kernelbridge.IrStatement{}, false
+		if !restParameter {
+			return kernelbridge.IrStatement{}, false
+		}
+		for _, extra := range callArguments[len(parameters):] {
+			if !writeAndCallFree(extra) {
+				return kernelbridge.IrStatement{}, false
+			}
+		}
 	}
 	// an argument that WRITES would move the caller's state on the way
 	// in, which the effect grammar does not carry
@@ -304,6 +317,27 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 			for range census.Reads {
 				args = append(args, kernelbridge.AbsentConst())
 			}
+			continue
+		}
+		// a BINDING-PATTERN parameter: one argument effect per bound
+		// entry, each reading the argument object's member by the entry's
+		// Key — the record-argument reader keyed the same way
+		if pd := parameter.AsParameterDeclaration(); pd.Name() != nil && ast.IsObjectBindingPattern(pd.Name()) {
+			if index >= len(callArguments) {
+				for range entries {
+					args = append(args, kernelbridge.AbsentConst())
+				}
+				continue
+			}
+			pseudo := make([]recordParamMember, len(entries))
+			for at, entry := range entries {
+				pseudo[at] = recordParamMember{Key: entry.Key, Sort: entry.Sort, TypeofTag: entry.TypeofTag}
+			}
+			leafEffects, leavesOk := recordArgumentEffects(context, pseudo, callArguments[index])
+			if !leavesOk {
+				return kernelbridge.IrStatement{}, false
+			}
+			args = append(args, leafEffects...)
 			continue
 		}
 		members, expanded := recordParamMembersOf(parameter)

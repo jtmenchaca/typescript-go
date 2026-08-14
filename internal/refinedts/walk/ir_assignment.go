@@ -64,6 +64,11 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			if held, ok := GetterReadEffect(context, node); ok {
 				return held, true
 			}
+			// `Scope.TRANSIENT` — an ENUM MEMBER: immutable by the
+			// language, its literal initializer is its value
+			if held, ok := EnumMemberConstEffect(context, node); ok {
+				return held, true
+			}
 			return kernelbridge.LoopEffect{}, false
 		},
 		Opaque: func(node *ast.Node) (kernelbridge.LoopEffect, bool) {
@@ -158,6 +163,42 @@ func FreeConstEffect(context *LoweringContext, node *ast.Node) (kernelbridge.Loo
 		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}, true
 	}
 	return kernelbridge.LoopEffect{}, false
+}
+
+// EnumMemberConstEffect reads `Scope.TRANSIENT` — a property access
+// whose NAME resolves to an ENUM MEMBER. An enum member is immutable
+// by the language, so its explicit literal initializer IS its value: a
+// numeric literal answers the exact constant. A string-membered or
+// auto-numbered member answers nothing here — the numeric reader has
+// no spelling for a word, and an auto value would be derived, never
+// read.
+func EnumMemberConstEffect(context *LoweringContext, node *ast.Node) (kernelbridge.LoopEffect, bool) {
+	if node == nil || !ast.IsPropertyAccessExpression(node) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	access := node.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil || !ast.IsIdentifier(access.Name()) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	symbol := symbolAt(context.Flow.P.Checker, access.Name())
+	if symbol == nil || symbol.ValueDeclaration == nil || !ast.IsEnumMember(symbol.ValueDeclaration) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	initializer := symbol.ValueDeclaration.AsEnumMember().Initializer
+	if initializer == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	head := Unwrapped(initializer)
+	if !ast.IsNumericLiteral(head) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	return LowerEffectExpression(head, EffectReader{
+		ReadPlace: func(string) (kernelbridge.LoopEffect, bool) { return kernelbridge.LoopEffect{}, false },
+		Opaque:    func(*ast.Node) (kernelbridge.LoopEffect, bool) { return kernelbridge.LoopEffect{}, false },
+	})
 }
 
 // IsAbsentKeyword is whether an expression spells the ABSENT value:

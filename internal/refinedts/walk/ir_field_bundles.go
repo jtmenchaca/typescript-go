@@ -750,6 +750,31 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 				return false
 			}
 		}
+		// `Object.assign(this, source)` — a store into fields nothing
+		// names: the computed store's own shape. Every field may have
+		// moved, the declaration bounds the set, and ComputedWrite's
+		// all-field havoc bracketing stands for it — not an escape. The
+		// source arguments walk on as ordinary expressions.
+		if ast.IsCallExpression(node) {
+			assignCall := node.AsCallExpression()
+			if assignCall.QuestionDotToken == nil && ast.IsPropertyAccessExpression(assignCall.Expression) {
+				assignAccess := assignCall.Expression.AsPropertyAccessExpression()
+				if assignAccess.QuestionDotToken == nil &&
+					ast.IsIdentifier(assignAccess.Expression) && assignAccess.Expression.Text() == "Object" &&
+					ast.IsIdentifier(assignAccess.Name()) && assignAccess.Name().Text() == "assign" &&
+					assignCall.Arguments != nil && len(assignCall.Arguments.Nodes) > 0 &&
+					isReceiver(Unwrapped(assignCall.Arguments.Nodes[0])) {
+					census.Computed = true
+					census.ComputedWrite = true
+					consumed[assignCall.Arguments.Nodes[0]] = struct{}{}
+					consumed[Unwrapped(assignCall.Arguments.Nodes[0])] = struct{}{}
+					for _, argument := range assignCall.Arguments.Nodes[1:] {
+						visit(argument)
+					}
+					return false
+				}
+			}
+		}
 		// `this.onData.bind(this)` — a DEFERRED method call: the bound
 		// function may run at any later time, exactly like a closure
 		// calling the method, and is collected the same way. The shape
@@ -1085,6 +1110,26 @@ func captureMentions(
 		if ast.IsDeleteExpression(child) && mentionsReceiverNode(child, isReceiver) {
 			readOnly = false
 			return true
+		}
+		// `Object.assign(this, source)` — a store into fields nothing
+		// names, exactly the computed store's shape: every field may have
+		// moved, and the declaration still bounds the set. ComputedWrite
+		// admits it under the all-field havoc bracketing instead of the
+		// escape. The SOURCE arguments walk on as ordinary expressions.
+		if ast.IsCallExpression(child) {
+			assignCall := child.AsCallExpression()
+			if assignCall.QuestionDotToken == nil && ast.IsPropertyAccessExpression(assignCall.Expression) {
+				assignAccess := assignCall.Expression.AsPropertyAccessExpression()
+				if assignAccess.QuestionDotToken == nil &&
+					ast.IsIdentifier(assignAccess.Expression) && assignAccess.Expression.Text() == "Object" &&
+					ast.IsIdentifier(assignAccess.Name()) && assignAccess.Name().Text() == "assign" &&
+					assignCall.Arguments != nil && len(assignCall.Arguments.Nodes) > 0 &&
+					isReceiver(Unwrapped(assignCall.Arguments.Nodes[0])) {
+					readOnly = false // reached only inside captures — a capture that
+					// reshapes the receiver is beyond the capture rules
+					return true
+				}
+			}
 		}
 		// a CALL whose callee is a receiver access is a METHOD call. The
 		// method's body may write fields, so the call is not a read — but
