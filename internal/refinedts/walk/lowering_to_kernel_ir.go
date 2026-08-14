@@ -338,6 +338,17 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			continue
 		}
 		dropHoists()
+		// `const { a } = call()` and every other pattern source the exact
+		// route above declined: the bound names take unknown — which is
+		// what is true of them — and the source's call lowers through the
+		// call machinery. AFTER the leaf-exact route, so a flattened
+		// record's pattern keeps its real values.
+		if viaPattern, ok := PatternAssignmentsOf(context, s); ok {
+			out = flush(out)
+			out = append(out, viaPattern...)
+			continue
+		}
+		dropHoists()
 		// `p = q` / `p = { … }` — a whole record written leaf for leaf.
 		// Ahead of the single-name reader, which has no slot for `p`.
 		if assignments, ok := RecordAssignmentOf(context, s); ok {

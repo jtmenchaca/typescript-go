@@ -1134,14 +1134,15 @@ func TestKernelSummaryDirect_ABodyDeclaringANestedArrowLowersPorouslyAndKeepsIts
 	}
 }
 
-func TestKernelSummaryDirect_AnArrayBindingPatternLowersWithItsNamesHavocked(t *testing.T) {
+func TestKernelSummaryDirect_AnArrayBindingPatternLowersWithItsNamesUnknown(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearResolvedRecordMembers()
 	ClearSummaryOutcomes()
-	// `const [a, b] = xs` names two slots. No route lowers the statement
-	// — DestructuringAssignmentsOf reads OBJECT patterns alone — so the
-	// havoc floor serves it and both names take `unknown`.
+	// `const [a, b] = xs` names two slots. The pattern route reads the
+	// statement whole: the bound values have no spelling, so both names
+	// take `unknown` BY THE PATTERN'S OWN RULE — the body is read, not
+	// floored, and records complete.
 	declaration := summaryDeclarationOf(t,
 		"function f(n: number) { let s = n + 1; const [a, b] = xs; return s; }")
 	names := summaryCollectedNames(t, declaration)
@@ -1151,19 +1152,14 @@ func TestKernelSummaryDirect_AnArrayBindingPatternLowersWithItsNamesHavocked(t *
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
 		_, construct, _ := SummaryOutcomeOf(declaration)
-		t.Fatalf("an array binding pattern DECLINED the body at %q — its names are collected, the statement havocs", construct)
+		t.Fatalf("an array binding pattern DECLINED the body at %q — its names are collected, the pattern lowers", construct)
 	}
 	outcome, construct, _ := SummaryOutcomeOf(declaration)
-	if outcome != SummaryPorous {
-		t.Errorf("outcome = %q, want porous — the pattern's statement havocked", outcome)
+	if outcome != SummaryComplete {
+		t.Errorf("outcome = %q (construct %q), want complete — unknown names are what is true of them, not a hole", outcome, construct)
 	}
-	// again the floor's own spelling, recorded not asserted finer
-	if construct != "declaration" {
-		t.Errorf("construct = %q, want %q — the floor's naming for a variable statement", construct, "declaration")
-	}
-	// the statement BEFORE the pattern kept its knowledge: f(2) returns 3.
-	// Read off the LOWERED IR walked directly — a porous body is never
-	// compiled, so there is no blob to apply.
+	// the statement BEFORE the pattern kept its knowledge: f(2) returns 3,
+	// read off the lowered IR walked directly.
 	lowered, loweredOk := RelowerSummaryBody(ctx, declaration)
 	if !loweredOk {
 		t.Fatalf("the body declined on the second lowering")

@@ -75,6 +75,49 @@ func TestDeclarationForms_AnUninitializedDeclaratorRecordsComplete(t *testing.T)
 	}
 }
 
+func TestDeclarationForms_APatternFromAnEffectFreeSourceIsRead(t *testing.T) {
+	// `const { a } = obj` where obj is opaque: a's value has no spelling
+	// — a takes unknown, which is what is true of it — and the body is
+	// read whole
+	answer, ok := booleanSummaryOf(t,
+		"function f(n: number) { const { a } = obj; return n + 1; }",
+		[]abstractdomain.AbstractValue{exactNumber(t, 2)})
+	if !ok {
+		t.Fatalf("a pattern from an effect-free source declined the summary route")
+	}
+	kernel := kernelDelegationLoadKernel(t)
+	state, stateOk := StateOfKnown(answer)
+	if !stateOk || state.Top {
+		t.Fatalf("the answer did not spell as a scalar state: %+v", answer)
+	}
+	if !kernel.Member(state.Set, []float64{3}) {
+		t.Errorf("f(2) excludes 3: %+v", state.Set)
+	}
+	ClearSummaryOutcomes()
+	outcome, construct := outcomeOf(t, summaryDeclarationOf(t,
+		"function f(n: number) { const { a } = obj; return n + 1; }"))
+	if outcome != SummaryComplete {
+		t.Errorf("outcome = %q (construct %q), want complete", outcome, construct)
+	}
+}
+
+func TestDeclarationForms_APatternFromAnUnresolvableCallKeepsThePorousName(t *testing.T) {
+	// the SOURCE call's effects are unenumerable, so the call havocs and
+	// names itself — the pattern route carries that through rather than
+	// silently claiming the call was read
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearSummaryOutcomes()
+	outcome, construct := outcomeOf(t, summaryDeclarationOf(t,
+		"function f(n: number) { const { a } = g(); return n + 1; }"))
+	if outcome == SummaryComplete {
+		t.Errorf("outcome = complete — the source call was never read, so complete overstates")
+	}
+	if outcome == SummaryPorous && construct == "" {
+		t.Errorf("the porous body named no construct")
+	}
+}
+
 func TestDeclarationForms_AMixedMultiDeclaratorStillDeclinesToTheFloor(t *testing.T) {
 	// one declarator no route spells (an object literal in a MULTI
 	// statement) declines the route — the statement keeps the floor and

@@ -60,21 +60,21 @@ func TestOutcomeLabels_AGeneratorDeclinesWhole(t *testing.T) {
 }
 
 // POROUS: the body translates, but one statement no route reads is
-// replaced by "assign unknown to every name it binds" — sound, and by
-// the serving rule the summary never answers a call.
+// replaced by "wipe everything it could touch" — sound, and by the
+// serving rule the summary never answers a call. The exemplar is a
+// call to a callee nothing resolves: its effects are unenumerable
+// beyond the wipe, so the statement havocs and names itself.
 func TestOutcomeLabels_AnUntranslatableStatementMakesTheBodyPorous(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearSummaryOutcomes()
 	outcome, construct := outcomeOf(t, summaryDeclarationOf(t,
-		"function f(n: number) { let s = n + 1; const [a, b] = xs; return s; }"))
+		"function f(n: number) { let s = n + 1; g(); return s; }"))
 	if outcome != SummaryPorous {
-		t.Errorf("outcome = %q, want porous — the arithmetic translated, the pattern wiped", outcome)
+		t.Errorf("outcome = %q (construct %q), want porous — the arithmetic translated, the call wiped", outcome, construct)
 	}
-	// the floor's own coarse naming; a finer diagnosis would say "an
-	// array binding pattern". Recorded, not endorsed.
-	if construct != "declaration" {
-		t.Errorf("construct = %q, want %q (the current coarse spelling)", construct, "declaration")
+	if construct == "" {
+		t.Errorf("a porous body named no construct — the first havocked statement must name itself")
 	}
 }
 
