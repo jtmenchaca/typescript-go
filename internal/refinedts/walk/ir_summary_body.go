@@ -501,7 +501,10 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 		return thisBundleLayout{}
 	}
 	census := FieldCensusOf(body, "this", BundleFieldsAs("this", fields))
-	if census.Escapes {
+	// an escape and a computed STORE both move the object through
+	// something no slot names, so neither leaves a believable bundle; both
+	// ride out under the one flag the callers already read
+	if !census.Believable() {
 		return thisBundleLayout{Escaped: true}
 	}
 	if len(census.Reads) == 0 && len(census.Writes) == 0 {
@@ -1049,7 +1052,7 @@ func lowerSummaryBodyReporting(
 		// expansions came before, in the census's declaration order. The
 		// census is the one report the call sites read back, so the rows
 		// ride out in BundleEntries with the write flags it found.
-		if _, census, _, isBundle := BundleParamCensus(ctx, body, parameter); isBundle && !census.Escapes {
+		if _, census, _, isBundle := BundleParamCensus(ctx, body, parameter); isBundle && census.Believable() {
 			// the arrow route fills ONE entry per declared parameter with a
 			// site sort, which an expanded bundle has no single entry for
 			if index < len(parameterSorts) {

@@ -526,7 +526,7 @@ func summaryEntryStates(
 		// (BundleParamEntryStates' rule): a class instance the caller
 		// knows nothing about is the routine case, and the bundle exists
 		// so the body can read fields the caller never had.
-		if _, census, _, isBundle := BundleParamCensus(ctx, declaration.Body(), parameter); isBundle && !census.Escapes && len(census.Reads) > 0 {
+		if _, census, _, isBundle := BundleParamCensus(ctx, declaration.Body(), parameter); isBundle && census.Believable() && len(census.Reads) > 0 {
 			var argument abstractdomain.AbstractValue
 			if index < len(argKnowns) {
 				argument = argKnowns[index]

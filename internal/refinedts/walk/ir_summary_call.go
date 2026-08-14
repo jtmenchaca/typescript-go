@@ -221,7 +221,7 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 		// a CLASS-TYPED parameter expanded to one entry per read field;
 		// placeholders hold the positions and bundleParamRetsAndArgs
 		// below overwrites them from the argument's own spelled path
-		if _, census, _, isBundle := BundleParamCensus(context.Flow, callee.Body(), parameter); isBundle && !census.Escapes && len(census.Reads) > 0 {
+		if _, census, _, isBundle := BundleParamCensus(context.Flow, callee.Body(), parameter); isBundle && census.Believable() && len(census.Reads) > 0 {
 			for range census.Reads {
 				args = append(args, kernelbridge.AbsentConst())
 			}

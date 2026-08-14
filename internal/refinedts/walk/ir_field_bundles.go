@@ -298,10 +298,17 @@ func typeElementFieldsOf(members []*ast.Node) []BundleField {
 // in either list a slot; the call site maps the Writes back out through
 // rets, the way a return value rides.
 //
-// Computed is any `receiver[e]` element access on the receiver: the
-// expression names no field, so nothing bounds WHICH slot moved — but
-// the DECLARATION bounds the set, so a consumer can havoc every slot of
-// this one object rather than declining.
+// Computed is any `receiver[e]` element access on the receiver, read or
+// written: the expression names no field.
+//
+// ComputedWrite is the half of that which MOVES state — `this[k] = v`,
+// `this[k]++`, `delete this[k]`. The two are separate because they cost
+// different things. A computed READ names no field but changes nothing,
+// so every slot keeps its value and the bundle is worth exactly what it
+// was. A computed STORE moves a slot nothing names, so no slot of this
+// receiver can be believed past it; the DECLARATION still bounds the
+// set, so a consumer can havoc every slot of this one object rather than
+// declining outright.
 //
 // Escapes is any occurrence of the receiver the lowering cannot follow:
 // a bare mention (`f(this)`, `return wrapper`, `xs.push(this)`), an
@@ -309,10 +316,11 @@ func typeElementFieldsOf(members []*ast.Node) []BundleField {
 // member. A bundle that escapes may be written through a name the census
 // never saw, so its slots cannot be trusted past that point.
 type FieldCensus struct {
-	Reads    []BundleField
-	Writes   []BundleField
-	Computed bool
-	Escapes  bool
+	Reads         []BundleField
+	Writes        []BundleField
+	Computed      bool
+	ComputedWrite bool
+	Escapes       bool
 }
 
 // FieldCensusOf scans a body for what it does with `receiverName` —
@@ -333,7 +341,9 @@ type FieldCensus struct {
 //     compound), the operand of `++`/`--`, or the operand of `delete`. A
 //     compound write and an update also READ, so both lists get the field.
 //   - COMPUTED is `<receiver>[e]` — an element access whose own receiver
-//     is this receiver.
+//     is this receiver. When that access is a STORE position rather than
+//     a read, ComputedWrite is set too: a read names no field and moves
+//     nothing, while a store moves a slot nothing names.
 //   - an ESCAPE is every other occurrence of the receiver: a bare
 //     identifier or `this` that is not the receiver of one of the above,
 //     an optional chain (`this?.x` — its receiver may be absent, which no
@@ -450,7 +460,117 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 		return nil, false, false
 	}
 
+	// noteStoreTarget records ONE store position. A store into
+	// `<receiver>.<field>` is a write; a store into `<receiver>[e]` moves a
+	// field nothing names; a store through any other shape that MENTIONS
+	// the receiver puts it somewhere the census cannot follow.
+	//
+	// It answers whether the target was accounted for, so the caller knows
+	// not to walk it again as an ordinary expression — a store position
+	// visited as an expression reads as a plain READ, which is the exact
+	// wrong answer: the slot would keep its entry value past the store.
+	noteStoreTarget := func(target *ast.Node, alsoReads bool) bool {
+		target = Unwrapped(target)
+		if target == nil {
+			return false
+		}
+		if name, isField := fieldAccessOf(target); isField {
+			if noteWrite(name) {
+				if alsoReads {
+					noteRead(name)
+				}
+			} else {
+				// a member the field set never declared: no slot holds it, and
+				// writing it moves state the census cannot name
+				census.Escapes = true
+			}
+			consumed[target] = struct{}{}
+			consumeReceiver(consumed, target)
+			return true
+		}
+		if ast.IsElementAccessExpression(target) &&
+			isReceiver(Unwrapped(target.AsElementAccessExpression().Expression)) {
+			// `this[k] = v`: the declaration bounds which slots could move,
+			// but nothing names which one did — so no slot of this receiver
+			// can be believed past this point
+			census.Computed = true
+			census.ComputedWrite = true
+			consumeReceiver(consumed, target)
+			return true
+		}
+		return false
+	}
+
+	// storePattern walks a DESTRUCTURING target — the `{ x: this.count }`
+	// of `({ x: this.count } = source)`, the `[this.count]` of
+	// `[this.count] = pair`, and the same shapes nested inside each other.
+	//
+	// Every leaf of such a pattern is a STORE position, not a read. The
+	// walk descends through the pattern's own structure and hands each
+	// leaf to noteStoreTarget; a leaf that is not a receiver access at all
+	// (a plain local, another object's field) is nobody's business here,
+	// and its own subexpressions — a computed key, a default's right side
+	// — are ordinary expressions and walk normally.
+	//
+	// Declared here and assigned below because it and `visit` call each
+	// other: a default value inside a pattern is an ordinary expression.
 	var visit func(node *ast.Node) bool
+	var storePattern func(target *ast.Node)
+	storePattern = func(target *ast.Node) {
+		target = Unwrapped(target)
+		if target == nil {
+			return
+		}
+		switch {
+		case ast.IsObjectLiteralExpression(target):
+			for _, property := range target.AsObjectLiteralExpression().Properties.Nodes {
+				switch {
+				case ast.IsPropertyAssignment(property):
+					assignment := property.AsPropertyAssignment()
+					// a computed key is an ordinary expression evaluated in place
+					if name := assignment.Name(); name != nil && ast.IsComputedPropertyName(name) {
+						visit(name.AsComputedPropertyName().Expression)
+					}
+					storePattern(assignment.Initializer)
+				case ast.IsShorthandPropertyAssignment(property):
+					// `({ count } = source)` stores into a LOCAL named count, never
+					// into the receiver — but its default value is an expression
+					if initializer := property.AsShorthandPropertyAssignment().ObjectAssignmentInitializer; initializer != nil {
+						visit(initializer)
+					}
+				case ast.IsSpreadAssignment(property):
+					storePattern(property.AsSpreadAssignment().Expression)
+				default:
+					visit(property)
+				}
+			}
+		case ast.IsArrayLiteralExpression(target):
+			for _, element := range target.AsArrayLiteralExpression().Elements.Nodes {
+				if ast.IsSpreadElement(element) {
+					storePattern(element.AsSpreadElement().Expression)
+					continue
+				}
+				storePattern(element)
+			}
+		case ast.IsBinaryExpression(target) &&
+			target.AsBinaryExpression().OperatorToken.Kind == ast.KindEqualsToken:
+			// a DEFAULTED element: `{ x: this.count = 1 }` stores into
+			// this.count when the source has no x, and evaluates 1 as an
+			// ordinary expression
+			binary := target.AsBinaryExpression()
+			storePattern(binary.Left)
+			visit(binary.Right)
+		default:
+			if noteStoreTarget(target, false) {
+				return
+			}
+			// not a receiver access: a plain local, another object's field.
+			// It still walks as an expression so a receiver mentioned inside
+			// it (`other[this.key] = v`) is counted.
+			visit(target)
+		}
+	}
+
 	visit = func(node *ast.Node) bool {
 		if node == nil {
 			return false
@@ -482,28 +602,40 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 			}
 			return false
 		}
+		// a LOOP BINDING through an expression: `for (this.count of xs)` and
+		// `for (this.count in o)` store into their target once per
+		// iteration. The target is not an assignment expression, so the
+		// write forms below never see it — without this the store reads as
+		// a plain access and the slot survives the loop unchanged.
+		//
+		// A for-of/for-in whose initializer is a DECLARATION binds fresh
+		// names and stores into nothing the bundle holds; only the
+		// expression form can name a field.
+		if node.Kind == ast.KindForOfStatement || node.Kind == ast.KindForInStatement {
+			loop := node.AsForInOrOfStatement()
+			if loop.Initializer != nil && !ast.IsVariableDeclarationList(loop.Initializer) {
+				storePattern(loop.Initializer)
+			} else {
+				visit(loop.Initializer)
+			}
+			visit(loop.Expression)
+			visit(loop.Statement)
+			return false
+		}
 		// the WRITE forms, before the read rule: an assignment target is a
 		// write, not a read of the slot it stores into
 		if target, alsoReads, isWrite := writeTargetOf(node); isWrite && target != nil {
-			if name, isField := fieldAccessOf(target); isField {
-				if noteWrite(name) {
-					if alsoReads {
-						noteRead(name)
-					}
-				} else {
-					// a member the field set never declared: no slot holds it, and
-					// writing it moves state the census cannot name
-					census.Escapes = true
+			// a DESTRUCTURING target is a pattern of store positions, each of
+			// which may name a field; a simple target is one store position
+			if ast.IsObjectLiteralExpression(target) || ast.IsArrayLiteralExpression(target) {
+				storePattern(target)
+				// the source side is an ordinary expression
+				if ast.IsBinaryExpression(node) {
+					visit(node.AsBinaryExpression().Right)
 				}
-				consumed[target] = struct{}{}
-				consumeReceiver(consumed, target)
-			} else if ast.IsElementAccessExpression(target) &&
-				isReceiver(Unwrapped(target.AsElementAccessExpression().Expression)) {
-				// `this[k] = v`: the declaration bounds which slots could move,
-				// but nothing names which one did
-				census.Computed = true
-				consumeReceiver(consumed, target)
+				return false
 			}
+			noteStoreTarget(target, alsoReads)
 			node.ForEachChild(visit)
 			return false
 		}
@@ -578,6 +710,26 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 		}
 	}
 	return census
+}
+
+// Believable answers whether a body's slots for this bundle may be
+// trusted at all. Two reports kill it, for one reason: the body moved
+// the object through something no slot names.
+//
+//   - ESCAPES — the receiver reached code the scan cannot follow, which
+//     may have stored through it under a name never seen.
+//   - COMPUTED WRITE — `this[k] = v` stored into a field the expression
+//     does not name, so every slot of this receiver is suspect.
+//
+// A computed READ is not here: naming no field costs precision on that
+// one access and moves nothing.
+//
+// Every consumer that decides whether to expand a bundle reads THIS,
+// not the flags directly — the layout and the two call sites have to
+// agree about which bodies expand, and three spellings of one condition
+// is three chances to drift.
+func (census FieldCensus) Believable() bool {
+	return !census.Escapes && !census.ComputedWrite
 }
 
 // consumeReceiver marks the receiver spelling inside a recognized access
