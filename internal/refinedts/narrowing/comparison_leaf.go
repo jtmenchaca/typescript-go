@@ -60,13 +60,14 @@ func LiteralOf(e *ast.Node) (float64, bool) {
 
 // ModuloSide is moduloSide in the TS source: `x % k === 0` — read the
 // remainder side, when it is one on this place with a positive finite
-// divisor. (0, false) stands in for the TS source's null.
-func ModuloSide(side *ast.Node, place dataflowfacts.TrackedPlace, isTracked func(name string) bool) (float64, bool) {
+// divisor. (0, false) stands in for the TS source's null. The checker
+// is what resolves a const-bound index in the remainder's place.
+func ModuloSide(c *checker.Checker, side *ast.Node, place dataflowfacts.TrackedPlace, isTracked func(name string) bool) (float64, bool) {
 	if !ast.IsBinaryExpression(side) || side.AsBinaryExpression().OperatorToken.Kind != ast.KindPercentToken {
 		return 0, false
 	}
 	bin := side.AsBinaryExpression()
-	tested := dataflowfacts.TrackedPlaceOf(bin.Left, isTracked)
+	tested := dataflowfacts.TrackedPlaceOfWith(c, bin.Left, isTracked)
 	k, kOk := LiteralOf(bin.Right)
 	if tested == nil || !dataflowfacts.SameTrackedPlace(*tested, place) ||
 		!kOk || math.IsInf(k, 0) || math.IsNaN(k) || k <= 0 {
@@ -94,7 +95,7 @@ func ComparisonLeaf(
 	}
 
 	onPlace := func(e *ast.Node) bool {
-		tested := dataflowfacts.TrackedPlaceOf(e, isTracked)
+		tested := dataflowfacts.TrackedPlaceOfWith(c, e, isTracked)
 		return tested != nil && dataflowfacts.SameTrackedPlace(*tested, place)
 	}
 
@@ -153,9 +154,9 @@ func ComparisonLeaf(
 			return negated(leaf)
 		}
 		// the exact-remainder test: x % k === 0 / !== 0
-		modulo, moduloOk := ModuloSide(left, place, isTracked)
+		modulo, moduloOk := ModuloSide(c, left, place, isTracked)
 		if !moduloOk {
-			modulo, moduloOk = ModuloSide(right, place, isTracked)
+			modulo, moduloOk = ModuloSide(c, right, place, isTracked)
 		}
 		leftLiteral, leftLiteralOk := LiteralOf(left)
 		rightLiteral, rightLiteralOk := LiteralOf(right)

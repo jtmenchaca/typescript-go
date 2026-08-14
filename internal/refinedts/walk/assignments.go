@@ -19,7 +19,6 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
-	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -43,8 +42,11 @@ func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.A
 // inside the element set a declared SEQUENCE binding states — the
 // element set is an invariant exactly like the whole set
 // (WriteBinding), and the index does not matter: every slot wears it.
-// Judging only; what the write does to the tracked value stays with
-// the caller.
+// A declared set that is a UNION of repetitions states one element set
+// per arm, and the written value has to sit inside the one belonging
+// to whichever arm the sequence is on — so every arm judges the write,
+// and any arm the value falls outside of is the alert. Judging only;
+// what the write does to the tracked value stays with the caller.
 func WriteElement(ctx *FlowContext, target *ast.Node, value abstractdomain.AbstractValue, at *ast.Node) {
 	eae := target.AsElementAccessExpression()
 	if !ast.IsIdentifier(eae.Expression) {
@@ -54,18 +56,21 @@ func WriteElement(ctx *FlowContext, target *ast.Node, value abstractdomain.Abstr
 	if !hasDeclared || declared.Kind != annotations.DeclaredSet {
 		return
 	}
-	window, ok := refinementsets.AsRepetition(*declared.Set)
+	windows, ok := RepetitionArmsOf(*declared.Set)
 	if !ok {
 		return
 	}
-	CheckAssignability(
-		ctx,
-		value,
-		annotations.DeclaredRefinement{Kind: annotations.DeclaredSet, Set: &window.Element},
-		at,
-		"the written element",
-		nil,
-	)
+	for _, window := range windows {
+		element := window.Element
+		CheckAssignability(
+			ctx,
+			value,
+			annotations.DeclaredRefinement{Kind: annotations.DeclaredSet, Set: &element},
+			at,
+			"the written element",
+			nil,
+		)
+	}
 }
 
 // rootOfReceiver is the tracked name a write's receiver roots at: an

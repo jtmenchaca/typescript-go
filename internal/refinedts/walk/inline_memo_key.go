@@ -25,9 +25,41 @@ import (
 // writes one flat string per value — compiler symbols by pointer
 // identity, non-finite floats as words — so the key builds without
 // a JSON pass, and this runs on EVERY inline call, hits included.
-func computeInlineMemoKey(ctx *FlowContext, env Env, call *ast.Node, callExpr *ast.CallExpression, contract *FunctionContract, calleeName *ast.Node, argKnowns []abstractdomain.AbstractValue) string {
+// The nodes and the values both come from the ONE effective-argument
+// list the binding itself uses (EffectiveArgumentsOf), so a tagged
+// template's slots key the same way a plain call's do, and the key's
+// argument spellings are exactly the values ParameterKnown binds. A nil
+// node is a position with no expression to scan — a synthesized
+// template object, or an item expanded out of a spread.
+//
+// EXPANSION AND THE KEY: a spread changes how many positions one call
+// node occupies, and the key spells every effective VALUE in order, so
+// two calls of one declaration whose spreads expanded differently spell
+// different keys — different lengths, or different values at some
+// position. A hit therefore replays an inline of the same expansion,
+// never of a different one. A spread that did NOT expand holds one
+// position spelling residue, which an exact list can hold at that
+// position too — so the list's EXACTNESS rides in the key as well,
+// since it is what a rest parameter's binding turns on (the marker
+// written below).
+//
+// A TAGGED call and a plain call of the same declaration need no
+// separate discriminator in the key. The memo is already sharded per
+// contract.Declaration, so the only pair that could collide is two
+// calls of one declaration; and the key spells every argument VALUE,
+// where a tagged call's position 0 is the template object — the exact
+// list of that literal's cooked strings. A plain call keys the same
+// only by passing an equal exact list into the same position, and then
+// the parameter bindings really are equal, so the replayed outcome is
+// the one the walk would have produced. The key's argument spellings
+// carry the distinction; the call node's own id rides only where a
+// callback argument makes the body's behavior node-dependent.
+func computeInlineMemoKey(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, calleeName *ast.Node, effective EffectiveArguments) string {
 	var callbacks []*ast.Node
-	for _, a := range callExpr.Arguments.Nodes {
+	for _, a := range effective.Nodes {
+		if a == nil {
+			continue
+		}
 		if ast.IsArrowFunction(a) || ast.IsFunctionExpression(a) {
 			callbacks = append(callbacks, a)
 		}
@@ -83,7 +115,16 @@ func computeInlineMemoKey(ctx *FlowContext, env Env, call *ast.Node, callExpr *a
 		key.WriteString(strconv.Itoa(CallNodeIdOf(call)))
 		key.WriteByte('|')
 	}
-	for _, arg := range argKnowns {
+	// an INEXACT list keys apart from an exact one: the values alone do
+	// not decide the binding, because a REST parameter reads a rest LIST
+	// off an exact list and residue off an inexact one. `f(a, ...xs)`
+	// with an unread spread and `f(a, b)` with b holding residue spell
+	// the same values, and their rest bindings differ — so the exactness
+	// rides in the key and the two never share an outcome.
+	if !effective.Exact {
+		key.WriteString("~|")
+	}
+	for _, arg := range effective.Knowns {
 		spelled, ok := abstractdomain.SpellForMemoKey(arg)
 		if !ok {
 			if tracing.Recording(tracing.GrainStep) {

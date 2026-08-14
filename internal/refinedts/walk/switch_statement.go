@@ -29,17 +29,31 @@ func switchNumberOf(e *ast.Node) (float64, bool) {
 // tuple, several pin their union set. (zero, false) on any label
 // this reading cannot pin (the clause then narrows nothing).
 func SwitchLabelValues(labels []*ast.Node) (abstractdomain.AbstractValue, bool) {
+	return SwitchLabelValuesWith(nil, labels)
+}
+
+// SwitchLabelValuesWith is SwitchLabelValues with the checker that
+// resolves a const-bound label to its literal, so `const A = 1;
+// switch (x) { case A: }` reads. A nil checker reads literal tokens
+// only.
+func SwitchLabelValuesWith(c *checker.Checker, labels []*ast.Node) (abstractdomain.AbstractValue, bool) {
 	var numbersSeen []float64
 	var stringsSeen []string
 	for _, label := range labels {
-		if ast.IsNumericLiteral(label) {
-			numbersSeen = append(numbersSeen, switchNumberMust(label))
-		} else if n, ok := switchNumberOf(label); ok && ast.IsPrefixUnaryExpression(label) {
+		// a label follows its const-to-const links first, so the
+		// reading below sees the literal the label names
+		resolved, resolvedOk := dataflowfacts.ConstChainLiteral(c, label)
+		if !resolvedOk {
+			return abstractdomain.AbstractValue{}, false
+		}
+		if ast.IsNumericLiteral(resolved) {
+			numbersSeen = append(numbersSeen, switchNumberMust(resolved))
+		} else if n, ok := switchNumberOf(resolved); ok && ast.IsPrefixUnaryExpression(resolved) {
 			numbersSeen = append(numbersSeen, n)
-		} else if ast.IsStringLiteral(label) {
-			stringsSeen = append(stringsSeen, label.AsStringLiteral().Text)
-		} else if ast.IsNoSubstitutionTemplateLiteral(label) {
-			stringsSeen = append(stringsSeen, label.Text())
+		} else if ast.IsStringLiteral(resolved) {
+			stringsSeen = append(stringsSeen, resolved.AsStringLiteral().Text)
+		} else if ast.IsNoSubstitutionTemplateLiteral(resolved) {
+			stringsSeen = append(stringsSeen, resolved.Text())
 		} else {
 			return abstractdomain.AbstractValue{}, false
 		}
@@ -301,7 +315,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 					}
 					labels = append(labels, previous.AsCaseOrDefaultClause().Expression)
 				}
-				if pinned, ok := SwitchLabelValues(labels); ok {
+				if pinned, ok := SwitchLabelValuesWith(ctx.P.Checker, labels); ok {
 					clauseEnv.Set(switchStmt.Expression.Text(), pinned)
 				}
 			}
@@ -316,32 +330,28 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 				if !ast.IsCaseClause(c) {
 					continue
 				}
-				if v, ok := SwitchLabelValues([]*ast.Node{c.AsCaseOrDefaultClause().Expression}); ok {
+				if v, ok := SwitchLabelValuesWith(ctx.P.Checker, []*ast.Node{c.AsCaseOrDefaultClause().Expression}); ok {
 					caseLabels = append(caseLabels, &v)
 				} else {
 					caseLabels = append(caseLabels, nil)
 				}
 			}
-			numericAllValid := true
+			// the labels the reader COULD pin as numbers are shed; an
+			// unreadable label leaves whatever it names in place. Shedding
+			// a subset is sound on its own: reaching the default arm means
+			// EVERY case failed, so failing each readable one is part of
+			// what the arm proves, and the labels left unread only mean
+			// the residual is wider than the truth — never narrower.
 			var numericLabels []float64
 			for _, l := range caseLabels {
 				if l == nil || l.Kind != abstractdomain.KindValues || l.KindTag != abstractdomain.PrimitiveNumber {
-					numericAllValid = false
-					break
+					continue
 				}
-			}
-			if numericAllValid {
-				for _, l := range caseLabels {
-					if l != nil && l.Kind == abstractdomain.KindValues {
-						numericLabels = append(numericLabels, l.Values...)
-					}
-				}
-			} else {
-				numericLabels = nil
+				numericLabels = append(numericLabels, l.Values...)
 			}
 			if hasHeld && held.Kind == abstractdomain.KindValues &&
 				(held.KindTag == abstractdomain.PrimitiveNumber || held.KindTag == abstractdomain.PrimitiveBoolean) &&
-				numericAllValid {
+				len(numericLabels) > 0 {
 				excludedSet := map[float64]struct{}{}
 				for _, v := range numericLabels {
 					excludedSet[v] = struct{}{}
@@ -356,7 +366,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 					clauseEnv.Set(switchStmt.Expression.Text(), abstractdomain.KnownValues(remaining, held.KindTag, abstractdomain.TrustLevelOf(held)))
 				}
 			} else if hasHeld && held.Kind == abstractdomain.KindSet && held.SetKindTag == abstractdomain.SetKindTagNone &&
-				numericAllValid && len(numericLabels) > 0 {
+				len(numericLabels) > 0 {
 				diff := refinementsets.MakeRefinedSet(refinementsets.Refinement{
 					Form: refinementsets.FormDifference,
 					A_:   &held.Set,

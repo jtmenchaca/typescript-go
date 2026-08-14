@@ -12,7 +12,11 @@ import (
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/conditiontree"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -102,7 +106,7 @@ func UntrackedIdentifier(ctx *FlowContext, e *ast.Node) abstractdomain.AbstractV
 	// sent by a caller outside this file, so the type is everything the
 	// file determines. A private function's parameter stays plain — its
 	// callers are in this file, and their arguments are determinable.
-	if d != nil && ExportedFunctionParameter(d) {
+	if d != nil && ExportedFunctionParameter(ctx.P.Checker, d) {
 		return abstractdomain.Opaque
 	}
 	if d != nil && ast.IsVariableDeclaration(d) {
@@ -152,25 +156,152 @@ func UntrackedIdentifier(ctx *FlowContext, e *ast.Node) abstractdomain.AbstractV
 	return silence.AfterReaders(silence.Residue(), ctx.P.Checker, e, silence.RoleModel)
 }
 
-// testedByCondition is testedByCondition in the TS source: whether any
-// CONDITION inside a body tests a name — an if, a ternary, a loop
-// test, or the left side of a short-circuit. A guard over the name
-// means the file's own text determines more than the declaration
-// said, whether or not the walk reads that form yet.
-func testedByCondition(body *ast.Node, name string) bool {
-	var mentions func(node *ast.Node) bool
-	mentions = func(node *ast.Node) bool {
-		if ast.IsIdentifier(node) {
-			return node.Text() == name
+// narrowsPlace answers, for ONE leaf of a condition tree, whether the
+// leaf tests `name` in a position the narrowers actually read a claim
+// from. The positions are exactly the ones the narrowing recognizers
+// take a place from — read off their own readers, not invented here:
+//
+//   - `typeof x === "s"`: typeof_ground.go's TypeofLeaf takes the place
+//     from the operand of the typeof side.
+//   - `x === lit`, `x !== lit`, `x == null`, `x < k`: the equality and
+//     comparison readers (structural_narrowing.go's equality block,
+//     comparison_leaf.go) take the place from EITHER side.
+//   - `x % k === 0`: comparison_leaf.go's ModuloSide takes the place
+//     from the left of the `%`.
+//   - `x.includes(s)`, `x.startsWith(s)`: string_test_leaf.go and
+//     comparison_leaf.go's index-of reading take the place from the
+//     METHOD RECEIVER.
+//   - `f(x)`: predicate_narrowings.go's PredicateCallNarrowings and
+//     array_shape_narrowing.go's ArrayShapeLeaf take the place from the
+//     FIRST argument.
+//   - `"k" in x`: structural_narrowing.go's `in` reading takes the
+//     place from the right side.
+//   - `x instanceof C`: instanceof_narrowing.go takes the place from
+//     the left side.
+//   - a bare `x`: structural_narrowing.go's last row reads truthiness
+//     of the place itself.
+//
+// Anything else the name appears in — a further call argument, an
+// arithmetic operand, a template piece, an argument of a call that is
+// only a SIDE of some other test — narrows nothing, and so must not
+// veto. This mirrors condition_tree_lowering.go's CollectPlaces (the
+// narrowing machinery's own "which places does this condition test"),
+// restricted to a single name. It reads places WITH the checker, the
+// way CollectPlaces does, so `if (xs[i] === "a")` under `const i = 0`
+// vetoes here exactly where the narrowers read it — every reading this
+// resolution adds ADDS a veto, and a veto only ever turns an opaque
+// parameter into a plainly-read one. The one checker-dependent row in
+// CollectPlaces this reading still takes by NAME is the default-library
+// check on `Boolean(x)`: recognizing a shadowed local `Boolean` as a
+// narrowing position also only widens the veto, the same safe
+// direction.
+func narrowsPlace(c *checker.Checker, test *ast.Node, name string) bool {
+	isTracked := func(candidate string) bool { return candidate == name }
+	// place reads a candidate expression as a place on `name`: `x`
+	// itself, or a key path rooted at it (`x.a`, `x["k"].b`, and
+	// `x[i]` where a const pins i) — the same reading every narrowing
+	// leaf performs.
+	place := func(candidate *ast.Node) bool {
+		return candidate != nil && dataflowfacts.TrackedPlaceOfWith(c, candidate, isTracked) != nil
+	}
+	// narrows reads one leaf. `!` and the peelable wrappers recurse,
+	// since a refuted leaf narrows the same place its held form does.
+	var narrows func(e *ast.Node) bool
+	narrows = func(e *ast.Node) bool {
+		e = narrowing.Peeled(e)
+		if ast.IsPrefixUnaryExpression(e) &&
+			e.AsPrefixUnaryExpression().Operator == ast.KindExclamationToken {
+			return narrows(e.AsPrefixUnaryExpression().Operand)
 		}
-		hit := false
-		node.ForEachChild(func(child *ast.Node) bool {
-			if !hit {
-				hit = mentions(child)
+		if ast.IsBinaryExpression(e) {
+			bin := e.AsBinaryExpression()
+			op := bin.OperatorToken.Kind
+			// `x ?? d` in test position reads as the bare test of x
+			if op == ast.KindQuestionQuestionToken {
+				return narrows(bin.Left)
+			}
+			// `"k" in x` states on x and on x.k
+			if op == ast.KindInKeyword {
+				return place(bin.Right)
+			}
+			if op == ast.KindInstanceOfKeyword {
+				return place(bin.Left)
+			}
+			if narrowing.IsComparisonOperator(op) ||
+				op == ast.KindEqualsEqualsToken || op == ast.KindExclamationEqualsToken {
+				for _, side := range []*ast.Node{bin.Left, bin.Right} {
+					side = narrowing.Peeled(side)
+					if place(side) {
+						return true
+					}
+					// `typeof x === "number"` — the typeof side's operand
+					if ast.IsTypeOfExpression(side) && place(side.AsTypeOfExpression().Expression) {
+						return true
+					}
+					// `x % k === 0` — the remainder's left side
+					if ast.IsBinaryExpression(side) &&
+						side.AsBinaryExpression().OperatorToken.Kind == ast.KindPercentToken &&
+						place(side.AsBinaryExpression().Left) {
+						return true
+					}
+					// `x.indexOf(s) === -1` — the method receiver
+					if ast.IsCallExpression(side) &&
+						ast.IsPropertyAccessExpression(side.AsCallExpression().Expression) &&
+						place(side.AsCallExpression().Expression.AsPropertyAccessExpression().Expression) {
+						return true
+					}
+				}
 			}
 			return false
-		})
-		return hit
+		}
+		if ast.IsCallExpression(e) {
+			call := e.AsCallExpression()
+			// `Boolean(x)` IS the test of x — the argument re-enters whole
+			if ast.IsIdentifier(call.Expression) && call.Expression.Text() == "Boolean" &&
+				call.Arguments != nil && len(call.Arguments.Nodes) == 1 {
+				return narrows(call.Arguments.Nodes[0])
+			}
+			// a predicate call states on its FIRST argument only
+			if call.Arguments != nil && len(call.Arguments.Nodes) > 0 &&
+				place(call.Arguments.Nodes[0]) {
+				return true
+			}
+			// a method receiver is the tested place: `x.includes("s")`
+			if ast.IsPropertyAccessExpression(call.Expression) &&
+				place(call.Expression.AsPropertyAccessExpression().Expression) {
+				return true
+			}
+			return false
+		}
+		// a bare place as the whole leaf is a truthiness test
+		return place(e)
+	}
+	return narrows(test)
+}
+
+// narrowedByCondition is testedByCondition in the TS source, narrowed
+// to the mentions that MATTER. The TS source vetoed on any textual
+// mention of the name anywhere inside any condition; `if (x.length >
+// unrelated)` and `if (config.debug) { log(x) }` and `if (send(x))`
+// all vetoed, though the first two state nothing about x's admitted
+// shape that the walk reads, and the third states only what its own
+// predicate body says. Here a condition vetoes only when the name
+// stands in a position one of the narrowing recognizers reads a claim
+// from (narrowsPlace above), folded over the SHARED condition tree so
+// that `&&`, `||` and `!` decompose exactly as the narrowers decompose
+// them.
+//
+// The condition SITES are unchanged from the TS source: an if, a
+// ternary, a while, a do, a for test, and the left side of a
+// short-circuit.
+func narrowedByCondition(c *checker.Checker, body *ast.Node, name string) bool {
+	narrowsName := func(condition *ast.Node) bool {
+		for _, leaf := range conditiontree.AllLeaves(conditiontree.ConditionTreeOf(condition, false)) {
+			if narrowsPlace(c, leaf.Test, name) {
+				return true
+			}
+		}
+		return false
 	}
 	found := false
 	var scan func(node *ast.Node)
@@ -198,7 +329,7 @@ func testedByCondition(body *ast.Node, name string) bool {
 				condition = bin.Left
 			}
 		}
-		if condition != nil && mentions(condition) {
+		if condition != nil && narrowsName(condition) {
 			found = true
 			return
 		}
@@ -217,11 +348,17 @@ func testedByCondition(body *ast.Node, name string) bool {
 // call site in this file sends the argument — a function declaration
 // with the export modifier, an arrow or function expression bound by
 // an exported const, or a method of an exported class. And no
-// condition in that function's body tests the name: a guard would
+// condition in that function's body NARROWS the name: a guard would
 // prove something the declaration did not say, and until the walk
 // reads it that is the walk's gap to close, never the outside's
 // silence.
-func ExportedFunctionParameter(declaration *ast.Node) bool {
+//
+// "Narrows" is the narrowing recognizers' own reading, not a textual
+// mention (narrowedByCondition below). A parameter handed to a call,
+// added to something, or interpolated into a template inside a
+// condition states nothing about its own admitted shape, so it leaves
+// the opaque standing intact.
+func ExportedFunctionParameter(c *checker.Checker, declaration *ast.Node) bool {
 	var bound *ast.Node
 	if ast.IsParameterDeclaration(declaration) {
 		bound = declaration.AsParameterDeclaration().Name()
@@ -263,7 +400,7 @@ func ExportedFunctionParameter(declaration *ast.Node) bool {
 	if body == nil || !hasName {
 		return sent
 	}
-	return !testedByCondition(body, name)
+	return !narrowedByCondition(c, body, name)
 }
 
 // BodilessCallee is bodilessCallee in the TS source: whether a named

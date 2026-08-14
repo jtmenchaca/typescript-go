@@ -58,11 +58,28 @@ func BoundFunctionOf(ctx *FlowContext, expression *ast.Node) *BoundFunction {
 	if pae.Name().Text() != "bind" || !resolvesToDefaultLib(ctx, pae.Name()) {
 		return nil
 	}
-	// a spread among the bind's arguments breaks the prebound COUNT —
-	// the offset would be a guess
-	for _, argument := range call.Arguments.Nodes {
+	// the prebound arguments are everything after the thisArg. A spread
+	// of an array whose LENGTH is read expands into that many prebound
+	// positions; a spread whose length is unread breaks the prebound
+	// COUNT, and the offset would be a guess
+	preboundNodes := call.Arguments.Nodes
+	if len(preboundNodes) > 1 {
+		preboundNodes = preboundNodes[1:]
+	} else {
+		preboundNodes = nil
+	}
+	offset, exactCount := ExactSyntacticArgumentCount(ctx.P.Checker, preboundNodes)
+	if !exactCount {
+		return nil
+	}
+	// a spread among the bind's arguments still costs the per-argument
+	// NODES the consumers replay — the count is exact, the nodes are
+	// not, so an expanded call keeps its offset and states no prebound
+	// argument list
+	for _, argument := range preboundNodes {
 		if ast.IsSpreadElement(argument) {
-			return nil
+			preboundNodes = nil
+			break
 		}
 	}
 	target := FunctionInReach(ctx, pae.Expression)
@@ -72,10 +89,6 @@ func BoundFunctionOf(ctx *FlowContext, expression *ast.Node) *BoundFunction {
 	if !ast.IsArrowFunction(target) && MentionsThis(target) {
 		return nil
 	}
-	offset := len(call.Arguments.Nodes) - 1
-	if offset < 0 {
-		offset = 0
-	}
 	// a prebound REST parameter swallows every later argument — the
 	// positional offset past it means nothing
 	for index, parameter := range target.Parameters() {
@@ -83,16 +96,10 @@ func BoundFunctionOf(ctx *FlowContext, expression *ast.Node) *BoundFunction {
 			return nil
 		}
 	}
-	prebound := call.Arguments.Nodes
-	if len(prebound) > 1 {
-		prebound = prebound[1:]
-	} else {
-		prebound = nil
-	}
 	return &BoundFunction{
 		Target:            target,
 		Offset:            offset,
-		PreboundArguments: prebound,
+		PreboundArguments: preboundNodes,
 	}
 }
 

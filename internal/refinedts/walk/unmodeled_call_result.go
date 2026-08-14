@@ -82,6 +82,26 @@ func UnmodeledCallResult(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.
 			return abstractdomain.Opaque
 		}
 	}
+	// a call rooted at `super` — `super.m(…)` or a derived
+	// constructor's `super(…)` — that reached HERE: the base body was
+	// not read, so what comes back enters from outside this walk's
+	// determination exactly as a call through an opaque value does.
+	//
+	// A super call whose base declaration super_binding.go resolves to a
+	// held contract no longer reaches here at all: evaluate_call_expression
+	// hands it the inline route, which reads the caller's `this` as the
+	// receiver (SummaryCallReceiver) and forgets through it with
+	// ForgetThisHeld. The calls still landing here are the ones that
+	// route declines — a base with no extends clause this walk can
+	// follow, a base outside the checked files, a computed `super[k]`
+	// member, an overridden base method, a bare `super(…)` whose
+	// constructor spells no name to key an inline on. The
+	// stated-annotation and default-library readings above still run
+	// first, so a super call whose return type spells an annotation
+	// wears it rather than reaching here.
+	if calleeRoot.Kind == ast.KindSuperKeyword {
+		return abstractdomain.Opaque
+	}
 	// a callee with NO BODY anywhere in reach — a .d.ts signature, or
 	// an import from an unresolved module: its result ENTERS from
 	// outside the file's determination, so reads through it stay

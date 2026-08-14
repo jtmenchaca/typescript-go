@@ -230,11 +230,61 @@ func NestedFunctions(fn *ast.Node) []*ast.Node {
 // name-keyed environment, so its identity is the binding's name
 // plus the keys walked from it. A third spelling must not appear;
 // anything needing a path speaks one of these two.
+//
+// BOTH spell an element slot the same way — in brackets. PlaceKey's
+// Path is one string, `.lo` and `[0]` concatenated (PlaceKeyOf);
+// TrackedPlace's Path is the segments as a list, `lo` and `[0]`
+// (TrackedPlaceOf). IndexSegmentOf reads a TrackedPlace segment back
+// as a slot.
 
 // TrackedPlace is a tracked place: a name, or a name followed by keys.
+//
+// A path segment is either a KEY — the plain text of a property name or
+// a string-literal element key, `total` or `line` — or an INDEX — a
+// non-negative integer element slot, spelled in brackets: `[0]`, `[1]`.
+// The bracket spelling cannot collide with a key, because a key segment
+// carries the property's own text and a JavaScript property named `[0]`
+// is unwritable in either access form: `o.[0]` does not parse, and
+// `o["[0]"]` produces the segment `[0]` only through the string-literal
+// arm — which reads its text, so it spells the brackets literally and
+// names the same slot the index segment does only if the object really
+// carries the key `[0]`, an object no index segment is ever built for
+// (the index arm requires a NUMERIC literal). The two arms therefore
+// never write the same segment for two different slots.
+//
+// A consumer that steps a path INTO a value reads a key segment as an
+// object key and an index segment as a list item — IndexSegmentOf tells
+// them apart. A consumer that only carries paths around (the narrowing
+// channels appending and copying segments) needs no distinction.
 type TrackedPlace struct {
 	Binding string
 	Path    []string
+}
+
+// IndexSegmentOf reads a path segment spelled as an index — `[0]` — and
+// answers the slot it names. Not-an-index for every key segment. The
+// spelling has to round-trip exactly: `[00]` and `[0x1]` read as keys,
+// not as slot 0 and slot 1, so no key ever borrows a slot's identity.
+func IndexSegmentOf(segment string) (int, bool) {
+	if len(segment) < 3 || segment[0] != '[' || segment[len(segment)-1] != ']' {
+		return 0, false
+	}
+	digits := segment[1 : len(segment)-1]
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return 0, false
+		}
+	}
+	slot, err := strconv.Atoi(digits)
+	if err != nil || IndexSegment(slot) != segment {
+		return 0, false
+	}
+	return slot, true
+}
+
+// IndexSegment spells a slot as an index segment.
+func IndexSegment(slot int) string {
+	return "[" + strconv.Itoa(slot) + "]"
 }
 
 // SameTrackedPlace reports whether two tracked places name the same
@@ -253,8 +303,22 @@ func SameTrackedPlace(a, b TrackedPlace) bool {
 
 // TrackedPlaceOf reads `x`, `o.total`, `o.line.qty` as a place — and
 // `o["k"]` with a literal key, which names the same key a property
-// access would; anything else (a call, a computed index) is not one.
+// access would, and `xs[0]` with a non-negative integer literal, which
+// names one slot. Anything else (a call, an index that is not a literal)
+// is not a place: the checker cannot say which slot it reads, so it
+// names none.
+//
+// Without a checker an index that is a NAME reads as no place, even
+// when the name is const-bound to a literal. TrackedPlaceOfWith takes
+// the checker that resolves it.
 func TrackedPlaceOf(e *ast.Node, isTracked func(name string) bool) *TrackedPlace {
+	return TrackedPlaceOfWith(nil, e, isTracked)
+}
+
+// TrackedPlaceOfWith is TrackedPlaceOf with the checker that resolves a
+// const-bound index to its literal, so `const i = 0; xs[i]` names the
+// same slot `xs[0]` does. A nil checker reads literal indices only.
+func TrackedPlaceOfWith(c *checker.Checker, e *ast.Node, isTracked func(name string) bool) *TrackedPlace {
 	// a cast changes no runtime place — `(source as any).hooks` tests
 	// source.hooks
 	for ast.IsParenthesizedExpression(e) || ast.IsAsExpression(e) || ast.IsNonNullExpression(e) {
@@ -283,7 +347,7 @@ func TrackedPlaceOf(e *ast.Node, isTracked func(name string) bool) *TrackedPlace
 	}
 	if ast.IsPropertyAccessExpression(e) {
 		propAccess := e.AsPropertyAccessExpression()
-		inner := TrackedPlaceOf(propAccess.Expression, isTracked)
+		inner := TrackedPlaceOfWith(c, propAccess.Expression, isTracked)
 		if inner == nil {
 			return nil
 		}
@@ -294,20 +358,72 @@ func TrackedPlaceOf(e *ast.Node, isTracked func(name string) bool) *TrackedPlace
 	}
 	if ast.IsElementAccessExpression(e) {
 		elemAccess := e.AsElementAccessExpression()
-		key := StringLiteralOf(elemAccess.ArgumentExpression)
-		if key == nil {
+		segment, spelled := elementSegmentOf(c, elemAccess.ArgumentExpression)
+		if !spelled {
 			return nil
 		}
-		inner := TrackedPlaceOf(elemAccess.Expression, isTracked)
+		inner := TrackedPlaceOfWith(c, elemAccess.Expression, isTracked)
 		if inner == nil {
 			return nil
 		}
 		return &TrackedPlace{
 			Binding: inner.Binding,
-			Path:    append(append([]string{}, inner.Path...), *key),
+			Path:    append(append([]string{}, inner.Path...), segment),
 		}
 	}
 	return nil
+}
+
+// elementSegmentOf spells the path segment an element-access argument
+// names: a string literal names a KEY by its own text, a non-negative
+// integer literal names an INDEX in brackets. Anything else — a call, an
+// expression, a negative or fractional literal — names no segment,
+// because the checker cannot say which slot the read lands on.
+//
+// A NAME names a segment only through the const-chain resolver, and
+// only with a checker in hand: `const i = 0; xs[i]` names slot 0,
+// because a const bound to a literal holds that literal at every
+// reachable point. A let, a var, a parameter, or any name the resolver
+// cannot pin names no segment.
+func elementSegmentOf(c *checker.Checker, argument *ast.Node) (string, bool) {
+	if key := StringLiteralOf(argument); key != nil {
+		return *key, true
+	}
+	if ast.IsNumericLiteral(argument) {
+		slot, err := strconv.Atoi(argument.Text())
+		if err != nil || slot < 0 {
+			return "", false
+		}
+		// the literal has to spell the slot exactly: `xs[01]` and
+		// `xs[1.0]` fail Atoi or fail the round-trip, and a source
+		// spelling this walk cannot reproduce names no segment
+		if strconv.Itoa(slot) != argument.Text() {
+			return "", false
+		}
+		return IndexSegment(slot), true
+	}
+	// a const-bound name resolves to the number it holds. The resolver
+	// answers a float64, so the value has to BE a non-negative integer
+	// the index spelling can carry — a fractional, negative, or
+	// out-of-range value names no slot. The segment spelled here is the
+	// one the literal arm would spell for the same slot, so a resolved
+	// index and a written one name the same place.
+	if c != nil && ast.IsIdentifier(argument) {
+		value, resolved := ConstChainNumber(c, argument)
+		if !resolved {
+			return "", false
+		}
+		slot := int(value)
+		if value != float64(slot) || slot < 0 {
+			return "", false
+		}
+		segment := IndexSegment(slot)
+		if readBack, isIndex := IndexSegmentOf(segment); !isIndex || readBack != slot {
+			return "", false
+		}
+		return segment, true
+	}
+	return "", false
 }
 
 // StringLiteralOf is a string literal side of an equality.

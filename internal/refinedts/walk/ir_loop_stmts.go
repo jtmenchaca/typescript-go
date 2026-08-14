@@ -10,11 +10,33 @@
 //	  solver then CERTIFIES an invariant — `let i = 0; while (i < 10)
 //	  i++` exits with i in {10}. That is the precise answer and it
 //	  keeps its priority everywhere below.
-//	this one reads NO condition at all. Any number of trips may run,
-//	  zero included, and the kernel havocs the body's own write set —
-//	  which it computes from the body statements itself and never
-//	  trusts from the wire — leaving every other slot's knowledge
-//	  intact.
+//	this one solves no invariant of its OWN making. Any number of
+//	  trips may run, zero included, and the kernel havocs the body's
+//	  own write set — which it computes from the body statements
+//	  itself and never trusts from the wire — leaving every other
+//	  slot's knowledge intact.
+//
+// THE HEAD IS READ AT BOTH ENDS.
+//
+// At the EXIT: a loop leaves only when its condition FAILS, so the
+// head's falsity sets intersect every slot's exit and a two-slot
+// head's negation tightens on top — `while (i < n)` leaves with i at
+// least n. That refinement is unconditional and always applies.
+//
+// At each TRIP ENTRY: a trip runs only when the condition HELD, and
+// the kernel's certifying walk uses that to decide an invariant over
+// the STATEMENT-walked body. The candidate is the entry row havocked
+// on the body's write set and cut by the head's truth sets; walking
+// the body from that cut and landing back inside it certifies the row,
+// which the kernel then meets into the exit. A loop that does not
+// certify answers exactly the havoc-and-head exit it always did, so
+// this can only ever tighten.
+//
+// The head rides in the effect loop's own vocabulary (Cond, After,
+// CondCmp) and is read through the SAME LoopHeadOf, so the two routes
+// cannot disagree about what a head says. Cond is what the entry cut
+// reads; After is what the exit cut reads; a two-slot head feeds both
+// through CondCmp.
 //
 // The floor it replaces havocked the union of the head's and the
 // body's MENTIONS: every leaf of every flattened local named anywhere
@@ -22,9 +44,10 @@
 // targets. This form havocs the body's WRITES. So a loop that reads a
 // record and writes one counter now keeps the record.
 //
-// THE HEAD MUST MOVE NOTHING. No condition is read, so any state the
-// head moves would simply be lost: `while (m.has(k++))` steps k on
-// every trip and this form would walk the loop as though it had not.
+// THE HEAD MUST MOVE NOTHING. The head is read for its exit sets and
+// nothing else, so any state it moves would simply be lost:
+// `while (m.has(k++))` steps k on every trip and this form would walk
+// the loop as though it had not.
 // So the while/do condition, the for's condition, and the for-of/for-in
 // iterable each pass writeAndCallFree, and a head that does not
 // declines the route back to the floor.
@@ -72,6 +95,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
 // LowerLoopStatements is the statement-bodied loop for while,
@@ -108,7 +132,7 @@ func LowerLoopStatements(
 		if !bodyOk {
 			return nil, kernelbridge.IrStatement{}, false
 		}
-		return nil, loopStmtsStatement(body), true
+		return nil, loopStmtsWithHead(context, while.Expression, body), true
 	case ast.IsDoStatement(statement):
 		// `do body while (cond)` runs the body at least once and this form
 		// admits ANY trip count including zero, so the same statement
@@ -124,7 +148,9 @@ func LowerLoopStatements(
 		if !bodyOk {
 			return nil, kernelbridge.IrStatement{}, false
 		}
-		return nil, loopStmtsStatement(body), true
+		// the do-while leaves through the SAME failed head a while does —
+		// the trip count differs, and this form claims nothing about it
+		return nil, loopStmtsWithHead(context, do.Expression, body), true
 	case ast.IsForStatement(statement):
 		return lowerForStatements(context, statement)
 	case ast.IsForOfStatement(statement), ast.IsForInStatement(statement):
@@ -188,7 +214,11 @@ func lowerForStatements(
 			Effect: step.Effect,
 		})
 	}
-	return prelude, loopStmtsStatement(body), true
+	// the condition is tested AFTER the incrementor, so the state the
+	// loop is left at is the state that failed it — the exit refinement
+	// reads exactly right here. `for (;;)` has no condition and refines
+	// by nothing, as it must.
+	return prelude, loopStmtsWithHead(context, forStmt.Condition, body), true
 }
 
 // lowerForInOrOfStatements is `for (x of xs)` and `for (k in o)`: the
@@ -322,12 +352,68 @@ func transfersStayInside(statement *ast.Node) bool {
 }
 
 // loopStmtsStatement wraps a lowered body as the kernel's
-// statement-bodied loop. Stmts is the whole carrying field: no Written,
-// no Cond, no After, no CondCmp — the kernel reads the write set off
-// the statements itself.
+// statement-bodied loop, with NO head read: no Written, no Cond, no
+// After, no CondCmp — the kernel reads the write set off the statements
+// and refines the exit by nothing.
 func loopStmtsStatement(body []kernelbridge.IrStatement) kernelbridge.IrStatement {
 	return kernelbridge.IrStatement{
 		Kind:  kernelbridge.IrStatementLoopStmts,
 		Stmts: body,
 	}
+}
+
+// loopStmtsWithHead is the same statement with the loop's head attached
+// for the EXIT refinement.
+//
+// The head is read through LoopHeadOf, the SAME machinery the
+// effect-bodied route uses, so the two routes can never disagree about
+// what a head says: `while (i < 10)` gives the truth set and the
+// falsity set at slot i, and `while (i < n)` gives the two-slot shape.
+//
+// The kernel intersects every slot's FALSITY set into its exit and
+// tightens the two-slot head's negation on top — sound because a loop
+// leaves only when its head FAILS, which is as true of the zero-trip
+// run as of any other.
+//
+// The TRUTH sets ride in Cond, and the certifying walk cuts by them at
+// every trip entry before walking the body — a trip runs only when the
+// head held. That cut is what the invariant certificate is decided
+// against, so a head that reads is worth carrying at both ends, not
+// only at the exit.
+//
+// A head that does not read (a call, a shape no comparison lowers)
+// falls back to the plain statement — the exit refines by nothing, the
+// certificate cuts by nothing, and the loop is exactly what it was
+// before the head was consulted. The head having already passed
+// writeAndCallFree is what makes consulting it safe: reading it costs
+// nothing and moves nothing.
+func loopStmtsWithHead(
+	context *LoweringContext, condition *ast.Node,
+	body []kernelbridge.IrStatement,
+) kernelbridge.IrStatement {
+	statement := loopStmtsStatement(body)
+	if context == nil || condition == nil {
+		return statement
+	}
+	head, headOk := LoopHeadOf(context, condition)
+	if !headOk {
+		return statement
+	}
+	if head.TwoSlot {
+		statement.CondCmp = &kernelbridge.IrLoopCondCmp{
+			On: head.On, Test: head.Test, OnB: head.OnB,
+		}
+		return statement
+	}
+	// the per-binding arrays the kernel reads by index, the head's own
+	// slot alone carrying sets
+	cond := make([]*refinementsets.RefinedSet, len(context.Bindings))
+	after := make([]*refinementsets.RefinedSet, len(context.Bindings))
+	if head.On >= 0 && head.On < len(cond) {
+		cond[head.On] = head.Cond
+		after[head.On] = head.After
+	}
+	statement.Cond = cond
+	statement.After = after
+	return statement
 }

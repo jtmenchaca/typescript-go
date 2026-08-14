@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -28,7 +29,7 @@ func TypeSeedAnswer(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKer
 	if declaration != nil && typereading.UncheckedDeclaration(p.Checker, declaration, 0) {
 		return Answer{}, false
 	}
-	if _, written := AnyWrittenNames(p)[token.Text()]; written {
+	if anyWriteReachesToken(p, token) {
 		return Answer{}, false
 	}
 	worn, ok := typereading.ReadHostType(p.Checker, p.Checker.GetTypeAtLocation(token), token, 0)
@@ -48,24 +49,28 @@ func TypeSeedAnswer(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKer
 
 // anyWrittenMemo is the TS source's `WeakMap<CheckerProgram, Set<string>>`
 // — substituted with a regular map guarded by a mutex, per PORT.md's
-// weak-map convention.
+// weak-map convention. The port carries the write's LEFT-SIDE NODE
+// beside its name, so the gate can ask which writes reach a read
+// instead of only whether the name was ever written.
 var (
 	anyWrittenMemoMu sync.Mutex
-	anyWrittenMemo   = map[*program.CheckerProgram]map[string]struct{}{}
+	anyWrittenMemo   = map[*program.CheckerProgram]map[string][]*ast.Node{}
 )
 
 // AnyWrittenNames is anyWrittenNames in the TS source: the names
 // this file ever assigns an any-typed value — the one write tsc
 // admits silently, so the type at a later read of that name is a
-// wish, not a checked claim.
-func AnyWrittenNames(p *program.CheckerProgram) map[string]struct{} {
+// wish, not a checked claim. Each name carries the assignment targets
+// that wrote it, which is what anyWriteReachesToken orders against a
+// read.
+func AnyWrittenNames(p *program.CheckerProgram) map[string][]*ast.Node {
 	anyWrittenMemoMu.Lock()
 	if held, ok := anyWrittenMemo[p]; ok {
 		anyWrittenMemoMu.Unlock()
 		return held
 	}
 	anyWrittenMemoMu.Unlock()
-	found := map[string]struct{}{}
+	found := map[string][]*ast.Node{}
 	var visit func(node *ast.Node)
 	visit = func(node *ast.Node) {
 		if ast.IsBinaryExpression(node) {
@@ -74,11 +79,11 @@ func AnyWrittenNames(p *program.CheckerProgram) map[string]struct{} {
 				func() {
 					defer func() {
 						if recover() != nil {
-							found[bin.Left.Text()] = struct{}{}
+							found[bin.Left.Text()] = append(found[bin.Left.Text()], bin.Left)
 						}
 					}()
 					if (p.Checker.GetTypeAtLocation(bin.Right).Flags() & checker.TypeFlagsAny) != 0 {
-						found[bin.Left.Text()] = struct{}{}
+						found[bin.Left.Text()] = append(found[bin.Left.Text()], bin.Left)
 					}
 				}()
 			}
@@ -93,6 +98,74 @@ func AnyWrittenNames(p *program.CheckerProgram) map[string]struct{} {
 	anyWrittenMemo[p] = found
 	anyWrittenMemoMu.Unlock()
 	return found
+}
+
+// anyWriteReachesToken answers whether an any-typed write to the
+// token's name can run before the token itself does. The gate refuses
+// the type seed exactly when one can.
+//
+// One ordering is soundly spellable here and only one: a write standing
+// textually AFTER the read, inside the SAME function body as the read,
+// with NO LOOP enclosing both, cannot run before it — the statements
+// between them run once, forward. Everything else keeps the whole-name
+// refusal:
+//
+//   - a write BEFORE the read in that body reaches it;
+//   - a write in a DIFFERENT function is not ordered against the read at
+//     all (the function may be called anywhere, including before);
+//   - a loop around both makes the later write run before the read on
+//     every iteration after the first;
+//   - a read with no enclosing function (module top level, where the
+//     write may sit in a function called from anywhere above) keeps the
+//     name gate.
+//
+// This only ever REMOVES a refusal when the write is provably unable to
+// reach; a write the reading cannot order keeps its poison.
+func anyWriteReachesToken(p *program.CheckerProgram, token *ast.Node) bool {
+	writes := AnyWrittenNames(p)[token.Text()]
+	if len(writes) == 0 {
+		return false
+	}
+	readHolder := enclosingFunctionOf(token)
+	if readHolder == nil {
+		return true // module top level: nothing to order the writes against
+	}
+	tokenStart := nodeStart(token)
+	for _, write := range writes {
+		if enclosingFunctionOf(write) != readHolder {
+			return true // another function's write runs at its caller's pleasure
+		}
+		if nodeStart(write) < tokenStart {
+			return true
+		}
+		if loopEnclosingBoth(write, token, readHolder) {
+			return true // a later write runs before the read on the next turn
+		}
+	}
+	return false
+}
+
+// loopEnclosingBoth is whether some loop inside the holder contains
+// both nodes — the case where a textually later write still precedes a
+// read, on the iteration after the one that wrote.
+func loopEnclosingBoth(write *ast.Node, token *ast.Node, holder *ast.Node) bool {
+	for node := write.Parent; node != nil && node != holder; node = node.Parent {
+		if !isLoopNode(node) {
+			continue
+		}
+		for inner := token.Parent; inner != nil && inner != holder; inner = inner.Parent {
+			if inner == node {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isLoopNode is the statement kinds that run their body more than once.
+func isLoopNode(node *ast.Node) bool {
+	return ast.IsForStatement(node) || ast.IsForInStatement(node) || ast.IsForOfStatement(node) ||
+		ast.IsWhileStatement(node) || ast.IsDoStatement(node)
 }
 
 // LiteralConstClaim is literalConstClaim in the TS source: a const
@@ -158,17 +231,12 @@ func literalKnown(p *program.CheckerProgram, e *ast.Node, depth int) (abstractdo
 			return abstractdomain.KnownValues([]float64{-float64(jsnum.FromString(unary.Operand.AsNumericLiteral().Text))}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved), true
 		}
 	}
-	if ast.IsIdentifier(e) && depth < 8 {
-		symbol := symbolAt(p.Checker, e)
-		if symbol != nil && symbol.ValueDeclaration != nil {
-			declaration := symbol.ValueDeclaration
-			if ast.IsVariableDeclaration(declaration) {
-				decl := declaration.AsVariableDeclaration()
-				if decl.Initializer != nil && declaration.Parent != nil && ast.IsVariableDeclarationList(declaration.Parent) &&
-					(declaration.Parent.Flags&ast.NodeFlagsConst) != 0 {
-					return literalKnown(p, decl.Initializer, depth+1)
-				}
-			}
+	// an identifier follows its const-to-const links to the literal it
+	// names — the one chain rule, shared with every other site that
+	// needs a literal (const_chain_literal.go)
+	if ast.IsIdentifier(e) && depth < dataflowfacts.ConstChainDepth {
+		if initializer, ok := dataflowfacts.ConstInitializerOf(p.Checker, e); ok {
+			return literalKnown(p, initializer, depth+1)
 		}
 	}
 	return abstractdomain.AbstractValue{}, false

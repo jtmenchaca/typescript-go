@@ -7,7 +7,11 @@
 // sinking. Privacy is the boundary that makes the collection
 // complete: tsc refuses outside writes, and any use of `this` that
 // is not a plain `this.key` (an alias, a hand-over, a computed
-// write) declines the whole class rather than guessing.
+// write) hands the instance out. After such an escape only the
+// `#`-named fields keep invariants — those are private at RUNTIME, so
+// no outside holder can write them and this walk still reads every
+// write; a `private`-modifier field loses its invariant, because the
+// modifier is erased and the escaped reference writes it freely.
 
 package walk
 
@@ -19,6 +23,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -104,9 +109,51 @@ func writtenAt(node *ast.Node) writtenAtKind {
 	return writtenAtNone
 }
 
-// FieldInvariantsOf is the invariants of a class's private fields,
-// or nil where `this` escapes the plain-key discipline. Memoized per
-// declaration; the collection walk runs each member body once.
+// numericStepWrite: is this write position a compound step whose
+// result is a NUMBER on every run? `-=`, `*=`, `/=`, `%=`, `**=`, the
+// bitwise and shift compounds, and `++`/`--` all run ToNumeric on
+// what they read before they write, so the value that lands is a
+// number (NaN included). `+=` is excluded — it concatenates when
+// either side is a string — and so are the logical compounds, whose
+// result is whatever the right side held.
+func numericStepWrite(node *ast.Node) bool {
+	parent := node.Parent
+	if parent == nil {
+		return false
+	}
+	if ast.IsBinaryExpression(parent) {
+		be := parent.AsBinaryExpression()
+		if be.Left != node {
+			return false
+		}
+		switch be.OperatorToken.Kind {
+		case ast.KindMinusEqualsToken, ast.KindAsteriskEqualsToken,
+			ast.KindSlashEqualsToken, ast.KindPercentEqualsToken,
+			ast.KindAsteriskAsteriskEqualsToken,
+			ast.KindAmpersandEqualsToken, ast.KindBarEqualsToken,
+			ast.KindCaretEqualsToken, ast.KindLessThanLessThanEqualsToken,
+			ast.KindGreaterThanGreaterThanEqualsToken,
+			ast.KindGreaterThanGreaterThanGreaterThanEqualsToken:
+			return true
+		}
+		return false
+	}
+	if ast.IsPostfixUnaryExpression(parent) {
+		operator := parent.AsPostfixUnaryExpression().Operator
+		return operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken
+	}
+	if ast.IsPrefixUnaryExpression(parent) {
+		operator := parent.AsPrefixUnaryExpression().Operator
+		return operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken
+	}
+	return false
+}
+
+// FieldInvariantsOf is the invariants of a class's private fields —
+// the `#`-named ones survive a `this` escape, the modifier-private
+// ones do not. Memoized per declaration; the collection walk runs each
+// member body once. Nil only on re-entry, where the answer would rest
+// on itself.
 func FieldInvariantsOf(ctx *FlowContext, declaration *ast.Node) map[string]abstractdomain.AbstractValue {
 	invariantMemoMu.Lock()
 	if invariantMemoSet[declaration] {
@@ -126,23 +173,56 @@ func FieldInvariantsOf(ctx *FlowContext, declaration *ast.Node) map[string]abstr
 
 func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]abstractdomain.AbstractValue {
 	// every `this` must be a plain `this.key` receiver — anything
-	// else (an alias, an argument, an element access) can write
-	// fields where the collection cannot see
+	// else (an alias, an argument, an element access) hands the WHOLE
+	// instance to code this walk does not read, so a write could land
+	// on any field from outside.
+	//
+	// An escape does not veto the `#`-named fields, and the reason is
+	// the LANGUAGE, not the type checker: a `#name` is private at
+	// RUNTIME — a holder of the escaped reference that is not lexically
+	// inside this class body cannot read or write `#name` at all (it is
+	// a TypeError, not a type error). So every write to a `#` field is
+	// spelled inside this class body, and the collection walk below
+	// reads that whole body. The escaped reference can only reach those
+	// fields by calling back into a method of this class, whose writes
+	// are exactly what the walk already collects.
+	//
+	// A field private by MODIFIER only (`private x`) has no such
+	// guarantee: the modifier is erased at runtime, so an alias typed
+	// loosely writes it freely, and the collection would be reading
+	// half the writes. Those fields keep the whole-class veto. A
+	// constructor-only-written `private` field is NOT airtight either,
+	// because the constructor can hand `this` out before it finishes
+	// writing, and the holder writes the field afterwards.
 	escapes := false
 	poisoned := map[string]struct{}{}
+	// the fields whose ONLY non-plain writes are numeric steps — those
+	// widen to the number ground rather than dropping out
+	numericallyStepped := map[string]struct{}{}
 	var inspect func(node *ast.Node)
 	inspect = func(node *ast.Node) {
-		if escapes {
-			return
-		}
 		if node.Kind == ast.KindThisKeyword {
 			parent := node.Parent
 			if !ast.IsPropertyAccessExpression(parent) || parent.AsPropertyAccessExpression().Expression != node {
 				escapes = true
-				return
-			}
-			if writtenAt(parent) == writtenAtOther {
-				poisoned[parent.AsPropertyAccessExpression().Name().Text()] = struct{}{}
+			} else if writtenAt(parent) == writtenAtOther {
+				key := parent.AsPropertyAccessExpression().Name().Text()
+				// a NUMERIC compound step (`this.#n++`, `this.#n *= k`, and
+				// kin) writes a number on every run whatever it read —
+				// ToNumeric runs on both sides first (tmp/ecma262/spec.html
+				// sec-compound-assignment-operators, sec-postfix-increment-
+				// operator) — so the field widens to the number ground
+				// instead of dropping out. `+=` is NOT one of these: it
+				// concatenates when either side is a string. `delete`, the
+				// logical compounds, and every other write keep the poison.
+				if numericStepWrite(parent) {
+					if _, already := poisoned[key]; !already {
+						numericallyStepped[key] = struct{}{}
+					}
+				} else {
+					delete(numericallyStepped, key)
+					poisoned[key] = struct{}{}
+				}
 			}
 		}
 		node.ForEachChild(func(child *ast.Node) bool {
@@ -151,9 +231,6 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 		})
 	}
 	inspect(declaration)
-	if escapes {
-		return nil
-	}
 
 	// the candidate fields: private and non-static — a `#name` is
 	// private by the language itself, a plain name needs the `private`
@@ -190,13 +267,26 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 		if flags&ast.ModifierFlagsPrivate == 0 && !ast.IsPrivateIdentifier(name) {
 			continue
 		}
+		// after an escape only the `#`-named fields survive: the language
+		// keeps outside code from writing them at all, so this walk still
+		// reads every write. A `private`-modifier field is writable
+		// through the escaped reference at runtime.
+		if escapes && !ast.IsPrivateIdentifier(name) {
+			continue
+		}
 		nameText := name.Text()
 		if _, isPoisoned := poisoned[nameText]; isPoisoned {
 			continue
 		}
 		env := NewEnv()
 		var value abstractdomain.AbstractValue
-		if pd.Initializer == nil {
+		if _, stepped := numericallyStepped[nameText]; stepped {
+			// a numeric step runs an unknown number of times over the
+			// object's life, so the field's own initializer no longer pins
+			// the value — what survives every run is the number ground
+			value = abstractdomain.PossiblyNaN(abstractdomain.KnownSet(
+				refinementsets.RefinedSet{}, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+		} else if pd.Initializer == nil {
 			value = abstractdomain.Undef
 		} else {
 			value = evaluateExpression(&silent, env, pd.Initializer)

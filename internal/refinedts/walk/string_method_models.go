@@ -139,20 +139,34 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 		}
 		if len(arguments) == 0 {
 			switch method {
+			// Go's ToUpper/ToLower is the SIMPLE case mapping; the
+			// spec's Default Case Conversion carries SpecialCasing's
+			// multi-point rows ("ß" uppercases to "SS" —
+			// sec-string.prototype.touppercase), so only the ASCII
+			// range, where the two agree, computes — a wider receiver
+			// keeps the sort-level answer below
 			case "toUpperCase":
-				out := outString(strings.ToUpper(text))
-				return &out
+				if isASCII(text) {
+					out := outString(strings.ToUpper(text))
+					return &out
+				}
 			case "toLowerCase":
-				out := outString(strings.ToLower(text))
-				return &out
+				if isASCII(text) {
+					out := outString(strings.ToLower(text))
+					return &out
+				}
+			// the trims remove the spec's white-space set
+			// (sec-trimstring: WhiteSpace ∪ LineTerminator), which is
+			// not Go's — unicode.IsSpace holds NEL and omits ZWNBSP —
+			// and not the ASCII cut list either (NBSP, LS, PS)
 			case "trim":
-				out := outString(strings.TrimSpace(text))
+				out := outString(strings.TrimFunc(text, isJSWhiteSpace))
 				return &out
 			case "trimStart":
-				out := outString(strings.TrimLeft(text, " \t\n\r\v\f"))
+				out := outString(strings.TrimLeftFunc(text, isJSWhiteSpace))
 				return &out
 			case "trimEnd":
-				out := outString(strings.TrimRight(text, " \t\n\r\v\f"))
+				out := outString(strings.TrimRightFunc(text, isJSWhiteSpace))
 				return &out
 			}
 		}

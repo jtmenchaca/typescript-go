@@ -22,7 +22,7 @@ import (
 // opaque: callers live outside this file.
 func InitialStateOfPlainParameter(p *program.CheckerProgram, parameter *ast.Node) abstractdomain.AbstractValue {
 	unread := func() abstractdomain.AbstractValue {
-		if ExportedFunctionParameter(parameter) {
+		if ExportedFunctionParameter(p.Checker, parameter) {
 			return abstractdomain.Opaque
 		}
 		return silence.Residue()

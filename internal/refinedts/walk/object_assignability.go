@@ -80,24 +80,51 @@ func CheckObjectArrayTarget(
 		// an array LITERAL gives each item its own syntactic position —
 		// the element's object literal, whose key initializers carry
 		// their true contextual sorts (the array node itself wears the
-		// array sort and would gate every scalar key to an alert)
-		var elements []*ast.Node
+		// array sort and would gate every scalar key to an alert).
+		//
+		// A spread contributes an unknown number of items, so only the
+		// positions a spread cannot have moved map: the elements BEFORE
+		// the first spread line up with the head of the item list, and
+		// the elements AFTER the last spread line up with its tail.
+		// Everything between the two spreads points at the whole array,
+		// as it did before.
+		elements := make([]*ast.Node, len(known.Items))
 		if ast.IsArrayLiteralExpression(node) {
-			arrayLiteral := node.AsArrayLiteralExpression()
-			hasSpread := false
-			for _, e := range arrayLiteral.Elements.Nodes {
+			written := node.AsArrayLiteralExpression().Elements.Nodes
+			firstSpread, lastSpread := -1, -1
+			for i, e := range written {
 				if ast.IsSpreadElement(e) {
-					hasSpread = true
-					break
+					if firstSpread < 0 {
+						firstSpread = i
+					}
+					lastSpread = i
 				}
 			}
-			if len(arrayLiteral.Elements.Nodes) == len(known.Items) && !hasSpread {
-				elements = arrayLiteral.Elements.Nodes
+			if firstSpread < 0 {
+				if len(written) == len(known.Items) {
+					copy(elements, written)
+				}
+			} else {
+				// the head: written[0:firstSpread] are items 0..firstSpread-1
+				head := firstSpread
+				if head > len(elements) {
+					head = len(elements)
+				}
+				copy(elements[:head], written[:head])
+				// the tail: the elements after the last spread are the last
+				// so many items, in order
+				tail := len(written) - lastSpread - 1
+				if tail > len(elements)-head {
+					tail = len(elements) - head
+				}
+				if tail > 0 {
+					copy(elements[len(elements)-tail:], written[len(written)-tail:])
+				}
 			}
 		}
 		for i, item := range known.Items {
 			itemNode := node
-			if elements != nil {
+			if elements[i] != nil {
 				itemNode = elements[i]
 			}
 			CheckAssignabilityAgainst(

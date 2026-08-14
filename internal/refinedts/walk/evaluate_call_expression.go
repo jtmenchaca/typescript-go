@@ -51,28 +51,14 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 		}
 	}
 	// a SPREAD argument expands its exact sequence into positional
-	// arguments — Math.max(...values) reads every element
+	// arguments — Math.max(...values) reads every element. The builtin
+	// models want the VALUES alone, so they read the effective list's
+	// knowns; the inline path below wants the values placed against
+	// their nodes and reads the whole effective list.
 	spreadArguments := func(args []*ast.Node) []abstractdomain.AbstractValue {
-		var out []abstractdomain.AbstractValue
-		for _, argument := range args {
-			if ast.IsSpreadElement(argument) {
-				spread := evaluateExpression(ctx, env, argument.AsSpreadElement().Expression)
-				if spread.Kind == abstractdomain.KindValues && spread.KindTag == abstractdomain.PrimitiveArray {
-					for _, v := range spread.Values {
-						out = append(out, abstractdomain.KnownValues([]float64{v}, abstractdomain.PrimitiveNumber, abstractdomain.TrustLevelOf(spread)))
-					}
-					continue
-				}
-				if spread.Kind == abstractdomain.KindList {
-					out = append(out, spread.Items...)
-					continue
-				}
-				out = append(out, silence.Residue()) // an inexpansible spread loses its slots
-				continue
-			}
-			out = append(out, evaluateExpression(ctx, env, argument))
-		}
-		return out
+		return EffectiveArgumentsOf(args, func(argument *ast.Node) abstractdomain.AbstractValue {
+			return evaluateExpression(ctx, env, argument)
+		}).Knowns
 	}
 	if builtin := ReadBuiltinCall(ctx, env, e, spreadArguments); builtin != nil {
 		// a builtin path that determined NOTHING may still wear the
@@ -102,18 +88,45 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 	if contract != nil && ast.IsPropertyAccessExpression(call.Expression) {
 		evaluateExpression(ctx, env, call.Expression.AsPropertyAccessExpression().Expression)
 	}
-	argKnowns := make([]abstractdomain.AbstractValue, len(arguments))
-	for i, argument := range arguments {
-		argKnowns[i] = evaluateExpression(ctx, env, argument)
+	// the arguments as the POSITIONS they occupy: every argument
+	// expression is evaluated once here, in source order, and a spread
+	// whose source is an exact sequence contributes one position per
+	// item. Nodes and values are built together, so every reader below
+	// that maps a parameter index to an argument node lands on the node
+	// whose value bound that parameter.
+	effective := EffectiveArgumentsOf(arguments, func(argument *ast.Node) abstractdomain.AbstractValue {
+		return evaluateExpression(ctx, env, argument)
+	})
+	argKnowns := effective.Knowns
+	if contract == nil {
+		// `super.m(x)` and a derived constructor's `super(x)` name no
+		// symbol ContractOf can follow, so the contract above is nil for
+		// them; super_binding.go walks the enclosing class's heritage to
+		// the base declaration the call runs, and its stated positions
+		// hold of these arguments exactly as any other call's do. The
+		// resolved contract stands in for the rest of this function: the
+		// obligations below, and the inline route further down.
+		//
+		// The receiver of such a call is the caller's own `this` — the
+		// dispatch to the base member is static, the instance is not
+		// re-bound — so the two seams the inline route reads a receiver
+		// through both answer for it: SummaryCallReceiver reads the
+		// tracked `this` entry, and the served-call forget fires
+		// ForgetThisHeld. A super call is a plain call shape besides —
+		// no template-object slot — so the effective list above is the
+		// one it binds.
+		if superContract := SuperCallContract(ctx, call.Expression); superContract != nil {
+			contract = superContract
+		}
 	}
 	if contract != nil {
-		CheckContractArguments(ctx, e, contract, argKnowns)
+		CheckContractArguments(ctx, contract, effective)
 	}
 	// a call through a PARAMETER the caller bound to a function
 	// literal: the very callback runs here, inlined
 	if contract == nil && ast.IsIdentifier(call.Expression) && ctx.CallableParams != nil {
 		if callback, ok := ctx.CallableParams[call.Expression.Text()]; ok {
-			return InlineCallbackNode(ctx, env, e, callback, argKnowns)
+			return InlineCallbackNode(ctx, env, e, callback, effective)
 		}
 	}
 	// a const-bound closure called by name runs HERE, synchronously —
@@ -121,7 +134,7 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 	// current facts, writes to outer names land, and the returned
 	// value is the join of what the body returns
 	if contract == nil {
-		if inlined := InlineStoredClosure(ctx, env, e, argKnowns); inlined != nil {
+		if inlined := InlineStoredClosure(ctx, env, e, effective); inlined != nil {
 			return *inlined
 		}
 	}
@@ -179,10 +192,17 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			statedResult = &v
 		}
 		summary := Summarize(ctx, *contract)
+		// a SUPER-rooted callee takes the full inline whether or not the
+		// body is self-contained: RecoverPure reads the callee's symbol off
+		// the call's own callee name, which `super.m` and a bare `super(…)`
+		// do not spell, so the recovery would answer residue where the
+		// opaque reading stood. The inline route reads the declaration's
+		// own name instead.
+		superRooted := SuperCalleeRoot(call.Expression) != nil
 		if summary.EffectFree {
 			tracing.Count("inlineSkipped", 0)
-			if summary.SelfContained {
-				recovered := RecoverPure(ctx, e, *contract, argKnowns, true)
+			if summary.SelfContained && !superRooted {
+				recovered := RecoverPure(ctx, e, *contract, effective, true)
 				if statedResult == nil {
 					return recovered
 				}
@@ -193,13 +213,13 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 		} else if summary.HasConstantWrites {
 			// the transfer applies the body's writes without re-walking
 			tracing.Count("summaryApplied", 0)
-			ApplyConstantWrites(ctx, env, e, summary.ConstantWrites)
+			ApplyConstantWrites(ctx, env, effective, summary.ConstantWrites)
 			if statedResult != nil {
 				return *statedResult
 			}
 			return silence.Residue()
 		}
-		recovered := InlineContractCall(ctx, env, e, contract, argKnowns)
+		recovered := InlineContractCall(ctx, env, e, contract, effective)
 		if statedResult == nil {
 			return recovered
 		}
@@ -225,7 +245,9 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 		resultSymbol := contract.Result.Symbol
 		var joined *abstractdomain.AbstractValue
 		complete := true
-		for i := 0; i < len(arguments) && complete; i++ {
+		// the positions, not the written arguments: a stated position is
+		// matched against the value that really bound it
+		for i := 0; i < len(argKnowns) && complete; i++ {
 			var stated *annotations.DeclaredRefinement
 			if i < len(contract.Params) {
 				stated = contract.Params[i]

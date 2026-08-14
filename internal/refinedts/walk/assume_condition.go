@@ -68,11 +68,24 @@ func registerSumConstraints(ctx *FlowContext, rows []dataflowfacts.SumConstraint
 // else stays feasible.
 func InfeasibleBranch(env Env, ns []narrowing.Narrowed) bool {
 	for _, n := range ns {
-		if len(n.Path) != 0 {
+		held, ok := env.Get(n.Binding)
+		if !ok {
 			continue
 		}
-		held, ok := env.Get(n.Binding)
-		if !ok || held.Kind != abstractdomain.KindValues {
+		// a PATH narrowing reads the key the path names, one step per
+		// segment through the object's own keys — the same exact-key
+		// reading the object rebuild does. A step that is not an object,
+		// or a key the object does not carry, says nothing about the
+		// leaf, so the narrowing keeps today's skip; only a leaf the
+		// walk holds EXACTLY can contradict anything.
+		if len(n.Path) != 0 {
+			leaf, reached := exactKeyAtPath(held, n.Path)
+			if !reached {
+				continue
+			}
+			held = leaf
+		}
+		if held.Kind != abstractdomain.KindValues {
 			continue
 		}
 		if len(held.Values) != 1 || held.KindTag != abstractdomain.PrimitiveNumber {
@@ -108,6 +121,43 @@ func InfeasibleBranch(env Env, ns []narrowing.Narrowed) bool {
 		}
 	}
 	return false
+}
+
+// exactKeyAtPath walks a narrowing's path into what a binding holds and
+// answers the value at the leaf, when every step reaches the value the
+// segment names: an object carrying that key, or a list carrying that
+// item. A maybe wrapper is stepped through: the path narrowing only
+// speaks about runs where the value was there, and the dead-branch
+// reading below only fires on an exact contradiction, which the absent
+// case cannot produce. Anything else answers not-reached, and the caller
+// leaves the narrowing alone.
+func exactKeyAtPath(held abstractdomain.AbstractValue, path []string) (abstractdomain.AbstractValue, bool) {
+	for _, key := range path {
+		if held.Kind == abstractdomain.KindPossiblyUndefined && held.Inner != nil {
+			held = *held.Inner
+		}
+		// an INDEX segment reads a list item by position; it names no
+		// object key, so an object under one is not reached
+		if slot, isIndex := dataflowfacts.IndexSegmentOf(key); isIndex {
+			if held.Kind != abstractdomain.KindList || slot >= len(held.Items) {
+				return abstractdomain.AbstractValue{}, false
+			}
+			held = held.Items[slot]
+			continue
+		}
+		if held.Kind != abstractdomain.KindObject {
+			return abstractdomain.AbstractValue{}, false
+		}
+		index, hasKey := objectKeyIndex(held, key)
+		if !hasKey {
+			return abstractdomain.AbstractValue{}, false
+		}
+		held = held.Keys[index].Value
+	}
+	if held.Kind == abstractdomain.KindPossiblyUndefined && held.Inner != nil {
+		held = *held.Inner
+	}
+	return held, true
 }
 
 func floatsInclude(list []float64, v float64) bool {
@@ -169,7 +219,7 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 	}, windows, site.ReadElsewhere)
 	// a held product guard (`x * y > k`) inverted: each factor narrows
 	// by the quotient of k and the other factor's window
-	inverse := InverseFactorNarrowings(ctx.Kernel, condition, func(name string) bool {
+	inverse := InverseFactorNarrowings(ctx.P.Checker, ctx.Kernel, condition, func(name string) bool {
 		_, ok := env.Get(name)
 		return ok
 	}, windows)
@@ -188,9 +238,23 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 				// DOTTED key (dots never appear in identifiers), so the
 				// entry rides the environment's own forking and joining;
 				// writes through the root sweep it (assignments.ts)
+				//
+				// A LIST root absorbs the write directly when the path names
+				// one of its items — a single INDEX segment inside the items
+				// it carries. ApplyNarrowed already rebuilt the root with
+				// that item narrowed (apply_narrowing.go's list arm), so the
+				// env.Set above IS the write, and the fallback would only
+				// record a second copy of the same fact under a dotted key
+				// no reader would prefer. Everything else — an index past the
+				// items, a deeper path, a non-list root — keeps the memory.
 				root := envOrResidue(into, n.Binding)
 				rootAbsorbs := root.Kind == abstractdomain.KindObject ||
 					(root.Kind == abstractdomain.KindPossiblyUndefined && root.Inner != nil && root.Inner.Kind == abstractdomain.KindObject)
+				if !rootAbsorbs && root.Kind == abstractdomain.KindList && len(n.Path) == 1 {
+					if slot, isIndex := dataflowfacts.IndexSegmentOf(n.Path[0]); isIndex && slot < len(root.Items) {
+						rootAbsorbs = true
+					}
+				}
 				if !rootAbsorbs {
 					pathKey := n.Binding
 					for _, p := range n.Path {
@@ -334,23 +398,10 @@ func assumeCondition(
 			return held.Values[0], true
 		}
 		// a const bound to a literal outside the walked scope (a
-		// module-level gap) — const, so the value never moves
-		symbol := ctx.P.Checker.GetSymbolAtLocation(side)
-		if symbol == nil || symbol.ValueDeclaration == nil {
-			return 0, false
-		}
-		declaration := symbol.ValueDeclaration
-		if !ast.IsVariableDeclaration(declaration) {
-			return 0, false
-		}
-		vd := declaration.AsVariableDeclaration()
-		if declaration.Parent == nil || (declaration.Parent.Flags&ast.NodeFlagsConst) == 0 {
-			return 0, false
-		}
-		if vd.Initializer == nil || !ast.IsNumericLiteral(vd.Initializer) {
-			return 0, false
-		}
-		return NumberOf(vd.Initializer)
+		// module-level gap) — const, so the value never moves. The
+		// initializer follows its const-to-const links, so
+		// `const M = 10; const N = M;` reads N as 10 (const_chain_literal.go).
+		return dataflowfacts.ConstChainNumber(ctx.P.Checker, side)
 	}
 	// an offset side whose arithmetic leaves the safe range: the
 	// kernel's proved envelope on |fl(x + k) − (x + k)| widens the

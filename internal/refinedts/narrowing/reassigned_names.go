@@ -2,23 +2,14 @@
 // A function declaration whose name is written anywhere may hold a
 // DIFFERENT function at runtime, so its body cannot stand for the
 // call. Split from condition_analysis.ts per the v2 tree.
-//
-// BLOCKED: FunctionWrites (functionWrites in the TS source) reads
-// dataflowfacts.WrittenNamesOf, which is NOT ported — it needs
-// service/program_resolution.ts's resolvesToDefaultLib on a default-
-// library method receiver, and dataflowfacts/syntactic_facts.go's own
-// banner marks writtenNamesOf blocked on exactly that (PORT.md: the
-// TS host/program adapter does not port, and this reader is outside
-// this directory's allowed import set regardless). Every call site in
-// this package that would read FunctionWrites is therefore also
-// unported here — see bound_condition.go and pinned_function.go's own
-// banners.
 package narrowing
 
 import (
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 )
 
 // reassignedMu guards reassignedCache: names a file ever reassigns — a
@@ -63,4 +54,15 @@ func ReassignedNames(file *ast.SourceFile) map[string]struct{} {
 	reassignedCache[file] = names
 	reassignedMu.Unlock()
 	return names
+}
+
+// FunctionWrites is functionWrites in the TS source: every name the
+// function can write — assignment targets, ++/--, non-read-only method
+// receivers of reference values, reference arguments handed to calls (a
+// value-sorted word travels by copy), with a default-library method's
+// receiver spared. Read from the syntactic-facts seam — computed once
+// per (checker, function), where it used to rescan the whole function
+// behind every const-guard condition.
+func FunctionWrites(c *checker.Checker, fn *ast.Node) map[string]struct{} {
+	return dataflowfacts.WrittenNamesOf(c, fn)
 }

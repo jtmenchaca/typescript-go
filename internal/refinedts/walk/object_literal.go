@@ -7,12 +7,28 @@
 package walk
 
 import (
+	"strconv"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
+
+// exactStringName is the ONE property name a computed key writes, where
+// the key expression pins exactly one string. ToPropertyKey of a string
+// is that string unchanged (sec-topropertykey), so the member lands on
+// exactly this name — no other key is touched, and the literal keeps
+// its completeness. Any other value (a number, a set, several strings,
+// an unknown) names no one key and answers ("", false).
+func exactStringName(keyValue abstractdomain.AbstractValue) (string, bool) {
+	if keyValue.Kind != abstractdomain.KindValues || keyValue.KindTag != abstractdomain.PrimitiveString {
+		return "", false
+	}
+	return stringOf(keyValue.Values), true
+}
 
 // EvaluateObjectLiteral evaluates an object literal expression.
 func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractValue {
@@ -26,6 +42,16 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 		keys[name] = v
 	}
 	complete := true
+	// a member whose KEY is not known costs the literal its completeness
+	// and every key written before it — the unknown name may land on any
+	// of them. The keys stay OBJECT keys, unstated where they were
+	// overwritten, so no absence claim rides on the unknown remainder.
+	openOnUnknownKey := func() {
+		for _, name := range keyOrder {
+			keys[name] = abstractdomain.Opaque
+		}
+		complete = false
+	}
 	for _, property := range lit.Properties.Nodes {
 		if ast.IsPropertyAssignment(property) {
 			pa := property.AsPropertyAssignment()
@@ -45,7 +71,24 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 					evaluateExpression(ctx, env, pa.Initializer)
 					continue
 				}
-				return silence.Residue() // a computed key lands anywhere
+				// a computed key whose expression evaluates to ONE exact
+				// string IS that name: ToPropertyKey of an exact string
+				// is the string itself (sec-topropertykey step 1 returns
+				// the already-string key unchanged), so the property is
+				// written exactly as if it had been spelled
+				if ast.IsComputedPropertyName(pa.Name()) {
+					keyValue := evaluateExpression(ctx, env, pa.Name().AsComputedPropertyName().Expression)
+					if exact, ok := exactStringName(keyValue); ok {
+						setKey(exact, evaluateExpression(ctx, env, pa.Initializer))
+						continue
+					}
+				}
+				// a computed key lands anywhere: the initializer still
+				// runs, and the literal keeps its named keys with
+				// completeness spent
+				evaluateExpression(ctx, env, pa.Initializer)
+				openOnUnknownKey()
+				continue
 			}
 			setKey(name, evaluateExpression(ctx, env, pa.Initializer))
 			continue
@@ -91,10 +134,7 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 			// so those become opaque with it — but the literal built
 			// here is still an OBJECT, its remaining keys unstated
 			if spread.Kind == abstractdomain.KindUnknown && spread.Opaque {
-				for _, name := range keyOrder {
-					keys[name] = abstractdomain.Opaque
-				}
-				complete = false
+				openOnUnknownKey()
 				continue
 			}
 			// a spread of exactly undefined contributes no keys at
@@ -104,8 +144,42 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 			if spread.Kind == abstractdomain.KindUndef {
 				continue
 			}
+			// a NON-OBJECT source still copies own enumerable properties
+			// (sec-copydataproperties calls ToObject on the source
+			// first): an exact string spreads its code units under index
+			// names, an exact sequence its elements — `length` is not
+			// enumerable on either, so it never rides along. Every other
+			// source shape (a set, a collection, a plain unknown) names
+			// keys this walk cannot spell, so it costs completeness and
+			// the keys written before it, never the whole literal.
 			if spread.Kind != abstractdomain.KindObject {
-				return silence.Residue()
+				if spread.Kind == abstractdomain.KindValues && spread.KindTag == abstractdomain.PrimitiveArray {
+					grade := abstractdomain.TrustLevelOf(spread)
+					for i, v := range spread.Values {
+						setKey(strconv.Itoa(i), abstractdomain.KnownValues([]float64{v}, abstractdomain.PrimitiveNumber, grade))
+					}
+					continue
+				}
+				// a string's index names count UTF-16 CODE UNITS, which
+				// coincide with this encoding's scalar slots only below
+				// the astral floor — an astral-bearing string names keys
+				// the tuple cannot spell
+				if spread.Kind == abstractdomain.KindValues && spread.KindTag == abstractdomain.PrimitiveString &&
+					refinementsets.AstralFree(spread.Values) {
+					grade := abstractdomain.TrustLevelOf(spread)
+					for i, v := range spread.Values {
+						setKey(strconv.Itoa(i), abstractdomain.KnownValues([]float64{v}, abstractdomain.PrimitiveString, grade))
+					}
+					continue
+				}
+				if spread.Kind == abstractdomain.KindList {
+					for i, item := range spread.Items {
+						setKey(strconv.Itoa(i), item)
+					}
+					continue
+				}
+				openOnUnknownKey()
+				continue
 			}
 			if !spread.Complete {
 				complete = false
@@ -176,12 +250,33 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 		hasName := false
 		if ast.IsGetAccessorDeclaration(property) || ast.IsSetAccessorDeclaration(property) || ast.IsMethodDeclaration(property) {
 			nameNode := property.Name()
-			if nameNode != nil && ast.IsIdentifier(nameNode) {
+			// a STRING-literal name spells its key exactly the way an
+			// identifier does — `{ "a"() {} }` writes "a"
+			if nameNode != nil && (ast.IsIdentifier(nameNode) || ast.IsStringLiteral(nameNode)) {
 				name, hasName = nameNode.Text(), true
 			}
 		}
 		if !hasName {
-			return silence.Residue()
+			// a COMPUTED-named method or accessor: an exact string name
+			// is the key it writes; anything else lands anywhere, and
+			// costs only completeness and the keys written before it.
+			// Either way the member itself carries no tracked data.
+			nameNode := property.Name()
+			if nameNode != nil && ast.IsComputedPropertyName(nameNode) {
+				keyExpression := nameNode.AsComputedPropertyName().Expression
+				// a SYMBOL-keyed member collides with no string key —
+				// every string-key claim survives it untouched, the same
+				// reading the property-assignment case takes
+				if (ctx.P.Checker.GetTypeAtLocation(keyExpression).Flags() & checker.TypeFlagsESSymbolLike) != 0 {
+					continue
+				}
+				if exact, ok := exactStringName(evaluateExpression(ctx, env, keyExpression)); ok {
+					setKey(exact, silence.Residue())
+					continue
+				}
+			}
+			openOnUnknownKey()
+			continue
 		}
 		if _, ok := keys[name]; !ok {
 			setKey(name, silence.Residue())

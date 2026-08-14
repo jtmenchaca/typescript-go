@@ -8,6 +8,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
@@ -84,17 +85,37 @@ func ReadObjectKeyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain
 	// a key read THROUGH an object-bounded T wears the key's own
 	// statement: every admissible T is a subset of the bound.
 	//
-	// BLOCKED: reading receiver.boundObject.keys needs the real
-	// *annotations.ObjectAnnotation shape. abstractdomain.AbstractValue's
-	// BoundObject field is typed ObjectAnnotationRef = *struct{} — an
-	// OPAQUE stand-in (abstract_value.go's own comment: "Comparisons in
-	// this package only ever check identity... When annotations ports,
-	// this becomes *annotations.ObjectAnnotation"). annotations HAS
-	// ported ObjectAnnotation now, but abstractdomain's field type is
-	// abstractdomain's own file to change, outside this port unit —
-	// so this arm cannot read the bound object's keys yet and falls
-	// through to the next reader, exactly like a receiver this branch
-	// never matched. Every other branch of this function is unaffected.
+	// The bound object arrives as an opaque ObjectAnnotationRef —
+	// abstractdomain holds the token and compares it by identity only.
+	// objectAnnotationOf (declared_value.go) walks the token back to
+	// the *annotations.ObjectAnnotation it was minted from; this file
+	// imports both packages, so the read lives here.
+	if receiver.Kind == abstractdomain.KindVariable && receiver.StarDepth == 0 && receiver.BoundObject != nil {
+		if bound := objectAnnotationOf(receiver.BoundObject); bound != nil {
+			for _, key := range bound.Keys {
+				if key.Name != pa.Name().Text() {
+					continue
+				}
+				// only a SET key states a value the read can wear; an
+				// object, collection, or reference key states a shape
+				// this arm holds nothing about
+				inner := silence.Residue()
+				if key.Value.Kind == annotations.KeyValueSet {
+					inner = abstractdomain.KnownSet(*key.Value.Set, nil, abstractdomain.TrustProved, setKindTagOf(key.Value.KindTag))
+				}
+				if inner.Kind != abstractdomain.KindUnknown {
+					// a key the statement lets be absent reads as the
+					// maybe wrapper, exactly as declared_value.go builds it
+					if key.MayBeAbsent {
+						out := abstractdomain.PossiblyUndefined(inner, "", false, false)
+						return &out
+					}
+					return &inner
+				}
+				break
+			}
+		}
+	}
 	// a receiver the walk holds nothing about, whose STATIC type is
 	// a web platform class: the getter's spec shape (web.ts)
 	if receiver.Kind == abstractdomain.KindUnknown {

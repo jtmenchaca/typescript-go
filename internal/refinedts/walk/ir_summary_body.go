@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
 
@@ -128,10 +129,6 @@ func scalarMemberListOf(holder string, members []*ast.Node) ([]recordParamMember
 //   - a symbol with MORE THAN ONE declaration — an interface declared
 //     twice merges its members across declarations, and reading only the
 //     first would build a member list the other declaration contradicts;
-//   - an INTERFACE with HERITAGE (`extends`) — an inherited member is
-//     declared somewhere this reading never visits, so the list would be
-//     incomplete and a body reading the inherited member would spell a
-//     slot the layout never made;
 //   - an interface or alias with TYPE PARAMETERS — the members'
 //     annotations are not the ones any instance actually holds;
 //   - a TYPE ALIAS whose right side is not a TYPE LITERAL (a union,
@@ -140,6 +137,25 @@ func scalarMemberListOf(holder string, members []*ast.Node) ([]recordParamMember
 //   - a CLASS — an instance carries methods, accessors, private state and
 //     aliases the flattening cannot hold, and its fields are not promised
 //     by the annotation alone.
+//
+// AN INTERFACE WITH HERITAGE (`interface Bounds extends Base { … }`)
+// expands: the heritage clause's parent references resolve through the
+// same symbolAt this function already uses, each parent's own members
+// read under the SAME per-member rules, recursively (a parent's own
+// heritage walks too), and the child's members SHADOW a parent's on a
+// name collision — TypeScript's own rule for an inherited property a
+// derived interface redeclares. Every existing decline still holds at
+// every link of the chain: type arguments on the reference or type
+// parameters on the declaration, a merged symbol (more than one
+// declaration), a qualified parent name, a parent that is not a plain
+// interface or an alias of a type literal, and any member the scalar
+// rules refuse. A CYCLE in the chain (illegal TS, but not assumed
+// pre-checked) declines rather than looping — the walk carries the
+// declaration nodes already on its own path and refuses to re-enter one.
+//
+// The answer stays check-independent for the same reason the one-level
+// reading is: the checker is asked only which declaration a name is, and
+// the members come off those declarations' own syntax.
 //
 // A nil context, or one with no program or no checker, resolves nothing
 // and declines — the nil-tolerance the ctx-less callers rely on: a
@@ -163,6 +179,23 @@ func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]
 	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
 		return nil, false
 	}
+	return declaredTypeMembersOf(ctx, holder, typeName, nil)
+}
+
+// declaredTypeMembersOf is the reading namedTypeMembersOf performs at
+// every link of a heritage chain: resolve ONE type NAME to its single
+// declaration and answer the members that declaration stands for,
+// including whatever it inherits.
+//
+// `visiting` holds the declaration nodes already on this walk's path. A
+// name resolving back onto one of them is a cycle, which answers false
+// rather than recursing forever.
+func declaredTypeMembersOf(
+	ctx *FlowContext,
+	holder string,
+	typeName *ast.Node,
+	visiting []*ast.Node,
+) ([]recordParamMember, bool) {
 	symbol := symbolAt(ctx.P.Checker, typeName)
 	if symbol == nil || len(symbol.Declarations) != 1 {
 		return nil, false
@@ -171,15 +204,33 @@ func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]
 	if declaration == nil {
 		return nil, false
 	}
-	if ast.IsInterfaceDeclaration(declaration) {
-		asInterface := declaration.AsInterfaceDeclaration()
-		if asInterface.HeritageClauses != nil && len(asInterface.HeritageClauses.Nodes) > 0 {
+	for _, seen := range visiting {
+		if seen == declaration {
 			return nil, false
 		}
+	}
+	if ast.IsInterfaceDeclaration(declaration) {
+		asInterface := declaration.AsInterfaceDeclaration()
 		if asInterface.TypeParameters != nil && len(asInterface.TypeParameters.Nodes) > 0 {
 			return nil, false
 		}
-		return scalarMemberListOf(holder, asInterface.Members.Nodes)
+		own, ownOk := interfaceOwnMembersOf(holder, asInterface)
+		if !ownOk {
+			return nil, false
+		}
+		// a fresh path slice per link: sibling parents each recurse with
+		// their own copy, so one branch's appends never land in another's
+		path := make([]*ast.Node, len(visiting), len(visiting)+1)
+		copy(path, visiting)
+		inherited, inheritedOk := heritageMembersOf(ctx, holder, asInterface, append(path, declaration))
+		if !inheritedOk {
+			return nil, false
+		}
+		merged := mergeShadowedMembers(inherited, own)
+		if len(merged) == 0 {
+			return nil, false
+		}
+		return merged, true
 	}
 	if ast.IsTypeAliasDeclaration(declaration) {
 		asAlias := declaration.AsTypeAliasDeclaration()
@@ -193,6 +244,91 @@ func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]
 	}
 	// a class, an enum, a module, a type parameter — none expand
 	return nil, false
+}
+
+// interfaceOwnMembersOf reads an interface's OWN member list under the
+// scalar rules, allowing the EMPTY list that scalarMemberListOf refuses:
+// `interface Bounds extends Base {}` declares nothing itself and takes
+// every member from its parent. The caller refuses the whole expansion
+// when the merged list is empty, so an interface with no members and no
+// heritage still declines exactly as before.
+func interfaceOwnMembersOf(holder string, asInterface *ast.InterfaceDeclaration) ([]recordParamMember, bool) {
+	if asInterface.Members == nil || len(asInterface.Members.Nodes) == 0 {
+		return nil, true
+	}
+	return scalarMemberListOf(holder, asInterface.Members.Nodes)
+}
+
+// heritageMembersOf reads everything an interface INHERITS: each
+// heritage clause's parent references resolved to their own members by
+// the same reading, in clause and reference order, later parents
+// shadowing earlier ones the way TypeScript's own resolution does.
+//
+// A parent reference carrying TYPE ARGUMENTS (`extends Box<number>`) or
+// spelled by anything but a plain identifier (`extends ns.Base`)
+// declines — the same two shapes the entry reference itself refuses,
+// for the same reasons.
+func heritageMembersOf(
+	ctx *FlowContext,
+	holder string,
+	asInterface *ast.InterfaceDeclaration,
+	visiting []*ast.Node,
+) ([]recordParamMember, bool) {
+	if asInterface.HeritageClauses == nil {
+		return nil, true
+	}
+	var inherited []recordParamMember
+	for _, clause := range asInterface.HeritageClauses.Nodes {
+		heritage := clause.AsHeritageClause()
+		if heritage.Types == nil {
+			continue
+		}
+		for _, reference := range heritage.Types.Nodes {
+			if !ast.IsExpressionWithTypeArguments(reference) {
+				return nil, false
+			}
+			parent := reference.AsExpressionWithTypeArguments()
+			if parent.TypeArguments != nil && len(parent.TypeArguments.Nodes) > 0 {
+				return nil, false
+			}
+			if parent.Expression == nil || !ast.IsIdentifier(parent.Expression) {
+				return nil, false
+			}
+			members, ok := declaredTypeMembersOf(ctx, holder, parent.Expression, visiting)
+			if !ok {
+				return nil, false
+			}
+			inherited = mergeShadowedMembers(inherited, members)
+		}
+	}
+	return inherited, true
+}
+
+// mergeShadowedMembers lays the `shadowing` list over the `base` one:
+// a member both spell is the SHADOWING one's, kept at the position the
+// base already gave it, and a member only the shadowing list spells is
+// appended after. Keeping the base's position is what makes the layout
+// deterministic — the slot order a parent's members took does not move
+// because a child redeclared one of them.
+func mergeShadowedMembers(base, shadowing []recordParamMember) []recordParamMember {
+	if len(base) == 0 {
+		return shadowing
+	}
+	at := map[string]int{}
+	merged := make([]recordParamMember, 0, len(base)+len(shadowing))
+	for _, member := range base {
+		at[member.Key] = len(merged)
+		merged = append(merged, member)
+	}
+	for _, member := range shadowing {
+		if index, already := at[member.Key]; already {
+			merged[index] = member
+			continue
+		}
+		at[member.Key] = len(merged)
+		merged = append(merged, member)
+	}
+	return merged
 }
 
 // resolvedRecordMembers remembers what ONE parameter node expanded to
@@ -850,7 +986,12 @@ func destructuredSlotsOf(pattern *ast.Node, records map[*ast.Node]ObjectLocal) [
 // TWO ("a.len", "a.elem"). A local the recognizers declined keeps its
 // single whole-name slot, whose key or index reads then find no slot
 // and decline the lowering — the existing behaviour.
+//
+// `c` is the host checker a plain-name scalar's sort is resolved
+// against (LocalSortResolved); nil reads the initializer's syntax
+// alone. The flattened families read their own leaves and never ask it.
 func localSlotsOf(
+	c *checker.Checker,
 	body *ast.Node,
 	locals []*ast.Node,
 	patterns []*ast.Node,
@@ -928,7 +1069,7 @@ func localSlotsOf(
 		}
 		out = append(out, bodySlot{
 			Name:      name,
-			Sort:      LocalSort(declared),
+			Sort:      LocalSortResolved(c, declared),
 			TypeofTag: LocalTypeof(declared),
 		})
 	}
@@ -1318,7 +1459,11 @@ func lowerSummaryBodyReporting(
 			parameterNames[parameter.AsParameterDeclaration().Name().Text()] = struct{}{}
 		}
 	}
-	slots := localSlotsOf(body, locals, patterns, parameterNames)
+	var slotChecker *checker.Checker
+	if ctx != nil && ctx.P != nil {
+		slotChecker = ctx.P.Checker
+	}
+	slots := localSlotsOf(slotChecker, body, locals, patterns, parameterNames)
 	// MUTABLE vectors: composition allocates fresh slots past #ret
 	bindings := append([]string{}, paramNames...)
 	sorts := append([]BindingKind{}, paramSorts...)

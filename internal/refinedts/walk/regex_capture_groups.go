@@ -17,21 +17,32 @@ type captureSpan struct {
 	end        int
 	capturing  bool
 	lookaround bool
+	// alternated records that a `|` sits DIRECTLY inside this group —
+	// at this group's own nesting level, not inside a group nested
+	// deeper. Such an alternation splits this group into branches, so
+	// every group it encloses can be left unset by a run that takes
+	// another branch.
+	alternated bool
 }
 
 // CaptureGroupsOf is captureGroupsOf in the TS source: the capture
 // groups of a regex pattern, each marked optional when the group can
 // be left unset in a successful match — a zero-admitting quantifier
-// on the group or any construct enclosing it, an alternation
-// anywhere, or a lookaround around it. Conservative on purpose: unsure
-// reads as optional (a string-or-undefined claim is sound either
-// way), and an unreadable structure (unbalanced parentheses) answers
-// (nil, false).
+// on the group or any construct enclosing it, a lookaround around it,
+// or an alternation in a scope that ENCLOSES the group (the whole
+// pattern, or a group the group sits inside). An alternation nested
+// deeper does not reach out: in /(a)(x|y)(b)/ all three groups fill on
+// every match, because the `|` splits only (x|y)'s own contents.
+// DIVERGES FROM TS: the TS source carries one whole-pattern
+// sawAlternation, so any `|` anywhere marks every group optional.
+// Conservative on purpose: unsure reads as optional (a
+// string-or-undefined claim is sound either way), and an unreadable
+// structure (unbalanced parentheses) answers (nil, false).
 func CaptureGroupsOf(pattern string) ([]CaptureGroup, bool) {
 	var groups []captureSpan
 	var stack []int
 	inClass := false
-	sawAlternation := false
+	topAlternated := false
 	runes := []rune(pattern)
 	at := func(i int) rune {
 		if i < 0 || i >= len(runes) {
@@ -68,7 +79,14 @@ func CaptureGroupsOf(pattern string) ([]CaptureGroup, bool) {
 			continue
 		}
 		if c == '|' {
-			sawAlternation = true
+			// the alternation belongs to the scope currently open: the
+			// innermost unclosed group, or the whole pattern when none is
+			// open
+			if len(stack) == 0 {
+				topAlternated = true
+			} else {
+				groups[stack[len(stack)-1]].alternated = true
+			}
 			continue
 		}
 		if c == '(' {
@@ -99,9 +117,12 @@ func CaptureGroupsOf(pattern string) ([]CaptureGroup, bool) {
 		next := at(endIndex + 1)
 		return next == '?' || next == '*' || (next == '{' && at(endIndex+2) == '0')
 	}
+	// the spans whose CONTENTS a run can leave unset: a group a
+	// quantifier lets repeat zero times, a lookaround, or a group split
+	// into branches by an alternation directly inside it
 	var optionalSpans []captureSpan
 	for _, g := range groups {
-		if zeroQuantified(g.end) || g.lookaround {
+		if zeroQuantified(g.end) || g.lookaround || g.alternated {
 			optionalSpans = append(optionalSpans, g)
 		}
 	}
@@ -110,7 +131,11 @@ func CaptureGroupsOf(pattern string) ([]CaptureGroup, bool) {
 		if !g.capturing {
 			continue
 		}
-		optional := sawAlternation || zeroQuantified(g.end) || g.lookaround
+		// a top-level alternation splits the WHOLE pattern, so every
+		// group sits in one branch and a run down another leaves it
+		// unset. An alternation nested inside some group reaches only
+		// the groups that group encloses — checked span by span below.
+		optional := topAlternated || zeroQuantified(g.end) || g.lookaround
 		if !optional {
 			for _, s := range optionalSpans {
 				if s.start < g.start && g.end < s.end {

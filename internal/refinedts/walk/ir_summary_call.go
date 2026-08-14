@@ -64,7 +64,9 @@ func constructorDeclarationOf(context *LoweringContext, callee *ast.Node) *ast.N
 		return nil
 	}
 	classLike := symbol.ValueDeclaration
-	if !ast.IsClassDeclaration(classLike) || ast.GetSourceFileOfNode(classLike).IsDeclarationFile {
+	// class-LIKE: a `const C = class { … }` expression constructs
+	// exactly as a declaration does
+	if !ast.IsClassLike(classLike) || ast.GetSourceFileOfNode(classLike).IsDeclarationFile {
 		return nil
 	}
 	for _, member := range classLike.ClassLikeData().Members.Nodes {

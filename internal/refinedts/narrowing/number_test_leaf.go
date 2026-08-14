@@ -29,7 +29,7 @@ func NumberTestLeaf(c *checker.Checker, e *ast.Node, place dataflowfacts.Tracked
 		if (argumentType.Flags() & checker.TypeFlagsNumberLike) == 0 {
 			return Other
 		}
-		tested := dataflowfacts.TrackedPlaceOf(argument, isTracked)
+		tested := dataflowfacts.TrackedPlaceOfWith(c, argument, isTracked)
 		if tested == nil || !dataflowfacts.SameTrackedPlace(*tested, place) {
 			return Other
 		}
@@ -53,7 +53,7 @@ func NumberTestLeaf(c *checker.Checker, e *ast.Node, place dataflowfacts.Tracked
 		return Other
 	}
 	argument := call.Arguments.Nodes[0]
-	tested := dataflowfacts.TrackedPlaceOf(argument, isTracked)
+	tested := dataflowfacts.TrackedPlaceOfWith(c, argument, isTracked)
 	if tested == nil || !dataflowfacts.SameTrackedPlace(*tested, place) {
 		return Other
 	}

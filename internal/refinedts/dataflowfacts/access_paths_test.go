@@ -254,6 +254,85 @@ func TestSameTrackedPlace(t *testing.T) {
 	}
 }
 
+func TestTrackedPlaceOfIndexSegments(t *testing.T) {
+	tracked := map[string]bool{"xs": true}
+	isTracked := func(name string) bool { return tracked[name] }
+
+	_, file := checkerFor(t, `
+xs[0];
+xs[1].a;
+xs[i];
+xs[-1];
+xs[1.5];
+xs[01];
+xs["[0]"];
+`)
+	var exprs []*ast.Node
+	for _, statement := range file.Statements.Nodes {
+		if ast.IsExpressionStatement(statement) {
+			exprs = append(exprs, statement.AsExpressionStatement().Expression)
+		}
+	}
+
+	t.Run("a literal index is one segment", func(t *testing.T) {
+		place := TrackedPlaceOf(exprs[0], isTracked)
+		if place == nil || place.Binding != "xs" || len(place.Path) != 1 || place.Path[0] != "[0]" {
+			t.Errorf("got %+v", place)
+		}
+	})
+
+	t.Run("an index then a key", func(t *testing.T) {
+		place := TrackedPlaceOf(exprs[1], isTracked)
+		if place == nil || len(place.Path) != 2 || place.Path[0] != "[1]" || place.Path[1] != "a" {
+			t.Errorf("got %+v", place)
+		}
+	})
+
+	for _, row := range []struct {
+		name  string
+		index int
+	}{
+		{"a name index is no place", 2},
+		{"a negative index is no place", 3},
+		{"a fractional index is no place", 4},
+		{"a padded index is no place", 5},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if place := TrackedPlaceOf(exprs[row.index], isTracked); place != nil {
+				t.Errorf("expected no place, got %+v", place)
+			}
+		})
+	}
+
+	t.Run("a string key spelling brackets stays a key", func(t *testing.T) {
+		place := TrackedPlaceOf(exprs[6], isTracked)
+		if place == nil || len(place.Path) != 1 || place.Path[0] != "[0]" {
+			t.Fatalf("got %+v", place)
+		}
+		// the segment text is the same; the collision argument is that no
+		// object carries a key `[0]` AND is read by an index arm, so the
+		// two never name two different slots at one place
+		if slot, isIndex := IndexSegmentOf(place.Path[0]); !isIndex || slot != 0 {
+			t.Errorf("IndexSegmentOf(%q) = %d, %v", place.Path[0], slot, isIndex)
+		}
+	})
+}
+
+func TestIndexSegmentRoundTrip(t *testing.T) {
+	for _, slot := range []int{0, 1, 7, 42, 4294967295} {
+		spelled := IndexSegment(slot)
+		got, isIndex := IndexSegmentOf(spelled)
+		if !isIndex || got != slot {
+			t.Errorf("IndexSegmentOf(%q) = %d, %v; want %d, true", spelled, got, isIndex, slot)
+		}
+	}
+	for _, key := range []string{"", "a", "[]", "[00]", "[0x1]", "[-1]", "[ 0]", "0", "[0", "0]"} {
+		if slot, isIndex := IndexSegmentOf(key); isIndex {
+			t.Errorf("IndexSegmentOf(%q) = %d, true; want a key", key, slot)
+		}
+	}
+}
+
 func TestStringLiteralOf(t *testing.T) {
 	_, file := checkerFor(t, "\"a\";\n`b`;\n1;\n")
 	var exprs []*ast.Node

@@ -30,7 +30,7 @@ func StringTestLeaf(c *checker.Checker, e *ast.Node, place dataflowfacts.Tracked
 	propAccess := callee.AsPropertyAccessExpression()
 	method := propAccess.Name().Text()
 	stringPlace := func(expr *ast.Node) bool {
-		tested := dataflowfacts.TrackedPlaceOf(expr, isTracked)
+		tested := dataflowfacts.TrackedPlaceOfWith(c, expr, isTracked)
 		if tested == nil || !dataflowfacts.SameTrackedPlace(*tested, place) {
 			return false
 		}
@@ -112,7 +112,7 @@ func IndexOfComparisonLeaf(
 	}
 	access := call.AsCallExpression().Expression
 	accessExpr := access.AsPropertyAccessExpression()
-	tested := dataflowfacts.TrackedPlaceOf(accessExpr.Expression, isTracked)
+	tested := dataflowfacts.TrackedPlaceOfWith(c, accessExpr.Expression, isTracked)
 	if tested == nil || !dataflowfacts.SameTrackedPlace(*tested, place) {
 		return kernelbridge.NarrowTree{}, false
 	}

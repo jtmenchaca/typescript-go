@@ -93,6 +93,16 @@ const (
 	LoopOpRem   LoopEffectOp = "rem"
 	LoopOpMin   LoopEffectOp = "min"
 	LoopOpMax   LoopEffectOp = "max"
+	// The bitwise and shift operators. These spell the same six names
+	// the transfer wire uses, and the kernel's loopOp2Of reads them
+	// into the effect grammar's LoopOp2; their images come from
+	// transferBitwise, the exactly-specified int32/uint32 functions.
+	LoopOpBitOr  LoopEffectOp = "bitOr"
+	LoopOpBitAnd LoopEffectOp = "bitAnd"
+	LoopOpBitXor LoopEffectOp = "bitXor"
+	LoopOpShl    LoopEffectOp = "shl"
+	LoopOpSar    LoopEffectOp = "sar"
+	LoopOpShr    LoopEffectOp = "shr"
 )
 
 // LoopEffect is one binding's body effect, lowered for the kernel's
@@ -203,11 +213,28 @@ const (
 	IrStatementBranchBoth IrStatementKind = "branchBoth"
 	IrStatementLoop       IrStatementKind = "loop"
 	// IrStatementLoopStmts is the loop whose body is STATEMENTS rather
-	// than one effect per binding. No condition is read, so any number
-	// of trips may run — zero included — and the kernel havocs the
-	// body's own write set, which it computes from the body statements
-	// itself and never trusts from this wire. It carries Stmts and
-	// nothing else: no Written, Cond, After, or CondCmp.
+	// than one effect per binding. Any number of trips may run — zero
+	// included — and the kernel havocs the body's own write set, which
+	// it computes from the body statements itself and never trusts from
+	// this wire. Written and Body stay nil: they are the effect-bodied
+	// loop's fields.
+	//
+	// Cond, After and CondCmp DO ride here when the head reads, in the
+	// effect loop's own spelling. The kernel refines the havoc with
+	// them at the EXIT — a loop leaves only when its head fails, so
+	// every slot intersects its falsity set and the two-slot head's
+	// negation tightens on top.
+	//
+	// Cond also feeds the kernel's INVARIANT certificate, which the
+	// certifying walk poses for this form: the entry row havocked on
+	// the body's write set, cut by the head's TRUTH sets, is walked
+	// through the body, and where it lands back inside itself the
+	// kernel meets it into the exit. That is decided kernel-side from
+	// these same fields — nothing new rides here for it — and a head
+	// that does not read lowers all three empty, which certifies
+	// nothing and leaves the plain havoc exit this form always had.
+	// The certifying walk is opt-in at the walk question
+	// (`certify`), because a compiled SUMMARY cannot mirror it.
 	IrStatementLoopStmts IrStatementKind = "loopStmts"
 	// IrStatementCall applies a callee's already-built summary. Callee
 	// indexes the summary table the question carries beside the
@@ -282,9 +309,9 @@ type IrStatement struct {
 	Effect LoopEffect
 
 	// "branch"
-	On     int
-	Test   IrBranchTest
-	W      *float64
+	On   int
+	Test IrBranchTest
+	W    *float64
 	// OnB: the SECOND slot a two-slot comparison tests On against —
 	// read only when Test is one of the *Slot comparisons, which
 	// carry no W.
@@ -308,9 +335,10 @@ type IrStatement struct {
 	CondCmp *IrLoopCondCmp
 
 	// "loopStmts"
-	// Stmts: the body of a statement-bodied loop. This is the whole
-	// carrying field for that kind — Body above is the effect-bodied
-	// loop's and stays nil here.
+	// Stmts: the body of a statement-bodied loop. Body above is the
+	// effect-bodied loop's and stays nil here; Cond, After and CondCmp
+	// are shared with the effect loop and carry this loop's head when
+	// one reads, for the EXIT refinement alone.
 	Stmts []IrStatement
 
 	// "call"
@@ -409,15 +437,38 @@ func StmtWire(s IrStatement) string {
 		)
 	}
 	if s.Kind == IrStatementLoopStmts {
-		// no condition and no per-binding sets: the body statements ride
-		// alone and the kernel reads the write set off them
+		// the body statements ride and the kernel reads the write set off
+		// them; the head's falsity sets and two-slot shape ride beside
+		// them when one reads, and are omitted entirely when it does not —
+		// which is the wire this form has always spoken
 		stmts := make([]string, len(s.Stmts))
 		for i, st := range s.Stmts {
 			stmts[i] = StmtWire(st)
 		}
+		head := ""
+		if len(s.Cond) > 0 {
+			cond := make([]string, len(s.Cond))
+			for i, c := range s.Cond {
+				cond[i] = optSetWire(c)
+			}
+			head += fmt.Sprintf(`,"cond":[%s]`, strings.Join(cond, ","))
+		}
+		if len(s.After) > 0 {
+			after := make([]string, len(s.After))
+			for i, a := range s.After {
+				after[i] = optSetWire(a)
+			}
+			head += fmt.Sprintf(`,"after":[%s]`, strings.Join(after, ","))
+		}
+		if s.CondCmp != nil {
+			head += fmt.Sprintf(
+				`,"condCmp":{"on":%d,"test":"%s","onB":%d}`,
+				s.CondCmp.On, s.CondCmp.Test, s.CondCmp.OnB,
+			)
+		}
 		return fmt.Sprintf(
-			`{"loopStmts":{"body":[%s]}}`,
-			strings.Join(stmts, ","),
+			`{"loopStmts":{"body":[%s]%s}}`,
+			strings.Join(stmts, ","), head,
 		)
 	}
 	operand := ""

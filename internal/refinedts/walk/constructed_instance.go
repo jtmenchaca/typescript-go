@@ -52,6 +52,8 @@ var (
 )
 
 // ConstructedInstance evaluates what `new declaration(args)` holds.
+// The declaration is any class-LIKE node — a class declaration or the
+// class expression a `const C = class { … }` binds.
 func ConstructedInstance(ctx *FlowContext, declaration *ast.Node, argKnowns []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	bare := abstractdomain.KnownObject(nil, nil, false, abstractdomain.TrustProved, false)
 	constructingMu.Lock()
@@ -82,7 +84,10 @@ func constructedInstanceInner(
 	argKnowns []abstractdomain.AbstractValue,
 	bare abstractdomain.AbstractValue,
 ) abstractdomain.AbstractValue {
-	classDecl := declaration.AsClassDeclaration()
+	// class-LIKE data: a declaration and a `const C = class { … }`
+	// expression carry the same heritage clauses and member list, so
+	// both read through this one accessor
+	classDecl := declaration.ClassLikeData()
 	var keyOrder []string
 	candidates := map[string][]abstractdomain.AbstractValue{}
 	addCandidate := func(name string, v abstractdomain.AbstractValue) {
@@ -129,8 +134,8 @@ func constructedInstanceInner(
 				}
 			}
 		}
-		if baseDeclaration != nil && ast.IsClassDeclaration(baseDeclaration) && baseDeclaration != declaration {
-			for _, member := range baseDeclaration.AsClassDeclaration().Members.Nodes {
+		if baseDeclaration != nil && ast.IsClassLike(baseDeclaration) && baseDeclaration != declaration {
+			for _, member := range baseDeclaration.ClassLikeData().Members.Nodes {
 				if ast.IsPropertyDeclaration(member) {
 					pd := member.AsPropertyDeclaration()
 					if pd.Initializer != nil && ast.IsIdentifier(pd.Name()) {

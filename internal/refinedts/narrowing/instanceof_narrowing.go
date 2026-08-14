@@ -33,7 +33,7 @@ func InstanceofLeaf(c *checker.Checker, e *ast.Node, isTracked func(name string)
 	// AMBIENT constructor answers: a class declared in this program
 	// has a readable constructor saying what its instances hold, and
 	// until the walk reads that, the row is a gap and not a bare object.
-	tested := dataflowfacts.TrackedPlaceOf(bin.Left, isTracked)
+	tested := dataflowfacts.TrackedPlaceOfWith(c, bin.Left, isTracked)
 	if tested == nil || !ambientConstructor(c, bin.Right) {
 		return None, true
 	}

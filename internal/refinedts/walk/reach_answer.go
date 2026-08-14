@@ -16,6 +16,79 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
+// writeReachesToken answers whether a write to the token's name can
+// run before the token itself does, inside the holder's body — the
+// question the entry-state claim below rests on.
+//
+// A BLOCK body runs statements in sequence and this reading walks
+// none of them, so any write anywhere in it voids the claim. An
+// EXPRESSION body is one expression evaluated left to right, so only
+// a write standing to the LEFT of the token can precede it:
+// `(x = f(x))` writes before the outer read, while `x.length` and
+// `x + (y = 1)` leave x holding what entry gave it. A write inside a
+// nested function is not run in place and cannot be ordered against
+// the token at all, so it voids the claim wherever it stands.
+func writeReachesToken(body *ast.Node, token *ast.Node) bool {
+	name := token.Text()
+	if ast.IsBlock(body) {
+		written := map[string]struct{}{}
+		AssignedNamesDirect(body, written)
+		_, isWritten := written[name]
+		return isWritten
+	}
+	tokenStart := nodeStart(token)
+	reaches := false
+	var scan func(node *ast.Node)
+	scan = func(node *ast.Node) {
+		if reaches {
+			return
+		}
+		if ast.IsFunctionLike(node) {
+			written := map[string]struct{}{}
+			AssignedNamesDirect(node, written)
+			if _, isWritten := written[name]; isWritten {
+				reaches = true
+			}
+			return
+		}
+		if target, isWrite := writtenTargetOf(node); isWrite &&
+			ast.IsIdentifier(target) && target.Text() == name && nodeStart(target) < tokenStart {
+			reaches = true
+			return
+		}
+		node.ForEachChild(func(child *ast.Node) bool {
+			scan(child)
+			return reaches
+		})
+	}
+	scan(body)
+	return reaches
+}
+
+// writtenTargetOf reads the place a write form writes to: an
+// assignment's left side, or the operand of ++/--.
+func writtenTargetOf(node *ast.Node) (*ast.Node, bool) {
+	if ast.IsBinaryExpression(node) {
+		bin := node.AsBinaryExpression()
+		if bin.OperatorToken.Kind >= ast.KindFirstAssignment && bin.OperatorToken.Kind <= ast.KindLastAssignment {
+			return bin.Left, true
+		}
+	}
+	if ast.IsPrefixUnaryExpression(node) {
+		unary := node.AsPrefixUnaryExpression()
+		if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+			return unary.Operand, true
+		}
+	}
+	if ast.IsPostfixUnaryExpression(node) {
+		unary := node.AsPostfixUnaryExpression()
+		if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+			return unary.Operand, true
+		}
+	}
+	return nil, false
+}
+
 // AnswerExpressionBodiedParameter is answerExpressionBodiedParameter
 // in the TS source.
 func AnswerExpressionBodiedParameter(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKernel, token *ast.Node, declaration *ast.Node) (Answer, bool) {
@@ -36,9 +109,7 @@ func AnswerExpressionBodiedParameter(p *program.CheckerProgram, kernel *kernelbr
 	if parameterHolding == nil || holderBody == nil {
 		return Answer{}, false
 	}
-	written := map[string]struct{}{}
-	AssignedNamesDirect(holderBody, written)
-	if _, isWritten := written[token.Text()]; isWritten {
+	if writeReachesToken(holderBody, token) {
 		return Answer{}, false
 	}
 	var held abstractdomain.AbstractValue

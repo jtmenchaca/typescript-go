@@ -96,7 +96,7 @@ func CallNodeIdOf(node *ast.Node) int {
 // knowledge — without the body walk. The key guaranteed every
 // observed entry state matches, so this IS what the walk would have
 // done.
-func ReplayInline(ctx *FlowContext, env Env, call *ast.Node, contract FunctionContract, argKnowns []abstractdomain.AbstractValue, held InlineOutcome) abstractdomain.AbstractValue {
+func ReplayInline(ctx *FlowContext, env Env, contract FunctionContract, effective EffectiveArguments, held InlineOutcome) abstractdomain.AbstractValue {
 	for _, entry := range held.PostByName {
 		if _, ok := env.Get(entry.Name); ok {
 			UpdateTrackedEnv(ctx.Aliases, env, entry.Name, entry.After)
@@ -104,16 +104,26 @@ func ReplayInline(ctx *FlowContext, env Env, call *ast.Node, contract FunctionCo
 	}
 	captured := CapturedOf(contract.Declaration)
 	bodyWrites := BodyWritesOf(ctx, contract.Declaration)
-	callExpr := call.AsCallExpression()
+	// the same placement seam the live inline used, so a replay binds the
+	// identical positions — the memo key spells the same effective values
+	// the binding takes, so a hit can only be an inline of this very
+	// expansion (EffectiveArgumentsOf)
+	argumentNodes := effective.Nodes
 	for i, parameter := range contract.Declaration.Parameters() {
 		name := parameter.AsParameterDeclaration().Name()
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		if i >= len(callExpr.Arguments.Nodes) {
+		if i >= len(argumentNodes) {
 			continue
 		}
-		argument := callExpr.Arguments.Nodes[i]
+		argument := argumentNodes[i]
+		// a position with no caller expression behind it — a tagged
+		// template's template object, an item expanded out of a spread —
+		// names no caller state, so the replay writes nothing back to it
+		if argument == nil {
+			continue
+		}
 		// the same capture rule the live inline applies — a captured
 		// reference argument forgets on replay too
 		if _, isCaptured := captured[name.Text()]; isCaptured && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
@@ -136,9 +146,9 @@ func ReplayInline(ctx *FlowContext, env Env, call *ast.Node, contract FunctionCo
 		WriteBackParameter(ctx, env, writeBackParameterParams{
 			parameter:     parameter,
 			post:          held.ParamPosts[i].Value,
-			entry:         ParameterKnown(parameter, i, call, argKnowns),
+			entry:         ParameterKnown(parameter, i, effective),
 			argument:      argument,
-			restArguments: callExpr.Arguments.Nodes[i:],
+			restArguments: argumentNodes[i:],
 		})
 	}
 	return AsCalleeResult(contract, held.Returned)

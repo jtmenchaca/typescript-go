@@ -9,6 +9,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
@@ -179,6 +180,81 @@ func isLoop(node *ast.Node) bool {
 		ast.IsForInStatement(node) || ast.IsWhileStatement(node) || ast.IsDoStatement(node)
 }
 
+// enterCaseClause puts `env` into the state a case body runs under:
+// the discriminant pinned to the labels that reach this body — its
+// own, plus the contiguous EMPTY clauses above it, whose labels share
+// this body. A default arm and a discriminant that is not a plain
+// name are left as they stand; the sibling analysis's shedding of the
+// case labels from a default arm reads the whole clause list, which
+// this single-path descent does not walk.
+func enterCaseClause(ctx *FlowContext, env Env, clause *ast.Node) {
+	if !ast.IsCaseClause(clause) {
+		return
+	}
+	block := clause.Parent
+	if block == nil || !ast.IsCaseBlock(block) || block.Parent == nil {
+		return
+	}
+	discriminant := block.Parent.AsSwitchStatement().Expression
+	if !ast.IsIdentifier(discriminant) {
+		return
+	}
+	if _, has := env.Get(discriminant.Text()); !has {
+		return
+	}
+	clauses := block.AsCaseBlock().Clauses.Nodes
+	index := -1
+	for i, c := range clauses {
+		if c == clause {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return
+	}
+	labels := []*ast.Node{clause.AsCaseOrDefaultClause().Expression}
+	for back := index - 1; back >= 0; back-- {
+		previous := clauses[back]
+		if !ast.IsCaseClause(previous) || len(previous.AsCaseOrDefaultClause().Statements.Nodes) > 0 {
+			break
+		}
+		labels = append(labels, previous.AsCaseOrDefaultClause().Expression)
+	}
+	if pinned, ok := SwitchLabelValuesWith(ctx.P.Checker, labels); ok {
+		env.Set(discriminant.Text(), pinned)
+	}
+}
+
+// enterCatchClause puts `env` into the state a catch body runs under:
+// the try's own text may have been part-way through its writes when
+// the exception came, so every name it writes from the first
+// statement that can raise onward is forgotten, and the caught
+// binding takes its seeded value.
+func enterCatchClause(ctx *FlowContext, env Env, catchClause *ast.Node) {
+	tryStatement := catchClause.Parent
+	if tryStatement == nil || !ast.IsTryStatement(tryStatement) {
+		return
+	}
+	tryBlock := tryStatement.AsTryStatement().TryBlock
+	written := map[string]struct{}{}
+	for _, s := range statementsFromFirstThrowing(tryBlock.AsBlock().Statements.Nodes) {
+		AssignedNamesDirect(s, written)
+	}
+	for name := range written {
+		if _, ok := env.Get(name); ok {
+			HavocEnv(ctx.Aliases, env, name)
+		}
+	}
+	binding := catchClause.AsCatchClause().VariableDeclaration
+	if binding != nil {
+		bindingName := binding.AsVariableDeclaration().Name()
+		if bindingName != nil && ast.IsIdentifier(bindingName) {
+			env.Set(bindingName.Text(), silence.SeededBinding(ctx.P.Checker, silence.Residue(), bindingName))
+		}
+	}
+}
+
 func enterToToken(ctx *FlowContext, env Env, from *ast.Node, token *ast.Node, writes bool) bool {
 	node := from
 	for {
@@ -250,7 +326,36 @@ func enterToToken(ctx *FlowContext, env Env, from *ast.Node, token *ast.Node, wr
 			case ast.IsForOfStatement(node), ast.IsForInStatement(node):
 				loopBody = node.AsForInOrOfStatement().Statement
 			}
-			if child != loopBody {
+			// a for-initializer and a for-of/for-in ITERABLE each run
+			// ONCE, before anything else the loop does — so the state
+			// they run under is the one already in hand here, and
+			// nothing needs solving to reach it
+			runsBeforeTheLoop := false
+			if ast.IsForStatement(node) {
+				runsBeforeTheLoop = child == node.AsForStatement().Initializer
+			} else if ast.IsForOfStatement(node) || ast.IsForInStatement(node) {
+				runsBeforeTheLoop = child == node.AsForInOrOfStatement().Expression
+			}
+			if runsBeforeTheLoop {
+				node = child
+				continue
+			}
+			// the CONDITION and the INCREMENTOR run on every trip, under
+			// the loop's settled facts — the same state the body enters
+			// with, which is what SolveLoop fills bodyEntry with. (The
+			// condition's own narrowing is inside that state; it is what
+			// the previous trip's test left, which is what a token in the
+			// condition sits under from the second trip on.)
+			inHead := false
+			if ast.IsForStatement(node) {
+				forStmt := node.AsForStatement()
+				inHead = child == forStmt.Condition || child == forStmt.Incrementor
+			} else if ast.IsWhileStatement(node) {
+				inHead = child == node.AsWhileStatement().Expression
+			} else if ast.IsDoStatement(node) {
+				inHead = child == node.AsDoStatement().Expression
+			}
+			if child != loopBody && !inHead {
 				return false
 			}
 			bodyEntry := NewEnv()
@@ -264,9 +369,45 @@ func enterToToken(ctx *FlowContext, env Env, from *ast.Node, token *ast.Node, wr
 			continue
 		}
 
-		if ast.IsSwitchStatement(node) || ast.IsCaseBlock(node) ||
-			ast.IsCaseClause(node) || ast.IsDefaultClause(node) || ast.IsCatchClause(node) {
-			return false
+		// a switch's scrutinee runs before any clause does, under the
+		// state in hand; the CaseBlock is just the clause container
+		if ast.IsSwitchStatement(node) {
+			if child == node.AsSwitchStatement().Expression {
+				node = child
+				continue
+			}
+			evaluateExpression(ctx, env, node.AsSwitchStatement().Expression)
+			node = child
+			continue
+		}
+		if ast.IsCaseBlock(node) {
+			node = child
+			continue
+		}
+
+		// a case body runs with the discriminant WEARING its label: the
+		// runtime took `scrutinee === label` to get here. A case LABEL
+		// itself is tested before any body runs, so it wears nothing.
+		if ast.IsCaseClause(node) || ast.IsDefaultClause(node) {
+			clause := node.AsCaseOrDefaultClause()
+			if ast.IsCaseClause(node) && child == clause.Expression {
+				node = child
+				continue
+			}
+			enterCaseClause(ctx, env, node)
+			return AnalyzeToToken(ctx, env, clause.Statements.Nodes, token, writes)
+		}
+
+		// a catch body runs on the state the try left, with everything
+		// the try's own text could still have been writing forgotten
+		// and the caught binding seeded
+		if ast.IsCatchClause(node) {
+			catchClause := node.AsCatchClause()
+			if child == catchClause.VariableDeclaration {
+				return false // the binding declares the name; it holds no walked state
+			}
+			enterCatchClause(ctx, env, node)
+			return AnalyzeToToken(ctx, env, catchClause.Block.AsBlock().Statements.Nodes, token, writes)
 		}
 
 		node = child

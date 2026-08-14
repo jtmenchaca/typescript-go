@@ -305,8 +305,13 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 		return DecodeWireState(parsed["whenTrue"]), DecodeWireState(parsed["whenFalse"])
 	}
 	kernel.Walk = func(states []KnownStateWire, stmts []IrStatement, table ...SummaryBlob) []KnownStateWire {
+		// "certify": true selects walkStmtsCert — the walk whose
+		// statement-loop exits carry the certified entry-cut invariant
+		// where the kernel can prove one, and the plain havoc answer
+		// where it declines. Refusal is none, so the certified walk can
+		// only tighten; asking is always sound
 		wire := fmt.Sprintf(
-			`{"states":[%s],"stmts":[%s]%s}`,
+			`{"states":[%s],"stmts":[%s]%s,"certify":true}`,
 			joinComma(StateWires(states)), joinComma(StmtWires(stmts)), TableField(table),
 		)
 		raw, err := ask1("walk", "kernel_walk", wire)

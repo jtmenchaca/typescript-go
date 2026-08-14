@@ -128,12 +128,15 @@ func EvaluateNewExpression(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 	// a class declared IN REACH reads its constructor: the instance
 	// wears the property initializers overlaid with every value the
 	// constructor's own text writes to `this` — joined, so every
-	// taken path is covered
+	// taken path is covered. class-LIKE, so `const C = class { … }`
+	// reads its members exactly as a declaration does — the same
+	// widening ir_summary_call.go's constructorDeclarationOf already
+	// carries on the summary side.
 	if ast.IsIdentifier(calleeCore) {
 		symbol := ctx.P.Checker.GetSymbolAtLocation(calleeCore)
 		if symbol != nil && symbol.ValueDeclaration != nil {
 			declaration := symbol.ValueDeclaration
-			if ast.IsClassDeclaration(declaration) && !ast.GetSourceFileOfNode(declaration).IsDeclarationFile {
+			if ast.IsClassLike(declaration) && !ast.GetSourceFileOfNode(declaration).IsDeclarationFile {
 				var argKnowns []abstractdomain.AbstractValue
 				if newExpr.Arguments != nil {
 					argKnowns = make([]abstractdomain.AbstractValue, len(newExpr.Arguments.Nodes))

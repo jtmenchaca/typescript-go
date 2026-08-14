@@ -9,11 +9,12 @@
 // resolution) keys by (program, node); a fact the tree answers alone
 // keys by node. Consumers never scan — they read the seam.
 //
-// BLOCKED: writtenNamesOf needs service/program_resolution.ts's
-// resolvesToDefaultLib — a service/ function outside this directory's
-// allowed import set (and the TS host/program adapter layer PORT.md
-// says is not ported at all). Everything else, which needs only the
-// checker, is ported below.
+// writtenNamesOf reads service/program_resolution.ts's
+// resolvesToDefaultLib. PORT.md's oracle-adapter rule turns that into a
+// direct checker call once p.host IS the checker —
+// c.SymbolInDefaultLib(c.GetSymbolAtLocation(node)) — so the function
+// needs nothing outside this directory's allowed import set and is
+// ported below with the rest.
 package dataflowfacts
 
 import (
@@ -72,6 +73,8 @@ type programKey struct {
 type programFacts struct {
 	assignedFiltered  map[string]struct{}
 	hasAssignedFilter bool
+	writes            map[string]struct{}
+	hasWrites         bool
 }
 
 var (
@@ -352,6 +355,100 @@ func AssignedIdentifierNames(node *ast.Node) map[string]struct{} {
 		held.hasAssignedIdent = true
 	}
 	return held.assignedIdentifiers
+}
+
+/* ── the write-set scanner (from condition_analysis) ─────────────── */
+
+// writtenNamesRootOf walks a property/element chain down to the
+// expression it reads from, so `o.a.b = 1` counts the write against
+// the name `o`.
+func writtenNamesRootOf(target *ast.Node) *ast.Node {
+	cursor := target
+	for ast.IsPropertyAccessExpression(cursor) || ast.IsElementAccessExpression(cursor) {
+		if ast.IsPropertyAccessExpression(cursor) {
+			cursor = cursor.AsPropertyAccessExpression().Expression
+		} else {
+			cursor = cursor.AsElementAccessExpression().Expression
+		}
+	}
+	return cursor
+}
+
+// writtenNamesResolvesToDefaultLib is resolvesToDefaultLib in the TS
+// source (service/program_resolution.ts): does this name resolve to a
+// declaration in a DEFAULT library file? PORT.md's oracle-adapter rule
+// makes it a direct checker call, written inline here the way the other
+// packages write theirs.
+func writtenNamesResolvesToDefaultLib(c *checker.Checker, node *ast.Node) bool {
+	return c.SymbolInDefaultLib(c.GetSymbolAtLocation(node))
+}
+
+// WrittenNamesOf collects every name the function can write: assignment
+// targets, ++/--, non-read-only method receivers of reference values,
+// reference arguments handed to calls (a value-sorted word travels by
+// copy), with a default-library method's receiver spared.
+func WrittenNamesOf(c *checker.Checker, fn *ast.Node) map[string]struct{} {
+	held := programOf(c, fn)
+	if held.hasWrites {
+		return held.writes
+	}
+	written := map[string]struct{}{}
+	var scan func(node *ast.Node) bool
+	scan = func(node *ast.Node) bool {
+		if ast.IsBinaryExpression(node) {
+			bin := node.AsBinaryExpression()
+			if bin.OperatorToken.Kind >= ast.KindFirstAssignment &&
+				bin.OperatorToken.Kind <= ast.KindLastAssignment {
+				root := writtenNamesRootOf(bin.Left)
+				if ast.IsIdentifier(root) {
+					written[root.Text()] = struct{}{}
+				}
+			}
+		}
+		if ast.IsPrefixUnaryExpression(node) {
+			unary := node.AsPrefixUnaryExpression()
+			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+				root := writtenNamesRootOf(unary.Operand)
+				if ast.IsIdentifier(root) {
+					written[root.Text()] = struct{}{}
+				}
+			}
+		}
+		if ast.IsPostfixUnaryExpression(node) {
+			unary := node.AsPostfixUnaryExpression()
+			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+				root := writtenNamesRootOf(unary.Operand)
+				if ast.IsIdentifier(root) {
+					written[root.Text()] = struct{}{}
+				}
+			}
+		}
+		if ast.IsCallExpression(node) {
+			call := node.AsCallExpression()
+			if ast.IsPropertyAccessExpression(call.Expression) {
+				propAccess := call.Expression.AsPropertyAccessExpression()
+				if _, readOnly := ReadOnlyArrayMethods[propAccess.Name().Text()]; !readOnly &&
+					ast.IsIdentifier(propAccess.Expression) &&
+					!writtenNamesResolvesToDefaultLib(c, propAccess.Name()) &&
+					ReferenceTyped(c, propAccess.Expression) {
+					written[propAccess.Expression.Text()] = struct{}{}
+				}
+			}
+			if call.Arguments != nil {
+				for _, argument := range call.Arguments.Nodes {
+					if ast.IsIdentifier(argument) && ReferenceTyped(c, argument) {
+						written[argument.Text()] = struct{}{}
+					}
+				}
+			}
+		}
+		node.ForEachChild(scan)
+		return false
+	}
+	scan(fn)
+	held.writes = written
+	held.hasWrites = true
+	return written
 }
 
 /* ── the name scanners (from inliner and loop_fixpoint) ──────────── */

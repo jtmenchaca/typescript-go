@@ -17,7 +17,18 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
-// ArrayCallbackMethods is ARRAY_CALLBACK_METHODS in the TS source.
+// ArrayCallbackMethods is ARRAY_CALLBACK_METHODS in the TS source: the
+// array methods whose callback this adapter models the parameters of.
+//
+// The list is shared vocabulary rather than this file's private one.
+// ir_callback_summary.go's statement-lowering switch has a case for
+// every name here — `reduce` through its own two-argument reader, the
+// rest through the one-argument one — so the parameter-binding route
+// and the closure-conversion route agree about which methods carry a
+// modeled callback. They disagreed once: this list named six and the
+// switch recognized three, which left `ys = xs.reduce(cb, seed)`
+// falling through with no attempt while the accumulator law below sat
+// fully implemented. A name added here needs a case there.
 var ArrayCallbackMethods = map[string]struct{}{
 	"map":     {},
 	"filter":  {},

@@ -9,6 +9,8 @@
 package walk
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
@@ -88,6 +90,78 @@ var impliesOp = map[string][]string{
 	"ge": {"gt", "ge"},
 }
 
+// elementComparisonAgainst reads ONE comparison as a bound on the
+// element itself: `e OP param` answers OP, the flipped `param OP e`
+// answers the mirrored OP. Both sides are peeled of parens and
+// as-casts first. Only bare identifiers match — a property read
+// (`e.value < a`) compares a KEY of the element, and the stated
+// element bound names the element, not a key of it, so the property
+// comparison says nothing about the element and answers nothing.
+func elementComparisonAgainst(condition *ast.Node, elementName, param string) (string, bool) {
+	condition = unwrapExpression(condition)
+	if !ast.IsBinaryExpression(condition) {
+		return "", false
+	}
+	bin := condition.AsBinaryExpression()
+	cmp, cmpOk := comparisonOfKind(bin.OperatorToken.Kind)
+	if !cmpOk {
+		return "", false
+	}
+	left := unwrapExpression(bin.Left)
+	right := unwrapExpression(bin.Right)
+	if ast.IsIdentifier(left) && left.Text() == elementName &&
+		ast.IsIdentifier(right) && right.Text() == param {
+		return cmp, true
+	}
+	if ast.IsIdentifier(left) && left.Text() == param &&
+		ast.IsIdentifier(right) && right.Text() == elementName {
+		return mirrorOp[cmp], true
+	}
+	return "", false
+}
+
+// elementPredicateAgainst reads a filter callback BODY as a bound on
+// the element, against the bound `op` states. A bare comparison
+// answers itself. A CONJUNCTION answers one of its conjuncts: every
+// element the whole predicate kept passed EVERY conjunct, so any one
+// conjunct's bound holds of every kept element — `e => e < a && e >
+// 0` proves `e < a`. Where several conjuncts bound the element
+// against the same name, the one that DISCHARGES the stated bound
+// answers, so `e <= a && e < a` reads as the proving `< a` rather
+// than refuting on the weaker conjunct. A DISJUNCTION answers
+// nothing: an element can be kept by the other arm without
+// satisfying the bound.
+func elementPredicateAgainst(body *ast.Node, elementName, param, op string) (string, bool) {
+	body = unwrapExpression(body)
+	if ast.IsBinaryExpression(body) &&
+		body.AsBinaryExpression().OperatorToken.Kind == ast.KindAmpersandAmpersandToken {
+		bin := body.AsBinaryExpression()
+		left, leftOk := elementPredicateAgainst(bin.Left, elementName, param, op)
+		right, rightOk := elementPredicateAgainst(bin.Right, elementName, param, op)
+		if leftOk && discharges(op, left) {
+			return left, true
+		}
+		if rightOk {
+			if discharges(op, right) || !leftOk {
+				return right, true
+			}
+		}
+		return left, leftOk
+	}
+	return elementComparisonAgainst(body, elementName, param)
+}
+
+// discharges reports whether a recognized predicate bound proves the
+// stated bound — the implication table read as a question.
+func discharges(op, predicate string) bool {
+	for _, implied := range impliesOp[op] {
+		if implied == predicate {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckElementBoundReturn is checkElementBoundReturn in the TS
 // source: an array statement whose EVERY element wears a dependent
 // bound (`Array<number & z.Lt<"a">>`), returned from a `.filter`:
@@ -114,35 +188,16 @@ func CheckElementBoundReturn(
 			if (ast.IsArrowFunction(callback) || ast.IsFunctionExpression(callback)) &&
 				len(callback.Parameters()) >= 1 && ast.IsIdentifier(callback.Parameters()[0].Name()) {
 				elementName := callback.Parameters()[0].Name().Text()
-				var body *ast.Node
 				callbackBody := callback.Body()
 				if callbackBody != nil && !ast.IsBlock(callbackBody) {
-					body = unwrapExpression(callbackBody)
-				}
-				if body != nil && ast.IsBinaryExpression(body) {
-					bin := body.AsBinaryExpression()
-					if cmp, cmpOk := comparisonOfKind(bin.OperatorToken.Kind); cmpOk {
-						left := unwrapExpression(bin.Left)
-						right := unwrapExpression(bin.Right)
-						if ast.IsIdentifier(left) && left.Text() == elementName &&
-							ast.IsIdentifier(right) && right.Text() == param {
-							predicate = cmp
-							hasPredicate = true
-						} else if ast.IsIdentifier(left) && left.Text() == param &&
-							ast.IsIdentifier(right) && right.Text() == elementName {
-							predicate = mirrorOp[cmp]
-							hasPredicate = true
-						}
-					}
+					predicate, hasPredicate = elementPredicateAgainst(callbackBody, elementName, param, op)
 				}
 			}
 		}
 	}
 	if hasPredicate {
-		for _, implied := range impliesOp[op] {
-			if implied == predicate {
-				return
-			}
+		if discharges(op, predicate) {
+			return
 		}
 		weaker := (op == "lt" && predicate == "le") || (op == "gt" && predicate == "ge")
 		if weaker {
@@ -175,13 +230,27 @@ func CheckOneDependentReturn(
 	dep DependentRelation,
 ) {
 	op, param := dep.Op, dep.Param
-	// a dotted name reaches into an object parameter — the entry rows
-	// carry those between parameters; a return against one declines
-	if containsDot(param) {
-		return
-	}
 	head := unwrapExpression(expression)
-	if ast.IsIdentifier(head) && head.Text() == param {
+	var fn *ast.Node
+	for cursor := expression.Parent; cursor != nil; cursor = cursor.Parent {
+		if ast.IsFunctionLike(cursor) {
+			fn = cursor
+			break
+		}
+	}
+	// the place the bound NAMES — the parameter binding, or the key
+	// under it a dotted name reaches
+	named := dependentParamPlace(ctx, fn, param)
+	// IDENTITY: the returned expression names the very place the bound
+	// names, so the two hold one value on every run — `return n` under
+	// z.Gte<"n">, `return config.min` under z.Gte<"config.min">
+	returnsNamedPlace := ast.IsIdentifier(head) && head.Text() == param
+	if !returnsNamedPlace && named != nil && strings.Contains(param, ".") {
+		if returned := dataflowfacts.PlaceKeyOf(ctx.P.Checker, head); returned != nil {
+			returnsNamedPlace = dataflowfacts.SamePlace(*returned, *named)
+		}
+	}
+	if returnsNamedPlace {
 		if op == "ge" || op == "le" {
 			return
 		}
@@ -239,27 +308,15 @@ func CheckOneDependentReturn(
 	// the ORDER LEDGER: a live row (or the kernel's composition of
 	// rows) relating the returned place to the parameter proves the
 	// per-run claim — `return x` after a refuted `x <= min` guard,
-	// `return max` under `max: z.Gte<"min">`'s own entry row
+	// `return max` under `max: z.Gte<"min">`'s own entry row. A DOTTED
+	// name reaches a key of an object parameter (`z.Gte<"config.min">`)
+	// and reaches the ledger the same way: the entry rows record those
+	// keys under the same place keys, so the lookup only has to spell
+	// the name as one.
 	{
-		var fn *ast.Node
-		for cursor := expression.Parent; cursor != nil; cursor = cursor.Parent {
-			if ast.IsFunctionLike(cursor) {
-				fn = cursor
-				break
-			}
-		}
-		var paramSymbol *ast.Symbol
-		if fn != nil {
-			for _, p := range fn.Parameters() {
-				if name := p.Name(); name != nil && ast.IsIdentifier(name) && name.Text() == param {
-					paramSymbol = ctx.P.Checker.GetSymbolAtLocation(name)
-					break
-				}
-			}
-		}
 		returnedPlace := dataflowfacts.PlaceKeyOf(ctx.P.Checker, head)
-		if paramSymbol != nil && returnedPlace != nil {
-			paramPlace := dataflowfacts.PlaceKey{Base: paramSymbol, Path: "", BaseName: param}
+		if named != nil && returnedPlace != nil {
+			paramPlace := *named
 			rows := ctx.DifferenceConstraints
 			var proved bool
 			switch op {
@@ -353,11 +410,32 @@ func CheckOneDependentReturn(
 	))
 }
 
-func containsDot(s string) bool {
-	for _, c := range s {
-		if c == '.' {
-			return true
-		}
+// dependentParamPlace is the place a dependent bound's NAME points
+// at, inside `fn`. A bare name ("min") is the parameter binding
+// itself; a dotted name ("config.min") is the key under the
+// parameter its head segment names — the same base-plus-path spelling
+// EntryDependentConstraints writes its rows under, so a return check
+// asks the ledger about the very key the entry rows recorded. Nil
+// when no parameter carries the head name.
+func dependentParamPlace(ctx *FlowContext, fn *ast.Node, param string) *dataflowfacts.PlaceKey {
+	if fn == nil {
+		return nil
 	}
-	return false
+	path := strings.Split(param, ".")
+	for _, p := range fn.Parameters() {
+		name := p.Name()
+		if name == nil || !ast.IsIdentifier(name) || name.Text() != path[0] {
+			continue
+		}
+		symbol := ctx.P.Checker.GetSymbolAtLocation(name)
+		if symbol == nil {
+			return nil
+		}
+		place := dataflowfacts.PlaceKey{Base: symbol, Path: "", BaseName: path[0]}
+		for _, key := range path[1:] {
+			place.Path += "." + key
+		}
+		return &place
+	}
+	return nil
 }

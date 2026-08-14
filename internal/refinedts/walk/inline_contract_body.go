@@ -33,11 +33,33 @@ import (
 // second evaluation would double whatever it did. Those answer silence,
 // which fills every this-entry TOP — a loss of precision, never of
 // soundness, since the entries are what the summary quantifies over.
-func SummaryCallReceiver(ctx *FlowContext, env Env, callExpr *ast.CallExpression) abstractdomain.AbstractValue {
-	if callExpr == nil || !ast.IsPropertyAccessExpression(callExpr.Expression) {
+//
+// A SUPER-rooted callee — `super.m(x)`, a derived constructor's
+// `super(x)` — runs the base member on the SAME instance the caller's
+// `this` names: the dispatch is static, the receiver is not. So it reads
+// the caller's tracked `this` entry, the very value `this.m(x)` reads
+// through the ThisKeyword arm of evaluateExpression, gated the same way
+// that arm gates it — a `this` with its own dynamic receiver is not the
+// tracked one, and there `super` names no class either.
+func SummaryCallReceiver(ctx *FlowContext, env Env, call *ast.Node) abstractdomain.AbstractValue {
+	callee := CalleeExpressionOf(call)
+	if callee == nil {
 		return silence.Residue()
 	}
-	receiver := callExpr.Expression.AsPropertyAccessExpression().Expression
+	if root := SuperCalleeRoot(callee); root != nil {
+		if dataflowfacts.EnclosingThisClass(root) == nil {
+			return silence.Residue()
+		}
+		held, ok := env.Get("this")
+		if !ok {
+			return silence.Residue()
+		}
+		return held
+	}
+	if !ast.IsPropertyAccessExpression(callee) {
+		return silence.Residue()
+	}
+	receiver := callee.AsPropertyAccessExpression().Expression
 	if receiver == nil || !ReadsWithoutEffect(receiver) {
 		return silence.Residue()
 	}
@@ -45,20 +67,38 @@ func SummaryCallReceiver(ctx *FlowContext, env Env, callExpr *ast.CallExpression
 }
 
 // InlineContractBody is inlineContractBody in the TS source.
-func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, argKnowns []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, effective EffectiveArguments) abstractdomain.AbstractValue {
 	tracing.Count("inlineContractCall", 0)
 	body := contract.Declaration.Body()
 	if body == nil {
 		return silence.Residue()
 	}
-	callExpr := call.AsCallExpression()
+	// the placement seam: one entry per parameter position, values and
+	// nodes from the same construction, for a plain call, a spreading
+	// call, and a tagged template alike (EffectiveArgumentsOf)
+	argumentNodes := effective.Nodes
+	argKnowns := effective.Knowns
+	callee := CalleeExpressionOf(call)
 	var calleeName *ast.Node
-	if ast.IsIdentifier(callExpr.Expression) {
-		calleeName = callExpr.Expression
-	} else if ast.IsPropertyAccessExpression(callExpr.Expression) {
-		calleeName = callExpr.Expression.AsPropertyAccessExpression().Name()
+	if callee == nil {
+		return silence.Residue()
 	}
-	if calleeName == nil {
+	// a SUPER-rooted callee names its member on the base declaration, not
+	// at the call site: `super.m` reads no symbol off `m` and a bare
+	// `super(…)` spells no name at all. The declaration super_binding.go
+	// resolved carries both readings — its own name node labels the
+	// counter, and its own symbol keys the recursion set and shards the
+	// memo. Where the declaration reaches no symbol, the inline declines
+	// here rather than keying on a name that means something else.
+	superRooted := SuperCalleeRoot(callee) != nil
+	if superRooted {
+		calleeName = contract.Declaration.Name()
+	} else if ast.IsIdentifier(callee) {
+		calleeName = callee
+	} else if ast.IsPropertyAccessExpression(callee) {
+		calleeName = callee.AsPropertyAccessExpression().Name()
+	}
+	if calleeName == nil || !ast.IsIdentifier(calleeName) {
 		return silence.Residue()
 	}
 	// the amplifier ledger: which callees the inline count concentrates
@@ -80,7 +120,13 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		// be written, so both forget before the marker returns —
 		// tailwindcss's `transform(child, copy.nodes, …)` left
 		// `copy.nodes` frozen at [] and a live length guard folded dead
-		for _, argument := range callExpr.Arguments.Nodes {
+		for _, argument := range argumentNodes {
+			// a position with no caller expression behind it — a tagged
+			// template's template object, an item expanded out of a spread —
+			// names no caller state, so there is nothing to forget behind it
+			if argument == nil {
+				continue
+			}
 			if ast.IsIdentifier(argument) {
 				if _, ok := env.Get(argument.Text()); ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
 					HavocEnv(ctx.Aliases, env, argument.Text())
@@ -113,7 +159,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	// join the callee's in the key. Knowledge carrying compiler
 	// objects still has no plain spelling and runs unmemoized rather
 	// than mis-keyed.
-	memoKey := computeInlineMemoKey(ctx, env, call, callExpr, contract, calleeName, argKnowns)
+	memoKey := computeInlineMemoKey(ctx, env, call, contract, calleeName, effective)
 	if memoKey != "" {
 		inlineMemoMu.Lock()
 		byKey := inlineMemoOf(ctx.P)[contract.Declaration]
@@ -129,7 +175,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		inlineMemoMu.Unlock()
 		if ok {
 			tracing.Count("inlineMemoHit", 0)
-			return ReplayInline(ctx, env, call, *contract, argKnowns, held)
+			return ReplayInline(ctx, env, *contract, effective, held)
 		}
 	}
 	// a FRESH key tries the kernel-summary route before walking: a
@@ -142,7 +188,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	// The summary's admitted bodies have no caller-visible effect
 	// beyond the return (KernelSummaryDirect's comment carries the
 	// argument), so the remembered outcome carries no posts.
-	if summarized, ok := KernelSummaryDirectOn(ctx, argKnowns, contract, SummaryCallReceiver(ctx, env, callExpr)); ok {
+	if summarized, ok := KernelSummaryDirectOn(ctx, argKnowns, contract, SummaryCallReceiver(ctx, env, call)); ok {
 		tracing.Count("inline.summaryDirect", 0)
 		// THE SERVED-CALL FORGET: a summary whose body writes receiver
 		// fields, writes a parameter bundle's fields, or returns its
@@ -151,16 +197,21 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		// served answer forgets exactly the same way, and such calls are
 		// never memoized: a replay would skip the forget.
 		if receiverTouched, writtenArguments := SummaryReceiverEffects(ctx, contract.Declaration); receiverTouched || len(writtenArguments) > 0 {
-			if receiverTouched && ast.IsPropertyAccessExpression(callExpr.Expression) {
-				ForgetThrough(ctx, env, callExpr.Expression.AsPropertyAccessExpression().Expression)
-			}
-			var callArguments []*ast.Node
-			if callExpr.Arguments != nil {
-				callArguments = callExpr.Arguments.Nodes
+			// a SUPER-rooted callee's receiver is the caller's `this`, and a
+			// SuperKeyword matches no ForgetThrough arm — handing it there
+			// would forget NOTHING while the base body wrote receiver fields.
+			// The this-root forget is the one that speaks for that receiver:
+			// havoc the alias class and reseed from the class's field
+			// invariants, fired on the same receiverTouched terms a property
+			// receiver gets.
+			if receiverTouched && SuperCalleeRoot(callee) != nil {
+				ForgetThisHeld(ctx, env, callee)
+			} else if receiverTouched && ast.IsPropertyAccessExpression(callee) {
+				ForgetThrough(ctx, env, callee.AsPropertyAccessExpression().Expression)
 			}
 			for _, index := range writtenArguments {
-				if index < len(callArguments) {
-					ForgetThrough(ctx, env, callArguments[index])
+				if index < len(argumentNodes) && argumentNodes[index] != nil {
+					ForgetThrough(ctx, env, argumentNodes[index])
 				}
 			}
 			return AsCalleeResult(*contract, summarized)
@@ -208,9 +259,9 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		callEnv.Set(name.Text(), ParameterKnown(parameter, i, call, argKnowns))
-		if i < len(callExpr.Arguments.Nodes) {
-			argument := callExpr.Arguments.Nodes[i]
+		callEnv.Set(name.Text(), ParameterKnown(parameter, i, effective))
+		if i < len(argumentNodes) && argumentNodes[i] != nil {
+			argument := argumentNodes[i]
 			if ast.IsArrowFunction(argument) || ast.IsFunctionExpression(argument) {
 				callableParams[name.Text()] = argument
 			}
@@ -282,10 +333,21 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 			continue
 		}
 		paramPosts = append(paramPosts, paramPost{Value: post(name.Text()), Has: true})
-		if i >= len(callExpr.Arguments.Nodes) {
+		if i >= len(argumentNodes) {
 			continue
 		}
-		argument := callExpr.Arguments.Nodes[i]
+		argument := argumentNodes[i]
+		// a position with no caller expression behind it has nothing to
+		// write back through: a tagged template's template object is
+		// synthesized and frozen (sec-gettemplateobject), and an item
+		// expanded out of a spread is an element of the source's VALUE,
+		// reachable only through the source array — which the walk never
+		// wrote back through when the spread held its own single slot
+		// either, since a SpreadElement node matches no target ForgetThrough
+		// recognizes
+		if argument == nil {
+			continue
+		}
 		// a parameter CAPTURED into a nested function value may be
 		// mutated whenever that closure later runs — the argument's
 		// facts forget instead of restating the inline's entry state
@@ -307,9 +369,9 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		WriteBackParameter(ctx, env, writeBackParameterParams{
 			parameter:     parameter,
 			post:          post(name.Text()),
-			entry:         ParameterKnown(parameter, i, call, argKnowns),
+			entry:         ParameterKnown(parameter, i, effective),
 			argument:      argument,
-			restArguments: callExpr.Arguments.Nodes[i:],
+			restArguments: argumentNodes[i:],
 		})
 	}
 	summarized := silence.Residue()

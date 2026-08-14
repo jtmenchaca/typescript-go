@@ -32,13 +32,27 @@ func dependsOpWord(op string) string {
 }
 
 // CheckContractArguments is checkContractArguments in the TS source.
-func CheckContractArguments(ctx *FlowContext, e *ast.Node, contract *FunctionContract, argKnowns []abstractdomain.AbstractValue) {
-	call := e.AsCallExpression()
-	if call.Arguments == nil {
+//
+// The positions come from the shared placement reader
+// (EffectiveArgumentsOf), so a tagged template's obligations line up
+// too — position 0 is the template object, positions 1.. the
+// substitutions — and so do a spreading call's, whose exact source
+// contributes one position per item. A position with no source
+// expression carries nothing to hang a diagnostic on and no caller
+// state to judge, so it is skipped: the template object is the walk's
+// own construction, and an item expanded out of a spread was written
+// inside the source array, not at this call.
+func CheckContractArguments(ctx *FlowContext, contract *FunctionContract, effective EffectiveArguments) {
+	argumentNodes := effective.Nodes
+	argKnowns := effective.Knowns
+	if argumentNodes == nil {
 		return
 	}
 	parameters := contract.Declaration.Parameters()
-	for i, argument := range call.Arguments.Nodes {
+	for i, argument := range argumentNodes {
+		if argument == nil || i >= len(argKnowns) {
+			continue
+		}
 		var stated *annotations.DeclaredRefinement
 		if i < len(contract.Params) {
 			stated = contract.Params[i]
@@ -174,8 +188,8 @@ func CheckContractArguments(ctx *FlowContext, e *ast.Node, contract *FunctionCon
 				if len(r.path) == 1 {
 					argumentPlace := dataflowfacts.PlaceKeyOf(ctx.P.Checker, argument)
 					var siblingArgument *ast.Node
-					if r.j >= 0 && r.j < len(call.Arguments.Nodes) {
-						siblingArgument = call.Arguments.Nodes[r.j]
+					if r.j >= 0 && r.j < len(argumentNodes) {
+						siblingArgument = argumentNodes[r.j]
 					}
 					var siblingPlace *dataflowfacts.PlaceKey
 					if siblingArgument != nil {

@@ -41,6 +41,20 @@
 //     two plain identifiers → k from keys, v from vals.
 //   - `const a = [...m.values()]` / `Array.from(m.values())` / `[...s]`
 //     → an ARRAY local bridged onto these slots (ir_array_slots.go).
+//   - `const n = new Map(m)` / `const t = new Set(s)` over an
+//     already-flattened sibling of the SAME kind → a COPY: the new
+//     collection's slots take the sibling's, read var for var. The two
+//     hold the same values, so they wear the same sorts, and every
+//     reader treats the copy exactly as it treats a seeded collection.
+//   - `m.forEach(cb)` / `s.forEach(cb)` → ONE call statement at the
+//     value slot (and the key slot second, for a Map), with no ret —
+//     forEach's own value is undefined and nothing reads it. The
+//     callback closure-converts through the ordinary machinery
+//     (ir_callback_summary.go), so a callback that WRITES a capture
+//     declines the statement rather than moving state the slots do not
+//     carry. One application covers the whole traversal: the value slot
+//     holds the join of everything the collection can hold and the
+//     callback's summary quantifies over all entries.
 //
 //   - `if (m.has(k))`, the has call standing as the WHOLE test of an if
 //     (parens and any leading `!` stripped) → nothing. The slots carry no
@@ -51,8 +65,8 @@
 //     gets its own ruling.
 //
 // Everything else declines the collection: an alias, an argument, a
-// return, `clear()`, `forEach`, a computed method name, an element
-// access `m[k]`, or any method not listed. A `has` ANYWHERE but an if
+// return, `clear()`, a computed method name, an element access `m[k]`,
+// or any method not listed. A `has` ANYWHERE but an if
 // test declines too — `const b = m.has(k)` would put a value in a slot
 // that has no reading for it, `f(m.has(k))` hands it out of sight, a
 // conjunct in `m.has(k) && k > 0` sits under a reading that would have
@@ -73,6 +87,13 @@ import (
 // from, the name it was spelled under, whether it is a Map (keys are
 // tracked) or a Set, the slot names, and the seed literal's entries in
 // source order.
+//
+// A COPY-CONSTRUCTED collection — `const n = new Map(m)` over an
+// already-flattened sibling — has no seed literal of its own; it carries
+// the sibling it was built from instead, and its slots are written from
+// that sibling's. Every OTHER field, and every recognizer answer below,
+// is identical to a seeded collection's: downstream readers cannot tell
+// the two apart, which is the whole point of the copy.
 type MapLocal struct {
 	Declaration  *ast.Node // VariableDeclaration
 	Name         string
@@ -83,8 +104,17 @@ type MapLocal struct {
 	// SeedKeys, SeedVals: the seed literal's key and value expressions,
 	// in source order. A Set's SeedKeys is nil. Both nil for an empty
 	// `new Map()` / `new Set()`.
+	//
+	// A copy-constructed collection inherits the SIBLING's seed
+	// expressions here, so MapValueSort, MapKeySort, and the two typeof
+	// readings answer for it exactly as they answer for the sibling —
+	// the slots hold the same values, so they wear the same sorts.
 	SeedKeys []*ast.Node
 	SeedVals []*ast.Node
+	// CopiedFrom: the spelled name of the already-flattened collection
+	// this one was constructed from, or "" for an ordinary construction.
+	// Its slots are "<CopiedFrom>.size" / ".vals" / ".keys".
+	CopiedFrom string
 }
 
 // The three slot spellings a flattened collection wears below its name.
@@ -107,7 +137,15 @@ func collectionConstructionOf(declaration *ast.Node) (isMap bool, seed *ast.Node
 	if initializer == nil {
 		return false, nil, false
 	}
-	head := Unwrapped(initializer)
+	return constructionOfNewExpression(Unwrapped(initializer))
+}
+
+// constructionOfNewExpression is the same reading against a `new`
+// expression standing anywhere, not only in a declaration's initializer
+// position — what the use scan needs to rule on `new Map(m)`, where the
+// collection being copied FROM appears inside someone else's
+// construction.
+func constructionOfNewExpression(head *ast.Node) (isMap bool, seed *ast.Node, ok bool) {
 	if !ast.IsNewExpression(head) {
 		return false, nil, false
 	}
@@ -130,6 +168,23 @@ func collectionConstructionOf(declaration *ast.Node) (isMap bool, seed *ast.Node
 		return false, nil, false
 	}
 	return isMap, expression.Arguments.Nodes[0], true
+}
+
+// copySourceOf is the spelled name a construction COPIES from:
+// `new Map(m)` / `new Set(s)`, the seed a bare identifier rather than an
+// array literal. Answers ("", false) for every other seed shape.
+//
+// Whether that name is an already-flattened collection of the MATCHING
+// kind is the caller's question — this reads the syntax only.
+func copySourceOf(seed *ast.Node) (string, bool) {
+	if seed == nil {
+		return "", false
+	}
+	head := Unwrapped(seed)
+	if !ast.IsIdentifier(head) {
+		return "", false
+	}
+	return head.Text(), true
 }
 
 // seedEntriesOf reads the seed argument of `new Map([[k, v], …])` or
@@ -338,6 +393,20 @@ func admitCollectionUse(node *ast.Node, name string, isMap bool) (mapUseAdmissio
 			}
 		}
 	}
+	// `new Map(m)` / `new Set(s)` — this collection COPIED into a new
+	// one. The copy reads only the slots, which hold everything the
+	// collection can hold, so the source keeps its flattening and its own
+	// occurrence here is consumed whole. The kind must MATCH: seeding a
+	// Set from a Map reads entry pairs, which one value slot cannot hold,
+	// and seeding a Map from a Set reads members as pairs, which they are
+	// not.
+	if ast.IsNewExpression(node) {
+		if constructedIsMap, seed, isConstruction := constructionOfNewExpression(node); isConstruction {
+			if source, isCopy := copySourceOf(seed); isCopy && source == name {
+				return mapUseAdmission{Admitted: constructedIsMap == isMap}, true
+			}
+		}
+	}
 	// `m.set(k, v)` / `s.add(v)` / `m.get(k)` / `m.delete(k)` — the
 	// operations; their arguments still scan
 	if method, arguments, isCall := collectionMethodCallOf(node, name); isCall {
@@ -350,6 +419,14 @@ func admitCollectionUse(node *ast.Node, name string, isMap bool) (mapUseAdmissio
 		case "get":
 			admitted = isMap && len(arguments) == 1
 		case "delete":
+			admitted = len(arguments) == 1
+		case "forEach":
+			// `m.forEach(cb)` — collectionForEachStatement reads the vals
+			// (and keys) slots and converts the callback, so the receiver's
+			// own occurrence is consumed and the callback still scans. Whether
+			// the callback converts is the lowering's question; a callback
+			// that declines costs the body its lowering rather than claiming
+			// anything wrong here.
 			admitted = len(arguments) == 1
 		case "values", "keys", "entries":
 			// a view standing alone is only admitted in an iterated or
@@ -442,8 +519,8 @@ func usesAreAllCollectionForms(body *ast.Node, declaration *ast.Node, name strin
 			return false
 		}
 		// Every other occurrence of the bare name — an alias, an argument,
-		// a return, `m.has(k)`, `m.clear()`, `m.forEach(cb)`, `m[k]` — is
-		// the WHOLE collection in a position the slots cannot spell.
+		// a return, `m.has(k)`, `m.clear()`, `m[k]` — is the WHOLE
+		// collection in a position the slots cannot spell.
 		if ast.IsIdentifier(node) && node.Text() == name && node != declarationName {
 			ok = false
 			return true
@@ -497,13 +574,108 @@ func MapLocalOf(body *ast.Node, declaration *ast.Node) (MapLocal, bool) {
 	return local, true
 }
 
+// copiedMapLocalOf is the COPY recognizer: `const n = new Map(m)` /
+// `const t = new Set(s)` over a collection the recognizer already
+// admitted. The result is a MapLocal in every respect — the same slot
+// spellings, the same use scan, the same sort and typeof answers — so
+// every downstream reader treats it exactly as it treats a seeded
+// collection's local. What differs is only where the slots' VALUES come
+// from: the sibling's own size, values, and keys slots.
+//
+// A copy over a collection that is NOT flattened declines: without the
+// source slots there is nothing to copy from. A copy across KINDS
+// declines too — `new Set(m)` over a Map reads entry pairs, which one
+// value slot cannot hold, and `new Map(s)` over a Set reads members as
+// pairs, which they are not.
+func copiedMapLocalOf(body *ast.Node, declaration *ast.Node, flattenedSibling func(name string) (MapLocal, bool)) (MapLocal, bool) {
+	if flattenedSibling == nil {
+		return MapLocal{}, false
+	}
+	isMap, seed, isConstruction := collectionConstructionOf(declaration)
+	if !isConstruction {
+		return MapLocal{}, false
+	}
+	if !ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+		return MapLocal{}, false
+	}
+	source, isCopy := copySourceOf(seed)
+	if !isCopy {
+		return MapLocal{}, false
+	}
+	sibling, flattened := flattenedSibling(source)
+	if !flattened {
+		return MapLocal{}, false
+	}
+	// the kinds must match: the slot families only line up where both
+	// collections carry the same ones
+	if sibling.IsMap != isMap {
+		return MapLocal{}, false
+	}
+	name := declaration.AsVariableDeclaration().Name().Text()
+	// a collection cannot be copied from itself — at the point the
+	// construction runs, its own slots have not been written yet
+	if source == name {
+		return MapLocal{}, false
+	}
+	if !usesAreAllCollectionForms(body, declaration, name, isMap) {
+		return MapLocal{}, false
+	}
+	local := MapLocal{
+		Declaration:  declaration,
+		Name:         name,
+		IsMap:        isMap,
+		SizeSlotName: name + mapSizeSuffix,
+		ValsSlotName: name + mapValsSuffix,
+		// the sibling's seed expressions ride in the ordinary Seed fields,
+		// so MapValueSort, MapKeySort and the typeof readings answer for
+		// this local exactly as they answer for the one it copied
+		SeedKeys:   sibling.SeedKeys,
+		SeedVals:   sibling.SeedVals,
+		CopiedFrom: source,
+	}
+	if isMap {
+		local.KeysSlotName = name + mapKeysSuffix
+	}
+	return local, true
+}
+
 // MapLocalsOf runs the recognizer over a body's collected locals and
 // answers the ones that flatten, keyed by declaration.
+//
+// TWO passes: the ordinary constructions flatten first, then the COPIES
+// (`const n = new Map(m)`), which need the table the first pass built to
+// know their source is flattened. A copy of a copy resolves on a later
+// pass, and the passes stop as soon as one adds nothing — a cycle among
+// copies cannot arise (a source must be declared before the copy reads
+// it), and the fixed bound keeps the walk finite regardless.
 func MapLocalsOf(body *ast.Node, locals []*ast.Node) map[*ast.Node]MapLocal {
 	out := map[*ast.Node]MapLocal{}
 	for _, declaration := range locals {
 		if local, ok := MapLocalOf(body, declaration); ok {
 			out[declaration] = local
+		}
+	}
+	byName := map[string]MapLocal{}
+	for _, collection := range out {
+		byName[collection.Name] = collection
+	}
+	flattenedSibling := func(name string) (MapLocal, bool) {
+		held, found := byName[name]
+		return held, found
+	}
+	for added := true; added; {
+		added = false
+		for _, declaration := range locals {
+			if _, already := out[declaration]; already {
+				continue
+			}
+			local, ok := copiedMapLocalOf(body, declaration, flattenedSibling)
+			if !ok {
+				continue
+			}
+			out[declaration] = local
+			byName[local.Name] = local
+			added = true
 		}
 	}
 	return out
@@ -717,6 +889,13 @@ func MapDeclarationAssignmentsOf(context *LoweringContext, statement *ast.Node) 
 	if !ok || keysOk != isMap {
 		return nil, false
 	}
+	// the COPY, tried first: `const n = new Map(m)` writes this
+	// collection's slots from the sibling's own — plain slot reads, so
+	// what the copy's readers see afterwards is indistinguishable from a
+	// seeded construction's lowering.
+	if copied, isCopy := copiedDeclarationAssignmentsOf(context, seed, sizeSlot, valsSlot, keysSlot, keysOk); isCopy {
+		return copied, true
+	}
 	keys, vals, seedOk := seedEntriesOf(seed, isMap)
 	if !seedOk {
 		return nil, false
@@ -733,6 +912,43 @@ func MapDeclarationAssignmentsOf(context *LoweringContext, statement *ast.Node) 
 			return nil, false
 		}
 		out = append(out, AssignmentTarget{Target: keysSlot, Effect: keysEffect})
+	}
+	return out, true
+}
+
+// copiedDeclarationAssignmentsOf is the COPY's lowering: `const n = new
+// Map(m)` writes `n.size := var m.size`, `n.vals := var m.vals`, and —
+// for a Map — `n.keys := var m.keys`. Three ordinary slot reads: the new
+// collection holds exactly what the old one held, so every later
+// `n.size`, `n.get(k)`, `n.set(k, v)` and iteration over `n` reads the
+// same shapes it would over a seeded collection.
+//
+// The syntax alone decides here, as everywhere in the lowering: the
+// recognizer's admission is already recorded in the slot vector, so the
+// gate is that both collections' slots resolve and their key halves
+// agree — a Map copied from a Set, or the reverse, has no matching slot
+// family to read.
+func copiedDeclarationAssignmentsOf(context *LoweringContext, seed *ast.Node, sizeSlot int, valsSlot int, keysSlot int, keysOk bool) ([]AssignmentTarget, bool) {
+	source, isCopy := copySourceOf(seed)
+	if !isCopy {
+		return nil, false
+	}
+	sourceSize, sourceVals, sourceKeys, sourceKeysOk, found := mapSlotsOf(context, source)
+	if !found {
+		return nil, false
+	}
+	// a Map's keys slot has no counterpart in a Set's family, and a copy
+	// across the two kinds reads values that are not the shape the slots
+	// hold
+	if sourceKeysOk != keysOk {
+		return nil, false
+	}
+	out := []AssignmentTarget{
+		{Target: sizeSlot, Effect: varEffect(sourceSize)},
+		{Target: valsSlot, Effect: varEffect(sourceVals)},
+	}
+	if keysOk {
+		out = append(out, AssignmentTarget{Target: keysSlot, Effect: varEffect(sourceKeys)})
 	}
 	return out, true
 }

@@ -162,15 +162,8 @@ func RefutePlainSort(
 	if typeNode == nil {
 		return
 	}
-	var demanded string
-	switch typeNode.Kind {
-	case ast.KindStringKeyword:
-		demanded = "string"
-	case ast.KindNumberKeyword:
-		demanded = "number"
-	case ast.KindBooleanKeyword:
-		demanded = "boolean"
-	default:
+	demanded := plainKeywordDemand(ctx, typeNode, 0)
+	if demanded == "" {
 		return
 	}
 	offending, ok := SortOutsidePlain(known, demanded)
@@ -185,13 +178,70 @@ func RefutePlainSort(
 	))
 }
 
+// plainKeywordDemand is the plain primitive keyword a spelled type
+// node demands — "string", "number", "boolean", or "" for every other
+// spelling. A NAME resolves through the checker to the type alias it
+// stands for and reads the alias's own target: `type Name = string`
+// demands exactly what the bare keyword demands, and the position
+// spelling the name is the same position. Only a target that IS one of
+// the three keywords qualifies; a union, an object, a generic alias,
+// or a chain past aliasHopLimit hops keeps the current silence.
+func plainKeywordDemand(ctx *FlowContext, typeNode *ast.Node, hops int) string {
+	switch typeNode.Kind {
+	case ast.KindStringKeyword:
+		return "string"
+	case ast.KindNumberKeyword:
+		return "number"
+	case ast.KindBooleanKeyword:
+		return "boolean"
+	case ast.KindParenthesizedType:
+		return plainKeywordDemand(ctx, typeNode.AsParenthesizedTypeNode().Type, hops)
+	}
+	if hops >= aliasHopLimit || !ast.IsTypeReferenceNode(typeNode) {
+		return ""
+	}
+	typeRef := typeNode.AsTypeReferenceNode()
+	// a name carrying type arguments stands for an instantiation, not
+	// for one plain keyword
+	if typeRef.TypeArguments != nil || !ast.IsIdentifier(typeRef.TypeName) {
+		return ""
+	}
+	symbol := symbolAt(ctx.P.Checker, typeRef.TypeName)
+	if symbol == nil {
+		return ""
+	}
+	for _, d := range symbol.Declarations {
+		if !ast.IsTypeAliasDeclaration(d) {
+			continue
+		}
+		aliasDecl := d.AsTypeAliasDeclaration()
+		// a GENERIC alias's target reads under its parameters, which this
+		// position does not carry
+		if aliasDecl.TypeParameters != nil && len(aliasDecl.TypeParameters.Nodes) > 0 {
+			return ""
+		}
+		return plainKeywordDemand(ctx, aliasDecl.Type, hops+1)
+	}
+	return ""
+}
+
+// aliasHopLimit bounds the alias chain plainKeywordDemand follows. A
+// self-referential alias is not a spelling tsc admits, but the walk
+// reads error-recovered trees too, and a bounded walk answers the same
+// "" a cyclic chain would.
+const aliasHopLimit = 8
+
 // SortOutsidePlain is sortOutsidePlain in the TS source: the sort a
 // claim PROVABLY wears that a plain demand excludes, or ("", false).
-// Conservative: only the unambiguous carriers answer — the symbol
-// and bigint kinds, a sort-tagged set, an exact word's kindTag — and
-// a union answers on any offending arm. Wrappers read through: NaN
-// is number-sorted and absence is tsc's own strict check, so neither
-// arm speaks here.
+// Only the unambiguous carriers answer — the symbol and bigint kinds,
+// a sort-tagged set, an exact word's kindTag, and every kind whose
+// sort is decided by CONSTRUCTION (an object, a list, a collection, a
+// promise, a date, a regex, a host function are each built as what
+// they are and wear that sort on every run) — and a union answers on
+// any offending arm. Wrappers read through: NaN is number-sorted and
+// absence is tsc's own strict check, so neither arm speaks here. The
+// genuinely ambiguous kinds — unknown, a sortless set whose forms
+// speak for two sorts, a refinement variable — stay silent.
 func SortOutsidePlain(known abstractdomain.AbstractValue, demanded string) (string, bool) {
 	switch known.Kind {
 	case abstractdomain.KindSymbol:
@@ -218,6 +268,26 @@ func SortOutsidePlain(known abstractdomain.AbstractValue, demanded string) (stri
 		return "", false
 	case abstractdomain.KindPossiblyNaN, abstractdomain.KindPossiblyUndefined:
 		return SortOutsidePlain(*known.Inner, demanded)
+	case abstractdomain.KindObject, abstractdomain.KindList,
+		abstractdomain.KindCollection, abstractdomain.KindPromise,
+		abstractdomain.KindDate, abstractdomain.KindRegex,
+		abstractdomain.KindHostFunction:
+		// the constructed carriers: each is built as its own kind, so the
+		// word it answers is the same on every run. `typeof` speaks that
+		// word (the "object"/"function" the domain's own reader gives),
+		// and none of the three plain primitive demands admits it.
+		word := abstractdomain.TypeofWordOfKnown(known)
+		if word == "" || word == demanded {
+			return "", false
+		}
+		return word, true
+	case abstractdomain.KindNaN:
+		// NaN is number-sorted — it refutes a string or boolean demand
+		// the way any exact number does
+		if demanded == "number" {
+			return "", false
+		}
+		return "number", true
 	default:
 		return "", false
 	}

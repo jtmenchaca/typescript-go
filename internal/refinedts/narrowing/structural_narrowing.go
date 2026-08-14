@@ -70,6 +70,17 @@ func StructuralRaw(c *checker.Checker, condition *ast.Node, isTracked func(name 
 // LEAF — every test below reads a single position, with `await` peeled
 // here (peeling can expose structure the shared tree could not see,
 // which re-enters the fold).
+//
+// Every place read here goes through TrackedPlaceOfWith, so the checker
+// resolves a const-bound index the same way the literal spelling reads:
+// `const i = 0; if (xs[i] === "a")` names the place `xs.[0]`, which is
+// the place `xs[0]` names. The narrowing that lands on it is sound on
+// the same terms as the literal one — the place is FIXED, because a
+// const cannot be rebound, so the segment names one slot at every
+// reachable point; and stability rides the BASE NAME, because any
+// element write to the base kills every index place of that base
+// (StableIn's reading). Resolving the index therefore adds places
+// without weakening what holds of them.
 func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name string) bool) BranchNarrowings {
 	e := Peeled(test)
 	if e != test {
@@ -137,7 +148,7 @@ func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name stri
 		// defined value under it, since `{k: undefined}` answers true.
 		if op == ast.KindInKeyword {
 			key := dataflowfacts.StringLiteralOf(bin.Left)
-			target := dataflowfacts.TrackedPlaceOf(bin.Right, isTracked)
+			target := dataflowfacts.TrackedPlaceOfWith(c, bin.Right, isTracked)
 			if key == nil || target == nil {
 				return None
 			}
@@ -162,7 +173,7 @@ func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name stri
 			return fromInstance
 		}
 
-		if fromTypeof, ok := TypeofLeaf(e, isTracked); ok {
+		if fromTypeof, ok := TypeofLeaf(c, e, isTracked); ok {
 			return fromTypeof
 		}
 
@@ -174,8 +185,8 @@ func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name stri
 			return None
 		}
 
-		leftPlace := dataflowfacts.TrackedPlaceOf(bin.Left, isTracked)
-		rightPlace := dataflowfacts.TrackedPlaceOf(bin.Right, isTracked)
+		leftPlace := dataflowfacts.TrackedPlaceOfWith(c, bin.Left, isTracked)
+		rightPlace := dataflowfacts.TrackedPlaceOfWith(c, bin.Right, isTracked)
 		testedPlace := leftPlace
 		if testedPlace == nil {
 			testedPlace = rightPlace
@@ -255,7 +266,7 @@ func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name stri
 	// is false), which strips a maybe wrapper, and keeps only the
 	// truthy words of a finite list. Held falsity keeps the falsy
 	// ones — 0 stays, and so does absence.
-	if testedPlace := dataflowfacts.TrackedPlaceOf(e, isTracked); testedPlace != nil {
+	if testedPlace := dataflowfacts.TrackedPlaceOfWith(c, e, isTracked); testedPlace != nil {
 		present := Narrowed{Binding: testedPlace.Binding, Path: testedPlace.Path, Definedness: "defined", Truthiness: "truthy"}
 		falsy := Narrowed{Binding: testedPlace.Binding, Path: testedPlace.Path, Truthiness: "falsy"}
 		return BranchNarrowings{WhenTrue: []Narrowed{present}, WhenFalse: []Narrowed{falsy}}

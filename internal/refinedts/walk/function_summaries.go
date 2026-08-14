@@ -302,13 +302,20 @@ func constantWriteSummary(contract FunctionContract, parameters map[string]struc
 // site: the same writes the inline would compute, applied
 // class-aware to the identifier arguments — O(writes) instead of a
 // body re-walk.
-func ApplyConstantWrites(ctx *FlowContext, env Env, call *ast.Node, writes []ConstantWrite) {
-	callExpr := call.AsCallExpression()
+//
+// A write names the PARAMETER it lands on, so the positions read here
+// are the effective ones: a call spreading an exact source writes
+// through the argument that really bound that parameter. A position
+// with no expression behind it — a tagged template's template object,
+// an item expanded out of a spread — is nil and the guard below skips
+// it, which is the same nothing a spread's own slot did before.
+func ApplyConstantWrites(ctx *FlowContext, env Env, effective EffectiveArguments, writes []ConstantWrite) {
+	arguments := effective.Nodes
 	for _, write := range writes {
-		if write.ParamIndex < 0 || write.ParamIndex >= len(callExpr.Arguments.Nodes) {
+		if write.ParamIndex < 0 || write.ParamIndex >= len(arguments) {
 			continue
 		}
-		target := callExpr.Arguments.Nodes[write.ParamIndex]
+		target := arguments[write.ParamIndex]
 		for target != nil && (ast.IsParenthesizedExpression(target) || ast.IsAsExpression(target)) {
 			if ast.IsParenthesizedExpression(target) {
 				target = target.AsParenthesizedExpression().Expression
@@ -363,9 +370,17 @@ var recoveryMemo = map[*program.CheckerProgram]map[*ast.Node]map[string]abstract
 // not encoding/json: json refuses NaN/±Inf outright, and ±Inf is the
 // bare number set's own bound, so marshaling silently unkeyed the
 // common case (the same disease the inline memo key had).
-func jsonStringifyArgKnowns(argKnowns []abstractdomain.AbstractValue) string {
+//
+// The list's EXACTNESS spells too, for the reason the inline memo key
+// spells it: a REST parameter binds a rest list off an exact list and
+// residue off an inexact one, so two lists spelling the same values
+// can still bind differently.
+func jsonStringifyArgKnowns(effective EffectiveArguments) string {
 	var b strings.Builder
-	for _, arg := range argKnowns {
+	if !effective.Exact {
+		b.WriteString("~\x1e")
+	}
+	for _, arg := range effective.Knowns {
 		spelled, ok := abstractdomain.SpellForMemoKey(arg)
 		if !ok {
 			return ""
@@ -377,16 +392,17 @@ func jsonStringifyArgKnowns(argKnowns []abstractdomain.AbstractValue) string {
 }
 
 // RecoverPure is recoverPure in the TS source.
-func RecoverPure(ctx *FlowContext, call *ast.Node, contract FunctionContract, argKnowns []abstractdomain.AbstractValue, memoize bool) abstractdomain.AbstractValue {
+func RecoverPure(ctx *FlowContext, call *ast.Node, contract FunctionContract, effective EffectiveArguments, memoize bool) abstractdomain.AbstractValue {
 	if !tracing.Recording(tracing.GrainStep) {
-		return recoverPureBody(ctx, call, contract, argKnowns, memoize)
+		return recoverPureBody(ctx, call, contract, effective, memoize)
 	}
 	return tracing.Span("recoverPure", func() abstractdomain.AbstractValue {
-		return recoverPureBody(ctx, call, contract, argKnowns, memoize)
+		return recoverPureBody(ctx, call, contract, effective, memoize)
 	}, tracing.GrainStep)
 }
 
-func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract, argKnowns []abstractdomain.AbstractValue, memoize bool) abstractdomain.AbstractValue {
+func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract, effective EffectiveArguments, memoize bool) abstractdomain.AbstractValue {
+	argKnowns := effective.Knowns
 	body := contract.Declaration.Body()
 	if body == nil {
 		return silence.Residue()
@@ -397,7 +413,7 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 		// knowledge carrying object references (a refinement variable's
 		// symbol, a stated annotation's nodes) has no plain spelling —
 		// those calls run unmemoized rather than mis-keyed
-		key = jsonStringifyArgKnowns(argKnowns)
+		key = jsonStringifyArgKnowns(effective)
 		if key != "" {
 			recoveryMemoMu.Lock()
 			shelf := recoveryMemo[ctx.P]
@@ -432,12 +448,12 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 		}
 		return summarized
 	}
-	callExpr := call.AsCallExpression()
+	callee := CalleeExpressionOf(call)
 	var calleeName *ast.Node
-	if ast.IsIdentifier(callExpr.Expression) {
-		calleeName = callExpr.Expression
-	} else if ast.IsPropertyAccessExpression(callExpr.Expression) {
-		calleeName = callExpr.Expression.AsPropertyAccessExpression().Name()
+	if callee != nil && ast.IsIdentifier(callee) {
+		calleeName = callee
+	} else if callee != nil && ast.IsPropertyAccessExpression(callee) {
+		calleeName = callee.AsPropertyAccessExpression().Name()
 	}
 	if calleeName == nil {
 		return silence.Residue()
@@ -466,7 +482,7 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		callEnv.Set(name.Text(), ParameterKnown(parameter, i, call, argKnowns))
+		callEnv.Set(name.Text(), ParameterKnown(parameter, i, effective))
 	}
 	var sink []abstractdomain.AbstractValue
 	silent := *ctx

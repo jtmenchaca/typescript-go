@@ -249,6 +249,14 @@ func LowerLoopEffect(
 					ast.KindAsteriskEqualsToken: kernelbridge.LoopOpMul,
 					ast.KindSlashEqualsToken:    kernelbridge.LoopOpDiv,
 					ast.KindPercentEqualsToken:  kernelbridge.LoopOpRem,
+					// the bitwise and shift compounds ride the same
+					// LoopOp2 vocabulary; transferBitwise decides them
+					ast.KindAmpersandEqualsToken:                         kernelbridge.LoopOpBitAnd,
+					ast.KindBarEqualsToken:                               kernelbridge.LoopOpBitOr,
+					ast.KindCaretEqualsToken:                             kernelbridge.LoopOpBitXor,
+					ast.KindLessThanLessThanEqualsToken:                  kernelbridge.LoopOpShl,
+					ast.KindGreaterThanGreaterThanEqualsToken:            kernelbridge.LoopOpSar,
+					ast.KindGreaterThanGreaterThanGreaterThanEqualsToken: kernelbridge.LoopOpShr,
 				}
 				if op, ok := compound[bin.OperatorToken.Kind]; ok && ast.IsIdentifier(bin.Left) {
 					a := readName(bin.Left.Text())

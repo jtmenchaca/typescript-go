@@ -165,15 +165,37 @@ func BundleFieldsAs(receiverName string, fields []BundleField) []BundleField {
 //     own `this` read one field set;
 //   - an INTERFACE → its property signatures, subject to the same field
 //     rules (method signatures are calls, not slots; a computed name
-//     spells nothing). An interface with HERITAGE (`extends`) or TYPE
-//     PARAMETERS declines: an inherited member is declared in a
-//     declaration this reading never visits, so the field set would be
-//     incomplete and a body reading the inherited member would read a
-//     slot that is not there; a type parameter means the members'
+//     spells nothing), PLUS everything it inherits (see below). TYPE
+//     PARAMETERS still decline: a type parameter means the members'
 //     annotations are not the ones the instance actually holds;
 //   - a TYPE ALIAS of a type literal → the literal's members. An alias of
 //     anything else (a union, another reference, a mapped type) declines
 //     — the census reads syntax, and only a literal spells its members.
+//
+// HERITAGE EXPANDS. `interface Wrapper extends Base { … }` reads Base's
+// members too: each heritage clause's parent references resolve through
+// the same symbolAt this function already uses, each parent's own
+// members read under the SAME field rules, recursively (a parent's own
+// heritage walks too), and the CHILD's members SHADOW a parent's on a
+// name collision, keeping the slot position the parent's list already
+// gave — TypeScript's own rule for a redeclared inherited property, and
+// the position rule is what keeps the slot vector from moving because a
+// child restated a member.
+//
+// Every decline holds at EVERY LINK of the chain: type parameters on any
+// declaration, a parent reference carrying type arguments or spelled by
+// anything but a plain identifier, a parent that is neither a plain
+// interface nor an alias of a type literal, and a symbol MORE THAN ONE
+// of whose declarations contributes members — a merged interface splits
+// its member list across declarations, so reading one of them builds a
+// field set the other contradicts. A CYCLE in the chain (illegal TS, but
+// not assumed pre-checked) declines rather than looping: the walk
+// carries the declaration nodes already on its own path and refuses to
+// re-enter one.
+//
+// A MEMBERLESS child with heritage (`interface W extends Base {}`) takes
+// its parents' fields — it declares nothing of its own and is exactly
+// what it inherits.
 //
 // (false) where nothing resolves: a nil context, a context with no
 // program or no checker (the nil-tolerance the callers rely on — a
@@ -205,40 +227,164 @@ func BundleTypeFieldsOf(ctx *FlowContext, typeNode *ast.Node) ([]BundleField, bo
 	if symbol == nil {
 		return nil, false
 	}
+	// the CLASS arm keeps its own resolution: a class-typed annotation and
+	// a method's own `this` read one field set, and classes carry their own
+	// heritage semantics outside this walk
 	for _, declaration := range symbol.Declarations {
 		if ast.IsClassLike(declaration) {
 			return ClassFieldsOf(ctx, declaration)
 		}
 	}
-	for _, declaration := range symbol.Declarations {
-		if !ast.IsInterfaceDeclaration(declaration) {
+	return declaredBundleFieldsOf(ctx, symbol.Declarations, nil)
+}
+
+// declaredBundleFieldsOf is the reading BundleTypeFieldsOf performs at
+// every link of a heritage chain: take ONE name's declarations and
+// answer the fields they stand for, including whatever they inherit.
+//
+// The declaration list is SCANNED rather than required to be of length
+// one — this file's own resolution policy, kept — but a symbol MORE THAN
+// ONE of whose declarations contributes members declines: a merged
+// interface splits its member list across declarations, and answering
+// from one of them would build a field set the other contradicts. A
+// declaration that contributes nothing (an enum, a module, a function
+// declaration sharing the name) does not count against that.
+//
+// `visiting` holds the declaration nodes already on this walk's path. A
+// name resolving back onto one of them is a cycle, which answers false
+// rather than recursing forever.
+func declaredBundleFieldsOf(
+	ctx *FlowContext,
+	declarations []*ast.Node,
+	visiting []*ast.Node,
+) ([]BundleField, bool) {
+	var contributor *ast.Node
+	for _, declaration := range declarations {
+		if declaration == nil {
 			continue
 		}
-		asInterface := declaration.AsInterfaceDeclaration()
-		// heritage hides members this reading never sees; a type parameter
-		// means the annotations are not the instance's own
-		if asInterface.HeritageClauses != nil && len(asInterface.HeritageClauses.Nodes) > 0 {
+		if !ast.IsInterfaceDeclaration(declaration) && !ast.IsTypeAliasDeclaration(declaration) {
+			continue
+		}
+		if contributor != nil {
+			// two declarations both spell members: the merged interface's
+			// split member list, which no single reading answers
 			return nil, false
 		}
+		contributor = declaration
+	}
+	if contributor == nil {
+		return nil, false
+	}
+	for _, seen := range visiting {
+		if seen == contributor {
+			return nil, false
+		}
+	}
+	if ast.IsInterfaceDeclaration(contributor) {
+		asInterface := contributor.AsInterfaceDeclaration()
+		// a type parameter means the annotations are not the instance's own
 		if asInterface.TypeParameters != nil && len(asInterface.TypeParameters.Nodes) > 0 {
 			return nil, false
 		}
-		return typeElementFieldsOf(asInterface.Members.Nodes), true
+		var own []BundleField
+		if asInterface.Members != nil {
+			own = typeElementFieldsOf(asInterface.Members.Nodes)
+		}
+		// a fresh path slice per link: sibling parents each recurse with
+		// their own copy, so one branch's appends never land in another's
+		path := make([]*ast.Node, len(visiting), len(visiting)+1)
+		copy(path, visiting)
+		inherited, inheritedOk := heritageBundleFieldsOf(ctx, asInterface, append(path, contributor))
+		if !inheritedOk {
+			return nil, false
+		}
+		return mergeShadowedFields(inherited, own), true
 	}
-	for _, declaration := range symbol.Declarations {
-		if !ast.IsTypeAliasDeclaration(declaration) {
+	asAlias := contributor.AsTypeAliasDeclaration()
+	if asAlias.TypeParameters != nil && len(asAlias.TypeParameters.Nodes) > 0 {
+		return nil, false
+	}
+	if asAlias.Type == nil || !ast.IsTypeLiteralNode(asAlias.Type) {
+		return nil, false
+	}
+	return typeElementFieldsOf(asAlias.Type.AsTypeLiteralNode().Members.Nodes), true
+}
+
+// heritageBundleFieldsOf reads everything an interface INHERITS: each
+// heritage clause's parent references resolved to their own fields by
+// the same reading, in clause and reference order, later parents
+// shadowing earlier ones the way TypeScript's own resolution does.
+//
+// A parent reference carrying TYPE ARGUMENTS (`extends Box<number>`) or
+// spelled by anything but a plain identifier (`extends ns.Base`)
+// declines — the members would depend on what was applied, which no slot
+// vector spells, and a qualified name reaches into a namespace this
+// reading does not claim to resolve.
+func heritageBundleFieldsOf(
+	ctx *FlowContext,
+	asInterface *ast.InterfaceDeclaration,
+	visiting []*ast.Node,
+) ([]BundleField, bool) {
+	if asInterface.HeritageClauses == nil {
+		return nil, true
+	}
+	var inherited []BundleField
+	for _, clause := range asInterface.HeritageClauses.Nodes {
+		heritage := clause.AsHeritageClause()
+		if heritage.Types == nil {
 			continue
 		}
-		asAlias := declaration.AsTypeAliasDeclaration()
-		if asAlias.TypeParameters != nil && len(asAlias.TypeParameters.Nodes) > 0 {
-			return nil, false
+		for _, reference := range heritage.Types.Nodes {
+			if !ast.IsExpressionWithTypeArguments(reference) {
+				return nil, false
+			}
+			parent := reference.AsExpressionWithTypeArguments()
+			if parent.TypeArguments != nil && len(parent.TypeArguments.Nodes) > 0 {
+				return nil, false
+			}
+			if parent.Expression == nil || !ast.IsIdentifier(parent.Expression) {
+				return nil, false
+			}
+			symbol := symbolAt(ctx.P.Checker, parent.Expression)
+			if symbol == nil {
+				return nil, false
+			}
+			fields, ok := declaredBundleFieldsOf(ctx, symbol.Declarations, visiting)
+			if !ok {
+				return nil, false
+			}
+			inherited = mergeShadowedFields(inherited, fields)
 		}
-		if asAlias.Type == nil || !ast.IsTypeLiteralNode(asAlias.Type) {
-			return nil, false
-		}
-		return typeElementFieldsOf(asAlias.Type.AsTypeLiteralNode().Members.Nodes), true
 	}
-	return nil, false
+	return inherited, true
+}
+
+// mergeShadowedFields lays the `shadowing` list over the `base` one: a
+// field both spell is the SHADOWING one's, kept at the position the base
+// already gave it, and a field only the shadowing list spells is
+// appended after. Keeping the base's position is what makes the layout
+// deterministic — the slot order a parent's fields took does not move
+// because a child redeclared one of them.
+func mergeShadowedFields(base, shadowing []BundleField) []BundleField {
+	if len(base) == 0 {
+		return shadowing
+	}
+	at := map[string]int{}
+	merged := make([]BundleField, 0, len(base)+len(shadowing))
+	for _, field := range base {
+		at[field.Name] = len(merged)
+		merged = append(merged, field)
+	}
+	for _, field := range shadowing {
+		if index, already := at[field.Name]; already {
+			merged[index] = field
+			continue
+		}
+		at[field.Name] = len(merged)
+		merged = append(merged, field)
+	}
+	return merged
 }
 
 // typeElementFieldsOf is ClassFieldsOf's rule over TYPE ELEMENTS —

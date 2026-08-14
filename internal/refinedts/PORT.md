@@ -301,16 +301,27 @@ skip the whole file: port everything else, and give the blocked
 function a body that returns the SAME fallback answer the TS source's
 caller sees when that function's own reading finds nothing — never a
 panic, never an empty stub with no comment. `narrowing/bound_condition.go`
-is the pattern: `ResolveBoundCondition` always answers `(ResolvedCondition{},
-false)` because `dataflowfacts.WrittenNamesOf` (needed transitively
-through `FunctionWrites`) is blocked on `service/program_resolution.ts`'s
-`resolvesToDefaultLib` — and the TS source's own `narrowingsOf` already
-falls through to reading the condition plainly when
-`resolveBoundCondition` reads nothing, so the blocked function's
-constant-false answer is the SOUND fallback, not a lie. Every such
-function gets a file-header banner naming the blocking import and every
-call site that is consequently degraded — a future wave un-blocking the
-import only needs to fill the one function in, not re-audit callers.
+was the pattern (NOW UNBLOCKED — the example is kept for its shape, not
+as a live blocker): `ResolveBoundCondition` answered
+`(ResolvedCondition{}, false)` because `dataflowfacts.WrittenNamesOf`
+(needed transitively through `FunctionWrites`) was thought blocked on
+`service/program_resolution.ts`'s `resolvesToDefaultLib` — and the TS
+source's own `narrowingsOf` already falls through to reading the
+condition plainly when `resolveBoundCondition` reads nothing, so the
+blocked function's constant-false answer was the SOUND fallback, not a
+lie. Every such function gets a file-header banner naming the blocking
+import and every call site that is consequently degraded — a future wave
+un-blocking the import only needs to fill the one function in, not
+re-audit callers.
+
+Before writing a new banner, CHECK the blocker still holds: this one had
+already dissolved. `resolvesToDefaultLib` is not a service/ import at
+all under the oracle-adapter rule above — it is
+`c.SymbolInDefaultLib(c.GetSymbolAtLocation(node))`, a direct checker
+call several packages already write inline (narrowing/
+array_shape_narrowing.go, annotations/program_resolution.go, walk/
+iteration_elements.go). A banner naming a TS-side import as the blocker
+is only true when the oracle-adapter rule does not already answer it.
 
 ## The kernel (for kernel_bridge and later)
 

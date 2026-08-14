@@ -181,25 +181,42 @@ func CheckBuiltinContracts(ctx *FlowContext, env Env, e *ast.Node) {
 		}
 		if hasName && spawnLikeCalleeNames[name] {
 			for _, argument := range args {
-				if !ast.IsArrayLiteralExpression(argument) {
+				// an argv written in place: each element is reported at
+				// its own node, which points the reader at the token
+				if ast.IsArrayLiteralExpression(argument) {
+					for _, element := range argument.AsArrayLiteralExpression().Elements.Nodes {
+						known := evaluateExpression(ctx, env, element)
+						text, ok := exactString(known)
+						if !ok {
+							continue
+						}
+						if !shellRedirectionPrefix.MatchString(text) {
+							continue
+						}
+						reportShellRedirectionArgv(ctx, element, text)
+					}
 					continue
 				}
-				for _, element := range argument.AsArrayLiteralExpression().Elements.Nodes {
-					known := evaluateExpression(ctx, env, element)
-					text, ok := exactString(known)
+				if ast.IsSpreadElement(argument) {
+					continue
+				}
+				// an argv held in a VARIABLE: the value states its items,
+				// and each exact string gets the same check. There is no
+				// per-element node to point at, so the report sits on the
+				// argument that carries the array
+				items, exact := ExactSpreadItems(evaluateExpression(ctx, env, argument))
+				if !exact {
+					continue
+				}
+				for _, item := range items {
+					text, ok := exactString(item)
 					if !ok {
 						continue
 					}
 					if !shellRedirectionPrefix.MatchString(text) {
 						continue
 					}
-					quoted, _ := json.Marshal(text)
-					ctx.Report(assignability.At(
-						element, 7001,
-						"the argv element "+string(quoted)+" is a shell "+
-							"redirection, and an exec without a shell hands it to the "+
-							"program as a plain argument — the redirection never happens",
-					))
+					reportShellRedirectionArgv(ctx, argument, text)
 				}
 			}
 			return
@@ -209,51 +226,75 @@ func CheckBuiltinContracts(ctx *FlowContext, env Env, e *ast.Node) {
 	if ast.IsCallExpression(e) && ast.IsPropertyAccessExpression(callee) {
 		pa := callee.AsPropertyAccessExpression()
 		if ast.IsIdentifier(pa.Expression) && pa.Expression.Text() == "window" &&
-			pa.Name().Text() == "open" && resolvesToDefaultLib(ctx, pa.Name()) &&
-			len(args) >= 2 {
-			anySpread := false
-			for _, a := range args {
-				if ast.IsSpreadElement(a) {
-					anySpread = true
+			pa.Name().Text() == "open" && resolvesToDefaultLib(ctx, pa.Name()) {
+			// a spread of an exact array expands into positional
+			// arguments, so `window.open(...args)` reads the same way as
+			// the positional spelling. A spread whose items are unread
+			// leaves every later position unplaced, and the check stands
+			// down
+			var positions []abstractdomain.AbstractValue
+			placed := true
+			for _, argument := range args {
+				items, exact := ExpandedArgumentItems(argument, func(node *ast.Node) abstractdomain.AbstractValue {
+					return evaluateExpression(ctx, env, node)
+				})
+				if !exact {
+					placed = false
 					break
 				}
+				positions = append(positions, items...)
 			}
-			if !anySpread {
-				target, _ := exactString(evaluateExpression(ctx, env, args[1]))
-				if target != "_blank" {
-					return
-				}
-				var features string
-				featuresOk := true
-				if len(args) >= 3 {
-					features, featuresOk = exactString(evaluateExpression(ctx, env, args[2]))
-				} else {
-					features = ""
-				}
-				if !featuresOk {
-					return
-				}
-				if noopenerWord.MatchString(features) {
-					return
-				}
-				var featuresPhrase string
-				if features == "" {
-					featuresPhrase = "there are no features here"
-				} else {
-					featuresPhrase = "the features here don't"
-				}
-				ctx.Report(assignability.At(
-					e, 7001,
-					`open with "_blank" gives the new page a window.opener handle `+
-						"back to this one unless the features say noopener — "+
-						featuresPhrase,
-				))
+			if !placed || len(positions) < 2 {
 				return
 			}
+			target, _ := exactString(positions[1])
+			if target != "_blank" {
+				return
+			}
+			var features string
+			featuresOk := true
+			if len(positions) >= 3 {
+				features, featuresOk = exactString(positions[2])
+			} else {
+				features = ""
+			}
+			if !featuresOk {
+				return
+			}
+			if noopenerWord.MatchString(features) {
+				return
+			}
+			var featuresPhrase string
+			if features == "" {
+				featuresPhrase = "there are no features here"
+			} else {
+				featuresPhrase = "the features here don't"
+			}
+			ctx.Report(assignability.At(
+				e, 7001,
+				`open with "_blank" gives the new page a window.opener handle `+
+					"back to this one unless the features say noopener — "+
+					featuresPhrase,
+			))
+			return
 		}
 	}
 }
 
 func setPtr(s refinementsets.RefinedSet) *refinementsets.RefinedSet {
 	return &s
+}
+
+// reportShellRedirectionArgv speaks the one argv sentence, at whatever
+// node the caller can point at — the element itself when the array is
+// written in place, the whole argument when the array came from a
+// variable.
+func reportShellRedirectionArgv(ctx *FlowContext, node *ast.Node, text string) {
+	quoted, _ := json.Marshal(text)
+	ctx.Report(assignability.At(
+		node, 7001,
+		"the argv element "+string(quoted)+" is a shell "+
+			"redirection, and an exec without a shell hands it to the "+
+			"program as a plain argument — the redirection never happens",
+	))
 }

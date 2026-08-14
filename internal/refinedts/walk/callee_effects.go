@@ -159,15 +159,19 @@ func BodyWritesOf(ctx *FlowContext, declaration *ast.Node) map[string]struct{} {
 			if ast.IsCallExpression(node) {
 				callExpr := node.AsCallExpression()
 				callee := callExpr.Expression
+				// one resolution serves both the RECEIVER reading below and
+				// the ARGUMENT reading further down — the same contract
+				// lookup answers "what does this callee do to what it is
+				// handed" for both.
+				contract := ContractOf(ctx, callee)
 				if ast.IsPropertyAccessExpression(callee) {
 					pae := callee.AsPropertyAccessExpression()
 					if ast.IsIdentifier(pae.Expression) {
-						if _, readOnly := dataflowfacts.ReadOnlyArrayMethods[pae.Name().Text()]; !readOnly {
+						if receiverWritten(ctx, declaration, contract, pae.Name().Text()) {
 							written[pae.Expression.Text()] = struct{}{}
 						}
 					}
 				}
-				contract := ContractOf(ctx, callee)
 				calleeMayWrite := contract == nil || !Summarize(ctx, *contract).EffectFree
 				if calleeMayWrite {
 					for _, argument := range callExpr.Arguments.Nodes {
@@ -196,6 +200,42 @@ func BodyWritesOf(ctx *FlowContext, declaration *ast.Node) map[string]struct{} {
 	bodyWriteNames[declaration] = written
 	bodyWriteNamesMu.Unlock()
 	return written
+}
+
+// receiverWritten answers whether `receiver.method(…)` writes the
+// receiver, for the method-receiver arm of BodyWritesOf.
+//
+// A callee this package can SUMMARIZE answers from its own effect
+// summary: SummaryReceiverEffects reads the summary's written
+// this-entries (and a returned receiver, which moves the caller's
+// object knowledge the same way), which is the same machinery the
+// ARGUMENT arm reads through Summarize — so a user-defined pure
+// method stops counting as a write on its receiver.
+//
+// Only when the callee resolves to no contract, or the summary
+// declines to lower, does the hand-curated read-only-name list
+// decide, unchanged. The direction stays safe throughout: every
+// doubt answers true, and a name counted as written merely narrows
+// less.
+func receiverWritten(ctx *FlowContext, declaration *ast.Node, contract *FunctionContract, methodName string) bool {
+	// the declaration being scanned RIGHT NOW cannot be summarized from
+	// inside its own scan: LowerSummaryBody memoizes only after it
+	// finishes, so a self-call would lower this body a second time
+	// underneath itself. A self-call falls to the name list, which
+	// counts the receiver written unless the name reads read-only.
+	if contract != nil && contract.Declaration != declaration {
+		// SummaryReceiverEffects answers a bare false BOTH when the
+		// summary says the receiver is untouched AND when the body did
+		// not lower at all, so the lowering is asked first: only a body
+		// that actually lowered gets to say "not written". A declined
+		// lowering falls through to the name list below.
+		if _, lowered := LowerSummaryBody(ctx, contract.Declaration); lowered {
+			receiverTouched, _ := SummaryReceiverEffects(ctx, contract.Declaration)
+			return receiverTouched
+		}
+	}
+	_, readOnly := dataflowfacts.ReadOnlyArrayMethods[methodName]
+	return !readOnly
 }
 
 // ObservedOf is everything a body can OBSERVE from its caller, per

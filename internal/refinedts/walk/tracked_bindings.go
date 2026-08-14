@@ -8,6 +8,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/jsnum"
 )
 
@@ -169,6 +170,65 @@ func LocalSort(declaration *ast.Node) BindingKind {
 		}
 	}
 	return BindingKindNumber
+}
+
+// LocalSortResolved is LocalSort with the host's own type consulted
+// for the ONE head shape whose syntax carries no sort evidence at all:
+// a CALL. `const s = getName()` reads number under the syntactic
+// fallback, and a word written into a number-sorted slot is admitted
+// into arithmetic downstream — so the call's resolved return type is
+// what fixes the sort.
+//
+// Only the call head consults the checker. The other shapes reaching
+// the number fallback keep their syntactic reading:
+//
+//   - an identifier or a property access is a REREAD of a place the
+//     lowering already laid out, and that slot's own sort is what its
+//     readers use; the initializer's slot follows the same reading it
+//     always has.
+//   - an arithmetic or comparison expression, a numeric literal, an
+//     update, a `typeof`/`!` unary — the syntax itself is the numeric
+//     evidence (booleans ride the number sort by this package's own
+//     rule, stated on LocalSort).
+//
+// A nil checker means syntax only: the answer is LocalSort's, so a
+// caller lowering without a checker keeps exactly today's behaviour.
+// A resolved type that is neither number-like nor string-like, that
+// mixes sorts, or that resolves to nothing wears unknown — tests on it
+// then decline, which loses coverage and never soundness.
+func LocalSortResolved(c *checker.Checker, declaration *ast.Node) BindingKind {
+	syntactic := LocalSort(declaration)
+	if c == nil || syntactic != BindingKindNumber {
+		return syntactic
+	}
+	decl := declaration.AsVariableDeclaration()
+	initializer := decl.Initializer
+	if initializer == nil {
+		return syntactic
+	}
+	head := Unwrapped(initializer)
+	if head == nil || !ast.IsCallExpression(head) {
+		return syntactic
+	}
+	t := c.GetTypeAtLocation(head)
+	if t == nil {
+		return BindingKindUnknown
+	}
+	// the same masking the statement dispatch reads a sort under: a type
+	// wearing ONLY number/boolean flags is the number sort, one wearing
+	// only string flags the string sort, and a union across the two — or
+	// anything else, `any` included — is unknown
+	flags := t.Flags()
+	numOrBool := checker.TypeFlagsNumber | checker.TypeFlagsNumberLiteral |
+		checker.TypeFlagsBoolean | checker.TypeFlagsBooleanLiteral
+	if (flags&numOrBool) != 0 && (flags & ^numOrBool) == 0 {
+		return BindingKindNumber
+	}
+	strOrLit := checker.TypeFlagsString | checker.TypeFlagsStringLiteral
+	if (flags&strOrLit) != 0 && (flags & ^strOrLit) == 0 {
+		return BindingKindString
+	}
+	return BindingKindUnknown
 }
 
 // LocalTypeof is a local's typeof evidence, from its initializer's

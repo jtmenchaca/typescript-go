@@ -11,11 +11,67 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
+
+// HeldPlaceEntry reads the PLACE-VALUE memory for one access: the
+// value a dotted key holds for the place the expression spells.
+//
+// The writers — assume_condition's applySide, whose narrowings on a
+// path the root cannot absorb land under the dotted key, and
+// loop_push_growth's place-keyed growth, whose grown sequence for
+// `this.items` lands the same way — spell the key by joining the
+// binding and every path segment with dots. This reads the same
+// spelling back. Segments come from dataflowfacts.TrackedPlaceOf, so
+// `o.total`, `this.items`, `o["k"]` and `xs[0]` all name the place
+// their writer named; a receiver the place reading cannot resolve
+// names none, and this answers nothing.
+//
+// The answer is a FLOW-CURRENT claim: it holds at this point of the
+// walk and dies when the flow moves, which every write and havoc
+// enforces by sweeping the root's dotted prefix
+// (ForgetPlaceEntriesEnv, reached through HavocEnv, UpdateTrackedEnv,
+// WriteBinding, and ForgetThisHeld for the `this` root).
+func HeldPlaceEntry(c *checker.Checker, env Env, e *ast.Node) (abstractdomain.AbstractValue, bool) {
+	// the checker-carrying place reading resolves a const-bound index
+	// (`const i = 0; xs[i]`) to the same slot the literal spells
+	place := dataflowfacts.TrackedPlaceOfWith(c, e, func(name string) bool {
+		_, held := env.Get(name)
+		return held
+	})
+	if place == nil || len(place.Path) == 0 {
+		return abstractdomain.AbstractValue{}, false
+	}
+	key := place.Binding
+	for _, segment := range place.Path {
+		key += "." + segment
+	}
+	return env.Get(key)
+}
+
+// meetHeldPlaceEntry combines a reader's own answer with the dotted
+// entry the place-value memory holds for the same access. Both are
+// claims about the ONE value the read names — the reader's is the
+// receiver's own shape (a class field invariant, an object's key), the
+// entry's is what the flow narrowed or grew in place — so they MEET
+// rather than shadow each other. With no entry held, the reader's
+// answer stands untouched.
+func meetHeldPlaceEntry(c *checker.Checker, env Env, e *ast.Node, answer *abstractdomain.AbstractValue) *abstractdomain.AbstractValue {
+	held, ok := HeldPlaceEntry(c, env, e)
+	if !ok {
+		return answer
+	}
+	if answer == nil {
+		return &held
+	}
+	out := abstractdomain.MeetKnown(*answer, held)
+	return &out
+}
 
 // ReadPropertyAccess is readPropertyAccess in the TS source.
 func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.AbstractValue {
@@ -25,11 +81,16 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 	if globalConstant := ReadGlobalConstantAccess(ctx, e); globalConstant != nil {
 		return globalConstant
 	}
+	// `this.key` and a known object's key each answer off the receiver,
+	// and the dotted entry speaks about the same value — so the two
+	// meet here rather than the earlier reader shadowing the memory.
+	// An enum member and a global constant name no tracked place, so
+	// they answer above this point untouched.
 	if thisProperty := ReadThisPropertyAccess(ctx, env, e); thisProperty != nil {
-		return thisProperty
+		return meetHeldPlaceEntry(ctx.P.Checker, env, e, thisProperty)
 	}
 	if objectKey := ReadObjectKeyAccess(ctx, env, e); objectKey != nil {
-		return objectKey
+		return meetHeldPlaceEntry(ctx.P.Checker, env, e, objectKey)
 	}
 	// reading a sequence's length: a tracked name reads its held value,
 	// and ANY OTHER receiver expression evaluates once right here — a
@@ -38,6 +99,11 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 	if ast.IsPropertyAccessExpression(e) {
 		pa := e.AsPropertyAccessExpression()
 		if pa.Name().Text() == "length" || pa.Name().Text() == "size" {
+			// the receiver's held value comes from the PLACE it spells —
+			// a tracked name reads its own entry, and a longer path
+			// (`this.items.length`, `o.rows.length`) reads the dotted
+			// entry the place-value memory holds for that path. Any other
+			// receiver expression evaluates.
 			var receiver abstractdomain.AbstractValue
 			if ast.IsIdentifier(pa.Expression) {
 				if held, ok := env.Get(pa.Expression.Text()); ok {
@@ -45,6 +111,8 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 				} else {
 					receiver = silence.Residue()
 				}
+			} else if held, ok := HeldPlaceEntry(ctx.P.Checker, env, pa.Expression); ok {
+				receiver = held
 			} else {
 				receiver = evaluateExpression(ctx, env, pa.Expression)
 			}
@@ -124,20 +192,38 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 			// the PLACE-VALUE memory: a dotted entry a guard recorded
 			// (assume_condition) answers where the receiver's own shape
 			// could not — `Array.isArray(u)` grounded u.length, and the
-			// branch's comparisons narrowed it in place
-			if ast.IsIdentifier(pa.Expression) {
-				if held, ok := env.Get(pa.Expression.Text() + "." + pa.Name().Text()); ok {
-					return &held
-				}
+			// branch's comparisons narrowed it in place. The place reading
+			// spells the key, so a `this`-rooted receiver
+			// (`this.items.length`) reads its entry the same way a plain
+			// name's does.
+			if held, ok := HeldPlaceEntry(ctx.P.Checker, env, e); ok {
+				return &held
 			}
 			out := silence.Residue()
 			return &out
 		}
 	}
-	return nil
+	// no arm above answered: a dotted entry for this very access still
+	// speaks — a guard's narrowing on `o.total` where the root holds no
+	// object shape to absorb it, or the sequence a push loop grew under
+	// `this.items`. Only a PROPERTY access answers here; an element
+	// access falls through to readElementAccess, whose own readers run
+	// before its dotted entry is asked for.
+	if !ast.IsPropertyAccessExpression(e) {
+		return nil
+	}
+	return meetHeldPlaceEntry(ctx.P.Checker, env, e, nil)
 }
 
 // ReadElementAccess is readElementAccess in the TS source.
 func ReadElementAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.AbstractValue {
-	return ElementAccessOf(ctx, env, e)
+	answer := ElementAccessOf(ctx, env, e)
+	// an element read spells a place too when its index is a literal or
+	// a const resolving to one (`xs[0]`, `o["k"]`, `xs[I]`): the same
+	// dotted entry the property path reads, meeting whatever the
+	// element readers answered off the receiver's own shape
+	if !ast.IsElementAccessExpression(e) {
+		return answer
+	}
+	return meetHeldPlaceEntry(ctx.P.Checker, env, e, answer)
 }

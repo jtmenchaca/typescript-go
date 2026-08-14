@@ -25,11 +25,19 @@ func typePartsOf(t *checker.Type) []*checker.Type {
 
 // AnnotationOfReturnType is annotationOfReturnType in the TS source:
 // the stated annotation a call's RESOLVED return type names: union
-// parts split absence off (`| undefined` / `| null`), and every
-// present part must reach a type-alias declaration whose spelling the
-// annotation reader reads (`z.infer<typeof X>` and kin). The claim is
-// the declaration's — library grade — and nil anywhere a part
-// resolves to nothing readable.
+// parts split absence off (`| undefined` / `| null`), a `never` part
+// carries no value and drops, and every REMAINING part must reach a
+// type-alias declaration whose spelling the annotation reader reads
+// (`z.infer<typeof X>` and kin). The claim is the declaration's —
+// library grade.
+//
+// A present part that names NO alias has no partial answer to give:
+// the widest sound claim for a value the annotation reader cannot
+// spell is the unknown, and the union of a stated set with the
+// unknown IS the unknown — the same nothing this returns. The absent
+// and never parts are the ones a sound partial CAN peel, and both are
+// peeled above, so nil here is the union's own answer, not a decline
+// short of one.
 func AnnotationOfReturnType(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
 	t := ctx.P.Checker.GetTypeAtLocation(e)
 	parts := typePartsOf(t)
@@ -38,6 +46,11 @@ func AnnotationOfReturnType(ctx *FlowContext, e *ast.Node) *abstractdomain.Abstr
 	for _, part := range parts {
 		if (part.Flags() & absentTypeFlags) != 0 {
 			sawAbsent = true
+			continue
+		}
+		// `never` admits no value, so it contributes nothing to the union
+		// and does not make the read absent either
+		if (part.Flags() & checker.TypeFlagsNever) != 0 {
 			continue
 		}
 		alias := part.GetTypeAlias()
@@ -80,13 +93,57 @@ func AnnotationOfReturnType(ctx *FlowContext, e *ast.Node) *abstractdomain.Abstr
 	return &graded
 }
 
+// declaredTypeNodeOfReceiver is the type node a `.get()` receiver's
+// own DECLARATION spells. The receiver resolves through the checker,
+// so a bare name (`cache`), a class field (`this.cache`), and any
+// longer property chain (`this.store.byId`) all reach the same
+// declaration question — what matters is that the resolved
+// declaration spells its type, not how the receiver is written. A
+// receiver whose symbol the checker does not place, or whose
+// declaration carries no spelled type (an inferred field), answers
+// nil the way an unresolvable name always did.
+func declaredTypeNodeOfReceiver(ctx *FlowContext, receiver *ast.Node) *ast.Node {
+	symbol := ctx.P.Checker.GetSymbolAtLocation(receiver)
+	if symbol == nil {
+		return nil
+	}
+	declaration := symbol.ValueDeclaration
+	if declaration == nil {
+		// an interface member has no value declaration; its property
+		// signature is the spelling
+		for _, d := range symbol.Declarations {
+			if ast.IsPropertySignatureDeclaration(d) {
+				declaration = d
+				break
+			}
+		}
+	}
+	if declaration == nil {
+		return nil
+	}
+	switch {
+	case ast.IsParameterDeclaration(declaration):
+		return declaration.AsParameterDeclaration().Type
+	case ast.IsVariableDeclaration(declaration):
+		return declaration.AsVariableDeclaration().Type
+	case ast.IsPropertyDeclaration(declaration):
+		return declaration.AsPropertyDeclaration().Type
+	case ast.IsPropertySignatureDeclaration(declaration):
+		return declaration.AsPropertySignatureDeclaration().Type
+	}
+	return nil
+}
+
 // MapValueAnnotation is mapValueAnnotation in the TS source: `x.get(k)`
 // where x's DECLARED type node spells `Map<K, V>` with V a readable
 // annotation: the read answers V's stated set, or absent (a get can
 // miss). tsc's own generic discipline is what makes every stored
 // value wear V at its write site, so the claim carries LIBRARY grade.
 // The type NODE is read rather than the resolved type because
-// instantiation erases the alias the annotation reader needs.
+// instantiation erases the alias the annotation reader needs. The
+// receiver is whatever the checker resolves to a declaration spelling
+// that node — a name, `this.cache`, or a longer chain all read the
+// same way.
 func MapValueAnnotation(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
 	call := e.AsCallExpression()
 	if !ast.IsPropertyAccessExpression(call.Expression) {
@@ -100,21 +157,7 @@ func MapValueAnnotation(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractV
 	if pa.Name().Text() != "get" || argCount != 1 {
 		return nil
 	}
-	receiver := pa.Expression
-	if !ast.IsIdentifier(receiver) {
-		return nil
-	}
-	symbol := ctx.P.Checker.GetSymbolAtLocation(receiver)
-	if symbol == nil || symbol.ValueDeclaration == nil {
-		return nil
-	}
-	declaration := symbol.ValueDeclaration
-	var typeNode *ast.Node
-	if ast.IsParameterDeclaration(declaration) {
-		typeNode = declaration.AsParameterDeclaration().Type
-	} else if ast.IsVariableDeclaration(declaration) {
-		typeNode = declaration.AsVariableDeclaration().Type
-	}
+	typeNode := declaredTypeNodeOfReceiver(ctx, pa.Expression)
 	if typeNode == nil || !ast.IsTypeReferenceNode(typeNode) {
 		return nil
 	}
@@ -149,15 +192,19 @@ func MapValueAnnotation(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractV
 // union answers the union of its words — reading `"postgres" |
 // "mongo"` as all strings refuted honest Map.get results at their own
 // stated positions), a general part its whole ground — with `|
-// undefined`/`| null` wrapping the maybe. Nil where the type names no
-// scalar sort or mixes two sorts.
+// undefined`/`| null` wrapping the maybe. A union MIXING sorts
+// (`string | number`, a string word beside a boolean) answers the
+// sort union of the parts' own grounds, each arm wearing what its own
+// part states. Nil only where some part names no scalar sort at all.
 func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
 	t := ctx.P.Checker.GetTypeAtLocation(e)
 	parts := typePartsOf(t)
 	sawAbsent := false
 	var words []string
 	var numberWords []float64
-	general := ""
+	// the GENERAL sorts the parts name, each at most once — a `string |
+	// number` return names two, and both grounds hold
+	generals := map[string]bool{}
 	for _, part := range parts {
 		if (part.Flags() & absentTypeFlags) != 0 {
 			sawAbsent = true
@@ -183,47 +230,45 @@ func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractVal
 			sort = "boolean"
 		}
 		if sort == "" {
+			// one part names no scalar sort — nothing states this call's
+			// ground
 			return nil
 		}
-		if general != "" && general != sort {
-			return nil
-		}
-		general = sort
+		generals[sort] = true
 	}
-	// a literal beside a DIFFERENT sort (string | 0) is the union
-	// machinery's row, not this one's; a literal beside its own general
-	// sort folds into the ground
-	if len(words) > 0 && (len(numberWords) > 0 || general == "number" || general == "boolean") {
-		return nil
-	}
-	if len(numberWords) > 0 && (general == "string" || general == "boolean") {
-		return nil
-	}
-	var ground *abstractdomain.AbstractValue
-	switch {
-	case general == "number":
-		v := abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.RefinedSet{}, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
-		ground = &v
-	case general == "string":
-		v := abstractdomain.KnownSet(refinementsets.Strings, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
-		ground = &v
-	case general == "boolean":
-		v := abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustProved)
-		ground = &v
-	case len(words) > 0:
+	// the arms, in the order a spelled union reads: strings, then
+	// numbers, then booleans. A literal beside its OWN general sort
+	// folds into that general ground (the general already admits the
+	// word); a literal beside a DIFFERENT sort is its own arm.
+	var arms []abstractdomain.AbstractValue
+	if generals["string"] {
+		arms = append(arms, abstractdomain.KnownSet(refinementsets.Strings, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+	} else if len(words) > 0 {
 		set := refinementsets.StringTuple(words[0])
 		for _, w := range words[1:] {
 			set = refinementsets.MakeRefinedSet(refinementsets.Union(set, refinementsets.StringTuple(w)))
 		}
-		v := abstractdomain.KnownSet(set, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
-		ground = &v
-	case len(numberWords) > 0:
-		v := abstractdomain.KnownValues(numberWords, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
-		ground = &v
+		arms = append(arms, abstractdomain.KnownSet(set, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
 	}
-	if ground == nil {
+	if generals["number"] {
+		arms = append(arms, abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.RefinedSet{}, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)))
+	} else if len(numberWords) > 0 {
+		arms = append(arms, abstractdomain.KnownValues(numberWords, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved))
+	}
+	if generals["boolean"] {
+		arms = append(arms, abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustProved))
+	}
+	if len(arms) == 0 {
 		return nil
 	}
+	// one arm IS the ground; two or more are the sort union, which
+	// KindUnionOf builds (and collapses back to the single arm itself
+	// when only one survives)
+	united := abstractdomain.KindUnionOf(arms)
+	if united.Kind == abstractdomain.KindUnknown {
+		return nil
+	}
+	ground := &united
 	if sawAbsent {
 		out := abstractdomain.PossiblyUndefined(*ground, "", false, false)
 		return &out

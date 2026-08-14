@@ -26,6 +26,19 @@ var binOps = map[ast.Kind]kernelbridge.LoopEffectOp{
 	ast.KindAsteriskToken: kernelbridge.LoopOpMul,
 	ast.KindSlashToken:    kernelbridge.LoopOpDiv,
 	ast.KindPercentToken:  kernelbridge.LoopOpRem,
+	// the bitwise and shift operators: the kernel reads these six op
+	// names into LoopOp2 and evaluates them through transferBitwise,
+	// which is exact on singleton operands, answers [0, mask] when one
+	// side of an AND is a nonnegative singleton, and claims nothing
+	// otherwise. No extra operand gate is needed: ToInt32 is defined
+	// for every double including the infinities, so a number-sorted
+	// operand of any magnitude is a legal input.
+	ast.KindBarToken:                               kernelbridge.LoopOpBitOr,
+	ast.KindAmpersandToken:                         kernelbridge.LoopOpBitAnd,
+	ast.KindCaretToken:                             kernelbridge.LoopOpBitXor,
+	ast.KindLessThanLessThanToken:                  kernelbridge.LoopOpShl,
+	ast.KindGreaterThanGreaterThanToken:            kernelbridge.LoopOpSar,
+	ast.KindGreaterThanGreaterThanGreaterThanToken: kernelbridge.LoopOpShr,
 }
 
 var mathOps = map[string]kernelbridge.LoopEffectOp{

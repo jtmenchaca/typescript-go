@@ -41,6 +41,134 @@ type LoopAnalyzers struct {
 	IterationElement func(ctx *FlowContext, env Env, iterable *ast.Node) *abstractdomain.AbstractValue
 }
 
+// foldableConditionSteps is the condition's pure unit steps the
+// fixpoint can iterate — `n--`, `n++`, `--n`, `++n` standing directly
+// as a comparison operand. Each returned node is the step expression
+// itself, for bodyEffect to evaluate at the top of every pass; each
+// folded name is REMOVED from `written`, since the fixpoint now models
+// that write and the blanket decay would throw the modeled fact away.
+//
+// The gate, per name:
+//
+//   - the step's operand is a plain identifier, and the step stands as
+//     a direct operand of the condition's comparison — a step nested in
+//     a call argument or behind a short-circuit runs a number of times
+//     the fixpoint cannot count;
+//   - the condition writes that name ONCE and nowhere else — a second
+//     write is a composed effect one evaluated step does not reproduce;
+//   - the BODY does not write it either. A body write and a condition
+//     write compose per trip, and the body's own walk already feeds its
+//     half; folding the condition's half on top would step the binding
+//     through the body's write rather than beside it.
+//
+// Everything else keeps the decay.
+func foldableConditionSteps(
+	ctx *FlowContext, loop *ast.Node, condition *ast.Node, written map[string]struct{},
+) []*ast.Node {
+	if len(written) == 0 {
+		return nil
+	}
+	// how many times the condition writes each name, and where the ONE
+	// step-shaped write to it stands
+	writeCount := map[string]int{}
+	stepAt := map[string]*ast.Node{}
+	var scan func(node *ast.Node)
+	scan = func(node *ast.Node) {
+		var operator ast.Kind
+		var operand *ast.Node
+		stepShaped := false
+		if ast.IsPrefixUnaryExpression(node) {
+			unary := node.AsPrefixUnaryExpression()
+			operator, operand, stepShaped = unary.Operator, unary.Operand, true
+		} else if ast.IsPostfixUnaryExpression(node) {
+			unary := node.AsPostfixUnaryExpression()
+			operator, operand, stepShaped = unary.Operator, unary.Operand, true
+		}
+		if stepShaped && (operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken) &&
+			ast.IsIdentifier(operand) {
+			name := operand.Text()
+			writeCount[name]++
+			if comparisonOperandStep(condition, node) {
+				stepAt[name] = node
+			}
+			return
+		}
+		// any OTHER write inside the condition — an assignment, a
+		// compound write, a step on a place — counts against every name it
+		// touches, so the single-write test below sees it
+		if ast.IsBinaryExpression(node) {
+			bin := node.AsBinaryExpression()
+			if bin.OperatorToken.Kind >= ast.KindFirstAssignment && bin.OperatorToken.Kind <= ast.KindLastAssignment {
+				other := map[string]struct{}{}
+				AssignedNames(ctx.P.Checker, node, other)
+				for name := range other {
+					writeCount[name] += 2 // never single, whatever else is found
+				}
+			}
+		}
+		node.ForEachChild(func(child *ast.Node) bool {
+			scan(child)
+			return false
+		})
+	}
+	scan(condition)
+
+	// the body's own write set — a name both halves write stays decayed
+	bodyWritten := map[string]struct{}{}
+	if statement := loopStatementBody(loop); statement != nil {
+		AssignedNames(ctx.P.Checker, statement, bodyWritten)
+		CallMediatedWrites(ctx.P.Checker, ctx.Contracts, statement, bodyWritten, nil)
+	}
+	if ast.IsForStatement(loop) && loop.AsForStatement().Incrementor != nil {
+		AssignedNames(ctx.P.Checker, loop.AsForStatement().Incrementor, bodyWritten)
+	}
+
+	var folded []*ast.Node
+	for name := range written {
+		step, isStep := stepAt[name]
+		if !isStep || writeCount[name] != 1 {
+			continue
+		}
+		if _, alsoBody := bodyWritten[name]; alsoBody {
+			continue
+		}
+		folded = append(folded, step)
+		delete(written, name)
+	}
+	return folded
+}
+
+// comparisonOperandStep reports whether `step` stands as a direct
+// operand of the condition's own comparison — `n-- > 0`, `0 < --n`.
+// A step anywhere else in the condition (a call argument, either arm
+// of a short-circuit) runs a number of times per trip the fixpoint
+// cannot count, so it does not qualify.
+func comparisonOperandStep(condition *ast.Node, step *ast.Node) bool {
+	bare := condition
+	for ast.IsParenthesizedExpression(bare) {
+		bare = bare.AsParenthesizedExpression().Expression
+	}
+	if !ast.IsBinaryExpression(bare) {
+		return false
+	}
+	bin := bare.AsBinaryExpression()
+	switch bin.OperatorToken.Kind {
+	case ast.KindLessThanToken, ast.KindLessThanEqualsToken,
+		ast.KindGreaterThanToken, ast.KindGreaterThanEqualsToken,
+		ast.KindEqualsEqualsToken, ast.KindEqualsEqualsEqualsToken,
+		ast.KindExclamationEqualsToken, ast.KindExclamationEqualsEqualsToken:
+	default:
+		return false
+	}
+	side := func(e *ast.Node) *ast.Node {
+		for ast.IsParenthesizedExpression(e) {
+			e = e.AsParenthesizedExpression().Expression
+		}
+		return e
+	}
+	return side(bin.Left) == step || side(bin.Right) == step
+}
+
 func loopStatementBody(loop *ast.Node) *ast.Node {
 	switch {
 	case ast.IsForStatement(loop):
@@ -176,6 +304,39 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	if ast.IsForOfStatement(loop) || ast.IsForInStatement(loop) {
 		AssignedNames(ctx.P.Checker, loop.AsForInOrOfStatement().Expression, conditionWritten)
 	}
+	// the tractable subset: a condition whose ONLY write to a name is a
+	// pure unit step on the comparison operand — `while (n-- > 0)`,
+	// `while (--n > 0)` — is folded into the fixpoint as a stepped
+	// binding, exactly as a body-side `n--` is. A body step reaches the
+	// fixpoint by being WALKED inside bodyEffect (analyzeStatement
+	// evaluates it, readStepUnary writes the binding); the condition's
+	// step is fed the same way, by evaluating the step expression at the
+	// top of bodyEffect.
+	//
+	// THE ORDER ARGUMENT. One trip of `while (COND) BODY` is: evaluate
+	// the condition, test it, run the body. So the state the body sees
+	// on trip k is the entry state stepped k times, and the per-trip
+	// transfer the fixpoint must iterate is (condition step) ∘ (body) —
+	// step FIRST, which is where bodyEffect evaluates it.
+	//
+	// Post- and pre-decrement differ only in the value the step
+	// EXPRESSION yields (`n--` reads the old value, `--n` the new); both
+	// leave the binding one lower. The fixpoint reads only the binding,
+	// never the expression's value, so the two spellings fold
+	// identically. Nor can the condition's own narrowing land on the
+	// wrong side of the step: the narrowing channel reads places off
+	// comparison operands through TrackedPlaceOf, which reads no place
+	// out of an update expression at all — so a stepped operand carries
+	// no narrowing to misalign, on either side.
+	//
+	// Every name with any OTHER condition write keeps the decay: two
+	// writes to one name in a condition, a step buried under a call, or
+	// a step on a name the body also writes, all leave the composed
+	// transfer outside what one evaluated step reproduces.
+	var conditionSteps []*ast.Node
+	if condition != nil {
+		conditionSteps = foldableConditionSteps(ctx, loop, condition, conditionWritten)
+	}
 	for name := range conditionWritten {
 		if _, ok := env.Get(name); ok {
 			env.Set(name, silence.Residue())
@@ -224,10 +385,24 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 		if ast.IsForOfStatement(loop) && elementKnown.Kind == abstractdomain.KindUnknown {
 			// the sort ground, extended to elements: iterating a
 			// `number[]` the walk knows nothing more about still provably
-			// yields doubles — any double, or NaN
+			// yields doubles — any double, or NaN.
+			//
+			// The reading is SEMANTIC, not a spelling: the type resolves
+			// through the checker, and the element type of any array
+			// reference — `number[]`, `Array<number>`, `ReadonlyArray<number>`,
+			// `readonly number[]`, an alias of any of them — is asked
+			// directly. GetElementTypeOfArrayType answers for exactly the
+			// references the language calls arrays (the global Array and
+			// ReadonlyArray targets), and a tuple, a union, or a
+			// non-array iterable answers nil and falls through unread, as
+			// it did before. Identity against the checker's own number
+			// type is the element test: no other type is `number`.
 			t := ctx.P.Checker.GetTypeAtLocation(forInOf.Expression)
-			if ctx.P.Checker.TypeToString(t) == "number[]" {
-				elementKnown = abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.RefinedSet{}, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+			if t != nil {
+				if element := ctx.P.Checker.GetElementTypeOfArrayType(t); element != nil &&
+					element == ctx.P.Checker.GetNumberType() {
+					elementKnown = abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.RefinedSet{}, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+				}
 			}
 		}
 	}
@@ -241,6 +416,16 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 
 	bodyEffect := func(fromEnv Env, reporting *FlowContext) Env {
 		body := fromEnv.Clone()
+		// the condition's folded unit steps run FIRST: the condition is
+		// evaluated before every body pass, so the state the body reads on
+		// trip k is the entry state stepped k times. Evaluating the step
+		// expression here is what makes the fixpoint's per-trip transfer
+		// the real one. Silent throughout — the condition was already
+		// checkAssignability'd once above, and this evaluation exists to
+		// move the binding, not to report a second time.
+		for _, step := range conditionSteps {
+			analyzers.EvaluateExpression(&silent, body, step)
+		}
 		if bodyTransfers != nil {
 			bodyTransfers.ApplyWhenTrue(body)
 		}
@@ -365,7 +550,71 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 		// for-in binding never held elements, only property keys, and a
 		// key is a string however the object changes mid-iteration
 		if mutated && !ast.IsForInStatement(loop) {
-			elementKnown = silence.Residue()
+			// APPEND-ONLY is the one mutation the entry reading survives.
+			//
+			// The array iterator holds an index and reads xs[i] at the
+			// moment it hands the element over, so what a body write does
+			// to the element binding depends entirely on WHERE it writes:
+			//
+			//   - a write BELOW the cursor (xs[0] = y after slot 0 was
+			//     handed over) changes nothing already read and nothing
+			//     still to be read;
+			//   - a write AT OR ABOVE the cursor (xs[i+1] = y, splice, pop
+			//     then push) replaces a value that has not been read yet —
+			//     the next read sees the write, so the entry reading is
+			//     simply wrong about it;
+			//   - push appends at the CURRENT length, which is always past
+			//     the cursor, so it disturbs no existing slot: every
+			//     original element is still read, at its original index,
+			//     holding its original value.
+			//
+			// So under push-only writes every element the loop ever hands
+			// over is either an ENTRY element (undisturbed) or a PUSHED
+			// value (read on a later trip, if the loop runs that far). The
+			// binding is the JOIN of the two — not the entry reading
+			// alone, which would be a wrong claim about trips 2 onward,
+			// and not unknown, which throws away both halves.
+			//
+			// A pushed argument is read at the ENTRY state, so it only
+			// counts when its value cannot move per trip: it may mention
+			// no name the loop writes and none the element binding
+			// introduces. `xs.push(x * 2)` reads the per-trip element and
+			// does not qualify; `xs.push(seed)` with seed untouched does.
+			// Anything else keeps the decay.
+			appended, appendOnly := appendedIterableArguments(loop, iterableNames)
+			recovered := false
+			if appendOnly && elementKnown.Kind != abstractdomain.KindUnknown {
+				bound := map[string]struct{}{}
+				if hasElementName {
+					bound[elementName] = struct{}{}
+				}
+				if elementPattern != nil {
+					ReadDestructuring(elementPattern, silence.Residue(), func(name string, _ abstractdomain.AbstractValue, _ *ast.Node) {
+						bound[name] = struct{}{}
+					})
+				}
+				joined := elementKnown
+				stable := true
+				for _, argument := range appended {
+					if !expressionStableAcrossTrips(argument, assigned, bound) {
+						stable = false
+						break
+					}
+					pushedKnown := analyzers.EvaluateExpression(&silent, env.Clone(), argument)
+					if pushedKnown.Kind == abstractdomain.KindUnknown {
+						stable = false
+						break
+					}
+					joined = abstractdomain.JoinKnown(joined, pushedKnown)
+				}
+				if stable && joined.Kind != abstractdomain.KindUnknown {
+					elementKnown = joined
+					recovered = true
+				}
+			}
+			if !recovered {
+				elementKnown = silence.Residue()
+			}
 		}
 	}
 	// a declared binding's stated set IS its invariant — every write is
@@ -420,9 +669,18 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 		}
 		return true
 	})
+	// the PROPERTY-PATH arrays the body pushed onto — `this.items` — which
+	// the fixpointed name list cannot hold. A root qualifies when the
+	// environment holds it, the same reading the name path uses to decide
+	// a name is the walk's to speak about; `this` is such a root whenever
+	// the walk holds one.
+	pushPlaces := PushedPlaceCandidates(loop, func(name string) bool {
+		_, held := env.Get(name)
+		return held
+	})
 	GrowPushedArrays(GrowPushedArraysInput{
 		Ctx: ctx, Env: env, Loop: loop, Candidate: candidate, After: after,
-		Fixpointed: fixpointed, EvaluateExpression: analyzers.EvaluateExpression,
+		Fixpointed: fixpointed, PushPlaces: pushPlaces, EvaluateExpression: analyzers.EvaluateExpression,
 	})
 	if transfers != nil && !ContainsBreak(statement) {
 		transfers.ApplyWhenFalse(after)
@@ -441,4 +699,123 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 		env.Set(name, known)
 		return true
 	})
+}
+
+// appendedIterableArguments is what a for-of BODY pushes onto its own
+// iterable, and whether pushing is the only thing it does to it.
+//
+// Every mention of an iterable name inside the body must be either a
+// plain read or the receiver of `push`; the arguments of every such
+// push come back. Anything else — an element write, another method, the
+// name handed to a call, a reassignment — answers (nil, false), since a
+// write at or above the iterator's cursor changes a value that has not
+// been read yet and the entry reading no longer describes it.
+//
+// The scan covers the body ALONE. The head's own `xs` is a read of the
+// iterable, not a write to it, and the for-of/for-in head is where the
+// name necessarily appears.
+func appendedIterableArguments(loop *ast.Node, iterableNames map[string]struct{}) ([]*ast.Node, bool) {
+	body := loopStatementBody(loop)
+	if body == nil {
+		return nil, false
+	}
+	var collected []*ast.Node
+	appendOnly := true
+	var visit func(node *ast.Node)
+	visit = func(node *ast.Node) {
+		if !appendOnly {
+			return
+		}
+		if ast.IsIdentifier(node) {
+			if _, isIterable := iterableNames[node.Text()]; !isIterable {
+				return
+			}
+			parent := node.Parent
+			if parent == nil {
+				appendOnly = false
+				return
+			}
+			// `xs.push(...)` — the one write that appends
+			if ast.IsPropertyAccessExpression(parent) &&
+				parent.AsPropertyAccessExpression().Expression == node {
+				member := parent.AsPropertyAccessExpression().Name().Text()
+				call := parent.Parent
+				isCall := call != nil && ast.IsCallExpression(call) && call.AsCallExpression().Expression == parent
+				if member == "push" && isCall {
+					if call.AsCallExpression().Arguments != nil {
+						collected = append(collected, call.AsCallExpression().Arguments.Nodes...)
+					}
+					return
+				}
+				// a plain property read (`xs.length`) says nothing about the
+				// contents; any other CALL on the receiver may move them
+				if isCall {
+					appendOnly = false
+				}
+				return
+			}
+			// `xs[i]` as a READ is fine; as an assignment target it writes a
+			// slot the cursor may not have passed
+			if ast.IsElementAccessExpression(parent) &&
+				parent.AsElementAccessExpression().Expression == node {
+				assignment := parent.Parent
+				if assignment != nil && ast.IsBinaryExpression(assignment) &&
+					assignment.AsBinaryExpression().Left == parent {
+					kind := assignment.AsBinaryExpression().OperatorToken.Kind
+					if kind >= ast.KindFirstAssignment && kind <= ast.KindLastAssignment {
+						appendOnly = false
+					}
+				}
+				return
+			}
+			// the name reassigned outright, or handed to a callee that may
+			// write through it
+			appendOnly = false
+			return
+		}
+		node.ForEachChild(func(child *ast.Node) bool {
+			visit(child)
+			return false
+		})
+	}
+	visit(body)
+	if !appendOnly {
+		return nil, false
+	}
+	return collected, true
+}
+
+// expressionStableAcrossTrips reports whether an expression evaluates
+// to the same value on every trip of a loop: it names nothing the loop
+// writes, nothing the element binding introduces, and calls nothing (a
+// call's answer can differ per trip whatever its arguments say).
+func expressionStableAcrossTrips(e *ast.Node, written map[string]struct{}, bound map[string]struct{}) bool {
+	stable := true
+	var visit func(node *ast.Node)
+	visit = func(node *ast.Node) {
+		if !stable {
+			return
+		}
+		if ast.IsCallExpression(node) || ast.IsNewExpression(node) || ast.IsTaggedTemplateExpression(node) {
+			stable = false
+			return
+		}
+		if ast.IsIdentifier(node) {
+			name := node.Text()
+			if _, isWritten := written[name]; isWritten {
+				stable = false
+				return
+			}
+			if _, isBound := bound[name]; isBound {
+				stable = false
+			}
+			return
+		}
+		node.ForEachChild(func(child *ast.Node) bool {
+			visit(child)
+			return false
+		})
+	}
+	visit(e)
+	return stable
 }

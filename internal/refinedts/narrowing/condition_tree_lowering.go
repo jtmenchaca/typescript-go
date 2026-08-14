@@ -120,7 +120,7 @@ func liftedPredicateTree(
 	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
 		return kernelbridge.NarrowTree{}, false
 	}
-	tested := dataflowfacts.TrackedPlaceOf(call.Arguments.Nodes[0], isTracked)
+	tested := dataflowfacts.TrackedPlaceOfWith(c, call.Arguments.Nodes[0], isTracked)
 	if tested == nil || !dataflowfacts.SameTrackedPlace(*tested, place) {
 		return kernelbridge.NarrowTree{}, false
 	}
@@ -176,7 +176,7 @@ func CollectPlaces(
 	into *[]dataflowfacts.TrackedPlace,
 ) {
 	add := func(candidate *ast.Node) {
-		place := dataflowfacts.TrackedPlaceOf(candidate, isTracked)
+		place := dataflowfacts.TrackedPlaceOfWith(c, candidate, isTracked)
 		if place == nil {
 			return
 		}

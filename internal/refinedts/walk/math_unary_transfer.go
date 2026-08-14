@@ -95,6 +95,12 @@ func UnaryMathImage(name string, args []abstractdomain.AbstractValue, operandTru
 		if pastMinusOne {
 			return abstractdomain.AtTrustLevel(unaryTransfer("log1p", args, operandTrustLevel), abstractdomain.TrustSpec), true
 		}
+		// the sign is not pinned: the operand straddles −1, so the answer
+		// is the shifted-log image of its provable past-−1 part alongside
+		// the NaN the rest reaches (sec-math.log1p: NaN below −1)
+		if split, ok := domainSplitImage("log1p", A, -1, true, operandTrustLevel); ok {
+			return split, true
+		}
 		return silence.Residue(), true
 	case "log", "log2", "log10":
 		// the log window is real only over POSITIVE operands — zero
@@ -119,6 +125,15 @@ func UnaryMathImage(name string, args []abstractdomain.AbstractValue, operandTru
 		}
 		if positive {
 			return abstractdomain.AtTrustLevel(unaryTransfer(name, args, operandTrustLevel), abstractdomain.TrustSpec), true
+		}
+		// the sign is not pinned: the answer is the log image of the
+		// operand's provably POSITIVE part alongside the NaN its negative
+		// part reaches. Zero is clipped away with a STRICT floor — the
+		// kernel's log family is positive-operands-only (transferLogWith:
+		// "zero reaches −∞ and a negative operand is NaN, carried
+		// reader-side"), so 0 must not enter the window it is asked.
+		if split, ok := domainSplitImage(name, A, 0, true, operandTrustLevel); ok {
+			return split, true
 		}
 		return silence.Residue(), true
 	case "sqrt":
@@ -152,6 +167,15 @@ func UnaryMathImage(name string, args []abstractdomain.AbstractValue, operandTru
 			return abstractdomain.AtTrustLevel(abstractdomain.NaNValue, operandTrustLevel), true
 		}
 		if window.Lo < 0 {
+			// the window straddles zero: the nonnegative part's roots are
+			// spec-exact and the negative part is NaN (sec-math.sqrt), so
+			// the answer is the clipped image wrapped possibly-NaN — the
+			// same split math_builtin_models.go's own sqrt-over-a-set
+			// branch takes. Zero IS in sqrt's domain, so the floor here is
+			// NOT strict.
+			if split, ok := domainSplitImage("sqrt", A, 0, false, operandTrustLevel); ok {
+				return split, true
+			}
 			return silence.Residue(), true
 		}
 		return abstractdomain.KnownSet(
@@ -163,6 +187,63 @@ func UnaryMathImage(name string, args []abstractdomain.AbstractValue, operandTru
 	default:
 		return abstractdomain.AbstractValue{}, false
 	}
+}
+
+// domainSplitImage answers a partial-domain unary Math call whose
+// operand straddles the edge of that domain: the real image of the part
+// that IS in the domain, wrapped possibly-NaN because the rest of the
+// operand reaches NaN. This is the split math_builtin_models.go's own
+// sqrt-over-a-set branch already takes, in the same construction —
+// PossiblyNaN over the clipped image, graded at the operand's own level
+// no better than spec.
+//
+// floor is the domain edge; strictFloor says the edge itself is OUTSIDE
+// the domain (the logs, whose 0 reaches −∞ rather than a real, and
+// log1p's −1), false where the edge is admitted (sqrt's 0).
+//
+// (AbstractValue{}, false) — the caller keeps its decline — when the
+// operand poses no window, when the in-domain part is provably EMPTY
+// (every value is past the edge, so nothing real survives the clip), or
+// when the kernel declines the clipped question.
+func domainSplitImage(
+	op string,
+	A refinementsets.RefinedSet,
+	floor float64,
+	strictFloor bool,
+	operandTrustLevel abstractdomain.TrustLevel,
+) (abstractdomain.AbstractValue, bool) {
+	kernel := currentTransferKernel()
+	if kernel == nil {
+		return abstractdomain.AbstractValue{}, false
+	}
+	// nothing to split without a readable window, and nothing to answer
+	// when the whole operand sits past the edge — the in-domain part is
+	// empty, so the decline stands
+	window := RangeOfSet(A)
+	if window == nil {
+		return abstractdomain.AbstractValue{}, false
+	}
+	if window.Hi < floor || (strictFloor && window.Hi == floor) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	edge := refinementsets.AtLeast(floor)
+	if strictFloor {
+		edge = refinementsets.Above(floor)
+	}
+	clipped := refinementsets.MakeRefinedSet(
+		append(append([]refinementsets.Refinement{}, A.Forms...), edge)...,
+	)
+	image := KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{
+		Op: unaryMathOpWire[op],
+		A:  clipped,
+	}))
+	// an unknown or all-NaN image says the clipped question itself was
+	// declined — no real half to speak for, so the caller's decline stands
+	if image.Kind == abstractdomain.KindUnknown || image.Kind == abstractdomain.KindNaN {
+		return abstractdomain.AbstractValue{}, false
+	}
+	grade := abstractdomain.MinTrustLevel(operandTrustLevel, abstractdomain.TrustSpec)
+	return abstractdomain.AtTrustLevel(abstractdomain.PossiblyNaN(image), grade), true
 }
 
 func allGreaterThan(values []float64, floor float64) bool {

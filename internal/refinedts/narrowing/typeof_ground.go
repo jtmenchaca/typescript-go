@@ -5,6 +5,7 @@ package narrowing
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -43,8 +44,10 @@ func GroundOfTypeofWord(word string) (abstractdomain.AbstractValue, bool) {
 
 // TypeofLeaf is typeofLeaf in the TS source: `typeof x === "word"` —
 // (nil, false) when the expression is not a typeof comparison; (None,
-// true) when the word or place cannot be read.
-func TypeofLeaf(e *ast.Node, isTracked func(name string) bool) (BranchNarrowings, bool) {
+// true) when the word or place cannot be read. The checker is what
+// resolves a const-bound index in the tested place (`const i = 0;
+// typeof xs[i]` tests the same slot `xs[0]` does).
+func TypeofLeaf(c *checker.Checker, e *ast.Node, isTracked func(name string) bool) (BranchNarrowings, bool) {
 	bin := e.AsBinaryExpression()
 	op := bin.OperatorToken.Kind
 	var typeofSide *ast.Node
@@ -66,7 +69,7 @@ func TypeofLeaf(e *ast.Node, isTracked func(name string) bool) (BranchNarrowings
 		wordSide = bin.Left
 	}
 	word := dataflowfacts.StringLiteralOf(wordSide)
-	tested := dataflowfacts.TrackedPlaceOf(typeofSide.AsTypeOfExpression().Expression, isTracked)
+	tested := dataflowfacts.TrackedPlaceOfWith(c, typeofSide.AsTypeOfExpression().Expression, isTracked)
 	if word == nil || tested == nil {
 		return None, true
 	}

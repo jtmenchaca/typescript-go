@@ -73,11 +73,38 @@ func AbstractValueOfDeclared(stated annotations.DeclaredRefinement) abstractdoma
 				// the graph carries it, not a set
 				keys = append(keys, abstractdomain.ObjectKey{Name: key.Name, Value: silence.Residue()})
 			case annotations.KeyValueCollection:
-				// TS switch only spells "set" | "object" | "reference" arms;
-				// a collection value has no case in the TS source's switch
-				// and falls through with no `keys[key.name]` assignment —
-				// the object build below then reads it as absent. Mirrored
-				// here by skipping the key entirely (no entry appended).
+				// DIVERGES FROM TS: the TS switch spells only "set" |
+				// "object" | "reference", so a collection key falls through
+				// with no `keys[key.name]` assignment and the object build
+				// reads the key as ABSENT — a key the statement says is
+				// always present. Here the key is entered as the collection
+				// it states: an INCOMPLETE Map or Set (no entry is named by
+				// a statement, only the members and size are), which is what
+				// the collection reads already expect — a `has` miss and a
+				// `get` miss both stay unanswered on an incomplete record
+				// (collection_models), while `typeof`, truthiness, and the
+				// sort answer off the kind. The member and size statements
+				// have nowhere to ride: the collection kind carries only
+				// flavor, entries, and completeness.
+				flavor := abstractdomain.FlavorSet
+				if key.Value.Flavor == "map" {
+					flavor = abstractdomain.FlavorMap
+				}
+				value := abstractdomain.AbstractValue{
+					Kind:             abstractdomain.KindCollection,
+					CollectionFlavor: flavor,
+					Entries:          nil,
+					Complete:         false,
+				}
+				// an optional or nullable collection key's reads wear the
+				// maybe wrapper, exactly as a set key's do
+				var worn abstractdomain.AbstractValue
+				if key.MayBeAbsent {
+					worn = abstractdomain.PossiblyUndefined(value, "", false, false)
+				} else {
+					worn = value
+				}
+				keys = append(keys, abstractdomain.ObjectKey{Name: key.Name, Value: worn})
 			}
 		}
 		return abstractdomain.KnownObject(keys, objectAnnotationRefOf(stated.Object), false, abstractdomain.TrustProved, false)
@@ -160,9 +187,15 @@ func measuresOf(m *annotations.Measures) *abstractdomain.Measures {
 // Mutex-guarded: concurrent entry walks reach this through declared
 // values, and an unguarded race could mint TWO tokens for one
 // annotation — breaking the identity SameKnown/JoinKnown compare by.
+//
+// The map is kept in BOTH directions. A token is minted from exactly
+// one annotation, so the annotation a token stands for is recoverable:
+// objectAnnotationOf walks back, which is how a reader in walk (which
+// imports both packages) opens a ref abstractdomain must keep opaque.
 var (
 	objectAnnotationTokensMu sync.Mutex
 	objectAnnotationTokens   = map[*annotations.ObjectAnnotation]abstractdomain.ObjectAnnotationRef{}
+	objectAnnotationsByToken = map[abstractdomain.ObjectAnnotationRef]*annotations.ObjectAnnotation{}
 )
 
 func objectAnnotationRefOf(o *annotations.ObjectAnnotation) abstractdomain.ObjectAnnotationRef {
@@ -176,5 +209,19 @@ func objectAnnotationRefOf(o *annotations.ObjectAnnotation) abstractdomain.Objec
 	}
 	token := &struct{}{}
 	objectAnnotationTokens[o] = token
+	objectAnnotationsByToken[token] = o
 	return token
+}
+
+// objectAnnotationOf is objectAnnotationRefOf's inverse: the
+// annotation a token was minted from, or nil for a token this walk
+// never minted. Readers that need the stated SHAPE behind an
+// AbstractValue's Stated/BoundObject ask here.
+func objectAnnotationOf(ref abstractdomain.ObjectAnnotationRef) *annotations.ObjectAnnotation {
+	if ref == nil {
+		return nil
+	}
+	objectAnnotationTokensMu.Lock()
+	defer objectAnnotationTokensMu.Unlock()
+	return objectAnnotationsByToken[ref]
 }

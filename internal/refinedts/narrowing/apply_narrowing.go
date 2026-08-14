@@ -8,6 +8,7 @@ package narrowing
 
 import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
@@ -584,7 +585,12 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 	// a keyed EXACT test on a SORT UNION of objects selects arms: an
 	// arm whose key at the path provably differs from the pinned word
 	// sheds, and the survivors narrow on — the discriminated-union
-	// split for plain object-type unions
+	// split for plain object-type unions.
+	//
+	// The step below reads a segment as an OBJECT KEY. An index segment
+	// finds no such key, so the step answers not-reached and the arm is
+	// KEPT — a list arm under an index shape sheds nothing, which is the
+	// answer that discards no runtime value.
 	if known.Kind == abstractdomain.KindKindUnion && n.Exact != nil {
 		pinned := n.Exact
 		var kept []abstractdomain.AbstractValue
@@ -623,7 +629,28 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 		}
 		return known
 	}
+	// a LIST root under an INDEX segment: the narrowing speaks about one
+	// slot, and the list carries its items positionally, so the item at
+	// that slot narrows in place and the rest stay as they were. A slot
+	// past the items says nothing — the list holds no value there for the
+	// narrowing to sharpen.
+	if known.Kind == abstractdomain.KindList {
+		slot, isIndex := dataflowfacts.IndexSegmentOf(path[0])
+		if !isIndex || slot >= len(known.Items) {
+			return known
+		}
+		items := make([]abstractdomain.AbstractValue, len(known.Items))
+		copy(items, known.Items)
+		items[slot] = narrowAt(items[slot], path[1:], n)
+		return abstractdomain.KnownList(items, abstractdomain.TrustLevelOf(known))
+	}
 	if known.Kind != abstractdomain.KindObject {
+		return known
+	}
+	// an INDEX segment names a list slot, and an object carries no such
+	// slot — an object under an index segment stays as it was rather than
+	// having the bracket text read as one of its keys
+	if _, isIndex := dataflowfacts.IndexSegmentOf(path[0]); isIndex {
 		return known
 	}
 	// a discriminated object narrows through its variants first: the

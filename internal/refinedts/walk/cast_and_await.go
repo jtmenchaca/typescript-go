@@ -39,11 +39,43 @@ func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
 func EvaluateAwait(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractValue {
 	await := e.AsAwaitExpression()
 	inner := await.Expression
-	// `await Promise.resolve(x)`: Promise.resolve fulfills with a
-	// non-thenable x unchanged (sec-promise.resolve — "a new promise
-	// resolved with the passed argument"), and await reads the
-	// fulfillment value. A primitive can never be a thenable, so when
-	// x's SORT is a primitive the composition wears x exactly
+	// `await Promise.resolve(x)`: the composition wears x exactly,
+	// for EVERY non-thenable x — not only a primitive one.
+	//
+	// The guarantee is the resolving function's own steps
+	// (sec-createresolvingfunctions, the [[Resolve]] closure), reached
+	// from Promise.resolve through PromiseResolve
+	// (sec-promise.resolve → sec-promise-resolve, step 3 "Perform
+	// Call(promiseCapability.[[Resolve]], undefined, « resolution »)"):
+	//
+	//	4. If resolution is not an Object, then
+	//	   a. Perform FulfillPromise(promise, resolution).
+	//	...
+	//	7. If IsCallable(thenAction) is false, then
+	//	   a. Perform FulfillPromise(promise, resolution).
+	//
+	// So a NON-OBJECT fulfills unchanged (step 4) and an OBJECT whose
+	// `then` is not callable ALSO fulfills unchanged (step 7). Only a
+	// callable `then` enqueues NewPromiseResolveThenableJob and adopts
+	// another value — the one genuine exception. And await reads the
+	// fulfillment value, so away from that exception the composition
+	// hands x back.
+	//
+	// The gate is therefore on the argument's own VALUE, not on its
+	// type's sort: the walk evaluates x once and unwraps when x's KIND
+	// cannot be a thenable (CannotBeThenable below). A promise value is
+	// exactly the excluded case — its `then` is callable by
+	// construction — and an object value is admitted only when the walk
+	// knows its keys completely and none of them is `then`.
+	//
+	// The argument evaluates exactly ONCE either way: the branch
+	// returns on both outcomes rather than falling through to the
+	// generic path, which would evaluate the whole call — and with it
+	// the argument — a second time. On the non-unwrap outcome the
+	// awaited value is the walk's own residue: Promise.resolve of a
+	// thenable adopts a value this walk cannot name, and the generic
+	// path would state nothing better. This mirrors the parseAsync
+	// branch below, which likewise evaluates its arguments and returns.
 	if ast.IsCallExpression(inner) {
 		call := inner.AsCallExpression()
 		if call.Arguments != nil && len(call.Arguments.Nodes) == 1 &&
@@ -52,30 +84,65 @@ func EvaluateAwait(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstra
 			if pa.Name().Text() == "resolve" && ast.IsIdentifier(pa.Expression) &&
 				pa.Expression.Text() == "Promise" &&
 				ctx.P.Checker.SymbolInDefaultLib(ctx.P.Checker.GetSymbolAtLocation(pa.Expression)) {
-				sort := primitives.SortOfPresent(ctx.P.Checker, ctx.P.Checker.GetTypeAtLocation(call.Arguments.Nodes[0]))
-				if sort == primitives.SortNumber || sort == primitives.SortString || sort == primitives.SortBool {
-					return evaluateExpression(ctx, env, call.Arguments.Nodes[0])
+				argument := evaluateExpression(ctx, env, call.Arguments.Nodes[0])
+				if CannotBeThenable(argument) {
+					return argument
 				}
+				// a thenable (or a value the walk cannot rule out as one)
+				// adopts something unnamed — and a promise ARGUMENT is
+				// `Promise.resolve` returning it unchanged
+				// (sec-promise-resolve step 1), so the await reads its own
+				// inner value
+				if argument.Kind == abstractdomain.KindPromise {
+					return abstractdomain.AtTrustLevel(*argument.Inner, abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(argument), abstractdomain.TrustLevelOf(*argument.Inner)))
+				}
+				return silence.Residue()
 			}
 		}
 	}
-	// `await schema.parseAsync(x)` on a z.promise schema: the library
-	// validates the RESOLVED value against the inner statement
-	// (vendored core/schemas.ts:4541), so the awaited value wears the
-	// inner set — at library grade, since the library's runtime is
-	// what enforces it
+	// `await schema.parseAsync(x)` — and `await schema.parse(x)` on a
+	// z.promise schema. Either way the awaited value wears the schema's
+	// stated set, at library grade, since the library's runtime is what
+	// enforces it. The two spellings reach that same set by different
+	// routes:
+	//
+	//   - a z.promise schema (annotation.Promise) validates the
+	//     RESOLVED value against the inner statement (vendored
+	//     core/schemas.ts:4541), and the annotation's set already IS
+	//     the inner one — so awaiting either parse or parseAsync reads
+	//     through to it.
+	//   - parseAsync on ANY schema returns a real Promise of the
+	//     validated output: vendored core/parse.ts:39-49, `_parseAsync`
+	//     awaits the run and `return result.value as
+	//     core.output<typeof schema>`, throwing when issues remain; and
+	//     the declared surface is `Promise<core.output<this>>` for
+	//     every schema (vendored classic/schemas.ts:117, mini/
+	//     schemas.ts:32), never only for z.promise. So the awaited
+	//     value wears the schema's set whatever the schema is — the
+	//     ordinary object/string/number case included, which the
+	//     annotation.Promise gate alone never reached.
+	//
+	// The verification is the doctrine's two readings: the installed
+	// library's surface and the vendored source above agree that the
+	// Promise wrapper here belongs to parseAsync's own signature, not
+	// to the schema's shape.
+	//
+	// `parse` (sync) on a NON-promise schema is deliberately NOT read
+	// here: it returns the validated value directly, so an `await` over
+	// it is awaiting a non-thenable and the generic path below already
+	// hands the value through unchanged.
 	if ast.IsCallExpression(inner) {
 		call := inner.AsCallExpression()
 		if ast.IsPropertyAccessExpression(call.Expression) {
 			pa := call.Expression.AsPropertyAccessExpression()
-			if (pa.Name().Text() == "parseAsync" || pa.Name().Text() == "parse") &&
-				ast.IsIdentifier(pa.Expression) {
+			method := pa.Name().Text()
+			if (method == "parseAsync" || method == "parse") && ast.IsIdentifier(pa.Expression) {
 				schemaSymbol := symbolAt(ctx.P.Checker, pa.Expression)
 				var annotation *annotations.Annotation
 				if schemaSymbol != nil {
 					annotation = ctx.Registry[schemaSymbol]
 				}
-				if annotation != nil && annotation.Promise {
+				if annotation != nil && (annotation.Promise || method == "parseAsync") {
 					if call.Arguments != nil {
 						for _, argument := range call.Arguments.Nodes {
 							evaluateExpression(ctx, env, argument)
@@ -95,6 +162,51 @@ func EvaluateAwait(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstra
 		return abstractdomain.AtTrustLevel(*landed.Inner, abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(landed), abstractdomain.TrustLevelOf(*landed.Inner)))
 	}
 	return landed
+}
+
+// CannotBeThenable answers whether a value's KIND rules out a callable
+// `then` — the one property that makes `Promise.resolve(x)` fulfil with
+// something other than x (sec-createresolvingfunctions steps 4 and 7:
+// a non-Object fulfils unchanged, and so does an Object whose `then` is
+// not callable; only a callable `then` enqueues the thenable job).
+//
+// Every PRIMITIVE kind answers yes — a non-Object can carry no `then`
+// at all. The exotic built-ins the domain names — a Date, a RegExp, a
+// Map or Set, an exact list — are Objects, but none of them carries a
+// `then` on its prototype chain, so each fulfils unchanged too.
+//
+// An OBJECT value answers yes only when the walk knows its keys
+// COMPLETELY (Complete) and no key is named `then`; a partial key set
+// could hide one. A KindPromise answers no by construction. Unknown,
+// opaque, variable, and union kinds answer no: the walk cannot rule a
+// thenable out, and only ruling it out licenses the unwrap.
+func CannotBeThenable(value abstractdomain.AbstractValue) bool {
+	switch value.Kind {
+	case abstractdomain.KindValues, abstractdomain.KindSet,
+		abstractdomain.KindBigints, abstractdomain.KindSymbol,
+		abstractdomain.KindUndef, abstractdomain.KindNaN:
+		// primitives: not Objects, so step 4 fulfils them unchanged
+		return true
+	case abstractdomain.KindDate, abstractdomain.KindRegex,
+		abstractdomain.KindCollection, abstractdomain.KindList:
+		// Objects whose prototypes carry no `then`, so step 7 fulfils
+		// them unchanged
+		return true
+	case abstractdomain.KindObject:
+		if !value.Complete {
+			return false
+		}
+		for _, key := range value.Keys {
+			if key.Name == "then" {
+				return false
+			}
+		}
+		// a bare-prototype object carries only its own keys; an ordinary
+		// one inherits from Object.prototype, which has no `then` either
+		return true
+	default:
+		return false
+	}
 }
 
 // EvaluateSatisfies is evaluateSatisfies in the TS source.

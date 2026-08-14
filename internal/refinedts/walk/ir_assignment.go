@@ -98,6 +98,13 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			if held, ok := FreeConstEffect(context, node); ok {
 				return held, true
 			}
+			// `f(o.x = e)` — a SETTER assignment in expression position:
+			// the setter's call hoists ahead of the statement and the
+			// expression's value is the right side, the language's own
+			// rule for what an assignment evaluates to
+			if held, ok := SetterAssignmentEffect(context, node); ok {
+				return held, true
+			}
 			// a CALL inside the expression — `count + this.bump()`, an
 			// argument, a ternary arm: it HOISTS to a temp-slot call
 			// statement emitted before this statement, and the expression
@@ -254,6 +261,16 @@ var compoundOps = map[ast.Kind]kernelbridge.LoopEffectOp{
 	ast.KindMinusEqualsToken:    kernelbridge.LoopOpSub,
 	ast.KindAsteriskEqualsToken: kernelbridge.LoopOpMul,
 	ast.KindSlashEqualsToken:    kernelbridge.LoopOpDiv,
+	// the compound bitwise and shift forms. The number-sort gate below
+	// (Sorts[target] != BindingKindNumber) is the only gate they need:
+	// ToInt32 is total on doubles, so any number-sorted target and
+	// operand is a legal input to transferBitwise.
+	ast.KindAmpersandEqualsToken:                         kernelbridge.LoopOpBitAnd,
+	ast.KindBarEqualsToken:                               kernelbridge.LoopOpBitOr,
+	ast.KindCaretEqualsToken:                             kernelbridge.LoopOpBitXor,
+	ast.KindLessThanLessThanEqualsToken:                  kernelbridge.LoopOpShl,
+	ast.KindGreaterThanGreaterThanEqualsToken:            kernelbridge.LoopOpSar,
+	ast.KindGreaterThanGreaterThanGreaterThanEqualsToken: kernelbridge.LoopOpShr,
 }
 
 // AssignmentOfExpression is assignmentOfExpression in the TS

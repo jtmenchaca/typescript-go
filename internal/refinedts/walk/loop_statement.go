@@ -10,14 +10,24 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 )
 
 // AnalyzeLoopStatement is analyzeLoopStatement in the TS source.
 func AnalyzeLoopStatement(ctx *FlowContext, env Env, statement *ast.Node, result *annotations.DeclaredRefinement) bool {
-	// a literally-false while condition runs zero iterations — the
-	// body writes nothing
-	if ast.IsWhileStatement(statement) && statement.AsWhileStatement().Expression.Kind == ast.KindFalseKeyword {
-		return false
+	// a while condition that is a FALSY literal runs zero iterations —
+	// the body writes nothing. The condition follows its const-to-const
+	// links first, so `const OFF = false; while (OFF)` gets the same
+	// shortcut as `while (false)`. What the resolver reads is a literal
+	// token: the two boolean keywords, a numeric literal, and a string
+	// literal — 0, -0, and "" are falsy under ToBoolean, so they run
+	// zero times too. A condition that is not a literal (a call, a
+	// comparison, a let-bound name) declines and takes the full loop
+	// machinery, even where the walk could decide it false.
+	if ast.IsWhileStatement(statement) {
+		if literal, ok := dataflowfacts.ConstChainLiteral(ctx.P.Checker, statement.AsWhileStatement().Expression); ok && dataflowfacts.FalsyLiteral(literal) {
+			return false
+		}
 	}
 	// a for-head let/const is LOOP-scoped: what it shadows comes
 	// back after the loop (any later use of the head name is out of

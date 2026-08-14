@@ -27,11 +27,11 @@ var instanceTable = map[string]bool{
 	"String": true, "Boolean": true,
 }
 
-// ReadInKeyword is readInKeyword in the TS source: `k in o`: answered
-// by a COMPLETE key set — a literal-built object knows every key it
-// has, so presence and absence are both theorems there; anything less
-// stays unknown. HasProperty walks the prototype chain
-// (sec-relational-operators-runtime-semantics-evaluation →
+// ReadInKeyword is readInKeyword in the TS source: `k in o`. A key
+// STATED on the object proves presence with no completeness needed;
+// absence is a theorem only on a COMPLETE key set — a literal-built
+// object knows every key it has. HasProperty walks the prototype
+// chain (sec-relational-operators-runtime-semantics-evaluation →
 // HasProperty), so a key every ordinary object inherits ("toString"
 // in {}) answers true even off the own keys.
 func ReadInKeyword(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.AbstractValue, bool) {
@@ -48,14 +48,27 @@ func ReadInKeyword(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abstr
 	} else if keyKnown.Kind == abstractdomain.KindValues && keyKnown.KindTag == abstractdomain.PrimitiveString {
 		key, hasKey = stringOf(keyKnown.Values), true
 	}
-	if hasKey && target.Kind == abstractdomain.KindObject && target.Complete {
-		_, hasOwn := objectKeyIndex(target, key)
-		held := hasOwn || abstractdomain.ObjectPrototypeFunctionKeys[key]
-		v := float64(0)
-		if held {
-			v = 1
+	if hasKey && target.Kind == abstractdomain.KindObject {
+		// presence of a STATED key needs no completeness — the key is
+		// there whatever else the object holds. But a key holding
+		// undefined is ambiguous in this domain: an explicit
+		// `{k: undefined}` answers true while a deleted key (spelled as
+		// the same Undef entry) answers false, so those stay unknown.
+		if index, hasOwn := objectKeyIndex(target, key); hasOwn {
+			entry := target.Keys[index].Value
+			if entry.Kind != abstractdomain.KindUndef && entry.Kind != abstractdomain.KindPossiblyUndefined {
+				return abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec), true
+			}
+			return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{keyKnown, target}), true
 		}
-		return abstractdomain.KnownValues([]float64{v}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec), true
+		if abstractdomain.ObjectPrototypeFunctionKeys[key] {
+			return abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec), true
+		}
+		// ABSENCE still needs the complete key set: only a
+		// literal-built object knows every key it has
+		if target.Complete {
+			return abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec), true
+		}
 	}
 	return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{keyKnown, target}), true
 }

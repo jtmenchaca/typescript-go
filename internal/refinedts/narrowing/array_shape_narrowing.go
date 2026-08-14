@@ -36,7 +36,7 @@ func ArrayShapeLeaf(c *checker.Checker, e *ast.Node, isTracked func(name string)
 			propAccess.Name().Text() == "isArray" &&
 			call.Arguments != nil && len(call.Arguments.Nodes) == 1 &&
 			resolvesToDefaultLib(c, propAccess.Name()) {
-			tested := dataflowfacts.TrackedPlaceOf(call.Arguments.Nodes[0], isTracked)
+			tested := dataflowfacts.TrackedPlaceOfWith(c, call.Arguments.Nodes[0], isTracked)
 			if tested != nil {
 				lengthShape := abstractdomain.KnownSet(
 					refinementsets.MakeRefinedSet(refinementsets.AtLeast(0), refinementsets.AtMost(4294967295), refinementsets.Integer),
@@ -83,7 +83,7 @@ func ArrayShapeLeaf(c *checker.Checker, e *ast.Node, isTracked func(name string)
 					}
 				}
 			}
-			tested := dataflowfacts.TrackedPlaceOf(call.Arguments.Nodes[0], isTracked)
+			tested := dataflowfacts.TrackedPlaceOfWith(c, call.Arguments.Nodes[0], isTracked)
 			// one sort per list: a mixed list pins nothing (the tuple layer
 			// holds one sort at a time)
 			if readable && tested != nil && len(members) > 0 && len(words) == 0 {

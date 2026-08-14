@@ -7,7 +7,6 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
-	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -20,7 +19,7 @@ func ElementOf(iterable abstractdomain.AbstractValue) abstractdomain.AbstractVal
 	if iterable.Kind == abstractdomain.KindUnknown && iterable.Opaque {
 		return abstractdomain.Opaque
 	}
-	if iterable.Kind == abstractdomain.KindSet && len(iterable.Set.Forms) == 1 {
+	if iterable.Kind == abstractdomain.KindSet {
 		// a sequence whose elements may include NaN (number[] initialized
 		// from its type): NaN rides beside the element set
 		withNaN := func(element abstractdomain.AbstractValue) abstractdomain.AbstractValue {
@@ -29,14 +28,24 @@ func ElementOf(iterable abstractdomain.AbstractValue) abstractdomain.AbstractVal
 			}
 			return element
 		}
-		only := iterable.Set.Forms[0]
-		if only.Form == refinementsets.FormStar {
-			return withNaN(abstractdomain.KnownSet(*only.A_, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
-		}
-		// a length-bounded sequence (a nonempty array) is a repetition,
-		// and its elements wear the repeated item set the same way
-		if rep, ok := refinementsets.AsRepetition(refinementsets.MakeRefinedSet(only)); ok {
-			return withNaN(abstractdomain.KnownSet(rep.Element, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+		// the star's item set, or a length-bounded sequence's repeated
+		// item set — read the same way, one per arm the set unions over,
+		// and the element is the JOIN of what the arms hold (whichever
+		// arm the sequence is on, its elements wear that arm's item set)
+		if arms, ok := RepetitionArmsOf(iterable.Set); ok {
+			var element *abstractdomain.AbstractValue
+			for _, rep := range arms {
+				one := abstractdomain.KnownSet(rep.Element, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
+				if element == nil {
+					element = &one
+				} else {
+					joined := abstractdomain.JoinKnown(*element, one)
+					element = &joined
+				}
+			}
+			if element != nil {
+				return withNaN(*element)
+			}
 		}
 	}
 	if iterable.Kind == abstractdomain.KindVariable && iterable.StarDepth > 0 {

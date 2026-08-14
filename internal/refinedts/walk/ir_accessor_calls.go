@@ -605,15 +605,22 @@ func setterValueEffect(
 
 // setterCompoundOps is the compound assignment's operator, as the
 // effect grammar's own arithmetic. It is compoundOps' table
-// (ir_assignment.go) read for the accessor route: the same four
-// operators, because the same effect grammar carries them, and a
-// compound through a setter must compute what a compound through a slot
-// computes or the two spell different arithmetic for the same source.
+// (ir_assignment.go) read for the accessor route: the same operators,
+// because the same effect grammar carries them, and a compound through
+// a setter must compute what a compound through a slot computes or the
+// two spell different arithmetic for the same source.
 var setterCompoundOps = map[ast.Kind]kernelbridge.LoopEffectOp{
 	ast.KindPlusEqualsToken:     kernelbridge.LoopOpAdd,
 	ast.KindMinusEqualsToken:    kernelbridge.LoopOpSub,
 	ast.KindAsteriskEqualsToken: kernelbridge.LoopOpMul,
 	ast.KindSlashEqualsToken:    kernelbridge.LoopOpDiv,
+	// the bitwise and shift compounds, matching compoundOps
+	ast.KindAmpersandEqualsToken:                         kernelbridge.LoopOpBitAnd,
+	ast.KindBarEqualsToken:                               kernelbridge.LoopOpBitOr,
+	ast.KindCaretEqualsToken:                             kernelbridge.LoopOpBitXor,
+	ast.KindLessThanLessThanEqualsToken:                  kernelbridge.LoopOpShl,
+	ast.KindGreaterThanGreaterThanEqualsToken:            kernelbridge.LoopOpSar,
+	ast.KindGreaterThanGreaterThanGreaterThanEqualsToken: kernelbridge.LoopOpShr,
 }
 
 // setterCompoundWriteOf lowers `o.x += e` where x resolves to a get/set

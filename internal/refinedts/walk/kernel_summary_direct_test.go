@@ -987,7 +987,7 @@ func summaryCollectedNames(t *testing.T, declaration *ast.Node) []string {
 		t.Fatalf("collectSummaryLocals declined — the collection skips, it does not decline")
 	}
 	var names []string
-	for _, slot := range localSlotsOf(body, locals, patterns, map[string]struct{}{}) {
+	for _, slot := range localSlotsOf(nil, body, locals, patterns, map[string]struct{}{}) {
 		names = append(names, slot.Name)
 	}
 	return names
@@ -1214,7 +1214,7 @@ func TestKernelSummaryDirect_AnArrayPatternsDefaultTakesAnOrdinaryUnknownSlot(t 
 	if !ok {
 		t.Fatalf("a defaulted array element declined the collection")
 	}
-	slots := localSlotsOf(body, locals, patterns, map[string]struct{}{})
+	slots := localSlotsOf(nil, body, locals, patterns, map[string]struct{}{})
 	for _, wanted := range []string{"a", "b"} {
 		found := false
 		for _, slot := range slots {
@@ -1242,7 +1242,7 @@ func TestKernelSummaryDirect_AnObjectPatternsNamesStillWearTheirLeafSorts(t *tes
 	if !ok {
 		t.Fatalf("collectSummaryLocals declined")
 	}
-	slots := localSlotsOf(body, locals, patterns, map[string]struct{}{})
+	slots := localSlotsOf(nil, body, locals, patterns, map[string]struct{}{})
 	for _, wanted := range []string{"lo", "hi"} {
 		found := false
 		for _, slot := range slots {

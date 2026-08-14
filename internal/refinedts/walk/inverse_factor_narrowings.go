@@ -22,7 +22,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/jsnum"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
@@ -41,7 +41,11 @@ import (
 // factor out of NaN (NaN products fail every comparison) and out of
 // −∞ (a negative product is not above k ≥ 0), so the claim is strong:
 // x lies in (bound, +∞].
+// The comparison's constant side is read through const-to-const links
+// (const_chain_literal.go), so the checker comes in alongside the
+// kernel; a nil checker reads literal tokens only, exactly as before.
 func InverseFactorNarrowings(
+	c *checker.Checker,
 	kernel *kernelbridge.RefinedTSKernel,
 	condition *ast.Node,
 	isTracked func(name string) bool,
@@ -97,11 +101,21 @@ func InverseFactorNarrowings(
 			visit(bin.Right)
 			return
 		}
-		if kind == ast.KindGreaterThanToken && ast.IsNumericLiteral(bin.Right) {
-			productRow(bin.Left, float64(jsnum.FromString(bin.Right.AsNumericLiteral().Text)))
+		// the constant side follows its const-to-const links to the
+		// literal it names, so `x * y > LIMIT` with `const LIMIT = 10`
+		// reads the same as the literal written in place — a const holds
+		// its literal at every reachable point. The strict-comparison and
+		// nonneg-cofactor gates above are untouched: only how k is READ
+		// changes, never which comparisons qualify.
+		if kind == ast.KindGreaterThanToken {
+			if k, ok := dataflowfacts.ConstChainNumber(c, bin.Right); ok {
+				productRow(bin.Left, k)
+			}
 		}
-		if kind == ast.KindLessThanToken && ast.IsNumericLiteral(bin.Left) {
-			productRow(bin.Right, float64(jsnum.FromString(bin.Left.AsNumericLiteral().Text)))
+		if kind == ast.KindLessThanToken {
+			if k, ok := dataflowfacts.ConstChainNumber(c, bin.Left); ok {
+				productRow(bin.Right, k)
+			}
 		}
 	}
 	visit(condition)

@@ -14,20 +14,13 @@ unresolved, each with its own reason.
    blocker; a conformance-stage fidelity item).
 
 6. abstractdomain.ObjectAnnotationRef remains *struct{} with
-   walk/declared_value.go's token-map bridging identity — revisit
-   whether ObjectAnnotationRef should become *annotations.
-   ObjectAnnotation directly now that annotations is ported
-   (abstractdomain cannot import annotations — check direction;
-   if impossible, the token map stands). STATUS: CHECKED, confirmed
-   impossible — annotations imports narrowing (chain_method.go,
-   zod_def_chain.go), and narrowing imports abstractdomain
-   (structural_narrowing.go, side_bounds.go, apply_narrowing.go,
-   array_shape_narrowing.go, instanceof_narrowing.go,
-   narrowing_effects.go, typeof_ground.go). abstractdomain importing
-   annotations directly would close abstractdomain → annotations →
-   narrowing → abstractdomain. The *struct{} token-map bridge in
-   walk/declared_value.go (objectAnnotationRefOf) is the permanent
-   answer, not a stopgap — no code change made.
+   walk/declared_value.go bidirectional memo (objectAnnotationsByToken +
+   objectAnnotationOf) — closed. walk/object_key_access.go:84-115 now
+   resolves the token to its annotation and answers stated keys without
+   requiring an import inversion. The ref type stays opaque to
+   abstractdomain; the memo keeps the annotation accessible in both
+   directions. STATUS: RESOLVED — the inverse-memo approach fixed the
+   bound-object key read without needing to invert the package order.
 
 11. control_flow's .test.ts files were out of the porter's scope —
     port them at/after integration (loop_fixpoint.test,

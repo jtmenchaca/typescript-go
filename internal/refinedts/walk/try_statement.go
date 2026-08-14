@@ -12,6 +12,65 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
+// raisesNothing answers whether running this subtree can raise — the
+// conservative half of the question, so only shapes the walk can read
+// end to end answer true. A call, a `new`, an await, a yield, a
+// tagged template, a `throw`, and a `delete` all run code this test
+// does not see. So does every property and element access: the
+// receiver may be absent, and a getter behind a plain read runs a
+// body — the same standing gap writeAndCallFree's comment names.
+// What remains are identifiers, literals, and the operators over
+// them, plus the assignments whose two sides are themselves readable.
+func raisesNothing(node *ast.Node) bool {
+	if node == nil {
+		return true
+	}
+	switch node.Kind {
+	case ast.KindCallExpression, ast.KindNewExpression, ast.KindAwaitExpression,
+		ast.KindYieldExpression, ast.KindTaggedTemplateExpression, ast.KindDeleteExpression,
+		ast.KindThrowStatement, ast.KindPropertyAccessExpression, ast.KindElementAccessExpression,
+		ast.KindSpreadElement, ast.KindSpreadAssignment:
+		return false
+	}
+	// a nested function is not RUN here, but the statements this walks
+	// are its own body's, which this reading does not cover
+	if ast.IsFunctionLike(node) {
+		return false
+	}
+	// an assignment to anything but a plain name writes through a
+	// receiver, which is the access case above
+	if ast.IsBinaryExpression(node) {
+		bin := node.AsBinaryExpression()
+		if bin.OperatorToken.Kind >= ast.KindFirstAssignment && bin.OperatorToken.Kind <= ast.KindLastAssignment &&
+			!ast.IsIdentifier(bin.Left) {
+			return false
+		}
+	}
+	free := true
+	node.ForEachChild(func(child *ast.Node) bool {
+		if !raisesNothing(child) {
+			free = false
+			return true
+		}
+		return false
+	})
+	return free
+}
+
+// statementsFromFirstThrowing drops the leading run of statements that
+// provably raise nothing and returns the rest — the statements at or
+// after the first one an exception can come out of. A catch entry
+// forgets what those write; the dropped run's writes had already
+// completed when any exception was raised.
+func statementsFromFirstThrowing(statements []*ast.Node) []*ast.Node {
+	for index, s := range statements {
+		if !raisesNothing(s) {
+			return statements[index:]
+		}
+	}
+	return nil
+}
+
 // AnalyzeTryStatement is analyzeTryStatement in the TS source.
 func AnalyzeTryStatement(ctx *FlowContext, env Env, statement *ast.Node, result *annotations.DeclaredRefinement) bool {
 	tryStmt := statement.AsTryStatement()
@@ -38,9 +97,15 @@ func AnalyzeTryStatement(ctx *FlowContext, env Env, statement *ast.Node, result 
 		catchClause := tryStmt.CatchClause.AsCatchClause()
 		// only the try TEXT's own writes havoc here — callee-mediated
 		// effects land whole at their statement, and the snapshots
-		// (whose per-name join covers partial application) carry them
+		// (whose per-name join covers partial application) carry them.
+		// The havoc starts at the first statement that could throw: a
+		// leading run of statements that move state but raise nothing
+		// completes before any exception can be observed, so catch sees
+		// their writes intact.
 		written := map[string]struct{}{}
-		AssignedNamesDirect(tryStmt.TryBlock, written)
+		for _, s := range statementsFromFirstThrowing(tryStmt.TryBlock.AsBlock().Statements.Nodes) {
+			AssignedNamesDirect(s, written)
+		}
 		for name := range written {
 			if _, ok := catchEnv.Get(name); ok {
 				HavocEnv(ctx.Aliases, catchEnv, name)

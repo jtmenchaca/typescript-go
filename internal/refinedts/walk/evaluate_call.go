@@ -156,11 +156,11 @@ func ProjectionSources(e *ast.Node, into []string) []string {
 // the arguments alone — memoizable. Anything unresolvable is
 // conservatively impure; a cycle of write-free bodies is pure (the
 // walk answers recursion with unknown anyway).
-func InlineContractCall(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, argKnowns []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+func InlineContractCall(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, effective EffectiveArguments) abstractdomain.AbstractValue {
 	if !tracing.Recording(tracing.GrainStep) {
-		return InlineContractBody(ctx, env, call, contract, argKnowns)
+		return InlineContractBody(ctx, env, call, contract, effective)
 	}
 	return tracing.Span("inlineContractCall", func() abstractdomain.AbstractValue {
-		return InlineContractBody(ctx, env, call, contract, argKnowns)
+		return InlineContractBody(ctx, env, call, contract, effective)
 	}, tracing.GrainStep)
 }

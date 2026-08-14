@@ -20,34 +20,119 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
+// ArgumentNodesOf is THE SYNTACTIC argument-reading seam: the
+// expressions a call-like node hands its callee, one slot per WRITTEN
+// argument. It reads syntax alone, so a spread stays one slot here —
+// how many positions it really occupies is a question about its held
+// value, which this function does not have.
+//
+// A reader that only wants "which expressions did the programmer write
+// at this call" asks here. A reader that PLACES a parameter against an
+// argument asks for the effective arguments instead
+// (EffectiveArgumentsOf, spread_expansion.go), whose entries are
+// positions rather than written arguments and whose nodes and values
+// move together.
+//
+// A CallExpression's slots are its own argument expressions.
+//
+// A TAGGED TEMPLATE's are the template object first and the `${…}`
+// substitutions after it, in source order — the tag call's argument
+// list is the list-concatenation of « siteObj » and the substitution
+// values (tmp/ecma262/spec.html
+// sec-runtime-semantics-argumentlistevaluation, the
+// `TemplateLiteral : SubstitutionTemplate` and
+// `TemplateLiteral : NoSubstitutionTemplate` alternatives; the note at
+// sec-tagged-templates states the same shape). Position 0 has NO
+// source expression: the template object is built by GetTemplateObject
+// from the literal itself, not written by the programmer, so the slot
+// is nil. Every caller already reads a nil argument slot as "no caller
+// state behind this position" and writes nothing back to it, which is
+// exactly right — a write into the frozen template object reaches no
+// name this file tracks (sec-gettemplateobject freezes it).
+//
+// Anything else has no argument list at all.
+func ArgumentNodesOf(call *ast.Node) []*ast.Node {
+	if call == nil {
+		return nil
+	}
+	if ast.IsCallExpression(call) {
+		arguments := call.AsCallExpression().Arguments
+		if arguments == nil {
+			return nil
+		}
+		return arguments.Nodes
+	}
+	if ast.IsTaggedTemplateExpression(call) {
+		substitutions := TemplateSubstitutions(call.AsTaggedTemplateExpression().Template)
+		slots := make([]*ast.Node, 0, len(substitutions)+1)
+		slots = append(slots, nil) // the template object, synthesized
+		return append(slots, substitutions...)
+	}
+	return nil
+}
+
+// CalleeExpressionOf is the expression a call-like node calls: a
+// CallExpression's `Expression`, a tagged template's `Tag`. The two
+// forms name their callee under different field names, and every
+// reader that wants "who is being called" asks here rather than
+// casting to one of them.
+func CalleeExpressionOf(call *ast.Node) *ast.Node {
+	if call == nil {
+		return nil
+	}
+	if ast.IsCallExpression(call) {
+		return call.AsCallExpression().Expression
+	}
+	if ast.IsTaggedTemplateExpression(call) {
+		return call.AsTaggedTemplateExpression().Tag
+	}
+	return nil
+}
+
 // ParameterKnown is the known a parameter wears at a call: its
-// positional argument's — or, for a trailing REST parameter, the
-// exact LIST of the remaining arguments' knowns (the rest parameter
-// is bound to an array of the leftover arguments in order —
+// positional argument's, `undefined` where the call passes no
+// argument for that position, or — for a trailing REST parameter —
+// the exact LIST of the remaining arguments' knowns (the rest
+// parameter is bound to an array of the leftover arguments in order —
 // tmp/ecma262/spec.html sec-functiondeclarationinstantiation).
-func ParameterKnown(parameter *ast.Node, index int, call *ast.Node, argKnowns []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+//
+// The positions are the EFFECTIVE ones, so a call spreading an exact
+// source places its parameters and states its rest list the way a call
+// writing those arguments out one at a time does. A list marked inexact
+// carries a spread whose count is unread: no position past it is placed
+// and no rest length is stated, so both readings answer residue.
+func ParameterKnown(parameter *ast.Node, index int, effective EffectiveArguments) abstractdomain.AbstractValue {
 	pd := parameter.AsParameterDeclaration()
 	if pd.DotDotDotToken == nil {
-		if index >= 0 && index < len(argKnowns) {
-			return argKnowns[index]
+		if index >= 0 && index < len(effective.Knowns) {
+			return effective.Knowns[index]
 		}
-		return silence.Residue()
-	}
-	// a spread at the call keeps the walk from counting the rest: an
-	// exact spread was expanded into positions upstream, but an
-	// inexpansible one collapsed to a single slot, and the LIST built
-	// here would state a wrong length
-	callExpr := call.AsCallExpression()
-	for _, argument := range callExpr.Arguments.Nodes {
-		if ast.IsSpreadElement(argument) {
+		// a position the call passes no argument for binds exactly
+		// `undefined` (tmp/ecma262/spec.html
+		// sec-functiondeclarationinstantiation: the argument list is
+		// shorter than the parameter list, and IteratorBindingInitialization
+		// binds the missing positions to undefined). A parameter with a
+		// DEFAULT binds the default's value instead, which this function
+		// does not evaluate, so that spelling keeps its silence — and so
+		// does a position past an unread spread, which the walk cannot
+		// prove the call leaves empty.
+		if pd.Initializer != nil {
 			return silence.Residue()
 		}
+		if !effective.Exact {
+			return silence.Residue()
+		}
+		return abstractdomain.Undef
 	}
-	rest := argKnowns
-	if index < len(argKnowns) {
-		rest = argKnowns[index:]
-	} else {
-		rest = nil
+	// an unread spread keeps the walk from counting the rest: it holds
+	// one position for a run of arguments of unknown length, so the LIST
+	// built here would state a wrong length
+	if !effective.Exact {
+		return silence.Residue()
+	}
+	var rest []abstractdomain.AbstractValue
+	if index >= 0 && index < len(effective.Knowns) {
+		rest = effective.Knowns[index:]
 	}
 	return abstractdomain.KnownList(rest, abstractdomain.TrustProved)
 }
@@ -59,8 +144,11 @@ func ParameterKnown(parameter *ast.Node, index int, call *ast.Node, argKnowns []
 // recursion and answers unknown. Only a CONST binding qualifies — a
 // let could have been rebound between declaration and call. Returns
 // nil when the callee is not such a closure.
-func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []abstractdomain.AbstractValue) *abstractdomain.AbstractValue {
-	callExpr := call.AsCallExpression()
+func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, effective EffectiveArguments) *abstractdomain.AbstractValue {
+	calleeExpression := CalleeExpressionOf(call)
+	if calleeExpression == nil {
+		return nil
+	}
 	var closure Callback
 	var symbol *ast.Symbol
 	// a const bound to `f.bind(...)` runs the TARGET function with the
@@ -69,7 +157,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 	// call's own (tmp/ecma262/spec.html sec-function.prototype.bind,
 	// sec-bound-function-exotic-objects-call-thisargument-argumentslist)
 	var preboundArguments []*ast.Node
-	direct := callExpr.Expression
+	direct := calleeExpression
 	if ast.IsParenthesizedExpression(direct) {
 		direct = direct.AsParenthesizedExpression().Expression
 	}
@@ -88,24 +176,26 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 				continue
 			}
 			var argument abstractdomain.AbstractValue
-			if i < len(argKnowns) {
-				argument = argKnowns[i]
+			if i < len(effective.Knowns) {
+				argument = effective.Knowns[i]
 			} else {
 				argument = silence.Residue()
 			}
-			var at *ast.Node
-			if i < len(callExpr.Arguments.Nodes) {
-				at = callExpr.Arguments.Nodes[i]
-			} else {
-				at = call
+			// the value and the node it hangs on come from the same
+			// position, so a diagnostic never names another argument's
+			// expression; a position with no expression behind it (an item
+			// expanded out of a spread) hangs on the call
+			at := call
+			if i < len(effective.Nodes) && effective.Nodes[i] != nil {
+				at = effective.Nodes[i]
 			}
 			CheckAssignability(ctx, argument, *result.Stated, at, "argument", nil)
 		}
 	} else {
-		if !ast.IsIdentifier(callExpr.Expression) {
+		if !ast.IsIdentifier(calleeExpression) {
 			return nil
 		}
-		found := ctx.P.Checker.GetSymbolAtLocation(callExpr.Expression)
+		found := ctx.P.Checker.GetSymbolAtLocation(calleeExpression)
 		if found == nil {
 			return nil
 		}
@@ -167,10 +257,19 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 			preboundKnowns[i] = silence.Residue()
 		}
 	}
+	// the prebound arguments occupy the FIRST positions, this call's own
+	// the rest — nodes and values grow by the same count, so the pair
+	// stays aligned. A prebound position's node is nil: its expression
+	// was spelled where the bind ran, not at this call, so nothing here
+	// writes back through it (the loop below forgets its roots instead).
 	boundOffset := len(preboundKnowns)
-	allArgKnowns := argKnowns
 	if boundOffset > 0 {
-		allArgKnowns = append(append([]abstractdomain.AbstractValue{}, preboundKnowns...), argKnowns...)
+		prefixed := EffectiveArguments{Exact: effective.Exact}
+		prefixed.Nodes = append(prefixed.Nodes, make([]*ast.Node, boundOffset)...)
+		prefixed.Knowns = append(prefixed.Knowns, preboundKnowns...)
+		prefixed.Nodes = append(prefixed.Nodes, effective.Nodes...)
+		prefixed.Knowns = append(prefixed.Knowns, effective.Knowns...)
+		effective = prefixed
 	}
 	inlining := ctx.Inlining
 	if inlining == nil {
@@ -214,7 +313,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 		} else {
 			saved[name.Text()] = savedEntry{}
 		}
-		env.Set(name.Text(), ParameterKnown(parameter, i, call, allArgKnowns))
+		env.Set(name.Text(), ParameterKnown(parameter, i, effective))
 	}
 	{
 		locals := map[string]struct{}{}
@@ -280,7 +379,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 		if !ok {
 			continue
 		}
-		entry := ParameterKnown(parameter, i, call, allArgKnowns)
+		entry := ParameterKnown(parameter, i, effective)
 		if abstractdomain.SameKnown(post, entry) {
 			continue
 		}
@@ -308,18 +407,16 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, argKnowns []
 			}
 			continue
 		}
+		// the effective list already carries the prebound prefix, so the
+		// parameter's index IS its position: the node written back through
+		// is the one whose value bound this parameter
 		var argument *ast.Node
-		argIndex := i - boundOffset
-		if argIndex >= 0 && argIndex < len(callExpr.Arguments.Nodes) {
-			argument = callExpr.Arguments.Nodes[argIndex]
-		}
-		restFrom := argIndex
-		if restFrom < 0 {
-			restFrom = 0
+		if i < len(effective.Nodes) {
+			argument = effective.Nodes[i]
 		}
 		var restArguments []*ast.Node
-		if restFrom < len(callExpr.Arguments.Nodes) {
-			restArguments = callExpr.Arguments.Nodes[restFrom:]
+		if i >= 0 && i < len(effective.Nodes) {
+			restArguments = effective.Nodes[i:]
 		}
 		WriteBackParameter(ctx, env, writeBackParameterParams{
 			parameter:     parameter,
@@ -355,6 +452,11 @@ func unwrapArgument(e *ast.Node) *ast.Node {
 // forgets; the list itself belongs to no caller name.
 func forgetRestArguments(ctx *FlowContext, env Env, restArguments []*ast.Node) {
 	for _, argument := range restArguments {
+		// a synthesized slot (a tagged template's template object) names
+		// no caller state, so there is nothing to forget behind it
+		if argument == nil {
+			continue
+		}
 		source := unwrapArgument(argument)
 		if ast.IsIdentifier(source) {
 			if _, ok := env.Get(source.Text()); ok {
@@ -427,8 +529,8 @@ func declaredNames(node *ast.Node, into map[string]struct{}) {
 }
 
 // InlineCallbackNode is inlineCallbackNode in the TS source.
-func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Callback, argKnowns []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
-	callExpr := call.AsCallExpression()
+func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Callback, effective EffectiveArguments) abstractdomain.AbstractValue {
+	argumentNodes := effective.Nodes
 	type savedEntry struct {
 		value abstractdomain.AbstractValue
 		has   bool
@@ -445,7 +547,7 @@ func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Call
 		} else {
 			saved[name.Text()] = savedEntry{}
 		}
-		env.Set(name.Text(), ParameterKnown(parameter, i, call, argKnowns))
+		env.Set(name.Text(), ParameterKnown(parameter, i, effective))
 	}
 	body := callback.Body()
 	// the body's own declarations shadow too — see InlineStoredClosure
@@ -505,17 +607,17 @@ func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Call
 			continue
 		}
 		var argument *ast.Node
-		if i < len(callExpr.Arguments.Nodes) {
-			argument = callExpr.Arguments.Nodes[i]
+		if i < len(argumentNodes) {
+			argument = argumentNodes[i]
 		}
 		var restArguments []*ast.Node
-		if i < len(callExpr.Arguments.Nodes) {
-			restArguments = callExpr.Arguments.Nodes[i:]
+		if i < len(argumentNodes) {
+			restArguments = argumentNodes[i:]
 		}
 		WriteBackParameter(ctx, env, writeBackParameterParams{
 			parameter:     parameter,
 			post:          post,
-			entry:         ParameterKnown(parameter, i, call, argKnowns),
+			entry:         ParameterKnown(parameter, i, effective),
 			argument:      argument,
 			restArguments: restArguments,
 		})

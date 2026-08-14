@@ -79,14 +79,7 @@ func AnalyzeVariableStatement(ctx *FlowContext, env Env, statement *ast.Node) bo
 		// binding a reference to another name: the two now share it —
 		// directly (an assertion wrapper changes no reference), or
 		// embedded inside a literal
-		direct := decl.Initializer
-		for direct != nil && (ast.IsAsExpression(direct) || ast.IsParenthesizedExpression(direct)) {
-			if ast.IsAsExpression(direct) {
-				direct = direct.AsAsExpression().Expression
-			} else {
-				direct = direct.AsParenthesizedExpression().Expression
-			}
-		}
+		direct := peeledReference(decl.Initializer)
 		if direct != nil && ast.IsIdentifier(direct) && dataflowfacts.ReferenceTyped(ctx.P.Checker, direct) {
 			ctx.Aliases.Link(decl.Name().Text(), direct.Text())
 		}
@@ -120,6 +113,27 @@ func AnalyzeVariableStatement(ctx *FlowContext, env Env, statement *ast.Node) bo
 	return false
 }
 
+// peeledReference looks through the wrappers that change no reference
+// — parentheses, an `as` cast, a non-null assertion — to the
+// expression whose runtime value is the very same value. `x`, `(x)`,
+// `x as T` and `x!` all hand back the one object, so each of them
+// names the same reference for aliasing.
+func peeledReference(e *ast.Node) *ast.Node {
+	for e != nil {
+		switch {
+		case ast.IsParenthesizedExpression(e):
+			e = e.AsParenthesizedExpression().Expression
+		case ast.IsAsExpression(e):
+			e = e.AsAsExpression().Expression
+		case ast.IsNonNullExpression(e):
+			e = e.AsNonNullExpression().Expression
+		default:
+			return e
+		}
+	}
+	return e
+}
+
 // linkReturnedParameterAlias is the TS source's local function: a
 // call that returns one of its parameters is an alias — the binding
 // links to the identifier argument at that position.
@@ -146,8 +160,12 @@ func linkReturnedParameterAlias(ctx *FlowContext, env Env, bindingName string, d
 			})
 		}
 		scanReturns(body)
-	} else if ast.IsIdentifier(body) {
-		returned[body.Text()] = struct{}{}
+	} else if bodyValue := peeledReference(body); bodyValue != nil && ast.IsIdentifier(bodyValue) {
+		// an expression body returns its value directly, through the
+		// wrappers that change no reference — `(x) => (x)` and
+		// `(x) => x as T` hand back the parameter exactly as `(x) => x`
+		// does
+		returned[bodyValue.Text()] = struct{}{}
 	}
 	var callArguments []*ast.Node
 	if call.Arguments != nil {
@@ -164,14 +182,7 @@ func linkReturnedParameterAlias(ctx *FlowContext, env Env, bindingName string, d
 		if i >= len(callArguments) {
 			continue
 		}
-		argument := callArguments[i]
-		for argument != nil && (ast.IsParenthesizedExpression(argument) || ast.IsAsExpression(argument)) {
-			if ast.IsParenthesizedExpression(argument) {
-				argument = argument.AsParenthesizedExpression().Expression
-			} else {
-				argument = argument.AsAsExpression().Expression
-			}
-		}
+		argument := peeledReference(callArguments[i])
 		if argument != nil && ast.IsIdentifier(argument) {
 			if _, ok := env.Get(argument.Text()); ok {
 				ctx.Aliases.Link(bindingName, argument.Text())

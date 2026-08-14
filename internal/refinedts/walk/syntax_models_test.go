@@ -40,6 +40,8 @@ var modeledKinds = []ast.Kind{
 	ast.KindCallExpression,
 	ast.KindPropertyAccessExpression,
 	ast.KindElementAccessExpression,
+	ast.KindTaggedTemplateExpression,
+	ast.KindSuperKeyword,
 }
 
 var declinedRows = []struct {
@@ -48,7 +50,6 @@ var declinedRows = []struct {
 	unsupported bool
 }{
 	{ast.KindNewExpression, "new builds a value the walk does not model", true},
-	{ast.KindTaggedTemplateExpression, "a tagged template calls its tag, which the walk does not run", true},
 	{ast.KindClassExpression, "a class value is not modeled", true},
 	{ast.KindMetaProperty, "import.meta is the host's value, not the program's", true},
 	{ast.KindYieldExpression, "what a yield resumes with comes from the caller — not read", true},

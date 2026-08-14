@@ -50,6 +50,41 @@ func stringOf(values []float64) string {
 	return b.String()
 }
 
+// textIsAlwaysAString reports whether ToString on a value of this kind
+// LANDS a string on every run that completes (sec-tostring). A symbol
+// throws at step 2, and a bare-prototype object reaches ToPrimitive
+// with neither toString nor valueOf to call, so it throws too — those
+// two answer no. Every other kind either converts directly or reaches
+// a primitive through the prototype it carries. ADDED IN GO: the TS
+// source has no twin, because its union arm voids the whole reading
+// instead of widening one arm.
+func textIsAlwaysAString(known abstractdomain.AbstractValue) bool {
+	switch known.Kind {
+	case abstractdomain.KindSymbol:
+		return false
+	case abstractdomain.KindObject:
+		return !known.BareProto
+	case abstractdomain.KindValues, abstractdomain.KindSet, abstractdomain.KindNaN,
+		abstractdomain.KindUndef, abstractdomain.KindList, abstractdomain.KindCollection,
+		abstractdomain.KindPromise, abstractdomain.KindDate, abstractdomain.KindRegex,
+		abstractdomain.KindHostFunction, abstractdomain.KindBigints:
+		return true
+	case abstractdomain.KindPossiblyUndefined, abstractdomain.KindPossiblyNaN:
+		return known.Inner != nil && textIsAlwaysAString(*known.Inner)
+	case abstractdomain.KindKindUnion:
+		for _, arm := range known.Arms {
+			if !textIsAlwaysAString(arm) {
+				return false
+			}
+		}
+		return len(known.Arms) > 0
+	default:
+		// variable and unknown: the kind itself is not pinned, so
+		// whether ToString lands is not pinned either
+		return false
+	}
+}
+
 // TextOfKnown is textOfKnown in the TS source: the text a value
 // becomes, or (TextReading{}, false) where the conversion is not
 // modeled (a function's source text; an object whose own toString the
@@ -167,35 +202,67 @@ func TextOfKnown(decimal func(v float64) (string, bool), known abstractdomain.Ab
 		return TextReading{}, false
 	case abstractdomain.KindList:
 		// join(",") of each item's text; an undefined item joins as the
-		// empty string (sec-array.prototype.join step for undefined)
+		// empty string (sec-array.prototype.join step for undefined).
+		// Every item contributes its own reading's SET, so one item whose
+		// text is wider than a single string widens the join instead of
+		// voiding it: the pieces concatenate with the comma between them,
+		// and the whole join is exact only when every piece is.
 		pieces := make([][]float64, 0, len(known.Items))
+		sets := make([]refinementsets.RefinedSet, 0, len(known.Items))
+		hasExact := true
 		grade := abstractdomain.TrustLevelOf(known)
 		for _, item := range known.Items {
 			if item.Kind == abstractdomain.KindUndef {
 				pieces = append(pieces, []float64{})
+				sets = append(sets, refinementsets.StringTuple(""))
 				continue
 			}
 			inner, ok := TextOfKnown(decimal, item)
-			if !ok || !inner.HasExact {
+			if !ok {
+				// an item with no text reading at all: the join's own text
+				// is out of reach, since nothing bounds that position
 				return TextReading{}, false
 			}
 			grade = abstractdomain.MinTrustLevel(grade, inner.Grade)
-			pieces = append(pieces, inner.Exact)
+			if inner.HasExact {
+				pieces = append(pieces, inner.Exact)
+			} else {
+				hasExact = false
+				pieces = append(pieces, nil)
+			}
+			sets = append(sets, inner.Set)
 		}
 		comma := refinementsets.CodepointsOf(",")
-		var joined []float64
-		for i, piece := range pieces {
-			if i > 0 {
-				joined = append(joined, comma...)
+		commaSet := refinementsets.StringTuple(",")
+		if hasExact {
+			var joined []float64
+			for i, piece := range pieces {
+				if i > 0 {
+					joined = append(joined, comma...)
+				}
+				joined = append(joined, piece...)
 			}
-			joined = append(joined, piece...)
+			return TextReading{
+				Exact:    joined,
+				HasExact: true,
+				Set:      refinementsets.StringTuple(stringOf(joined)),
+				Grade:    grade,
+			}, true
 		}
-		return TextReading{
-			Exact:    joined,
-			HasExact: true,
-			Set:      refinementsets.StringTuple(stringOf(joined)),
-			Grade:    grade,
-		}, true
+		if len(sets) == 0 {
+			// an empty array joins to the empty string
+			return exactText("", grade), true
+		}
+		// the pieces concatenate right-nested, commas between them —
+		// the same shape a template literal's spans build
+		joinedSet := sets[len(sets)-1]
+		for i := len(sets) - 2; i >= 0; i-- {
+			joinedSet = refinementsets.MakeRefinedSet(refinementsets.Concatenation(
+				sets[i],
+				refinementsets.MakeRefinedSet(refinementsets.Concatenation(commaSet, joinedSet)),
+			))
+		}
+		return TextReading{Exact: nil, HasExact: false, Set: joinedSet, Grade: grade}, true
 	case abstractdomain.KindPossiblyUndefined:
 		inner, ok := TextOfKnown(decimal, *known.Inner)
 		if !ok {
@@ -219,12 +286,28 @@ func TextOfKnown(decimal func(v float64) (string, bool), known abstractdomain.Ab
 			Grade:    abstractdomain.MinTrustLevel(inner.Grade, abstractdomain.TrustLevelOf(known)),
 		}, true
 	case abstractdomain.KindKindUnion:
+		// a union's text is the SET of texts its arms spell, so an arm
+		// whose own text is out of reach widens that arm to the widest
+		// sound claim instead of voiding the union: every completing run
+		// of ToString on it lands a STRING (sec-tostring). An arm that
+		// can THROW instead of landing — a symbol (sec-tostring step 2)
+		// or a bare-prototype object, which has no toString and no
+		// valueOf to reach a primitive — has no text to widen to, and the
+		// union stays out of reach.
 		var set *refinementsets.RefinedSet
 		grade := abstractdomain.TrustLevelOf(known)
 		for _, arm := range known.Arms {
 			inner, ok := TextOfKnown(decimal, arm)
 			if !ok {
-				return TextReading{}, false
+				if !textIsAlwaysAString(arm) {
+					return TextReading{}, false
+				}
+				inner = TextReading{
+					Exact:    nil,
+					HasExact: false,
+					Set:      refinementsets.Strings,
+					Grade:    abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(arm), abstractdomain.TrustSpec),
+				}
 			}
 			grade = abstractdomain.MinTrustLevel(grade, inner.Grade)
 			if set == nil {

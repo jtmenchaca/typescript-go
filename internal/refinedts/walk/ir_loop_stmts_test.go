@@ -46,7 +46,7 @@ func loopStmtsSlotOf(t *testing.T, declaration *ast.Node, wanted string) int {
 			parameterNames[name.Text()] = struct{}{}
 		}
 	}
-	for index, slot := range localSlotsOf(body, locals, patterns, parameterNames) {
+	for index, slot := range localSlotsOf(nil, body, locals, patterns, parameterNames) {
 		if slot.Name == wanted {
 			return len(parameters) + index
 		}
@@ -164,9 +164,17 @@ func TestLoopStmts_AWhileWhoseBodyTheFoldDeclinesLowersAndRecordsComplete(t *tes
 	if len(loop.Stmts) == 0 {
 		t.Errorf("the loopStmts body is empty — the switch's chain must ride inside it")
 	}
-	if loop.Written != nil || loop.Cond != nil || loop.After != nil || loop.Body != nil {
+	// Written and Body are the EFFECT-bodied loop's fields and stay nil;
+	// Cond and After are shared, and `while (c > 0)` reads, so they carry
+	// the head for the exit refinement
+	if loop.Written != nil || loop.Body != nil {
 		t.Errorf("the loopStmts statement carries an effect-bodied loop's fields — "+
-			"Stmts is its whole carrying field: %+v", loop)
+			"Written and Body are not its: %+v", loop)
+	}
+	cSlot := loopStmtsSlotOf(t, declaration, "c")
+	if loop.After == nil || cSlot >= len(loop.After) || loop.After[cSlot] == nil {
+		t.Errorf("the loopStmts statement carries no falsity set at `c` — "+
+			"`while (c > 0)` leaves only when the head fails: %+v", loop.After)
 	}
 	// THE SOUNDNESS PIN. `s` is written inside the loop, so after a loop
 	// nothing bounded its exit is TOP: zero trips and a thousand are both
@@ -175,11 +183,20 @@ func TestLoopStmts_AWhileWhoseBodyTheFoldDeclinesLowersAndRecordsComplete(t *tes
 	// buys over the floor, which havocked every slot the loop mentioned.
 	sSlot := loopStmtsSlotOf(t, declaration, "s")
 	nSlot := loopStmtsSlotOf(t, declaration, "n")
-	cSlot := loopStmtsSlotOf(t, declaration, "c")
 	exits := loopStmtsWalk(t, kernel, lowered, map[int]float64{nSlot: 2, cSlot: 1})
 	if !exits[sSlot].Top {
 		t.Errorf("`s`'s exit is not TOP: %+v — the loop writes it under an unbounded trip count, "+
 			"so nothing about it survives", exits[sSlot])
+	}
+	// `c` the loop never writes AND the head reads, so its exit carries
+	// the falsity set: the loop left, so `c > 0` failed and `c <= 0`.
+	// The entry value 1 satisfies the head, so it cannot be an exit value
+	// — the intersection excludes it, which is exactly the refinement
+	// this unit adds over the plain havoc.
+	if exits[cSlot].Top {
+		t.Errorf("`c`'s exit is TOP — the loop never writes it and the head bounds its exit")
+	} else if kernel.Member(exits[cSlot].Set, []float64{1}) {
+		t.Errorf("`c`'s exit admits 1: %+v — the loop leaves only when `c > 0` fails", exits[cSlot].Set)
 	}
 	if exits[nSlot].Top {
 		t.Fatalf("`n`'s exit is TOP — the loop never writes it, so its entry knowledge must survive")

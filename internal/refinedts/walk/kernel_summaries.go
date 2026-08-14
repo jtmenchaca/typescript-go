@@ -573,10 +573,16 @@ func constEffectState(effect kernelbridge.LoopEffect) (kernelbridge.KnownStateWi
 // value the wire cannot spell declines THIS call (never the summary,
 // which quantifies over every entry).
 //
-// A NON-OBJECT argument for an expanded parameter declines the call —
-// the entries were laid out expecting the members, and no scalar spells
-// them. So does an object missing a declared member, or one whose field
-// is itself unspellable.
+// A NON-OBJECT argument for an expanded parameter fills every member
+// entry TOP, and an object that does not name a declared member fills
+// that one entry TOP — thisEntryState's rule below, which the class
+// bundle above already takes through BundleParamEntryStates. TOP, and
+// never absent: an argument the caller knows nothing about made no claim
+// that the member is undefined, and TOP is what the entry quantifier
+// already covers, so filling it costs precision and never soundness. The
+// SLOT VECTOR's shape is unaffected either way — one entry per declared
+// member goes out whatever the argument turned out to be, which is what
+// the layout agreement actually requires.
 //
 // Past the declared parameters the vector holds a METHOD's this-entries,
 // which the RECEIVER fills field by field (thisEntryStates below), or an
@@ -669,20 +675,15 @@ func summaryEntryStates(
 			}
 			continue
 		}
+		// each member entry reads the argument's own field, and TOPS where
+		// the argument is not a known object, does not name the member, or
+		// holds a value the wire cannot spell — thisEntryState's three
+		// fallbacks, which are the same three here. The count is one entry
+		// per declared member either way, so the vector the layout expects
+		// goes out whatever the argument was.
 		argument := argKnowns[index]
-		if argument.Kind != abstractdomain.KindObject {
-			return nil, false
-		}
 		for _, member := range members {
-			at, has := objectKeyIndex(argument, member.Key)
-			if !has {
-				return nil, false
-			}
-			wire, ok := StateOfKnown(argument.Keys[at].Value)
-			if !ok {
-				return nil, false
-			}
-			states = append(states, wire)
+			states = append(states, thisEntryState(argument, member.Key))
 		}
 	}
 	// the METHOD's this-entries, filled from the receiver's own field

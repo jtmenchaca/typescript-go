@@ -75,14 +75,20 @@ var SyntaxModels = map[ast.Kind]SyntaxModel{
 		Said:        "new builds a value the walk does not model",
 		Unsupported: true,
 	},
-	ast.KindTaggedTemplateExpression: {
-		Said:        "a tagged template calls its tag, which the walk does not run",
-		Unsupported: true,
-	},
+	ast.KindTaggedTemplateExpression: {Modeled: true},
+	// `super` reads as the base entered from outside this walk, and the
+	// call it sits under forgets what the base could have written
+	ast.KindSuperKeyword: {Modeled: true},
 	ast.KindClassExpression: {
+		// `new C()` on a class expression constructs from the class's own
+		// members (evaluate_new_expression.go reads any class-LIKE
+		// declaration); the class VALUE itself — the constructor
+		// function a bare `C` reference holds — is what stays unread
 		Said:        "a class value is not modeled",
 		Unsupported: true,
 	},
+	// the kind covers `import.meta` and `new.target`; new.target reads as
+	// the constructor-or-absent it is, so only import.meta declines here
 	ast.KindMetaProperty: {
 		Said:        "import.meta is the host's value, not the program's",
 		Unsupported: true,

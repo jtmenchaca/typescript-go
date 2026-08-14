@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -161,7 +162,11 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 	for _, paramName := range paramNames {
 		parameterNames[paramName] = struct{}{}
 	}
-	for _, slot := range localSlotsOf(body, locals, patterns, parameterNames) {
+	var slotChecker *checker.Checker
+	if context.Flow != nil && context.Flow.P != nil {
+		slotChecker = context.Flow.P.Checker
+	}
+	for _, slot := range localSlotsOf(slotChecker, body, locals, patterns, parameterNames) {
 		if _, exists := names[slot.Name]; exists {
 			continue
 		}

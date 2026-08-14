@@ -76,7 +76,20 @@ func JsValueExact(known abstractdomain.AbstractValue, noteGrade func(grade abstr
 	case abstractdomain.KindNaN:
 		return math.NaN()
 	case abstractdomain.KindObject:
-		// only a COMPLETE object names every key it has
+		// only a COMPLETE object names every key it has, and one
+		// non-exact key voids the whole map. Both consumers READ THE MAP
+		// AS TOTAL and would turn a partial one into a wrong answer, so
+		// the all-or-nothing rule is the sound one here:
+		//   - JSON.stringify writes every key it is handed and nothing
+		//     else, so a partial map prints a shorter object as if it
+		//     were the whole one.
+		//   - the zod parse evaluator reads a key's ABSENCE from the map
+		//     as the schema throwing (parse_evaluator's object arm), and
+		//     reads the unnamed keys to decide stripping versus
+		//     strictObject's throw — a partial map fabricates a throw.
+		// A caller that only needs ONE key does not come through here at
+		// all: object_key_access reads a stated key straight off
+		// known.Keys, incomplete object or not.
 		if !known.Complete {
 			return nil
 		}
@@ -90,6 +103,9 @@ func JsValueExact(known abstractdomain.AbstractValue, noteGrade func(grade abstr
 		}
 		return out
 	case abstractdomain.KindList:
+		// one non-exact item voids the whole list, for the same reason
+		// the object case gives: both consumers index the list by
+		// position and read it as total.
 		out := make([]JsValue, 0, len(known.Items))
 		for _, item := range known.Items {
 			value := JsValueExact(item, noteGrade)

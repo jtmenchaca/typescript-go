@@ -24,9 +24,10 @@ var (
 )
 
 // gatesTestedBy is gatesTestedBy in the TS source: the gates a
-// statement tests — `if` conditions, ternary conditions, and
-// short-circuit left sides, anywhere in its subtree. Cached per
-// statement: loop widening re-walks lists.
+// statement tests — `if` conditions, ternary conditions,
+// short-circuit left sides, and `while`/`for` conditions, anywhere
+// in its subtree. Cached per statement: loop widening re-walks
+// lists.
 func gatesTestedBy(ctx *FlowContext, statement *ast.Node) []gateKey {
 	statementGatesMu.Lock()
 	if held, ok := statementGatesCache[statement]; ok {
@@ -53,6 +54,29 @@ func gatesTestedBy(ctx *FlowContext, statement *ast.Node) []gateKey {
 			bin := node.AsBinaryExpression()
 			if bin.OperatorToken.Kind == ast.KindAmpersandAmpersandToken || bin.OperatorToken.Kind == ast.KindBarBarToken {
 				note(bin.Left)
+			}
+		}
+		// a loop condition contributes its leaves the same way an `if`
+		// condition does. A loop re-evaluates its test once per
+		// iteration, while the correlation split quantifies over one RUN
+		// of the statement list — so the split is only sound when the
+		// test's ToBoolean is fixed across the whole run. That is
+		// exactly what CorrelationGateOf's StableIn check enforces: it
+		// walks every statement in the list, the loop body among them,
+		// and a loop whose own body writes the tested place fails the
+		// check and contributes nothing. A loop over a place nothing
+		// writes tests the same value every iteration, so assuming it
+		// truthy and falsy in turn still partitions every run.
+		if ast.IsWhileStatement(node) {
+			note(node.AsWhileStatement().Expression)
+		}
+		if ast.IsDoStatement(node) {
+			note(node.AsDoStatement().Expression)
+		}
+		if ast.IsForStatement(node) {
+			// `for (;;)` has no condition
+			if condition := node.AsForStatement().Condition; condition != nil {
+				note(condition)
 			}
 		}
 		// a switch tests `scrutinee === <label>` once per literal case
@@ -128,6 +152,13 @@ func CorrelationGateOf(ctx *FlowContext, statements []*ast.Node, held []GateAssu
 			}
 			fn := dataflowfacts.EnclosingFunctionOf(statements[0])
 			if !dataflowfacts.StableIn(gate.Place, statements, fn) {
+				continue
+			}
+			// a two-place test — an equality or a relational comparison —
+			// holds its verdict for a run only when NEITHER side is
+			// rewritten, so the second place passes the same stability
+			// check as the first
+			if gate.Other != nil && !dataflowfacts.StableIn(*gate.Other, statements, fn) {
 				continue
 			}
 			return GateAssumption{Base: gate.Base, Detail: gate.Detail, Truthy: true}, true

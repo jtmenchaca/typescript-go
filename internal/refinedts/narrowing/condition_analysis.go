@@ -14,13 +14,8 @@
 // definedness, and a held string equality pins the EXACT tuple as a
 // working value.
 //
-// BLOCKED (partial): the TS source's narrowingsOf opens with a
-// const-name resolution pass over ResolveBoundCondition
-// (bound_condition.go) — unported there, pending FunctionWrites (see
-// that file's banner). That pass is dropped below; the rest of
-// narrowingsOf (the || literal-disjunction row, the &&/|| structural
-// composition, and the kernel-tree reading) ports whole. The TS
-// source's final branch — recording an UNREAD GUARD via
+// BLOCKED (partial): the TS source's final branch — recording an
+// UNREAD GUARD via
 // predicate_read.ts's mentionsTracked/recordUnreadGuard — is also
 // dropped: recordUnreadGuard needs assignability/decline_reasons.ts's
 // noteReason, which is outside this directory's allowed import set
@@ -96,12 +91,9 @@ func NarrowingsOf(
 	// a condition BOUND TO A NAME keeps every fact it encodes:
 	// `const ok = cond; if (ok)` — and the `ok === true`, `!ok`,
 	// `a && b` spellings over bound names — read as the conditions
-	// themselves wherever the resolution is sound. BLOCKED here (see
-	// the file banner): ResolveBoundCondition always answers
-	// (ResolvedCondition{}, false), so this pass never fires and the
-	// reading falls straight through to the normal reading below —
-	// the same fallback the TS source takes when resolution reads
-	// nothing.
+	// themselves wherever the resolution is sound. A condition that
+	// resolves to no bound name falls straight through to the normal
+	// reading below.
 	if resolved, ok := ResolveBoundCondition(c, condition); ok {
 		b := NarrowingsOf(c, resolved.Condition, isTracked, sideBounds, readElsewhere)
 		if len(b.WhenTrue) > 0 || len(b.WhenFalse) > 0 {
@@ -158,7 +150,7 @@ func NarrowingsOf(
 				} else if ast.IsStringLiteral(bin.Left) {
 					literal, tested = bin.Left, bin.Right
 				}
-				testedPlace := dataflowfacts.TrackedPlaceOf(tested, isTracked)
+				testedPlace := dataflowfacts.TrackedPlaceOfWith(c, tested, isTracked)
 				if literal == nil || testedPlace == nil {
 					readable = false
 					return

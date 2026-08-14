@@ -2,24 +2,6 @@
 // condition a const binding holds, and the value-copy bindings a
 // function's `const x = <place>` pairs make. Split from
 // condition_analysis.ts per the v2 tree.
-//
-// BLOCKED: resolveBoundCondition, boundConditionInitializer,
-// copyBindingsOf, and copySourcePlaceOf all read functionWrites
-// (reassigned_names.go's FunctionWrites), which needs
-// dataflowfacts.WrittenNamesOf — not ported (blocked on
-// service/program_resolution.ts's resolvesToDefaultLib; see
-// reassigned_names.go's banner and dataflowfacts/syntactic_facts.go's
-// own). Every caller of these four functions in this package is
-// therefore also unported: condition_analysis.go's narrowingsOf reads
-// resolveBoundCondition only at its TOP (the const-name resolution
-// pass) — that pass is dropped there, reported, and the rest of
-// narrowingsOf (the connective and kernel-tree reading) ports whole.
-// walk/assume_condition.go's ConditionEnvTransfersOf calls
-// CopyBindingsOf/CopySourcePlaceOf directly (this is where the TS
-// source's own applySide reads them) — both answer their sound
-// "nothing proven" fallback until functionWrites lands.
-// ConstCopiesOf itself has no such dependency and is ported below,
-// ready for when functionWrites lands.
 package narrowing
 
 import (
@@ -52,8 +34,20 @@ var (
 	constCopiesCache = map[*ast.Node][]ConstCopy{}
 )
 
-// ConstCopiesOf is constCopiesOf in the TS source.
-func ConstCopiesOf(fn *ast.Node) []ConstCopy {
+// ConstCopiesOf is constCopiesOf in the TS source, reading places WITH
+// the checker where the TS source read them without one: the
+// checker-carrying place reading resolves a const-bound index in a
+// copied initializer (`const i = 0; const c = xs[i]`) to the slot the
+// literal spells, so that copy rides the place's narrowings too. The TS
+// source's trackedPlaceOf takes no checker and reads no such copy —
+// this widening is deliberate; every copy read here still passes the
+// same FunctionWrites stability gates its callers apply.
+//
+// The memo keys on the function node alone and needs no checker in the
+// key: dataflowfacts.ConstChainNumber follows const-to-const symbol
+// links to a literal token, and for a fixed program those links and
+// that token are fixed, so one function node has one answer.
+func ConstCopiesOf(c *checker.Checker, fn *ast.Node) []ConstCopy {
 	constCopiesMu.Lock()
 	held, ok := constCopiesCache[fn]
 	constCopiesMu.Unlock()
@@ -67,7 +61,7 @@ func ConstCopiesOf(fn *ast.Node) []ConstCopy {
 			varDecl := node.AsVariableDeclaration()
 			if varDecl.Initializer != nil && ast.IsVariableDeclarationList(node.Parent) &&
 				(node.Parent.Flags&ast.NodeFlagsConst) != 0 {
-				place := dataflowfacts.TrackedPlaceOf(varDecl.Initializer, func(string) bool { return true })
+				place := dataflowfacts.TrackedPlaceOfWith(c, varDecl.Initializer, func(string) bool { return true })
 				if place != nil {
 					copies = append(copies, ConstCopy{Name: node.Name().Text(), Place: *place})
 				}
@@ -84,12 +78,54 @@ func ConstCopiesOf(fn *ast.Node) []ConstCopy {
 }
 
 // BoundConditionInitializer is boundConditionInitializer in the TS
-// source. BLOCKED — see the file banner: it needs FunctionWrites,
-// which is not ported. Always answers (nil, false) here.
+// source: the initializer behind `const ok = cond`, when testing `ok`
+// reads as testing `cond` — the binding is const in the same function,
+// and nothing the condition mentions can have moved (no mentioned name
+// is assigned in the function, no call can reach a mentioned reference
+// — a value-sorted argument travels by copy — and a default-library
+// method's receiver is never written by calling it). Answers nil when
+// the reading finds no such initializer.
 func BoundConditionInitializer(c *checker.Checker, e *ast.Node) *ast.Node {
-	_ = c
-	_ = e
-	return nil
+	if !ast.IsIdentifier(e) {
+		return nil
+	}
+	symbol := c.GetSymbolAtLocation(e)
+	if symbol == nil {
+		return nil
+	}
+	declaration := symbol.ValueDeclaration
+	if declaration == nil || !ast.IsVariableDeclaration(declaration) {
+		return nil
+	}
+	varDecl := declaration.AsVariableDeclaration()
+	if varDecl.Initializer == nil || !ast.IsVariableDeclarationList(declaration.Parent) ||
+		(declaration.Parent.Flags&ast.NodeFlagsConst) == 0 {
+		return nil
+	}
+	fn := dataflowfacts.EnclosingFunctionOf(e)
+	if fn == nil || fn != dataflowfacts.EnclosingFunctionOf(declaration) {
+		return nil
+	}
+	written := FunctionWrites(c, fn)
+	stable := true
+	var mentions func(node *ast.Node) bool
+	mentions = func(node *ast.Node) bool {
+		if !stable {
+			return true
+		}
+		if ast.IsIdentifier(node) {
+			if _, isWritten := written[node.Text()]; isWritten {
+				stable = false
+			}
+		}
+		node.ForEachChild(mentions)
+		return false
+	}
+	mentions(varDecl.Initializer)
+	if !stable {
+		return nil
+	}
+	return varDecl.Initializer
 }
 
 // ResolvedCondition is the { condition, flipped } pair
@@ -99,48 +135,124 @@ type ResolvedCondition struct {
 	Flipped   bool
 }
 
-// ResolveBoundCondition is resolveBoundCondition in the TS source.
-// BLOCKED — see the file banner: it reads BoundConditionInitializer,
-// which is not ported (needs FunctionWrites). Always answers
-// (ResolvedCondition{}, false) here — narrowingsOf's caller then falls
-// through to reading the condition as itself, exactly as the TS source
-// does when resolution reads nothing.
+// ResolveBoundCondition is resolveBoundCondition in the TS source:
+// resolve a tested expression to the CONDITION a const binding holds —
+// a bare name, or the name compared against a boolean literal
+// (`ok === true`, `ok !== false` and mirrors). Flipped says the
+// resolved condition's parity is inverted. Answers
+// (ResolvedCondition{}, false) when the expression resolves to no bound
+// condition; narrowingsOf's caller then reads the condition as itself.
 func ResolveBoundCondition(c *checker.Checker, e *ast.Node) (ResolvedCondition, bool) {
-	_ = c
-	_ = e
-	return ResolvedCondition{}, false
+	cond := Peeled(e)
+	if ast.IsIdentifier(cond) {
+		initializer := BoundConditionInitializer(c, cond)
+		if initializer == nil {
+			return ResolvedCondition{}, false
+		}
+		return ResolvedCondition{Condition: initializer, Flipped: false}, true
+	}
+	if !ast.IsBinaryExpression(cond) {
+		return ResolvedCondition{}, false
+	}
+	bin := cond.AsBinaryExpression()
+	eq := bin.OperatorToken.Kind == ast.KindEqualsEqualsEqualsToken
+	ne := bin.OperatorToken.Kind == ast.KindExclamationEqualsEqualsToken
+	if !eq && !ne {
+		return ResolvedCondition{}, false
+	}
+	// boolOf reads a side that is spelled `true` or `false`; the second
+	// answer says the side is a boolean literal at all.
+	boolOf := func(side *ast.Node) (bool, bool) {
+		if side.Kind == ast.KindTrueKeyword {
+			return true, true
+		}
+		if side.Kind == ast.KindFalseKeyword {
+			return false, true
+		}
+		return false, false
+	}
+	leftBool, leftIsBool := boolOf(bin.Left)
+	rightBool, rightIsBool := boolOf(bin.Right)
+	// exactly ONE side has to be the literal: neither, or both, reads as
+	// no bound condition
+	if leftIsBool == rightIsBool {
+		return ResolvedCondition{}, false
+	}
+	// the NAMED side is whichever side is not the literal; the literal
+	// value is the one side that spelled a boolean
+	named := bin.Left
+	literal := rightBool
+	if leftIsBool {
+		named = bin.Right
+		literal = leftBool
+	}
+	named = Peeled(named)
+	if !ast.IsIdentifier(named) {
+		return ResolvedCondition{}, false
+	}
+	initializer := BoundConditionInitializer(c, named)
+	if initializer == nil {
+		return ResolvedCondition{}, false
+	}
+	return ResolvedCondition{Condition: initializer, Flipped: ne != (literal == false)}, true
 }
 
 // CopyBindingsOf is copyBindingsOf in the TS source: names
 // `const x = <source place>` binds in the site's function with
 // neither the copy nor the source's root ever written there — x
-// still equals the place, so it rides the place's narrowings.
-// BLOCKED — see the file banner: it reads functionWrites, which
-// needs dataflowfacts.WrittenNamesOf (not ported). Always answers
-// nil here, the same "no copies proven" fallback the TS source's own
-// early returns (source.path.length === 0, fn === null) leave
-// standing when it has nothing to say — the caller in
-// walk/assume_condition.go simply applies no additional copy
-// narrowings.
+// still equals the place, so it rides the place's narrowings. Answers
+// nil when nothing is proven — a bare source place, no enclosing
+// function, or the source's root written in it — and the caller in
+// walk/assume_condition.go then applies no additional copy narrowings.
 func CopyBindingsOf(c *checker.Checker, site *ast.Node, source dataflowfacts.TrackedPlace) []string {
-	_ = c
-	_ = site
-	_ = source
-	return nil
+	if len(source.Path) == 0 {
+		return nil
+	}
+	fn := dataflowfacts.EnclosingFunctionOf(site)
+	if fn == nil {
+		return nil
+	}
+	written := FunctionWrites(c, fn)
+	if _, isWritten := written[source.Binding]; isWritten {
+		return nil
+	}
+	var names []string
+	for _, copy := range ConstCopiesOf(c, fn) {
+		if _, isWritten := written[copy.Name]; isWritten {
+			continue
+		}
+		if dataflowfacts.SameTrackedPlace(copy.Place, source) {
+			names = append(names, copy.Name)
+		}
+	}
+	return names
 }
 
 // CopySourcePlaceOf is copySourcePlaceOf in the TS source: the PLACE
 // `const x = <source place>` copied from, when neither x nor the
 // place's root is ever written in the site's function — x still
-// equals the place, so a narrowing on x holds of the place too.
-// BLOCKED — see the file banner: it reads functionWrites, which
-// needs dataflowfacts.WrittenNamesOf (not ported). Always answers
-// (TrackedPlace{}, false) here, the same "no source place proven"
-// fallback the TS source's own early returns (fn === null) leave
-// standing.
+// equals the place, so a narrowing on x holds of the place too. The
+// REVERSE of CopyBindingsOf: guard the copy, and the source place
+// narrows with it. Answers (TrackedPlace{}, false) when no source place
+// is proven.
 func CopySourcePlaceOf(c *checker.Checker, site *ast.Node, binding string) (dataflowfacts.TrackedPlace, bool) {
-	_ = c
-	_ = site
-	_ = binding
+	fn := dataflowfacts.EnclosingFunctionOf(site)
+	if fn == nil {
+		return dataflowfacts.TrackedPlace{}, false
+	}
+	written := FunctionWrites(c, fn)
+	if _, isWritten := written[binding]; isWritten {
+		return dataflowfacts.TrackedPlace{}, false
+	}
+	for _, copy := range ConstCopiesOf(c, fn) {
+		if copy.Name != binding {
+			continue
+		}
+		if len(copy.Place.Path) > 0 {
+			if _, rootWritten := written[copy.Place.Binding]; !rootWritten {
+				return dataflowfacts.TrackedPlace{Binding: copy.Place.Binding, Path: copy.Place.Path}, true
+			}
+		}
+	}
 	return dataflowfacts.TrackedPlace{}, false
 }

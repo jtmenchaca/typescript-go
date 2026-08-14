@@ -41,7 +41,7 @@ func PredicateCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(
 	anyPlace := false
 	if callExpr.Arguments != nil {
 		for _, a := range callExpr.Arguments.Nodes {
-			place := dataflowfacts.TrackedPlaceOf(a, isTracked)
+			place := dataflowfacts.TrackedPlaceOfWith(c, a, isTracked)
 			argumentPlaces = append(argumentPlaces, place)
 			if place != nil {
 				anyPlace = true
@@ -223,7 +223,7 @@ func AssertionCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(
 	anyPlace := false
 	if callExpr.Arguments != nil {
 		for _, a := range callExpr.Arguments.Nodes {
-			place := dataflowfacts.TrackedPlaceOf(a, isTracked)
+			place := dataflowfacts.TrackedPlaceOfWith(c, a, isTracked)
 			argumentPlaces = append(argumentPlaces, place)
 			if place != nil {
 				anyPlace = true

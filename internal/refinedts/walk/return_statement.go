@@ -8,6 +8,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
@@ -33,8 +34,11 @@ func AnalyzeReturnStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 	// arms separately: the join happens at the summary, where a
 	// recursive pass-through arm (`c ? base : f(x - 1)`) survives
 	// as a whole entry for the induction instead of laundering
-	// through the join
-	if rs.Expression != nil && ast.IsConditionalExpression(rs.Expression) && ctx.ReturnSink != nil && result == nil {
+	// through the join. A STATED result type takes the same split —
+	// each arm is what that path returns, so each checks against the
+	// stated type on its own — and then also checks the whole ternary,
+	// which is what the plain path below does.
+	if rs.Expression != nil && ast.IsConditionalExpression(rs.Expression) && ctx.ReturnSink != nil {
 		ternary := rs.Expression.AsConditionalExpression()
 		evaluateExpression(ctx, env, ternary.Condition)
 		// both arms sink whole (the summary joins them); each runs
@@ -44,8 +48,19 @@ func AnalyzeReturnStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 			WhenFalseScope: ternary.WhenFalse,
 			At:             rs.Expression,
 		}, false, false)
-		*ctx.ReturnSink = append(*ctx.ReturnSink, evaluateExpression(assumed.WhenTrue.Ctx, assumed.WhenTrue.Env, ternary.WhenTrue))
-		*ctx.ReturnSink = append(*ctx.ReturnSink, evaluateExpression(assumed.WhenFalse.Ctx, assumed.WhenFalse.Env, ternary.WhenFalse))
+		whenTrue := evaluateExpression(assumed.WhenTrue.Ctx, assumed.WhenTrue.Env, ternary.WhenTrue)
+		whenFalse := evaluateExpression(assumed.WhenFalse.Ctx, assumed.WhenFalse.Env, ternary.WhenFalse)
+		*ctx.ReturnSink = append(*ctx.ReturnSink, whenTrue)
+		*ctx.ReturnSink = append(*ctx.ReturnSink, whenFalse)
+		if result != nil {
+			// the check the stated type is owed: each arm against it at
+			// its own site, so the report names the arm that breaks it
+			CheckAssignability(ctx, whenTrue, *result, ternary.WhenTrue, "a returned value", nil)
+			CheckAssignability(ctx, whenFalse, *result, ternary.WhenFalse, "a returned value", nil)
+			// a parameter-dependent bound on the result is per-run — the
+			// sibling's state at THIS return is the evidence
+			CheckDependentReturn(ctx, env, rs.Expression, abstractdomain.JoinKnown(whenTrue, whenFalse), *result)
+		}
 		return true
 	}
 	known := silence.Residue()
