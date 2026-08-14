@@ -226,19 +226,57 @@ func DeclarationAssignment(context *LoweringContext, declarations []*ast.Node) (
 	if len(declarations) != 1 {
 		return AssignmentTarget{}, false
 	}
-	d := declarations[0].AsVariableDeclaration()
-	if !ast.IsIdentifier(d.Name()) || d.Initializer == nil {
+	return declaratorAssignment(context, declarations[0])
+}
+
+// declaratorAssignment lowers ONE declarator: an identifier name whose
+// slot exists, holding its initializer's effect — or, with NO
+// initializer, holding exactly the value the runtime gives it:
+// undefined. `let x;` is not an unknown, it is an absent constant.
+func declaratorAssignment(context *LoweringContext, declaration *ast.Node) (AssignmentTarget, bool) {
+	d := declaration.AsVariableDeclaration()
+	if !ast.IsIdentifier(d.Name()) {
 		return AssignmentTarget{}, false
 	}
 	target, ok := IndexOf(context, d.Name())
 	if !ok {
 		return AssignmentTarget{}, false
 	}
+	if d.Initializer == nil {
+		return AssignmentTarget{Target: target, Effect: kernelbridge.AbsentConst()}, true
+	}
 	effect, ok := RhsEffect(context, context.Sorts[target], d.Initializer)
 	if !ok {
 		return AssignmentTarget{}, false
 	}
 	return AssignmentTarget{Target: target, Effect: effect}, true
+}
+
+// MultiDeclarationAssignmentsOf lowers `let a = 1, b = 2` — a variable
+// statement with SEVERAL declarators, each an ordinary declarator the
+// single route already reads. All-or-nothing: one declarator no route
+// spells declines the statement to the next route (and ultimately the
+// floor), exactly as the whole statement declined before this existed.
+// Only statements with two or more declarators are this route's — a
+// single declarator keeps its existing routes, object literals and
+// calls included, which run earlier in the dispatch.
+func MultiDeclarationAssignmentsOf(context *LoweringContext, statement *ast.Node) ([]AssignmentTarget, bool) {
+	if !ast.IsVariableStatement(statement) {
+		return nil, false
+	}
+	declarations := statement.AsVariableStatement().DeclarationList.AsVariableDeclarationList().Declarations.Nodes
+	if len(declarations) < 2 {
+		return nil, false
+	}
+	out := make([]AssignmentTarget, 0, len(declarations))
+	for _, declaration := range declarations {
+		assignment, ok := declaratorAssignment(context, declaration)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, assignment)
+	}
+	return out, true
 }
 
 // AssignmentOf is assignmentOf in the TS source: an assignment's

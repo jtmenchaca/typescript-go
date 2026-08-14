@@ -245,6 +245,17 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 			continue
 		}
 		if index >= len(callArguments) {
+			// a DEFINITELY-MISSING argument on a DEFAULTED parameter rides
+			// the default itself — a CONST effect means the same thing in
+			// every binding space, so the callee's lowered default is this
+			// caller's argument effect verbatim. The body's definedness
+			// branch then joins two identical values and stays exact.
+			if effect, defaulted := calleeShape.DefaultEffects[len(args)]; defaulted {
+				if effect.Kind == kernelbridge.LoopEffectConst || effect.Kind == kernelbridge.LoopEffectConstState {
+					args = append(args, effect)
+					continue
+				}
+			}
 			args = append(args, kernelbridge.AbsentConst())
 			continue
 		}

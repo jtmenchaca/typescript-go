@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
 
 /* ── record parameters ───────────────────────────────────────────── */
@@ -323,10 +324,18 @@ func SummaryParameterEntries(parameter *ast.Node) ([]bodySlot, bool) {
 // (recordParamMembersIn's memo).
 func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlot, bool) {
 	pd := parameter.AsParameterDeclaration()
-	if pd.Name() == nil || !ast.IsIdentifier(pd.Name()) || pd.Initializer != nil || pd.DotDotDotToken != nil {
+	if pd.Name() == nil || !ast.IsIdentifier(pd.Name()) || pd.DotDotDotToken != nil {
 		return nil, false
 	}
 	if members, isRecord := recordParamMembersIn(ctx, parameter); isRecord {
+		// a defaulted RECORD parameter would need the default object
+		// applied member-wise across the expansion, which no route
+		// spells — the refusal stays for the record shape alone. A
+		// defaulted SCALAR parameter takes its one entry below, and the
+		// body lowering applies the default under a definedness branch.
+		if pd.Initializer != nil {
+			return nil, false
+		}
 		out := make([]bodySlot, 0, len(members))
 		for _, member := range members {
 			out = append(out, bodySlot{
@@ -1014,6 +1023,15 @@ func lowerSummaryBodyReporting(
 	// leaves and, below, the method's this-fields. Filled in slot order,
 	// which is the order the entries are appended in.
 	var bundleEntries []BundleEntry
+	// the DEFAULTED parameters' slots, remembered on the single-entry
+	// path and read by the prelude below, which applies each default
+	// under a definedness branch — the runtime's own rule: undefined,
+	// and only undefined, takes the default
+	type defaultedParameterSlot struct {
+		Slot        int
+		Initializer *ast.Node
+	}
+	var defaultedSlots []defaultedParameterSlot
 	for index, parameter := range parameters {
 		entries, entriesOk := SummaryParameterEntriesIn(ctx, parameter)
 		if !entriesOk {
@@ -1076,6 +1094,12 @@ func lowerSummaryBodyReporting(
 			if len(census.Reads) > 0 {
 				continue
 			}
+		}
+		if pd := parameter.AsParameterDeclaration(); pd.Initializer != nil {
+			defaultedSlots = append(defaultedSlots, defaultedParameterSlot{
+				Slot:        len(paramNames),
+				Initializer: pd.Initializer,
+			})
 		}
 		paramNames = append(paramNames, entries[0].Name)
 		// the site's sort where the arrow route supplied one, the
@@ -1229,6 +1253,38 @@ func lowerSummaryBodyReporting(
 		context.Typeofs = append(context.Typeofs, typeofTag)
 		return len(context.Bindings) - 1, true
 	}
+	// THE DEFAULT PRELUDE: each defaulted parameter applies its default
+	// exactly where the runtime does — only when the call left the entry
+	// undefined. The branch tests the slot's definedness (the kernel's
+	// IrTest.defined, covered by walk_sound), and the else arm assigns
+	// the lowered default; a supplied argument walks the empty then arm
+	// untouched. A default the effect grammar cannot spell havocs its
+	// OWN slot and names the construct — the body's other statements
+	// keep their knowledge.
+	var prelude []kernelbridge.IrStatement
+	defaultEffects := map[int]kernelbridge.LoopEffect{}
+	for _, defaulted := range defaultedSlots {
+		if effect, lowered := RhsEffect(context, context.Sorts[defaulted.Slot], defaulted.Initializer); lowered {
+			defaultEffects[defaulted.Slot] = effect
+			prelude = append(prelude, kernelbridge.IrStatement{
+				Kind: kernelbridge.IrStatementBranch,
+				On:   defaulted.Slot,
+				Test: kernelbridge.IrTestDefined,
+				Else: []kernelbridge.IrStatement{{
+					Kind:   kernelbridge.IrStatementAssign,
+					Target: defaulted.Slot,
+					Effect: effect,
+				}},
+			})
+			continue
+		}
+		NoteFirstHavoc(context, "a defaulted parameter")
+		prelude = append(prelude, kernelbridge.IrStatement{
+			Kind:   kernelbridge.IrStatementAssign,
+			Target: defaulted.Slot,
+			Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown},
+		})
+	}
 	stmts, statementsOk := LowerStatements(context, statements)
 	if !statementsOk {
 		// the statement walk names the construct it refused ON — the
@@ -1253,14 +1309,20 @@ func lowerSummaryBodyReporting(
 	// FirstHavoc is the set-once field the havoc routes fill: empty means
 	// every statement was READ, non-empty names the first construct that
 	// was stood in for. The door above turns the two into complete/porous.
+	// the prelude runs FIRST: a default is applied before any body
+	// statement can read the parameter
+	if len(prelude) > 0 {
+		stmts = append(prelude, stmts...)
+	}
 	return LoweredSummary{
-		Stmts:         stmts,
-		ParamCount:    len(paramNames),
-		DoneIndex:     doneIndex,
-		RetIndex:      retIndex,
-		SlotCount:     len(context.Bindings),
-		Table:         table.Blobs,
-		BundleEntries: bundleEntries,
+		Stmts:          stmts,
+		ParamCount:     len(paramNames),
+		DoneIndex:      doneIndex,
+		RetIndex:       retIndex,
+		SlotCount:      len(context.Bindings),
+		Table:          table.Blobs,
+		BundleEntries:  bundleEntries,
+		DefaultEffects: defaultEffects,
 	}, context.FirstHavoc, "", true
 }
 

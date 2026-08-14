@@ -56,6 +56,15 @@ type LoweredSummary struct {
 	// statements. A body with no composed calls carries an empty
 	// table.
 	Table []kernelbridge.SummaryBlob
+	// DefaultEffects: one lowered default per DEFAULTED parameter slot.
+	// The body already applies the default under a definedness branch;
+	// the compile joins branch arms (a summary quantifies over all
+	// entries), so a call whose argument is DEFINITELY missing fills its
+	// entry from this effect instead of absent — the join then collapses
+	// to the default exactly. Only a CONST or CONSTSTATE effect may
+	// cross a call boundary this way: every other kind indexes the
+	// callee's own binding space.
+	DefaultEffects map[int]kernelbridge.LoopEffect
 	// BundleEntries: one row per expanded bundle entry — this-fields
 	// and record-parameter leaves — in slot order. Path is the slot
 	// spelling ("this.container", "p.lo"), Index its slot index, and
@@ -486,6 +495,20 @@ func applySummary(
 	return promiseWrappedIfAsync(declaration, abstractdomain.AtTrustLevel(answer, floor)), true
 }
 
+// constEffectState reads a CONST or CONSTSTATE effect as the entry
+// state it spells — the only two effect kinds whose meaning does not
+// depend on any binding space, which is what lets a callee's lowered
+// default cross to a caller's entry vector.
+func constEffectState(effect kernelbridge.LoopEffect) (kernelbridge.KnownStateWire, bool) {
+	switch effect.Kind {
+	case kernelbridge.LoopEffectConst:
+		return kernelbridge.KnownStateWire{Set: effect.Set}, true
+	case kernelbridge.LoopEffectConstState:
+		return kernelbridge.KnownStateWire{Set: effect.Set, Absent: effect.Absent, Nan: effect.Nan}, true
+	}
+	return kernelbridge.KnownStateWire{}, false
+}
+
 // summaryEntryStates builds the entry states a call sends, one per
 // ENTRY — which is no longer one per declared parameter: a type-literal
 // parameter expands to one entry per member (SummaryParameterEntries,
@@ -541,6 +564,17 @@ func summaryEntryStates(
 		members, expanded := recordParamMembersIn(ctx, parameter)
 		if !expanded {
 			if index >= len(argKnowns) {
+				// a DEFINITELY-MISSING argument on a DEFAULTED parameter
+				// enters holding the default: the body's definedness branch
+				// then joins two identical values and the answer stays
+				// exact. Only a CONST or CONSTSTATE default can cross —
+				// anything else indexes the callee's binding space.
+				if effect, defaulted := summary.DefaultEffects[len(states)]; defaulted {
+					if state, constant := constEffectState(effect); constant {
+						states = append(states, state)
+						continue
+					}
+				}
 				states = append(states, absentState)
 				continue
 			}

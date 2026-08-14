@@ -376,6 +376,14 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			continue
 		}
 		dropHoists()
+		// `let a = 1, b = 2` — several ordinary declarators in one
+		// statement, each lowering by the single declarator's own rule.
+		if assignments, ok := MultiDeclarationAssignmentsOf(context, s); ok {
+			out = flush(out)
+			out = append(out, assignsOf(assignments)...)
+			continue
+		}
+		dropHoists()
 		// `x = count + f(y)` / `let x = f(g(y)) + 1`: the RHS reading hoists
 		// each call it met, left to right, and those statements go out ahead
 		// of the assignment that reads their temps

@@ -36,6 +36,88 @@ var mathOps = map[string]kernelbridge.LoopEffectOp{
 	"abs":   kernelbridge.LoopOpAbs,
 }
 
+// booleanBinaryTokens: every binary operator whose VALUE is exactly
+// true or false. The effect claims the two-value set {0,1} — exact as
+// a set, reading neither operand — so it is admissible only when
+// evaluating the operands cannot move state (writeAndCallFree).
+var booleanBinaryTokens = map[ast.Kind]struct{}{
+	ast.KindLessThanToken:                {},
+	ast.KindGreaterThanToken:             {},
+	ast.KindLessThanEqualsToken:          {},
+	ast.KindGreaterThanEqualsToken:       {},
+	ast.KindEqualsEqualsToken:            {},
+	ast.KindEqualsEqualsEqualsToken:      {},
+	ast.KindExclamationEqualsToken:       {},
+	ast.KindExclamationEqualsEqualsToken: {},
+	ast.KindInstanceOfKeyword:            {},
+	ast.KindInKeyword:                    {},
+}
+
+// logicalTokens: the short-circuit operators. `a && b` evaluates to a
+// on a falsy a and to b otherwise, so the JOIN of both operands' sets
+// admits every value the expression can take — a superset on the arm
+// the short-circuit picked, never an exclusion. Same for || and ??.
+var logicalTokens = map[ast.Kind]struct{}{
+	ast.KindAmpersandAmpersandToken: {},
+	ast.KindBarBarToken:             {},
+	ast.KindQuestionQuestionToken:   {},
+}
+
+// booleanPairEffect is the constant two-value set a boolean-valued
+// operator produces — true rides 1 and false rides 0, the same
+// encoding the true/false keyword constants below use.
+func booleanPairEffect() kernelbridge.LoopEffect {
+	return kernelbridge.LoopEffect{
+		Kind: kernelbridge.LoopEffectConst,
+		Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1})),
+	}
+}
+
+// writeAndCallFree answers whether evaluating the subtree can move any
+// state the lowering tracks: no write form (an assignment, ++/--,
+// delete) and no code the lowering does not run (a call, a `new`, an
+// await, a yield, a tagged template). A getter behind a plain property
+// read still runs code this test does not see — the same standing gap
+// the ternary's write-free condition and the opaque branch's test
+// accept.
+func writeAndCallFree(node *ast.Node) bool {
+	if node == nil {
+		return true
+	}
+	if ast.IsBinaryExpression(node) {
+		operator := node.AsBinaryExpression().OperatorToken.Kind
+		if operator >= ast.KindFirstAssignment && operator <= ast.KindLastAssignment {
+			return false
+		}
+	}
+	if ast.IsPrefixUnaryExpression(node) {
+		operator := node.AsPrefixUnaryExpression().Operator
+		if operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken {
+			return false
+		}
+	}
+	if ast.IsPostfixUnaryExpression(node) {
+		operator := node.AsPostfixUnaryExpression().Operator
+		if operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken {
+			return false
+		}
+	}
+	switch node.Kind {
+	case ast.KindDeleteExpression, ast.KindCallExpression, ast.KindNewExpression,
+		ast.KindAwaitExpression, ast.KindYieldExpression, ast.KindTaggedTemplateExpression:
+		return false
+	}
+	free := true
+	node.ForEachChild(func(child *ast.Node) bool {
+		if !writeAndCallFree(child) {
+			free = false
+			return true
+		}
+		return false
+	})
+	return free
+}
+
 // ContainsWrite is containsWrite in the TS source: does the subtree
 // perform any write? A shape mapped to an opaque effect must be
 // write-free, or the lowering's state would miss the write. Shared
@@ -348,10 +430,34 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 		if unary.Operator == ast.KindPlusToken {
 			return LowerEffectExpression(unary.Operand, reader)
 		}
+		// `!x` always produces exactly true or false — the two-value set,
+		// under the same moves-nothing gate the comparisons wear
+		if unary.Operator == ast.KindExclamationToken && writeAndCallFree(unary.Operand) {
+			return booleanPairEffect(), true
+		}
 		return reader.Opaque(e)
 	}
 	if ast.IsBinaryExpression(e) {
 		bin := e.AsBinaryExpression()
+		// a COMPARISON (and instanceof/in) always produces exactly true or
+		// false: the two-value set is the exact answer, and no operand is
+		// read — admitted only where evaluating the operands moves nothing.
+		// A gate failure falls to Opaque, exactly what the operator did
+		// before this arm existed.
+		if _, isBoolean := booleanBinaryTokens[bin.OperatorToken.Kind]; isBoolean && writeAndCallFree(e) {
+			return booleanPairEffect(), true
+		}
+		// a SHORT-CIRCUIT operator's value is one of its operands, so the
+		// join of both admits every run. A side that does not lower falls
+		// to Opaque — again the operator's old path.
+		if _, isLogical := logicalTokens[bin.OperatorToken.Kind]; isLogical {
+			a, aOk := LowerEffectExpression(bin.Left, reader)
+			b, bOk := LowerEffectExpression(bin.Right, reader)
+			if aOk && bOk {
+				return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectJoin, A: &a, B: &b}, true
+			}
+			return reader.Opaque(e)
+		}
 		op, ok := binOps[bin.OperatorToken.Kind]
 		if !ok {
 			return reader.Opaque(e)
