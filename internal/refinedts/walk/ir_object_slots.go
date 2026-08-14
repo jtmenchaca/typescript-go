@@ -672,10 +672,17 @@ func DestructuringAssignmentsOf(context *LoweringContext, statement *ast.Node) (
 		return nil, false
 	}
 	initializer := Unwrapped(decl.Initializer)
-	if !ast.IsIdentifier(initializer) {
+	var holder string
+	switch {
+	case ast.IsIdentifier(initializer):
+		holder = initializer.Text()
+	case initializer.Kind == ast.KindThisKeyword:
+		// `const { count } = this` — the method's own bundle spells its
+		// fields "this.<name>", so the same leaf read serves
+		holder = "this"
+	default:
 		return nil, false
 	}
-	holder := initializer.Text()
 	var out []AssignmentTarget
 	for _, element := range decl.Name().AsBindingPattern().Elements.Nodes {
 		binding := element.AsBindingElement()

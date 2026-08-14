@@ -186,13 +186,31 @@ func TestEscapeAudit_ThisCapturedByANestedArrow(t *testing.T) {
 	}
 }
 
-// the same capture READ-ONLY still escapes: the arrow may run after a
-// later store, so even a read inside one is not this body's read.
+// the same capture READ-ONLY is ADMITTED as a read: a read moves
+// nothing, so it may run at any later time without invalidating any
+// belief the body holds. What must hold instead: the field is recorded
+// as read, and nothing else is claimed.
 func TestEscapeAudit_ThisReadByANestedArrow(t *testing.T) {
 	census := auditMethodCensus(t,
 		"class C { count: number; m(xs: number[]) { xs.forEach(() => { use(this.count); }); } }")
+	if census.Escapes {
+		t.Errorf("a READ-ONLY arrow capture escaped: %+v — reading moves nothing", census)
+	}
+	if !hasField(census.Reads, "count") {
+		t.Errorf("the arrow's read of count was not recorded: %+v", census)
+	}
+	if len(census.Writes) != 0 {
+		t.Errorf("a read-only capture recorded writes: %+v", census)
+	}
+}
+
+// an arrow that CALLS a method keeps the escape: the method's body may
+// write fields at a time the scan cannot place.
+func TestEscapeAudit_AMethodCallingArrowStillEscapes(t *testing.T) {
+	census := auditMethodCensus(t,
+		"class C { count: number; m(xs: number[]) { xs.forEach(() => { this.bump(); }); } }")
 	if !census.Escapes {
-		t.Errorf("`this` read by a nested arrow did not escape: %+v", census)
+		t.Errorf("an arrow calling this.bump() did not escape: %+v — the method may write count", census)
 	}
 }
 
@@ -308,6 +326,41 @@ func TestEscapeAudit_ANestedPathStillReadsTheOuterField(t *testing.T) {
 		"class C { count: number; m() { return this.count.inner; } }")
 	if !hasField(census.Reads, "count") && !census.Escapes {
 		t.Errorf("`this.count.inner` recorded neither a read of count nor an escape: %+v", census)
+	}
+}
+
+/* ── destructuring FROM the receiver ────────────────────────────── */
+
+// `const { count } = this` is the read of count wearing a pattern —
+// admitted as exactly that read, never an escape.
+func TestEscapeAudit_DestructuringFromThisIsARead(t *testing.T) {
+	census := auditMethodCensus(t,
+		"class C { count: number; m(): number { const { count } = this; return count + 1; } }")
+	if census.Escapes {
+		t.Errorf("destructuring a declared field from this escaped: %+v", census)
+	}
+	if !hasField(census.Reads, "count") {
+		t.Errorf("the pattern's read of count was not recorded: %+v", census)
+	}
+}
+
+// a pattern with a DEFAULT, a REST, or an undeclared member keeps the
+// escape — those read shapes no slot spells.
+func TestEscapeAudit_DestructuringFromThisWithADefaultStillEscapes(t *testing.T) {
+	census := auditMethodCensus(t,
+		"class C { count: number; m(): number { const { count = 1 } = this; return count; } }")
+	if !census.Escapes {
+		t.Errorf("a defaulted pattern from this did not escape: %+v", census)
+	}
+	rest := auditMethodCensus(t,
+		"class C { count: number; m(): object { const { ...r } = this; return r; } }")
+	if !rest.Escapes {
+		t.Errorf("a rest pattern from this did not escape: %+v", rest)
+	}
+	undeclared := auditMethodCensus(t,
+		"class C { count: number; m(): number { const { other } = this; return 1; } }")
+	if !undeclared.Escapes {
+		t.Errorf("a pattern reading an undeclared member did not escape: %+v", undeclared)
 	}
 }
 

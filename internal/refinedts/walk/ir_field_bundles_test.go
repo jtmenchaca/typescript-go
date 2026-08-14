@@ -556,17 +556,35 @@ func TestFieldBundles_AnOptionalChainOnTheReceiverEscapes(t *testing.T) {
 	}
 }
 
-func TestFieldBundles_AnArrowCarriesTheReceiverOutAndEscapes(t *testing.T) {
-	// an arrow keeps the enclosing `this`, and its body runs at a time
-	// this scan cannot place
+func TestFieldBundles_AReadOnlyArrowCaptureIsARead(t *testing.T) {
+	// an arrow keeps the enclosing `this` and runs at a time this scan
+	// cannot place — but a READ moves nothing, so a capture whose every
+	// receiver mention is a declared-field read is admitted as reads
 	census := thisCensusOf(t, `
 		class Module {
 			depth: number;
 			load(): number { return xs.map(x => x + this.depth).length; }
 		}
 	`)
+	if census.Escapes {
+		t.Errorf("escapes = true, want false — the arrow only reads depth")
+	}
+	if !sameNames(census.Reads, []string{"depth"}) {
+		t.Errorf("reads = %v, want [depth]", fieldNames(census.Reads))
+	}
+}
+
+func TestFieldBundles_AWritingArrowCaptureStillEscapes(t *testing.T) {
+	// a capture that WRITES a field may store at any later time — that
+	// is exactly what the escape guards
+	census := thisCensusOf(t, `
+		class Module {
+			depth: number;
+			load(): number { xs.forEach(x => { this.depth = x; }); return 1; }
+		}
+	`)
 	if !census.Escapes {
-		t.Errorf("escapes = false, want true — an arrow closes over this and runs later")
+		t.Errorf("escapes = false, want true — the arrow stores into depth")
 	}
 }
 
@@ -603,14 +621,25 @@ func TestFieldBundles_ANamedReceiverReadsWritesAndEscapesTheSameWayThisDoes(t *t
 	}
 }
 
-func TestFieldBundles_ANamedReceiverCrossesIntoANestedFunctionAndEscapes(t *testing.T) {
+func TestFieldBundles_ANamedReceiverInANestedFunctionFollowsTheReadOnlyRule(t *testing.T) {
 	// unlike `this`, a closed-over NAME is still the same object inside
-	// any nested form
+	// any nested form — and the same admission applies: a closure whose
+	// every mention is a declared-field READ contributes reads, while
+	// one that writes keeps the escape
 	census := namedCensusOf(t,
 		`function f(wrapper: InstanceWrapper): number { const g = function () { return wrapper.metatype; }; return 1; }`,
 		"wrapper", []string{"metatype"})
-	if !census.Escapes {
-		t.Errorf("escapes = false, want true — the closure carries wrapper out of sight")
+	if census.Escapes {
+		t.Errorf("escapes = true, want false — the closure only reads metatype")
+	}
+	if !sameNames(census.Reads, []string{"metatype"}) {
+		t.Errorf("reads = %v, want [metatype]", fieldNames(census.Reads))
+	}
+	writing := namedCensusOf(t,
+		`function f(wrapper: InstanceWrapper): number { const g = function () { wrapper.metatype = 1; }; return 1; }`,
+		"wrapper", []string{"metatype"})
+	if !writing.Escapes {
+		t.Errorf("a writing closure did not escape: %+v", writing)
 	}
 }
 

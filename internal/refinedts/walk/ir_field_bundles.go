@@ -583,7 +583,13 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 			return false
 		}
 		// a nested function's body runs at a time this scan cannot place —
-		// a receiver mentioned inside carries the bundle out of sight.
+		// a receiver mentioned inside carries the bundle out of sight,
+		// UNLESS every mention is a plain READ of a declared field: a read
+		// moves nothing, so it may interleave at any later time without
+		// invalidating any belief the body holds. Those reads are recorded
+		// as the body's own; anything else inside — a write, a method
+		// call (whose body may write), a bare mention, a computed access —
+		// keeps the escape.
 		//
 		// `this` is the one spelling that does not always cross: only an
 		// ARROW keeps the enclosing `this`, while a function expression, a
@@ -597,10 +603,56 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 			if receiverName == "this" && rebindsThis {
 				return false
 			}
-			if mentionsReceiver(node, receiverName) {
-				census.Escapes = true
+			if !mentionsReceiver(node, receiverName) {
+				return false
 			}
+			if reads, readOnly := readOnlyFieldMentions(node, isReceiver, byName); readOnly {
+				for _, name := range reads {
+					noteRead(name)
+				}
+				return false
+			}
+			census.Escapes = true
 			return false
+		}
+		// `const { a, b } = this` — a destructuring READ of declared
+		// fields, wearing a pattern. Each plain element is the read of the
+		// field it names; a default, a rest, a computed key, or a nested
+		// pattern keeps the escape (the pattern reads shapes no slot
+		// spells).
+		if ast.IsVariableDeclaration(node) {
+			d := node.AsVariableDeclaration()
+			if d.Initializer != nil && isReceiver(Unwrapped(d.Initializer)) &&
+				d.Name() != nil && ast.IsObjectBindingPattern(d.Name()) {
+				for _, element := range d.Name().AsBindingPattern().Elements.Nodes {
+					binding := element.AsBindingElement()
+					if binding.DotDotDotToken != nil || binding.Initializer != nil {
+						census.Escapes = true
+						return false
+					}
+					if !ast.IsIdentifier(binding.Name()) {
+						census.Escapes = true
+						return false
+					}
+					read := binding.Name().Text()
+					if binding.PropertyName != nil {
+						if !ast.IsIdentifier(binding.PropertyName) {
+							census.Escapes = true
+							return false
+						}
+						read = binding.PropertyName.Text()
+					}
+					if !noteRead(read) {
+						// the pattern reads a member the field set never
+						// declared — no slot answers it
+						census.Escapes = true
+						return false
+					}
+				}
+				consumed[Unwrapped(d.Initializer)] = struct{}{}
+				consumed[d.Initializer] = struct{}{}
+				return false
+			}
 		}
 		// a LOOP BINDING through an expression: `for (this.count of xs)` and
 		// `for (this.count in o)` store into their target once per
@@ -770,6 +822,128 @@ func isPropertyStepName(node *ast.Node) bool {
 		return parent.AsPropertyAccessExpression().Name() == node
 	}
 	return false
+}
+
+// readOnlyFieldMentions walks a NESTED FUNCTION's subtree and answers
+// the declared fields it reads through the receiver — provided every
+// receiver mention is exactly such a read. The moment any mention is
+// anything else — a write target, a method-call callee (the method's
+// body may write), an optional or computed step, an undeclared member,
+// a bare mention — the answer is (nil, false) and the caller keeps the
+// escape.
+//
+// A read is admissible from inside a closure that runs at ANY later
+// time because reading moves nothing: no belief the enclosing body
+// holds about a field is invalidated by a read interleaving with it.
+func readOnlyFieldMentions(
+	node *ast.Node,
+	isReceiver func(*ast.Node) bool,
+	byName map[string]BundleField,
+) ([]string, bool) {
+	var reads []string
+	readOnly := true
+	var visit func(child *ast.Node) bool
+	visit = func(child *ast.Node) bool {
+		if !readOnly || child == nil {
+			return true
+		}
+		// any write form whose subtree mentions the receiver fails the
+		// admission — the target may be a field, and a field written at an
+		// unplaceable time is exactly what the escape guards
+		if ast.IsBinaryExpression(child) {
+			operator := child.AsBinaryExpression().OperatorToken.Kind
+			if operator >= ast.KindFirstAssignment && operator <= ast.KindLastAssignment {
+				if mentionsReceiverNode(child.AsBinaryExpression().Left, isReceiver) {
+					readOnly = false
+					return true
+				}
+			}
+		}
+		if ast.IsPrefixUnaryExpression(child) {
+			operator := child.AsPrefixUnaryExpression().Operator
+			if (operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken) &&
+				mentionsReceiverNode(child.AsPrefixUnaryExpression().Operand, isReceiver) {
+				readOnly = false
+				return true
+			}
+		}
+		if ast.IsPostfixUnaryExpression(child) {
+			operator := child.AsPostfixUnaryExpression().Operator
+			if (operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken) &&
+				mentionsReceiverNode(child.AsPostfixUnaryExpression().Operand, isReceiver) {
+				readOnly = false
+				return true
+			}
+		}
+		if ast.IsDeleteExpression(child) && mentionsReceiverNode(child, isReceiver) {
+			readOnly = false
+			return true
+		}
+		// a CALL whose callee is a receiver access is a METHOD call — the
+		// method's body may write fields this scan cannot see
+		if ast.IsCallExpression(child) {
+			callee := Unwrapped(child.AsCallExpression().Expression)
+			if ast.IsPropertyAccessExpression(callee) &&
+				isReceiver(Unwrapped(callee.AsPropertyAccessExpression().Expression)) {
+				readOnly = false
+				return true
+			}
+		}
+		// a plain declared-field READ: record it and step over the
+		// receiver spelling it consumed
+		if ast.IsPropertyAccessExpression(child) {
+			access := child.AsPropertyAccessExpression()
+			if isReceiver(Unwrapped(access.Expression)) {
+				if access.QuestionDotToken != nil || !ast.IsIdentifier(access.Name()) {
+					readOnly = false
+					return true
+				}
+				name := access.Name().Text()
+				if _, declared := byName[name]; !declared {
+					readOnly = false
+					return true
+				}
+				reads = append(reads, name)
+				return false
+			}
+		}
+		// any OTHER receiver occurrence — bare, computed, spread — fails
+		if isReceiver(child) && !isPropertyStepName(child) {
+			readOnly = false
+			return true
+		}
+		child.ForEachChild(visit)
+		return false
+	}
+	node.ForEachChild(visit)
+	if !readOnly {
+		return nil, false
+	}
+	return reads, true
+}
+
+// mentionsReceiverNode is mentionsReceiver over a receiver PREDICATE
+// rather than a name — the nested-function admission tests subtrees
+// with the census's own isReceiver.
+func mentionsReceiverNode(node *ast.Node, isReceiver func(*ast.Node) bool) bool {
+	if node == nil {
+		return false
+	}
+	if isReceiver(node) && !isPropertyStepName(node) {
+		return true
+	}
+	found := false
+	node.ForEachChild(func(child *ast.Node) bool {
+		if found {
+			return true
+		}
+		if mentionsReceiverNode(child, isReceiver) {
+			found = true
+			return true
+		}
+		return false
+	})
+	return found
 }
 
 // mentionsReceiver answers whether a subtree names the receiver at all —
