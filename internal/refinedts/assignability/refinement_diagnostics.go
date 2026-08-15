@@ -6,7 +6,7 @@
 //	                              with a counterexample behind it;
 //	                              on sequence shapes "not proven
 //	                              assignable", read conservatively)
-//	7002  cannot be determined  — nothing is proven about the value at
+//	7002  not yet determined    — nothing is proven about the value at
 //	                              a checked position; the one honest
 //	                              alert
 //	7003  the empty set         — an annotation denotes ∅
@@ -48,7 +48,7 @@ type RefinementDiagnostic struct {
 	Fix *RefinementFix
 }
 
-const AlertText = "Type cannot be determined. Narrow type for safe type inference."
+const AlertText = "Type not yet determined. Narrow type for safe type inference."
 
 // PowAlertStem is the `**` alert, at the checked position an unpinned
 // power reaches. Grounding: exponentiation transfers exactly on

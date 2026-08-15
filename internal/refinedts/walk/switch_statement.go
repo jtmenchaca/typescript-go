@@ -424,7 +424,16 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 		if brokeOut {
 			contributions = append(contributions, clauseEnv)
 		} else if !exited {
-			precise = false
+			// falling off the end composes into the NEXT clause's
+			// statements — unless there is no next clause (every later
+			// one, excluded or empty, shares nothing to fall into), in
+			// which case falling off the end is a normal switch exit,
+			// exactly like ending in a break
+			if lastRunnableClause(clauses, index, excluded) {
+				contributions = append(contributions, clauseEnv)
+			} else {
+				precise = false
+			}
 		}
 	}
 	if !precise {
@@ -491,6 +500,26 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 	}
 	ReplaceEnv(env, joined)
 	return false
+}
+
+// lastRunnableClause reports whether `index` is the last clause a
+// fallthrough could possibly reach: every clause after it is either
+// excluded by the correlation pass or carries no statements of its
+// own (an empty clause shares whatever comes after it, so it is
+// nothing to fall INTO). Falling off the end of such a clause is a
+// normal switch exit — there is no further body for the composed
+// write model to lose track of — so it joins in exactly like a bare
+// break, instead of degrading the whole switch to havoc.
+func lastRunnableClause(clauses []*ast.Node, index int, excluded int) bool {
+	for i := index + 1; i < len(clauses); i++ {
+		if i == excluded {
+			continue
+		}
+		if len(caseOrDefaultStatements(clauses[i])) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // caseOrDefaultStatements reads a CaseClause's or DefaultClause's

@@ -129,6 +129,13 @@ func darkSlotOf(source abstractdomain.AbstractValue) abstractdomain.AbstractValu
 // `slotOf(source, key: string)`; Go has no `string | number` union,
 // so the two shapes split into SlotOf and SlotOfIndex, per PORT.md's
 // no-union-twin convention.)
+//
+// A COMPLETE object's key set is exhaustive — its Keys list every key
+// the value has, so a name missing from that list is not "unknown
+// whether present," it is PROVABLY ABSENT (the same reading
+// objectRest gives the keys it drops). An incomplete source may still
+// carry the key under a computed or spread entry this read cannot
+// see, so a miss there stays honestly unknown.
 func SlotOf(source abstractdomain.AbstractValue, key string) abstractdomain.AbstractValue {
 	dark := darkSlotOf(source)
 	if source.Kind != abstractdomain.KindObject {
@@ -138,6 +145,9 @@ func SlotOf(source abstractdomain.AbstractValue, key string) abstractdomain.Abst
 		if k.Name == key {
 			return k.Value
 		}
+	}
+	if source.Complete {
+		return abstractdomain.Undef
 	}
 	return dark
 }

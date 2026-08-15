@@ -4,9 +4,9 @@
 // patterns go through the shared reader (bindings/destructuring.ts,
 // ported at walk/destructuring.go); the top-level object and array
 // arms keep the extra behavior that reader does not: OPAQUE array
-// rest, rest without seededBinding, defaults that residue only
-// unknown (not undef), skipped nested array patterns, and alias
-// linking for a destructured reference.
+// rest, rest without seededBinding, a default's value JOINED with the
+// member's own reading (not residued to unknown), skipped nested
+// array patterns, and alias linking for a destructured reference.
 
 package walk
 
@@ -24,6 +24,37 @@ func destructureInto(ctx *FlowContext, env Env, name *ast.Node, source abstractd
 	ReadDestructuring(name, source, func(text string, held abstractdomain.AbstractValue, at *ast.Node) {
 		WriteBinding(ctx, env, text, silence.SeededBinding(ctx.P.Checker, held, at), at, "an initialized value")
 	})
+}
+
+// withDefaultValue is a defaulted slot's true binding: the default
+// expression runs exactly when the slot is absent, so the bound name
+// is the JOIN of what the slot holds when present and what the
+// default evaluates to when it is not.
+//
+//   - held is exactly Undef (the member is PROVABLY absent — a
+//     complete source without that key, SlotOf's now-precise reading)
+//     — the default always runs; the binding IS the default's value,
+//     no join needed.
+//   - held is PossiblyUndefined(x) — the member may or may not be
+//     there; the binding is the join of x and the default's value.
+//   - held is a real value that is never absent — the default never
+//     runs; held stands as read.
+//   - held is generic Unknown (neither provably absent nor a read
+//     value) — whether the default ran cannot be told, so the
+//     honest answer stays unknown.
+func withDefaultValue(ctx *FlowContext, env Env, held abstractdomain.AbstractValue, initializer *ast.Node) abstractdomain.AbstractValue {
+	if held.Kind == abstractdomain.KindUndef {
+		return evaluateExpression(ctx, env, initializer)
+	}
+	if held.Kind == abstractdomain.KindPossiblyUndefined {
+		present := *held.Inner
+		defaultValue := evaluateExpression(ctx, env, initializer)
+		return abstractdomain.JoinKnown(present, defaultValue)
+	}
+	if held.Kind == abstractdomain.KindUnknown {
+		return silence.Residue()
+	}
+	return held
 }
 
 // BindDestructuringDeclaration is bindDestructuringDeclaration in
@@ -121,8 +152,8 @@ func bindObjectPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer
 		} else {
 			held = silence.Residue()
 		}
-		if be.Initializer != nil && held.Kind == abstractdomain.KindUnknown {
-			held = silence.Residue()
+		if be.Initializer != nil {
+			held = withDefaultValue(ctx, env, held, be.Initializer)
 		}
 		WriteBinding(ctx, env, be.Name().Text(), silence.SeededBinding(ctx.P.Checker, held, be.Name()), element, "an initialized value")
 		// a destructured REFERENCE is the holder's child — linked,

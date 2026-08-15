@@ -651,21 +651,50 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	})
 
 	// ── one checked pass against the certified facts ──────────────────
-	checkedStep := bodyEffect(candidate, ctx)
+	// `candidate` is the union of every body-ENTRY state — for a
+	// while/for it already carries the guard, since bodyEffect narrows
+	// every step through bodyTransfers before walking (bodyTransfers ==
+	// transfers there). A do-while's candidate carries the guard only
+	// on the OUTPUT of stepImage (transfers.ApplyWhenTrue there narrows
+	// what LEAVES the body, landing correctly on the entry to iteration
+	// 2+); iteration 1 enters raw, unconditionally, before the guard is
+	// ever tested — and that holds for a DECLARED name exactly as it
+	// does for a fixpointed one: SettleLoopCandidate sets a declared
+	// name's candidate to the full stated range regardless of what the
+	// raw entry actually is, so narrowing it by the guard here can
+	// still cut away a raw entry-1 value the guard would have refused.
+	// So: narrow every touched name by the guard, then rejoin the raw
+	// entry-1 value — the same entry-1-unrolled ∪ entry-2+-guarded
+	// shape premiseEnv already computes for the kernel premise, applied
+	// here to what the ONE reporting walk sees.
+	checkedEntry := candidate
+	if ast.IsDoStatement(loop) && transfers != nil {
+		checkedEntry = candidate.Clone()
+		transfers.ApplyWhenTrue(checkedEntry)
+		for _, name := range touched {
+			checkedEntry.Set(name, abstractdomain.JoinKnown(envOrResidue(checkedEntry, name), envOrResidue(env, name)))
+		}
+	}
+	checkedStep := bodyEffect(checkedEntry, ctx)
 
 	// ── what follows the loop ────────────────────────────────────────
 	// zero iterations leave the entry state; any number leave the
 	// invariant; the refuted condition narrows unless a break escapes.
-	// A do-while tests AFTER the body, so its exit states are the
-	// body's step image — which the body-window candidate no longer
-	// contains — and that image joins in before the refutation narrows.
+	// A do-while has NO zero-iteration exit — the body always runs at
+	// least once — so its only exit states are the body's step image,
+	// checkedStep, which already carries the held guard on entries 2+
+	// (checkedEntry, above) joined with the raw entry-1 value where
+	// that matters. Joining the RAW entry env or the wide entry-window
+	// candidate in on top, as a while/for legitimately does for their
+	// genuine zero-iteration case, would carry the unguarded full
+	// declared range back in for a do-while and undo checkedEntry's
+	// narrowing right here.
 	after := NewEnv()
 	env.Range(func(name string, known abstractdomain.AbstractValue) bool {
-		carried := abstractdomain.JoinKnown(known, envOrResidue(candidate, name))
 		if ast.IsDoStatement(loop) {
-			after.Set(name, abstractdomain.JoinKnown(carried, envOrResidue(checkedStep, name)))
+			after.Set(name, envOrResidue(checkedStep, name))
 		} else {
-			after.Set(name, carried)
+			after.Set(name, abstractdomain.JoinKnown(known, envOrResidue(candidate, name)))
 		}
 		return true
 	})

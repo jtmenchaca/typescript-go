@@ -262,7 +262,7 @@ func CheckObjectKnown(
 	// sequence shape or a scalar-layer form — is a member of it on
 	// no run, so the position REFUTES in plain words (the branch
 	// alerted before 2026-08-08, hiding the wire-vs-decoded cast
-	// class behind "cannot be determined"). An UNREAD or formless
+	// class behind the "not yet determined" alert). An UNREAD or formless
 	// placeholder set (a record's widest sound claim) states more
 	// than its forms say, so it keeps the honest alert.
 	if target.Kind == annotations.DeclaredSet && !target.Unread &&

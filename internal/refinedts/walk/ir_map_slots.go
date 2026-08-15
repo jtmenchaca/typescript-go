@@ -103,7 +103,7 @@
 // `Map.groupBy(items, keySelector)` — `constructionOfNewExpression`
 // only reads a `new Map(…)` / `new Set(…)` head, so this static call is
 // not recognized as a construction at all and NOT-YET-BUILT applies,
-// not "cannot be determined": recognizing it would need (1) a
+// not the 7002 "not yet determined" alert: recognizing it would need (1) a
 // construction reader for the `Map.groupBy` call shape alongside the
 // `new` one, (2) a callback-summary-driven fresh-collection size and
 // key family — the group count and the keys are whatever the
