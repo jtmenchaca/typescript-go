@@ -96,6 +96,14 @@ func lowerFlatteningRoutes(
 		return out, true
 	}
 	dropHoists()
+	// `a.pop()` / `a.shift()` — the length shrinks (never below zero);
+	// the element slot keeps its join.
+	if assignments, ok := ArrayShrinkAssignmentsOf(context, s); ok {
+		out = flush(out)
+		out = append(out, assignsOf(assignments)...)
+		return out, true
+	}
+	dropHoists()
 	// `a[i] = v` — the element slot joins; the length is untouched.
 	if assignments, ok := ArrayIndexWriteOf(context, s); ok {
 		out = flush(out)
@@ -114,6 +122,22 @@ func lowerFlatteningRoutes(
 	// `m.delete(k)` — the size may shrink (never below zero); the
 	// keys and values slots keep their joins.
 	if assignments, ok := MapDeleteAssignmentsOf(context, s); ok {
+		out = flush(out)
+		out = append(out, assignsOf(assignments)...)
+		return out, true
+	}
+	dropHoists()
+	// `m.clear()` — the size takes exactly zero; the keys and values
+	// slots return to the empty collection's state.
+	if assignments, ok := MapClearAssignmentsOf(context, s); ok {
+		out = flush(out)
+		out = append(out, assignsOf(assignments)...)
+		return out, true
+	}
+	dropHoists()
+	// `m.getOrInsert(k, v)` — the size may step, the keys and values
+	// slots join; a bound result reads the joined values slot.
+	if assignments, ok := MapGetOrInsertAssignmentsOf(context, s); ok {
 		out = flush(out)
 		out = append(out, assignsOf(assignments)...)
 		return out, true

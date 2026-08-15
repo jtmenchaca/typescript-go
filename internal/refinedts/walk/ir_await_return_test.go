@@ -32,6 +32,57 @@ func TestAwaitReturn_ReturnAwaitOfATrackedScalarWritesTheResultSlotAndRaisesTheF
 	}
 }
 
+func TestAwaitReturn_ReturnAwaitOfPromiseRejectWritesAThrownExit(t *testing.T) {
+	// ECMA-262 sec-promise.reject: reason is passed straight to
+	// [[Reject]] with no thenable check, so the rejection propagates
+	// before the return ever hands back a value — the sound answer is
+	// the same #ret := thrown / #done := {1} shape lowerThrowStatement
+	// writes for `throw e`, not the identity read
+	context := awaitScalarContext()
+	statements := awaitParse(t, `function f() { return await Promise.reject(s); }`)
+	body := statements[0].AsFunctionDeclaration().Body.AsBlock().Statements.Nodes
+	raise := kernelbridge.IrStatement{
+		Kind:   kernelbridge.IrStatementAssign,
+		Target: context.Result.Done,
+		Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst},
+	}
+	lowered, ok := AwaitReturnStatements(context, body[0].AsReturnStatement().Expression, raise)
+	if !ok {
+		t.Fatalf("AwaitReturnStatements(return await Promise.reject(s)) ok = false, want true")
+	}
+	if len(lowered) != 2 {
+		t.Fatalf("len(lowered) = %d, want 2 (the thrown ret write and the raise): %+v", len(lowered), lowered)
+	}
+	if lowered[0].Target != context.Result.Ret || lowered[0].Effect.Kind != kernelbridge.LoopEffectThrown {
+		t.Errorf("lowered[0] = %+v, want `assign #ret thrown`", lowered[0])
+	}
+	if lowered[1].Target != context.Result.Done {
+		t.Errorf("lowered[1] is not the caller's own raise: target = %d, want %d", lowered[1].Target, context.Result.Done)
+	}
+}
+
+func TestAwaitReturn_ReturnAwaitOfPromiseRejectInsideAnUncoveredTryDeclines(t *testing.T) {
+	// a reject inside a try this body's own try route does not cover
+	// keeps the decline, the same law an explicit `throw` obeys
+	// (ThrowReachesATry / ThrowCoveredByItsTry, lowering_to_kernel_ir_throw.go)
+	context := awaitScalarContext()
+	statements := awaitParse(t, `
+		function f() {
+			try {
+				return await Promise.reject(s);
+			} finally {
+				cleanup();
+			}
+		}
+	`)
+	fn := statements[0].AsFunctionDeclaration().Body.AsBlock().Statements.Nodes[0]
+	tryReturn := fn.AsTryStatement().TryBlock.AsBlock().Statements.Nodes[0]
+	raise := kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Done}
+	if _, ok := AwaitReturnStatements(context, tryReturn.AsReturnStatement().Expression, raise); ok {
+		t.Errorf("a Promise.reject return inside a finally-bearing try lowered — the try route does not cover it")
+	}
+}
+
 func TestAwaitReturn_WithoutAResultSlotThereIsNothingToReturnInto(t *testing.T) {
 	context := awaitScalarContext()
 	context.Result = nil

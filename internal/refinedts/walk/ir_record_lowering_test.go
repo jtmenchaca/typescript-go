@@ -345,6 +345,77 @@ func TestIrSwitchLowering_ASwitchWithNoDefaultLeavesTheChainsFinalElseEmpty(t *t
 	}
 }
 
+// TestIrSwitchLowering_ABooleanDiscriminantLowersItsCaseTrueChainAsABranch
+// pins the boolean case-label arm (lowering_to_kernel_ir_switch_labels.go):
+// over a boolean-sorted (number-sorted, typeof-boolean) slot, `case
+// true:` reads as the same IrTestEq the number sort already tests
+// under, true's own word 1.
+func TestIrSwitchLowering_ABooleanDiscriminantLowersItsCaseTrueChainAsABranch(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	context := recordLoweringContext(kernel,
+		[]string{"flag", "x"},
+		[]BindingKind{BindingKindNumber, BindingKindNumber})
+	context.Typeofs[0] = TypeofTagBoolean
+	stmts, ok := LowerStatements(context, loweringParse(t, `
+		switch (flag) {
+			case true: x = 1; break;
+			default: x = 2;
+		}
+	`))
+	if !ok {
+		t.Fatalf("LowerStatements(boolean switch) ok = false, want true")
+	}
+	if len(stmts) != 1 || stmts[0].Kind != kernelbridge.IrStatementBranch {
+		t.Fatalf("lowered to %+v, want one branch heading the chain", stmts)
+	}
+	if stmts[0].Test != kernelbridge.IrTestEq || stmts[0].W == nil || *stmts[0].W != 1 {
+		t.Errorf("first test = %+v, want IrTestEq against the word 1 (true)", stmts[0])
+	}
+	exit := kernel.Walk([]kernelbridge.KnownStateWire{
+		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1}))},
+		{Top: true},
+	}, stmts)
+	set := loweringSetOf(t, exit[1])
+	if !kernel.Member(set, []float64{1}) {
+		t.Errorf("member(x, [1]) = false, want true — true reaches the case true arm")
+	}
+	if !kernel.Member(set, []float64{2}) {
+		t.Errorf("member(x, [2]) = false, want true — false reaches the default")
+	}
+}
+
+// TestIrSwitchLowering_ABooleanCaseLabelOverAnUntrackedDiscriminantTakesTheHavocFloor
+// pins the soundness side of the same arm: a boolean label over a
+// discriminant with no tracked slot at all still declines the chain
+// and falls to the havoc floor, exactly like the plain-number
+// untracked-discriminant case above.
+func TestIrSwitchLowering_ABooleanCaseLabelOverAnUntrackedDiscriminantTakesTheHavocFloor(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	context := recordLoweringContext(kernel,
+		[]string{"x"},
+		[]BindingKind{BindingKindNumber})
+	stmts, ok := LowerStatements(context, loweringParse(t, `
+		switch (free) {
+			case true: x = 1; break;
+		}
+	`))
+	if !ok {
+		t.Fatalf("an untracked-discriminant boolean switch declined outright, want the havoc floor")
+	}
+	sawX := false
+	for _, s := range stmts {
+		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
+			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
+		}
+		if s.Target == 0 {
+			sawX = true
+		}
+	}
+	if !sawX {
+		t.Errorf("x (slot 0) was not havocked — the arm's write would be skipped")
+	}
+}
+
 func TestIrSwitchLowering_ASwitchOnAnUntrackedDiscriminantTakesTheHavocFloor(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	context := recordLoweringContext(kernel,

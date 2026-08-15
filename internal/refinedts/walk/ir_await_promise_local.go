@@ -54,10 +54,11 @@ func holdPromiseInnerSlot(context *LoweringContext, name string, slot int) {
 }
 
 // promiseLocalDeclarationOf is `const p = f(…)` where f resolves with a
-// blob and EVERY later use of p is `await p`. Such a local holds a
-// promise that is only ever settled, so it flattens to ONE slot spelled
-// "p.inner": the call statement's ret writes it here, and each `await p`
-// downstream reads its var (awaitIdentityEffect above).
+// blob, OR `const p = Promise.resolve(e)`, and EVERY later use of p is
+// `await p`. Such a local holds a promise that is only ever settled, so
+// it flattens to ONE slot spelled "p.inner": the initializer's write
+// lands it here, and each `await p` downstream reads its var
+// (awaitIdentityEffect above).
 //
 // Total-or-decline over p's uses, the same law every other flattening
 // here obeys: a p that is passed to something, returned, `.then`-ed, or
@@ -78,19 +79,7 @@ func promiseLocalDeclarationOf(context *LoweringContext, statement *ast.Node) ([
 	if !ast.IsIdentifier(declaration.Name()) || declaration.Initializer == nil {
 		return nil, false
 	}
-	call := Unwrapped(declaration.Initializer)
-	if !ast.IsCallExpression(call) {
-		return nil, false
-	}
-	// only a callee the registry answers for: a promise from anything
-	// else has no ret out-state to land in the flattened slot
-	callee := summaryCalleeOf(context, call)
-	if callee == nil || context.Flow == nil {
-		return nil, false
-	}
-	if _, hasBlob := SummaryBlobFor(context.Flow, callee); !hasBlob {
-		return nil, false
-	}
+	initializer := Unwrapped(declaration.Initializer)
 	name := declaration.Name().Text()
 	// a name already flattened is a second declaration of the same
 	// spelling — one name, one slot, so the second declines rather than
@@ -105,6 +94,33 @@ func promiseLocalDeclarationOf(context *LoweringContext, statement *ast.Node) ([
 	if !usesAreAllAwaits(body, declarations[0], name) {
 		return nil, false
 	}
+	// `const p = Promise.resolve(e)` — e's own reading, gated exactly as
+	// the await-position recognizer gates it (RhsEffect admits only
+	// shapes CannotBeThenable would clear)
+	if inner, isResolve := promiseResolveArgumentOf(initializer); isResolve {
+		slot, allocated := context.Allocate(name+promiseInnerSuffix, BindingKindUnknown, TypeofTagNone)
+		if !allocated {
+			return nil, false
+		}
+		effect, ok := RhsEffect(context, BindingKindUnknown, inner)
+		if !ok {
+			return nil, false
+		}
+		holdPromiseInnerSlot(context, name, slot)
+		return []kernelbridge.IrStatement{{Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: effect}}, true
+	}
+	if !ast.IsCallExpression(initializer) {
+		return nil, false
+	}
+	// only a callee the registry answers for: a promise from anything
+	// else has no ret out-state to land in the flattened slot
+	callee := summaryCalleeOf(context, initializer)
+	if callee == nil || context.Flow == nil {
+		return nil, false
+	}
+	if _, hasBlob := SummaryBlobFor(context.Flow, callee); !hasBlob {
+		return nil, false
+	}
 	// the inner slot's sort is UNKNOWN: nothing in the declaration
 	// spells what the callee settles to, and an unknown-sorted slot
 	// admits only the definedness test — which loses coverage, never
@@ -113,7 +129,7 @@ func promiseLocalDeclarationOf(context *LoweringContext, statement *ast.Node) ([
 	if !allocated {
 		return nil, false
 	}
-	lowered, ok := SummaryCallOrHavoc(context, call, slot)
+	lowered, ok := SummaryCallOrHavoc(context, initializer, slot)
 	if !ok {
 		return nil, false
 	}

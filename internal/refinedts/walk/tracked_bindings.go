@@ -63,9 +63,13 @@ func SpelledNameOf(e *ast.Node) (string, bool) {
 }
 
 // Unwrapped is the expression behind parens and casts, for sort
-// peeking.
+// peeking. `<T>e`, `e as T`, and `e satisfies T` all erase to `e` at
+// runtime exactly like a plain cast does — TypeScript emits no
+// runtime check for any of the three — so all three peel here
+// alongside `e!`.
 func Unwrapped(e *ast.Node) *ast.Node {
-	for ast.IsParenthesizedExpression(e) || ast.IsAsExpression(e) || ast.IsNonNullExpression(e) {
+	for ast.IsParenthesizedExpression(e) || ast.IsAsExpression(e) || ast.IsNonNullExpression(e) ||
+		ast.IsTypeAssertion(e) || ast.IsSatisfiesExpression(e) {
 		switch {
 		case ast.IsParenthesizedExpression(e):
 			e = e.AsParenthesizedExpression().Expression
@@ -73,6 +77,10 @@ func Unwrapped(e *ast.Node) *ast.Node {
 			e = e.AsAsExpression().Expression
 		case ast.IsNonNullExpression(e):
 			e = e.AsNonNullExpression().Expression
+		case ast.IsTypeAssertion(e):
+			e = e.AsTypeAssertion().Expression
+		case ast.IsSatisfiesExpression(e):
+			e = e.AsSatisfiesExpression().Expression
 		}
 	}
 	return e

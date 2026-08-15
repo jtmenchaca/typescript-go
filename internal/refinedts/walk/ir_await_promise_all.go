@@ -54,6 +54,20 @@ func promiseAllStatementOf(context *LoweringContext, statement *ast.Node) ([]ker
 // — its elements, or (nil, false) for any other shape. A spread, a named
 // array, a `.map` result, or a second argument all decline.
 func promiseAllArrayOf(node *ast.Node) ([]*ast.Node, bool) {
+	return promiseArrayLiteralArgumentOf(node, "all")
+}
+
+// promiseRaceArrayOf is the ARRAY LITERAL argument of `Promise.race([…])`
+// — its elements, or (nil, false) for any other shape. Same recognition
+// as promiseAllArrayOf, one property name apart.
+func promiseRaceArrayOf(node *ast.Node) ([]*ast.Node, bool) {
+	return promiseArrayLiteralArgumentOf(node, "race")
+}
+
+// promiseArrayLiteralArgumentOf is the one array-literal recognition
+// promiseAllArrayOf and promiseRaceArrayOf share: `Promise.<property>([…])`
+// with a single array-literal argument holding no spread and no elision.
+func promiseArrayLiteralArgumentOf(node *ast.Node, property string) ([]*ast.Node, bool) {
 	if !ast.IsCallExpression(node) {
 		return nil, false
 	}
@@ -62,14 +76,14 @@ func promiseAllArrayOf(node *ast.Node) ([]*ast.Node, bool) {
 	if !ast.IsPropertyAccessExpression(access) {
 		return nil, false
 	}
-	property := access.AsPropertyAccessExpression()
-	if property.QuestionDotToken != nil {
+	pa := access.AsPropertyAccessExpression()
+	if pa.QuestionDotToken != nil {
 		return nil, false
 	}
-	if !ast.IsIdentifier(property.Expression) || property.Expression.Text() != "Promise" {
+	if !ast.IsIdentifier(pa.Expression) || pa.Expression.Text() != "Promise" {
 		return nil, false
 	}
-	if !ast.IsIdentifier(property.Name()) || property.Name().Text() != "all" {
+	if !ast.IsIdentifier(pa.Name()) || pa.Name().Text() != property {
 		return nil, false
 	}
 	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
@@ -85,4 +99,43 @@ func promiseAllArrayOf(node *ast.Node) ([]*ast.Node, bool) {
 		}
 	}
 	return literal.AsArrayLiteralExpression().Elements.Nodes, true
+}
+
+// promiseRaceJoinEffect is `await Promise.race([a, b, …])` where every
+// element's own reading is admitted: race settles to whichever element
+// settles first (ECMA-262 sec-performpromiserace — each element is
+// wired through `then` straight to the shared capability's resolve/
+// reject, so the first to fire wins), so the sound answer is the JOIN
+// of every element's reading — the value could be any one of them.
+//
+// A call element hoists through HoistCallEffect (the same door
+// `f(x)` inside any other expression takes) into its own temp-slot
+// call statement, appended to context.Hoisted for the statement route
+// to flush ahead of the join; a scalar/literal element reads through
+// RhsEffect exactly as a Promise.resolve argument does.
+//
+// An EMPTY array declines: per sec-promise.race's own note, a race over
+// no elements never settles at all — there is no completion to give a
+// slot, so the floor is the honest answer, not a join of nothing.
+func promiseRaceJoinEffect(context *LoweringContext, elements []*ast.Node) (kernelbridge.LoopEffect, bool) {
+	if len(elements) == 0 {
+		return kernelbridge.LoopEffect{}, false
+	}
+	var joined kernelbridge.LoopEffect
+	for index, element := range elements {
+		unwrapped := Unwrapped(element)
+		effect, ok := HoistCallEffect(context, unwrapped)
+		if !ok {
+			effect, ok = RhsEffect(context, BindingKindUnknown, unwrapped)
+		}
+		if !ok {
+			return kernelbridge.LoopEffect{}, false
+		}
+		if index == 0 {
+			joined = effect
+			continue
+		}
+		joined = joinEffect(joined, effect)
+	}
+	return joined, true
 }

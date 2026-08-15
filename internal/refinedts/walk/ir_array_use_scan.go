@@ -96,6 +96,100 @@ func callbackMethodCallOf(node *ast.Node, name string) ([]*ast.Node, bool) {
 	return call.Arguments.Nodes, true
 }
 
+// readMethodArgCounts is the fixed argument count each non-callback,
+// non-mutating read method admits here — the shape the value readers
+// in ir_array_search.go and ir_array_join.go actually convert. A call
+// at any other argument count falls through to the whole-array decline
+// below, exactly like an unlisted method.
+//
+// `indexOf`/`lastIndexOf`/`includes` take a SECOND `fromIndex`
+// argument the readers do not convert (the drawn-from window they
+// answer holds only for a search of the WHOLE array), so only the
+// one-argument call is admitted. `at` and `join` each take exactly the
+// one argument their own clause names.
+var readMethodArgCounts = map[string]int{
+	"indexOf":     1,
+	"lastIndexOf": 1,
+	"includes":    1,
+	"at":          1,
+	"join":        1,
+}
+
+// arrayReadMethodCallOf is `a.<method>(arg)` for one of
+// readMethodArgCounts's names — the value-producing read methods that
+// consume the array's own occurrence whole and still scan their one
+// argument. Mirrors callbackMethodCallOf's shape one level down (a
+// fixed count instead of "one or more"). Answers the matched method's
+// own name alongside the argument, since a caller reading a SPECIFIC
+// method (arraySearchIndexEffect's "indexOf" vs "lastIndexOf") needs
+// to tell which one matched.
+func arrayReadMethodCallOf(node *ast.Node, name string) (method string, argument *ast.Node, ok bool) {
+	if !ast.IsCallExpression(node) {
+		return "", nil, false
+	}
+	call := node.AsCallExpression()
+	if call.QuestionDotToken != nil {
+		return "", nil, false
+	}
+	if !ast.IsPropertyAccessExpression(call.Expression) {
+		return "", nil, false
+	}
+	access := call.Expression.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return "", nil, false
+	}
+	if !ast.IsIdentifier(access.Expression) || access.Expression.Text() != name {
+		return "", nil, false
+	}
+	if !ast.IsIdentifier(access.Name()) {
+		return "", nil, false
+	}
+	method = access.Name().Text()
+	if readMethodArgCounts[method] != 1 {
+		return "", nil, false
+	}
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+		return "", nil, false
+	}
+	if ast.IsSpreadElement(call.Arguments.Nodes[0]) {
+		return "", nil, false
+	}
+	return method, call.Arguments.Nodes[0], true
+}
+
+// arrayShrinkCallOf is `a.pop()` / `a.shift()` — the zero-argument
+// shrinking calls ir_array_pop_shift.go converts.
+func arrayShrinkCallOf(node *ast.Node, name string) (string, bool) {
+	if !ast.IsCallExpression(node) {
+		return "", false
+	}
+	call := node.AsCallExpression()
+	if call.QuestionDotToken != nil {
+		return "", false
+	}
+	if !ast.IsPropertyAccessExpression(call.Expression) {
+		return "", false
+	}
+	access := call.Expression.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return "", false
+	}
+	if !ast.IsIdentifier(access.Expression) || access.Expression.Text() != name {
+		return "", false
+	}
+	if !ast.IsIdentifier(access.Name()) {
+		return "", false
+	}
+	method := access.Name().Text()
+	if method != "pop" && method != "shift" {
+		return "", false
+	}
+	if call.Arguments != nil && len(call.Arguments.Nodes) != 0 {
+		return "", false
+	}
+	return method, true
+}
+
 // loneSpreadNameOf is the name a LONE spread of an array literal
 // spreads: `[...a]` answers "a", and `[...a, x]` answers nothing.
 //
@@ -221,6 +315,18 @@ func usesAreAllArrayFormsFrom(body *ast.Node, declarationName *ast.Node, name st
 			for _, argument := range arguments {
 				visitIfPresent(argument)
 			}
+			return false
+		}
+		// `a.indexOf(v)` / `.lastIndexOf(v)` / `.includes(v)` / `.at(i)` /
+		// `.join(sep)` — a value read off the two slots (ir_array_search.go,
+		// ir_array_join.go); the one argument still scans.
+		if _, argument, isRead := arrayReadMethodCallOf(node, name); isRead {
+			visitIfPresent(argument)
+			return false
+		}
+		// `a.pop()` / `a.shift()` — the shrinking mutation
+		// (ir_array_pop_shift.go): no argument to scan.
+		if _, isShrink := arrayShrinkCallOf(node, name); isShrink {
 			return false
 		}
 		// `a.map(cb)` / `.filter` / `.forEach` / `.find` / `.flatMap` /

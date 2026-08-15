@@ -47,6 +47,12 @@ func RhsEffect(context *LoweringContext, targetSort BindingKind, e *ast.Node) (k
 		if seq, ok := SequenceEffectOf(context, e); ok {
 			return seq, true
 		}
+		// `a.join(sep)` on a flattened array — a string the sequence
+		// grammar cannot spell exactly; the sort-only row under its
+		// separator and element gates (ir_array_join.go).
+		if held, ok := ArrayJoinEffect(context, e, targetSort); ok {
+			return held, true
+		}
 	}
 	return EffectOf(context, e)
 }

@@ -107,8 +107,14 @@ func usesAreAllDeclaredKeySteps(
 			}
 		}
 		// `p.a.b` — a path; the root and every step name are consumed here,
-		// so none reaches the bare-identifier test below
-		if root, path, isPath := propertyPathOf(node); isPath && root == name {
+		// so none reaches the bare-identifier test below. `p?.a` reads as
+		// the plain step too: `p` is this record's OWN root, and a
+		// flattened record local is always defined, so the optional step
+		// changes nothing about which leaf is read. A DEEPER optional step
+		// (`p.a?.b`) is not this admit — propertyPathAdmittingRootOptionalStep
+		// only tolerates the `?.` adjacent to the root itself, so `p.a?.b`
+		// still falls through to the whole-name refusal below.
+		if root, path, isPath := propertyPathAdmittingRootOptionalStep(node); isPath && root == name {
 			if _, isDeclared := declared[strings.Join(path, ".")]; !isDeclared {
 				ok = false // a leaf the literal never gave a slot
 				return true

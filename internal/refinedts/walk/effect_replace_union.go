@@ -54,10 +54,11 @@ import (
 //     sees, so this side establishes them and the wire name carries them
 //     -- exactly LoopOpSplitElemSafe's arrangement, and not
 //     LoopOpSliceBmp's, whose premise is the receiver's own set.
-//   - A FUNCTION replacement declines outright: its text is the ToString
-//     of a Call (_functionalReplace_ true), so no set holds it and the
-//     union has no second half. This is the one part of the old decline
-//     that stands.
+//   - A FUNCTION replacement takes no part in the union row: its text is
+//     the ToString of a Call (_functionalReplace_ true), so no set holds
+//     it and the union has no second half. It earns the FUNCTIONAL-
+//     REPLACER row instead (below the union row's gates in the body),
+//     gated on its own write set rather than declining outright.
 //
 // A REGEX pattern keeps the closure -- its matches are still spans of
 // the receiver -- and a regex carrying the `u` or `v` flag ALSO earns
@@ -143,19 +144,31 @@ import (
 // non-`u`/`v` regexes, the astral-unsafe literals, and the
 // `replaceAll` whose replacement outgrows its pattern.
 //
-// Two shapes stay refused ahead of both rows:
+// A THIRD ROW stands behind a FUNCTION replacement specifically:
+// LoopOpReplaceSortThrowSafe. The union and sort rows both need the
+// replacement held as a set of scalars, which a function's return value
+// never is; what the clause still guarantees on that shape is "a word on
+// every completing run, or a thrown exit" -- sec-string.prototype.replace,
+// sec-string.prototype.replaceall and sec-regexp.prototype-%symbol.replace%
+// each read `_functionalReplace_ := IsCallable(_replaceValue_)` and, where
+// true, compute the replacement as `? ToString(? Call(_replaceValue_,
+// ...))` -- caller code this side cannot see the body of, so it may throw,
+// but every run that DOES complete reaches the same three-piece String
+// concatenation the sort row claims a word for. The row is gated on the
+// replacer's own write set (ClosureEscapesTrackedWrite, effect_closure_
+// writes.go): a SCALAR write set is coverable and is havocked alongside
+// the row (ClosureWriteSlots); a write through a FLATTENED capture the
+// census cannot spell -- a member write with no slot, or a mention of a
+// flattened local -- is not coverable (closureMutatesFlattenedCapture,
+// ir_assignment_closure_values.go, the same gate FunctionValuedDeclarationOf
+// asks of a closure it hands over) and the refusal stands.
+//
+// One shape stays refused ahead of every row:
 //
 //   - `replaceAll` at a regex literal whose flags LACK `g`:
 //     sec-string.prototype.replaceall step 2.a.iii throws a TypeError
 //     there, so "never a thrown exit" is exactly false and no row
 //     holds. The refusal answers `top`, which admits the throw.
-//   - a FUNCTION replacement (the named refusal in the body): the
-//     replacer is caller code, so the true claim at that site is
-//     "string sort, MAY THROW, with the replacer's writes havoced" --
-//     and the kernel's sequence route has no spelling for a word
-//     beside a thrown flag (`WalkStep` for `seqUn` produces only
-//     value outcomes; transfers/walk_correct.lean), so the claim has
-//     no wire form to ride. Until it does, the refusal stands.
 func replaceUnionEffect(context *LoweringContext, call *ast.CallExpression) (kernelbridge.LoopEffect, bool) {
 	if call.QuestionDotToken != nil || !ast.IsPropertyAccessExpression(call.Expression) {
 		return kernelbridge.LoopEffect{}, false
@@ -206,19 +219,65 @@ func replaceUnionEffect(context *LoweringContext, call *ast.CallExpression) (ker
 	}
 	replacement, replacementOk := exactSyntacticStringOf(call.Arguments.Nodes[1])
 	if !replacementOk {
-		// A FUNCTION replacement (and any replacement this side cannot
-		// read exactly) stays refused, and this is the claim the refusal
-		// declines to make: the result would be STRING-SORTED and the
-		// call MAY THROW -- the replacer is caller code, invoked
+		// A FUNCTION replacement earns the FUNCTIONAL-REPLACER row,
+		// gated on its write set: the replacer is caller code, invoked
 		// mid-operation (? Call, then ? ToString of its result), so it
-		// can throw and it can WRITE, and the value claim would be sound
-		// only with the replacer's write set havoced
-		// (ClosureEscapesTrackedWrite names the boundary). The kernel's
-		// sequence route has no spelling for "a word, or a thrown exit"
-		// -- `WalkStep` for `seqUn` produces only value outcomes -- so
-		// that claim has no wire form to ride, and until it does the
-		// refusal stands and answers `top`.
-		return kernelbridge.LoopEffect{}, false
+		// can throw and it can WRITE. `LoopOpReplaceSortThrowSafe`
+		// carries exactly the value claim that survives that -- a word
+		// on every completing run, or a thrown exit -- and the write
+		// half is covered by havocking the replacer's own write set
+		// (ClosureEscapesTrackedWrite names the boundary shared with
+		// every other escaping-closure call site: the closure runs at a
+		// time no statement here places, so every name it writes must
+		// be havocked before the claim is trusted).
+		//
+		// Any OTHER unreadable replacement -- a variable, a computed
+		// expression that is not a function literal -- stays refused:
+		// this side has no write-set reading for it at all, so the
+		// gated claim has no premise to earn.
+		replacer := Unwrapped(call.Arguments.Nodes[1])
+		if replacer == nil || !ast.IsFunctionLike(replacer) || replacer.Body() == nil {
+			return kernelbridge.LoopEffect{}, false
+		}
+		// a statement stream must exist to hoist the havoc into -- the
+		// same first gate HoistCallEffect asks, since an append to
+		// context.Hoisted with no stream to flush it is silently lost
+		if !context.CanHoist {
+			return kernelbridge.LoopEffect{}, false
+		}
+		// THE UNCOVERABLE SHAPE, refused ahead of the row exactly as
+		// FunctionValuedDeclarationOf refuses it: a write through a
+		// FLATTENED capture the assigned-name census cannot spell --
+		// a member/element write with no slot of its own, or a mention
+		// of a flattened local anywhere in the body (closureMutatesFlat
+		// tenedCapture, ir_assignment_closure_values.go). ClosureWriteSlots
+		// would UNDER-count that move, which is the unsound direction, so
+		// the claim earns no row there and the refusal stands.
+		if closureMutatesFlattenedCapture(context, replacer.Body()) {
+			return kernelbridge.LoopEffect{}, false
+		}
+		receiver, receiverOk := sequenceEffectOf(context, access.Expression, true /*inSequence*/)
+		if !receiverOk {
+			return kernelbridge.LoopEffect{}, false
+		}
+		// THE COVERABLE SHAPE: every SCALAR name the replacer writes is
+		// havocked alongside the row -- ClosureEscapesTrackedWrite names
+		// the boundary this shares with every other escaping-closure call
+		// site, and ClosureWriteSlots is the exact set it resolves to.
+		// Both read closureAssignedNames' contract: the node handed in
+		// must be the closure ITSELF (`replacer`), not its body alone --
+		// closureAssignedNames only starts collecting once its walk finds
+		// a function-like node to descend into, so a bare block sees no
+		// writes at its own top level.
+		if ClosureEscapesTrackedWrite(context, replacer) {
+			context.Hoisted = append(context.Hoisted,
+				havocAssignments(ClosureWriteSlots(context, replacer))...)
+		}
+		return kernelbridge.LoopEffect{
+			Kind: kernelbridge.LoopEffectSeqUnary,
+			Op:   kernelbridge.LoopOpReplaceSortThrowSafe,
+			A:    &receiver,
+		}, true
 	}
 	receiver, receiverOk := sequenceEffectOf(context, access.Expression, true /*inSequence*/)
 	if !receiverOk {

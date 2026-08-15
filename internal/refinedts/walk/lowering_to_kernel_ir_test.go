@@ -284,6 +284,99 @@ func TestLoweringToKernelIR_AForLoopHeadLowersInitComparisonAndStepCertifyThroug
 	}
 }
 
+// TestLoweringToKernelIR_AngleBracketAndAsAssertionsUnwrapIdentically
+// pins that `<T>e` and `e as T` lower the same statements — both erase
+// at runtime exactly like a plain read, so a read through either
+// spelling reaches the same assignment IR the unwrapped read does
+// (Unwrapped, tracked_bindings.go).
+func TestLoweringToKernelIR_AngleBracketAndAsAssertionsUnwrapIdentically(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	angleContext := &LoweringContext{
+		Bindings: []string{"x", "y"},
+		Sorts:    []BindingKind{BindingKindNumber, BindingKindNumber},
+		Narrow:   kernel.Narrow,
+	}
+	angleStmts, angleOk := LowerStatements(angleContext, loweringParse(t, `y = <number>x;`))
+	if !angleOk {
+		t.Fatalf("LowerStatements(<number>x) ok = false, want true")
+	}
+	asContext := &LoweringContext{
+		Bindings: []string{"x", "y"},
+		Sorts:    []BindingKind{BindingKindNumber, BindingKindNumber},
+		Narrow:   kernel.Narrow,
+	}
+	asStmts, asOk := LowerStatements(asContext, loweringParse(t, `y = x as number;`))
+	if !asOk {
+		t.Fatalf("LowerStatements(x as number) ok = false, want true")
+	}
+	if len(angleStmts) != len(asStmts) {
+		t.Fatalf("len(angleStmts) = %d, len(asStmts) = %d, want equal", len(angleStmts), len(asStmts))
+	}
+	for i := range angleStmts {
+		if angleStmts[i].Kind != asStmts[i].Kind || angleStmts[i].Target != asStmts[i].Target ||
+			angleStmts[i].Effect.Kind != asStmts[i].Effect.Kind || angleStmts[i].Effect.Index != asStmts[i].Effect.Index {
+			t.Errorf("stmts[%d] = %+v, want %+v (identical to the `as` spelling)", i, angleStmts[i], asStmts[i])
+		}
+	}
+	// walked, both spellings pass the read through unchanged
+	exit := kernel.Walk([]kernelbridge.KnownStateWire{
+		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{5}))},
+		{Top: true},
+	}, angleStmts)
+	y := exit[1]
+	if y.Top {
+		t.Fatalf("y.Top = true, want false")
+	}
+	if !kernel.Member(loweringSetOf(t, y), []float64{5}) {
+		t.Errorf("member(y, [5]) = false, want true — <number>x reads x through")
+	}
+}
+
+// TestLoweringToKernelIR_SatisfiesExpressionUnwrapsLikeAsAndAngleBracket
+// pins `e satisfies T` beside item 1's two spellings: the same
+// erasure argument, the same Unwrapped arm.
+func TestLoweringToKernelIR_SatisfiesExpressionUnwrapsLikeAsAndAngleBracket(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	satisfiesContext := &LoweringContext{
+		Bindings: []string{"x", "y"},
+		Sorts:    []BindingKind{BindingKindNumber, BindingKindNumber},
+		Narrow:   kernel.Narrow,
+	}
+	satisfiesStmts, satisfiesOk := LowerStatements(satisfiesContext, loweringParse(t, `y = x satisfies number;`))
+	if !satisfiesOk {
+		t.Fatalf("LowerStatements(x satisfies number) ok = false, want true")
+	}
+	asContext := &LoweringContext{
+		Bindings: []string{"x", "y"},
+		Sorts:    []BindingKind{BindingKindNumber, BindingKindNumber},
+		Narrow:   kernel.Narrow,
+	}
+	asStmts, asOk := LowerStatements(asContext, loweringParse(t, `y = x as number;`))
+	if !asOk {
+		t.Fatalf("LowerStatements(x as number) ok = false, want true")
+	}
+	if len(satisfiesStmts) != len(asStmts) {
+		t.Fatalf("len(satisfiesStmts) = %d, len(asStmts) = %d, want equal", len(satisfiesStmts), len(asStmts))
+	}
+	for i := range satisfiesStmts {
+		if satisfiesStmts[i].Kind != asStmts[i].Kind || satisfiesStmts[i].Target != asStmts[i].Target ||
+			satisfiesStmts[i].Effect.Kind != asStmts[i].Effect.Kind || satisfiesStmts[i].Effect.Index != asStmts[i].Effect.Index {
+			t.Errorf("stmts[%d] = %+v, want %+v (identical to the `as` spelling)", i, satisfiesStmts[i], asStmts[i])
+		}
+	}
+	exit := kernel.Walk([]kernelbridge.KnownStateWire{
+		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{9}))},
+		{Top: true},
+	}, satisfiesStmts)
+	y := exit[1]
+	if y.Top {
+		t.Fatalf("y.Top = true, want false")
+	}
+	if !kernel.Member(loweringSetOf(t, y), []float64{9}) {
+		t.Errorf("member(y, [9]) = false, want true — x satisfies number reads x through")
+	}
+}
+
 func TestLoweringToKernelIR_UnreadableStatementsHavocWhatTheyCouldHaveWrittenAndDeclineOnlyWhereTheSlotSetIsUnknowable(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	// an unresolvable call no longer declines the body: it HAVOCS the

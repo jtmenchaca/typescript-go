@@ -28,6 +28,12 @@ func MapDeclarationAssignmentsOf(context *LoweringContext, statement *ast.Node) 
 		return nil, false
 	}
 	declaration := declarations[0]
+	// the PRODUCER, tried first: `const u = a.union(b)` and its three
+	// algebra siblings have a call initializer, never a `new` one, so
+	// collectionConstructionOf below would decline them outright
+	if produced, isProducer := producedDeclarationAssignmentsOf(context, declaration); isProducer {
+		return produced, true
+	}
 	isMap, seed, isConstruction := collectionConstructionOf(declaration)
 	if !isConstruction {
 		return nil, false
@@ -102,6 +108,45 @@ func copiedDeclarationAssignmentsOf(context *LoweringContext, seed *ast.Node, si
 		out = append(out, AssignmentTarget{Target: keysSlot, Effect: varEffect(sourceKeys)})
 	}
 	return out, true
+}
+
+// producedDeclarationAssignmentsOf is the two-sibling PRODUCER's
+// lowering: `const u = a.union(b)` and its three algebra siblings
+// (setAlgebraProducerNames) write `u.vals := join(var a.vals, var
+// b.vals)` — sound for all four methods, since every member of the
+// result is drawn from one operand's members or the other's
+// (ir_map_slots.go's setAlgebraProducerNames doc names the ECMA-262
+// clauses) — and `u.size := unknown`: duplicates between the two
+// operands are not resolvable from their summaries under any of the
+// four operators, so the count is deliberately NOT claimed.
+//
+// The syntax alone decides here, as everywhere in the lowering: the
+// recognizer's admission already recorded both operands' slots resolve
+// and share a value sort, so the gate below is that both names' slots
+// are found in THIS context.
+func producedDeclarationAssignmentsOf(context *LoweringContext, declaration *ast.Node) ([]AssignmentTarget, bool) {
+	receiverName, argumentName, isProducer := setProducerConstructionOf(declaration)
+	if !isProducer {
+		return nil, false
+	}
+	if !ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+		return nil, false
+	}
+	name := declaration.AsVariableDeclaration().Name().Text()
+	sizeSlot, valsSlot, _, keysOk, ok := mapSlotsOf(context, name)
+	// a producer is a Set: no keys slot on the new local
+	if !ok || keysOk {
+		return nil, false
+	}
+	_, receiverVals, _, receiverKeysOk, receiverFound := mapSlotsOf(context, receiverName)
+	_, argumentVals, _, argumentKeysOk, argumentFound := mapSlotsOf(context, argumentName)
+	if !receiverFound || !argumentFound || receiverKeysOk || argumentKeysOk {
+		return nil, false
+	}
+	return []AssignmentTarget{
+		{Target: sizeSlot, Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}},
+		{Target: valsSlot, Effect: joinEffect(varEffect(receiverVals), varEffect(argumentVals))},
+	}, true
 }
 
 // joinedSeedEffect is a seed row's expressions joined into one effect

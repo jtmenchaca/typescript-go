@@ -34,9 +34,25 @@ func switchLabelGuard(
 ) ([]kernelbridge.IrStatement, bool) {
 	// the label as the literal TOKEN it names: itself where it is already
 	// one, the const it is bound to, or the enum member's own value
-	literal, literalOk := switchLabelLiteral(context, label)
+	literal, isBoolean, literalOk := switchLabelLiteral(context, label)
 	if !literalOk {
 		return nil, false
+	}
+	if isBoolean {
+		// A BOOLEAN LABEL TESTS A BOOLEAN-TYPED SLOT ONLY. Booleans ride the
+		// number sort (true/false are the words 1/0, this package's own
+		// ToNumber encoding — literal_values.go, effect_expression.go), the
+		// same sort a plain `case 1:` tests under. Gating on the sort alone
+		// would let `case true:` match a number-sorted slot that happens to
+		// hold the literal 1, which is not the claim the source makes — the
+		// flow side keeps the same separation with its own "b:"/"n:" key
+		// prefixes (SwitchKeyOfLabel). So a boolean label additionally
+		// requires the discriminant's TYPEOF evidence to be "boolean",
+		// exactly the extra fact the number-sorted number labels don't need
+		// and booleans do.
+		if !discriminantTypeofBoolean(context, discriminant, hoistedSlot, hoisted) {
+			return nil, false
+		}
 	}
 	if hoisted {
 		return hoistedLabelGuard(context, hoistedSlot, literal, thn, els)
@@ -50,6 +66,24 @@ func switchLabelGuard(
 		literal,
 	)
 	return LowerGuard(context, equality, thn, els)
+}
+
+// discriminantTypeofBoolean is whether the switch's discriminant slot
+// carries TypeofTagBoolean — the extra gate a boolean case label needs
+// beyond the number sort a plain numeric label already checks.
+func discriminantTypeofBoolean(context *LoweringContext, discriminant *ast.Node, hoistedSlot int, hoisted bool) bool {
+	on := hoistedSlot
+	if !hoisted {
+		var onOk bool
+		on, onOk = IndexOf(context, discriminant)
+		if !onOk {
+			return false
+		}
+	}
+	if context == nil || on < 0 || on >= len(context.Typeofs) {
+		return false
+	}
+	return context.Typeofs[on] == TypeofTagBoolean
 }
 
 // hoistedLabelGuard is one `case k:` against a HOISTED discriminant's
@@ -124,37 +158,55 @@ func hoistedLabelGuard(
 //     token handed back is freshly made from that value, since an enum
 //     member has no literal token of its own to point at.
 //
-// (nil, false) for anything else — a computed label compares two values
-// the equality tests do not speak.
-func switchLabelLiteral(context *LoweringContext, label *ast.Node) (*ast.Node, bool) {
+// (nil, false, false) for anything else — a computed label compares two
+// values the equality tests do not speak.
+//
+// The middle result is whether the token stands for a BOOLEAN literal —
+// `true`/`false` spelled as the number words 1/0 (this package's own
+// ToNumber encoding) — which the caller uses to gate the discriminant's
+// typeof beyond the plain number sort a numeric label already checks.
+func switchLabelLiteral(context *LoweringContext, label *ast.Node) (*ast.Node, bool, bool) {
 	head := Unwrapped(label)
 	if _, isNumber := NumberOf(head); isNumber {
-		return head, true
+		return head, false, true
 	}
 	if ast.IsStringLiteral(head) {
-		return head, true
+		return head, false, true
+	}
+	// a boolean literal label — `case true:` / `case false:` — is the
+	// exact word 1 or 0 under the number sort, the same encoding
+	// EvaluateLiteral and SwitchLabelValuesWith already give it. A fresh
+	// numeric-literal token is synthesized so both the hoisted equality
+	// (NumberOf in hoistedLabelGuard) and the built `===` head (NumberOf
+	// via TestOf) read it exactly as they read a written `case 1:`.
+	factory := ast.NewNodeFactory(ast.NodeFactoryHooks{})
+	if head.Kind == ast.KindTrueKeyword {
+		return factory.NewNumericLiteral("1", ast.TokenFlagsNone), true, true
+	}
+	if head.Kind == ast.KindFalseKeyword {
+		return factory.NewNumericLiteral("0", ast.TokenFlagsNone), true, true
 	}
 	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
-		return nil, false
+		return nil, false, false
 	}
 	c := context.Flow.P.Checker
 	if resolved, ok := dataflowfacts.ConstChainLiteral(c, head); ok {
 		if _, isNumber := NumberOf(resolved); isNumber {
-			return resolved, true
+			return resolved, false, true
 		}
 		if ast.IsStringLiteral(resolved) {
-			return resolved, true
+			return resolved, false, true
 		}
 	}
 	// an enum member read — `case MyEnum.A:`. The checker's own literal
 	// type for the member IS the value, at the same grade the enum
 	// reader elsewhere takes it at.
 	if !ast.IsPropertyAccessExpression(head) {
-		return nil, false
+		return nil, false, false
 	}
 	receiverSymbol := symbolAt(c, head.AsPropertyAccessExpression().Expression)
 	if receiverSymbol == nil {
-		return nil, false
+		return nil, false, false
 	}
 	isEnum := false
 	for _, declaration := range receiverSymbol.Declarations {
@@ -164,31 +216,30 @@ func switchLabelLiteral(context *LoweringContext, label *ast.Node) (*ast.Node, b
 		}
 	}
 	if !isEnum {
-		return nil, false
+		return nil, false, false
 	}
 	memberType := c.GetTypeAtLocation(head)
-	factory := ast.NewNodeFactory(ast.NodeFactoryHooks{})
 	if memberType.IsNumberLiteral() {
 		// a member the checker never pinned (a computed one) has no value
 		// at all, and no token can be made for it
 		value, ok := numberLiteralValue(memberType.AsLiteralType().Value())
 		if !ok {
-			return nil, false
+			return nil, false, false
 		}
 		// a NEGATIVE member spells as a minus over its magnitude, which is
 		// the same shape NumberOf reads for a written `case -1:`
 		if value < 0 {
 			magnitude := factory.NewNumericLiteral(jsnum.Number(-value).String(), ast.TokenFlagsNone)
-			return factory.NewPrefixUnaryExpression(ast.KindMinusToken, magnitude), true
+			return factory.NewPrefixUnaryExpression(ast.KindMinusToken, magnitude), false, true
 		}
-		return factory.NewNumericLiteral(jsnum.Number(value).String(), ast.TokenFlagsNone), true
+		return factory.NewNumericLiteral(jsnum.Number(value).String(), ast.TokenFlagsNone), false, true
 	}
 	if memberType.IsStringLiteral() {
 		text, ok := memberType.AsLiteralType().Value().(string)
 		if !ok {
-			return nil, false
+			return nil, false, false
 		}
-		return factory.NewStringLiteral(text, ast.TokenFlagsNone), true
+		return factory.NewStringLiteral(text, ast.TokenFlagsNone), false, true
 	}
-	return nil, false
+	return nil, false, false
 }

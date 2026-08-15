@@ -23,6 +23,32 @@ func AwaitReturnStatements(
 	if context.Result == nil {
 		return nil, false
 	}
+	// `return await Promise.reject(e)` — a THROWN exit, not a return: the
+	// rejection propagates before the return ever hands back a value, so
+	// #ret takes ThrownConst() instead of the identity read below (same
+	// shape lowerThrowStatement writes for `throw e`). Safe to land HERE
+	// and not in statement position: this route's own caller already
+	// ENDS lowerStatementList's loop at the return statement
+	// (lowering_to_kernel_ir_return.go:79, lowering_to_kernel_ir.go:140),
+	// so nothing downstream sees a stale statement the way an unguarded
+	// statement-position write would leave behind — see the note beside
+	// AwaitStatementOf in ir_await.go.
+	//
+	// RECOGNIZED-BUT-DECLINED short-circuits the WHOLE route rather than
+	// falling through: awaitedReturnCallOf below has no reading for
+	// "reject" specifically, so an unguarded fallthrough would have it
+	// read `Promise.reject(e)` as an ordinary unresolvable CALL and hand
+	// back the opaque-havoc floor's `#ret := unknown` — which is wrong
+	// whether or not the try-coverage gate admits the throw, and doubly
+	// wrong inside an uncovered try, where the sound answer is the same
+	// decline `throw e` at that position would take, not a value.
+	if _, isReject := promiseRejectExpressionOperandOf(expression); isReject {
+		lowered, ok := awaitRejectThrownStatements(context, expression)
+		if !ok {
+			return nil, false
+		}
+		return append(lowered, raise), true
+	}
 	// `return await s` / `return await p` — the identity read into the
 	// result slot
 	if effect, isEffect := awaitIdentityEffect(context, expression); isEffect {

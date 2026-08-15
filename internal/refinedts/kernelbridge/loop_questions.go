@@ -341,6 +341,36 @@ const (
 	// namedCaptures undefined), and the regex road runs over a regex
 	// literal's intrinsic behaviour, none of which throws.
 	LoopOpReplaceSortSafe LoopEffectOp = "replaceSortSafe"
+	// LoopOpReplaceSortThrowSafe is the replace family's
+	// FUNCTIONAL-REPLACER row -- LoopOpReplaceSortSafe's claim, PLUS the
+	// thrown flag, for a REPLACEMENT that is caller code rather than an
+	// exactly-known string. sec-string.prototype.replace,
+	// sec-string.prototype.replaceall and
+	// sec-regexp.prototype-%symbol.replace% each read
+	// `_functionalReplace_ := IsCallable(_replaceValue_)` and, where
+	// true, compute the replacement as
+	// `? ToString(? Call(_replaceValue_, ...))` -- caller code this side
+	// cannot see the body of, so it may throw. Every run that DOES
+	// complete still reaches the same three-piece String concatenation
+	// LoopOpReplaceSortSafe claims a word for, so the two outcomes
+	// admitted are exactly "a word" and "a thrown exit" -- never absent,
+	// never NaN.
+	//
+	// THE GATE is the receiver and pattern shape alone -- the same
+	// premise LoopOpReplaceSortSafe needs minus the replacement's own
+	// exactness, since this row does not need to read the replacement
+	// at all: receiver stated a string, pattern an exactly-spelled
+	// string or a regex literal, and -- under `replaceAll` at a regex
+	// -- the `g` flag proven present (sec-string.prototype.replaceall
+	// step 2.a.iii is a TypeError without it, independent of the
+	// replacer).
+	//
+	// THE WRITE HALF is not this row's claim: a functional replacer may
+	// also write names this body tracks, which is why the adapter sends
+	// this op only alongside havocking the replacer's write set
+	// (ClosureEscapesTrackedWrite names the boundary) -- exactly as any
+	// other escaping-closure call site is handled.
+	LoopOpReplaceSortThrowSafe LoopEffectOp = "replaceSortThrowSafe"
 )
 
 // LoopEffect is one binding's body effect, lowered for the kernel's

@@ -33,9 +33,16 @@ func slotIndexOfName(context *LoweringContext, spelled string) (int, bool) {
 // `#sym:` leaf name the flattening spelled it with. The path is one step
 // by construction — the key is a const's own name, never a chain — so
 // the spelling is `p.#sym:S` and the lookup is the same lookup.
+//
+// The path read here admits ONE optional step adjacent to the root
+// (`p?.a`, propertyPathAdmittingRootOptionalStep) — sound because the
+// slot lookup below is the real gate: "p.a" only resolves to an index
+// where the recognizer already admitted p as a flattened local (whose
+// root is never null/undefined), so a root that is not such a local
+// still fails the lookup exactly as before.
 func PathSlotIndexOf(context *LoweringContext, node *ast.Node) (int, bool) {
 	head := Unwrapped(node)
-	if root, path, ok := propertyPathOf(head); ok {
+	if root, path, ok := propertyPathAdmittingRootOptionalStep(head); ok {
 		return slotIndexOfName(context, root+"."+strings.Join(path, "."))
 	}
 	if root, leaf, ok := symbolKeyedLeafOf(context, head); ok {

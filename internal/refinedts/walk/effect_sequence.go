@@ -164,12 +164,18 @@ func sequenceEffectOf(context *LoweringContext, e *ast.Node, inSequence bool) (k
 	// `replace` keeps the decline outright: it substitutes caller-chosen
 	// text, so neither closure applies under any alphabet.
 	//
-	// `split` and `indexOf` are not declines and are not here: neither
+	// `split`, `indexOf`/`lastIndexOf`, `includes`/`startsWith`/
+	// `endsWith`, and `.length` are not declines and are not here: none
 	// answers a STRING. A split answers an ARRAY, lowered to the two
 	// slots by ir_array_slots.go (its elem slot takes the same
 	// drawn-from row under an astral-safe separator gate, its len slot
-	// takes unknown); an indexOf answers a NUMBER, read by the numeric
-	// reader's stringIndexOfEffect in ir_assignment.go.
+	// takes unknown); indexOf/lastIndexOf answer a NUMBER and includes/
+	// startsWith/endsWith answer a BOOLEAN, both read by the numeric
+	// reader's stringIndexOfEffect / stringBooleanSearchEffect
+	// (ir_assignment_effect_read.go); `.length` likewise answers a
+	// NUMBER, read by that same file's stringLengthEffect. `charAt` DOES
+	// answer a string and IS here, riding the slice row below — see its
+	// own comment for why no tighter claim is reachable.
 	if ast.IsCallExpression(head) {
 		call := head.AsCallExpression()
 		if ast.IsPropertyAccessExpression(call.Expression) &&
@@ -179,9 +185,16 @@ func sequenceEffectOf(context *LoweringContext, e *ast.Node, inSequence bool) (k
 			switch pa.Name().Text() {
 			case "trim":
 				seqOp = kernelbridge.LoopOpTrim
-			case "trimStart":
+			case "trimStart", "trimLeft":
+				// trimLeft IS trimStart: the spec's Annex B gives it as
+				// the SAME function object ("The initial value of the
+				// 'trimLeft' property is %String.prototype.trimStart%",
+				// annex "String.prototype.trimleft"), not a second
+				// implementation, so the two spellings ride one op.
 				seqOp = kernelbridge.LoopOpTrimStart
-			case "trimEnd":
+			case "trimEnd", "trimRight":
+				// trimRight IS trimEnd for the same Annex B reason
+				// (annex "String.prototype.trimright").
 				seqOp = kernelbridge.LoopOpTrimEnd
 			case "toUpperCase":
 				seqOp = kernelbridge.LoopOpUpperAscii
@@ -211,6 +224,31 @@ func sequenceEffectOf(context *LoweringContext, e *ast.Node, inSequence bool) (k
 		if ast.IsPropertyAccessExpression(call.Expression) {
 			pa := call.Expression.AsPropertyAccessExpression()
 			if pa.Name().Text() == "slice" && sliceArgumentsArePlain(call) {
+				if receiver, ok := sequenceEffectOf(context, pa.Expression, true /*inSequence*/); ok {
+					return kernelbridge.LoopEffect{
+						Kind: kernelbridge.LoopEffectSeqUnary,
+						Op:   kernelbridge.LoopOpSliceBmp,
+						A:    &receiver,
+					}, true
+				}
+			}
+			// charAt(i) IS a one-argument slice: sec-string.prototype.charat
+			// step 7 answers "the substring of string from position to
+			// position + 1" (empty where the index is out of range, steps
+			// 5-6) — exactly substring(pos, pos+1), the same cut slice
+			// performs. Under the BMP gate sliceBmp already wears, every cut
+			// lands on a scalar boundary and the piece is a contiguous
+			// subsequence of the receiver whatever the endpoints were, which
+			// is what makes charAt's result "drawn from the receiver's
+			// alphabet, no longer than it" — the exact claim sliceBmp's row
+			// carries. This is the SAME kernel row as slice, ridden under
+			// the SAME name (LoopOpSliceBmp); charAt gets no tighter
+			// [0,1]-length claim than that row states, because no wire op
+			// exists to send a length window beside the alphabet one (the
+			// gated seqUn family, seqOp1Of, has no such shape) — an ungated
+			// or non-BMP receiver stays floored exactly as slice's does.
+			if pa.Name().Text() == "charAt" && sliceArgumentsArePlain(call) &&
+				call.Arguments != nil && len(call.Arguments.Nodes) == 1 {
 				if receiver, ok := sequenceEffectOf(context, pa.Expression, true /*inSequence*/); ok {
 					return kernelbridge.LoopEffect{
 						Kind: kernelbridge.LoopEffectSeqUnary,
@@ -281,6 +319,17 @@ func SpelledSequenceShape(e *ast.Node) bool {
 // literal text. An empty literal chunk contributes the empty tuple,
 // which concatenates to nothing — kept rather than special-cased, so
 // the chain's shape is one rule.
+//
+// A NUMBER-SORTED substitution — `${n}` — is not a sequence read, but
+// it is not a decline either: ToString of a Number always answers a
+// String (sec-tostring, the Number case: NaN/±0/finite/±Infinity every
+// row is a String), so the span contributes a KNOWN-SORT, UNKNOWN-VALUE
+// piece — the string root C* — rather than costing the whole template.
+// This is strictly the sort-only claim: the concatenation family can
+// carry no more of a ToString result than "some string" without a
+// digit-shape transfer this grammar does not have, so the widening
+// stops at the sort. templateSpanEffect below is what tries the
+// number route once the sequence route has declined.
 func templateSequenceOf(context *LoweringContext, head *ast.Node) (kernelbridge.LoopEffect, bool) {
 	template := head.AsTemplateExpression()
 	if template.TemplateSpans == nil {
@@ -292,9 +341,7 @@ func templateSequenceOf(context *LoweringContext, head *ast.Node) (kernelbridge.
 	}}
 	for _, spanNode := range template.TemplateSpans.Nodes {
 		span := spanNode.AsTemplateSpan()
-		// a substitution sits INSIDE a sequence the template already
-		// committed to, so a call there hoists
-		substituted, ok := sequenceEffectOf(context, span.Expression, true /*inSequence*/)
+		substituted, ok := templateSpanEffect(context, span.Expression)
 		if !ok {
 			return kernelbridge.LoopEffect{}, false
 		}
@@ -320,4 +367,23 @@ func templateSequenceOf(context *LoweringContext, head *ast.Node) (kernelbridge.
 		out = concatOf(parts[i], out)
 	}
 	return out, true
+}
+
+// templateSpanEffect is one template substitution's contribution to the
+// concatenation chain: the ordinary sequence reading where the
+// substitution is itself string-sorted (a call there hoists, since the
+// substitution sits INSIDE a sequence the template already committed
+// to), and — only where that declines — the sort-only string-root piece
+// for a NUMBER-sorted substitution, ToString's known sort with an
+// unknown value. Anything neither route reads (unknown-sorted,
+// object-valued, …) still declines the whole template, exactly as
+// before this widening existed.
+func templateSpanEffect(context *LoweringContext, span *ast.Node) (kernelbridge.LoopEffect, bool) {
+	if substituted, ok := sequenceEffectOf(context, span, true /*inSequence*/); ok {
+		return substituted, true
+	}
+	if _, ok := EffectOf(context, span); ok {
+		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.Strings}, true
+	}
+	return kernelbridge.LoopEffect{}, false
 }

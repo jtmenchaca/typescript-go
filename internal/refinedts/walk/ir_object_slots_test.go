@@ -377,3 +377,189 @@ func TestObjectSlots_TheRecognizerDeclinesAKeyReadingTheRecordItDeclares(t *test
 		t.Errorf("a self-reading record literal flattened — its second key would read an unwritten slot")
 	}
 }
+
+/* ── ITEM 1: an optional step on the flattened local's own root ────── */
+
+func TestObjectSlots_TheRecognizerAdmitsAnOptionalStepOnTheRecordsOwnRoot(t *testing.T) {
+	// `p?.lo` on p's OWN root: p is a flattened record local, always
+	// defined, so the optional step reads the same leaf `p.lo` does —
+	// the recognizer must flatten exactly as it does for the plain step
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { const p = { lo: 0, hi: n }; p.lo = (p?.lo) + 1; return p?.lo; }")
+	body := declaration.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the record local collected")
+	}
+	flattened := ObjectLocalsOf(body, locals.Locals)
+	if len(flattened) != 1 {
+		t.Fatalf("ObjectLocalsOf found %d flattened locals, want 1 — an optional step on the record's own root should not refuse the flattening", len(flattened))
+	}
+	for _, local := range flattened {
+		if len(local.Keys) != 2 || local.Keys[0].SlotName != "p.lo" || local.Keys[1].SlotName != "p.hi" {
+			t.Errorf("flattened leaves = %+v, want p.lo, p.hi unchanged by the optional read", local.Keys)
+		}
+	}
+}
+
+func TestObjectSlots_ARootOptionalStepSummarizesIdenticallyToThePlainStep(t *testing.T) {
+	// the same loop body written with `p.lo` and with `p?.lo` must
+	// settle the SAME kernel summary — the optional step on the record's
+	// own root is semantically identical to the plain step
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	plain := summaryDeclarationOf(t,
+		"function f(n: number) { const p = { lo: 0, hi: n }; let i = 0; while (i < 3) { p.lo = p.lo + 1; i = i + 1; } return p.lo; }")
+	optional := summaryDeclarationOf(t,
+		"function f(n: number) { const p = { lo: 0, hi: n }; let i = 0; while (i < 3) { p.lo = (p?.lo) + 1; i = i + 1; } return p?.lo; }")
+	plainAnswer, plainOk := KernelSummaryDirect(
+		&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}},
+		[]abstractdomain.AbstractValue{exactNumber(t, 7)},
+		&FunctionContract{Declaration: plain})
+	optionalAnswer, optionalOk := KernelSummaryDirect(
+		&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}},
+		[]abstractdomain.AbstractValue{exactNumber(t, 7)},
+		&FunctionContract{Declaration: optional})
+	if plainOk != optionalOk {
+		t.Fatalf("plain ok=%v, optional-root ok=%v — the optional step on the record's own root must summarize exactly as the plain step does", plainOk, optionalOk)
+	}
+	if !plainOk {
+		t.Fatalf("KernelSummaryDirect ok = false for the plain-step body, want a summarized answer")
+	}
+	plainState, plainStateOk := StateOfKnown(plainAnswer)
+	optionalState, optionalStateOk := StateOfKnown(optionalAnswer)
+	if plainStateOk != optionalStateOk {
+		t.Fatalf("plain StateOfKnown ok=%v, optional-root ok=%v", plainStateOk, optionalStateOk)
+	}
+	if plainStateOk {
+		if plainState.Top != optionalState.Top {
+			t.Errorf("plain Top=%v, optional-root Top=%v, want identical", plainState.Top, optionalState.Top)
+		}
+		if !kernel.Member(optionalState.Set, []float64{3}) {
+			t.Errorf("optional-root summary excludes the true value 3 for p.lo: %+v", optionalState.Set)
+		}
+	}
+}
+
+func TestObjectSlots_TheRecognizerDeclinesADeeperOptionalStep(t *testing.T) {
+	// `p.inner?.deep` — the `?.` sits BETWEEN two steps, not adjacent to
+	// the root: the intermediate leaf `p.inner` is not provably
+	// non-absent, so this stays refused with today's spelling
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { const p = { inner: { deep: n } }; return p.inner?.deep; }")
+	body := declaration.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the record local collected")
+	}
+	if flattened := ObjectLocalsOf(body, locals.Locals); len(flattened) != 0 {
+		t.Errorf("a deeper optional step (p.inner?.deep) flattened — only a step adjacent to the record's own root is admitted")
+	}
+}
+
+/* ── ITEM 2: shorthand properties in record literals ────────────────── */
+
+func TestObjectSlots_TheRecognizerAdmitsAShorthandRow(t *testing.T) {
+	// `{ a, hi: n }` — a is a SHORTHAND row, short for `a: a`; the
+	// recognizer must contribute the leaf keyed "a" beside the plain row
+	declaration := summaryDeclarationOf(t,
+		"function f(a: number, n: number) { const p = { a, hi: n }; return p.a + p.hi; }")
+	body := declaration.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the record local collected")
+	}
+	flattened := ObjectLocalsOf(body, locals.Locals)
+	if len(flattened) != 1 {
+		t.Fatalf("ObjectLocalsOf found %d flattened locals, want 1 — a shorthand row should not refuse the whole literal", len(flattened))
+	}
+	for _, local := range flattened {
+		if len(local.Keys) != 2 {
+			t.Fatalf("flattened local has %d leaves, want 2", len(local.Keys))
+		}
+		if local.Keys[0].SlotName != "p.a" || local.Keys[0].Key != "a" {
+			t.Errorf("first leaf = %+v, want key a slotted p.a", local.Keys[0])
+		}
+		if local.Keys[1].SlotName != "p.hi" {
+			t.Errorf("second leaf slot = %q, want p.hi", local.Keys[1].SlotName)
+		}
+		// the shorthand leaf's initializer is its OWN name expression — the
+		// identifier `a`, the same node ShorthandPropertyAssignment.Name()
+		// reads
+		if !ast.IsIdentifier(local.Keys[0].Initializer) || local.Keys[0].Initializer.Text() != "a" {
+			t.Errorf("shorthand leaf initializer = %+v, want the identifier a", local.Keys[0].Initializer)
+		}
+	}
+}
+
+func TestObjectSlots_AShorthandRowSummarizes(t *testing.T) {
+	// a body reading both a shorthand leaf and a plain leaf summarizes
+	// through the ordinary scalar grammar, exactly as an all-plain
+	// literal does
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	declaration := summaryDeclarationOf(t,
+		"function f(a: number) { const hi = a + 1; const p = { a, hi }; return p.hi; }")
+	contract := &FunctionContract{Declaration: declaration}
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	answer, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{exactNumber(t, 6)}, contract)
+	if !ok {
+		t.Fatalf("KernelSummaryDirect ok = false, want a summarized answer for a shorthand-row record local")
+	}
+	state, stateOk := StateOfKnown(answer)
+	if !stateOk || state.Top {
+		t.Fatalf("summarized answer did not spell as a scalar state: %+v", answer)
+	}
+	if !kernel.Member(state.Set, []float64{7}) {
+		t.Errorf("summary of f(6) excludes the true value 7 for p.hi (a + 1): %+v", state.Set)
+	}
+}
+
+func TestObjectSlots_AShorthandOfAnUntrackedNameStillFlattensWithThatLeafReadingUnknown(t *testing.T) {
+	// `{ a, hi: n }` where `a` names NOTHING this body tracks (no
+	// parameter, no local, no free const named a) — the row still
+	// flattens: the leaf vocabulary is about which KEY is named, not
+	// whether the value expression resolves. The recognizer's use-scan
+	// never inspects a leaf's initializer for readability; only
+	// ObjectLocalIn's self-reference check (mentionsName) and the
+	// lowering's RhsEffect read it, so the flattening itself is
+	// unaffected by "a" being untracked.
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	declaration := summaryDeclarationOf(t,
+		"function f(n: number) { const p = { a, hi: n }; return p.hi; }")
+	body := declaration.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the record local collected")
+	}
+	flattened := ObjectLocalsOf(body, locals.Locals)
+	if len(flattened) != 1 {
+		t.Fatalf("ObjectLocalsOf found %d flattened locals, want 1 — a shorthand of an untracked name should still flatten", len(flattened))
+	}
+	for _, local := range flattened {
+		if len(local.Keys) != 2 || local.Keys[0].SlotName != "p.a" {
+			t.Fatalf("flattened leaves = %+v, want p.a present despite a being untracked", local.Keys)
+		}
+	}
+	// what the EFFECT ROUTE soundly does with the untracked leaf's value:
+	// `a` resolves to no const RhsEffect's Opaque reader can follow (not a
+	// tracked slot, not a free const, not a getter, not a call), so the
+	// per-leaf DECLARATION ASSIGNMENT for this record declines and the
+	// statement falls to the opaque havoc floor. A havocked statement is a
+	// POROUS body, and the serving rule is that only a COMPLETE body serves
+	// (applySummary's rule; porous answers were measured strictly weaker
+	// than the inline walk's). So the direct route declines this call —
+	// the flattening above is what the shorthand widening claims, and the
+	// porous outcome naming the declaration is the honest remainder.
+	ClearSummaryOutcomes()
+	contract := &FunctionContract{Declaration: declaration}
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	if _, summarized := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{exactNumber(t, 7)}, contract); summarized {
+		t.Fatalf("KernelSummaryDirect ok = true — a porous body (the havocked declaration) must not serve")
+	}
+	outcome, _, recorded := SummaryOutcomeOf(declaration)
+	if !recorded || outcome != SummaryPorous {
+		t.Errorf("outcome = %v (recorded %v), want porous — the body lowers with the declaration havocked, never declines whole", outcome, recorded)
+	}
+}

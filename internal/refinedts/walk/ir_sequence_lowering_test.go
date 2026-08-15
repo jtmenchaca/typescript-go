@@ -173,31 +173,26 @@ func TestIrSequenceLowering_ATemplateLiteralLowersAsAConcatChainOverItsLiteralCh
 	}
 }
 
-func TestIrSequenceLowering_ATemplateWithANumberSortedSubstitutionTakesTheHavocFloor(t *testing.T) {
+func TestIrSequenceLowering_ATemplateWithANumberSortedSubstitutionLowersAsAConcatenation(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
-	// the sequence reading refuses a number-sorted substitution (its
-	// spelled digits are ToString's, which no set operation here
-	// computes), and the TOTAL-LOWERING floor havocs the target — out
-	// becomes unknown rather than the body declining
+	// a number-sorted substitution contributes the sort-only string root
+	// (ToString of a number is total and always a String), so the
+	// template lowers as the concatenation instead of taking the havoc
+	// floor — the target is a string built around the spans, not unknown
 	stmts, ok := LowerStatements(&LoweringContext{
 		Bindings: []string{"n", "out"},
 		Sorts:    []BindingKind{BindingKindNumber, BindingKindString},
 		Narrow:   kernel.Narrow,
 	}, loweringParse(t, "out = `a${n}b`;"))
 	if !ok {
-		t.Fatalf("a number substitution declined outright, want the havoc floor")
+		t.Fatalf("a number substitution declined outright, want the concatenation lowering")
 	}
-	sawTarget := false
-	for _, s := range stmts {
-		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
-			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
-		}
-		if s.Target == 1 {
-			sawTarget = true
-		}
+	if len(stmts) != 1 {
+		t.Fatalf("len(stmts) = %d, want the one concatenation assign: %+v", len(stmts), stmts)
 	}
-	if !sawTarget {
-		t.Errorf("out (slot 1) was not havocked — its old knowledge would survive the write")
+	if stmts[0].Kind != kernelbridge.IrStatementAssign || stmts[0].Target != 1 ||
+		stmts[0].Effect.Kind != kernelbridge.LoopEffectConcat {
+		t.Errorf("stmts[0] = %+v, want `out := concat` — the spans ride, the number span widens to the string root", stmts[0])
 	}
 }
 

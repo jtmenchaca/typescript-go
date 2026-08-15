@@ -136,21 +136,42 @@ func flatKeysOfLiteralWith(
 	var keys []ObjectLocalKey
 	seen := map[string]struct{}{}
 	for _, property := range literal.AsObjectLiteralExpression().Properties.Nodes {
-		if !ast.IsPropertyAssignment(property) {
-			return nil, false
-		}
-		assignment := property.AsPropertyAssignment()
-		if assignment.Initializer == nil {
+		// a SHORTHAND row (`{ a }`) names its key AND its value with the
+		// same identifier — `a` is short for `a: a`. It has no
+		// PropertyAssignment.Initializer to read (a different node kind
+		// entirely), so its key and its value expression are both read
+		// off ShorthandPropertyAssignment.Name() here, and the row then
+		// joins the ordinary `key: expression` handling below through the
+		// same `key`/`initializer` pair a plain row supplies.
+		var keyName *ast.Node
+		var initializer *ast.Node
+		switch {
+		case ast.IsPropertyAssignment(property):
+			assignment := property.AsPropertyAssignment()
+			if assignment.Initializer == nil {
+				return nil, false
+			}
+			keyName = assignment.Name()
+			initializer = assignment.Initializer
+		case ast.IsShorthandPropertyAssignment(property):
+			shorthand := property.AsShorthandPropertyAssignment()
+			name := shorthand.Name()
+			if name == nil || !ast.IsIdentifier(name) {
+				return nil, false
+			}
+			keyName = name
+			initializer = name
+		default:
 			return nil, false
 		}
 		var key string
 		switch {
-		case ast.IsIdentifier(assignment.Name()):
-			key = assignment.Name().Text()
+		case ast.IsIdentifier(keyName):
+			key = keyName.Text()
 		default:
 			// a computed key names one leaf only through a stable symbol
 			// const; every other computed key names nothing the vector holds
-			symbolKey, isSymbolKey := symbolMemberFieldName(c, assignment.Name())
+			symbolKey, isSymbolKey := symbolMemberFieldName(c, keyName)
 			if !isSymbolKey {
 				return nil, false
 			}
@@ -161,7 +182,7 @@ func flatKeysOfLiteralWith(
 		}
 		seen[key] = struct{}{}
 		path := append(append([]string{}, prefix...), key)
-		value := Unwrapped(assignment.Initializer)
+		value := Unwrapped(initializer)
 		// a nested fixed-shape literal contributes its OWN leaves under
 		// this key — one more level of the same rule
 		if ast.IsObjectLiteralExpression(value) {
@@ -181,7 +202,7 @@ func flatKeysOfLiteralWith(
 			Path:        path,
 			Key:         key,
 			SlotName:    holder + "." + strings.Join(path, "."),
-			Initializer: assignment.Initializer,
+			Initializer: initializer,
 		})
 	}
 	if len(keys) == 0 {
@@ -196,12 +217,46 @@ func flatKeysOfLiteralWith(
 // layout gives a method's field slots. Optional steps (`p?.a`) and
 // computed steps decline — neither is a plain path read.
 func propertyPathOf(node *ast.Node) (root string, path []string, ok bool) {
+	return propertyPathReading(node, false)
+}
+
+// propertyPathAdmittingRootOptionalStep is propertyPathOf, but tolerates
+// ONE optional step — provided its RECEIVER is the root identifier or
+// `this` itself (`p?.a`, `this?.count`). The soundness fact: a FLATTENED
+// RECORD LOCAL is always defined (`const p = { … }` binds an object,
+// never null/undefined), so `p?.a` on such a root reads the identical
+// leaf `p.a` would. A DEEPER optional step (`p.a?.b`, where the `?.`
+// sits on a step that is not adjacent to the root) still declines here —
+// the intermediate leaf `p.a` is not provably non-absent, so nothing
+// admits reading past it.
+//
+// Every caller of this variant already knows the root it is asking
+// about IS a flattened local's own name — the flattening's use scan and
+// the lowering-side slot lookup both check `root == name` (or resolve
+// the slot by spelling) after calling this, exactly as they did with
+// propertyPathOf. This function only widens which SYNTAX yields a path;
+// it does not itself decide which roots are flattened.
+func propertyPathAdmittingRootOptionalStep(node *ast.Node) (root string, path []string, ok bool) {
+	return propertyPathReading(node, true)
+}
+
+// propertyPathReading is the shared walk propertyPathOf and
+// propertyPathAdmittingRootOptionalStep both run: `admitRootOptional`
+// says whether the ONE step adjacent to the root — the last one the loop
+// below visits, since the walk descends outermost-in — may carry a
+// `?.` and still count as a plain path step. Every other optional step,
+// at any other depth, always declines.
+func propertyPathReading(node *ast.Node, admitRootOptional bool) (root string, path []string, ok bool) {
 	var steps []string
 	current := node
 	for ast.IsPropertyAccessExpression(current) {
 		access := current.AsPropertyAccessExpression()
+		receiver := access.Expression
+		receiverIsRoot := ast.IsIdentifier(receiver) || receiver.Kind == ast.KindThisKeyword
 		if access.QuestionDotToken != nil {
-			return "", nil, false
+			if !admitRootOptional || !receiverIsRoot {
+				return "", nil, false
+			}
 		}
 		if !ast.IsIdentifier(access.Name()) {
 			return "", nil, false

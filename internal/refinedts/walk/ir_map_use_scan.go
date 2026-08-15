@@ -63,6 +63,18 @@ func admitCollectionUse(node *ast.Node, name string, isMap bool) (mapUseAdmissio
 			}
 		}
 	}
+	// `a.union(b)` / `.intersection(b)` / `.difference(b)` /
+	// `.symmetricDifference(b)` — this collection standing as either the
+	// RECEIVER or the ARGUMENT of a two-sibling Set producer. Both
+	// occurrences are consumed whole here: setProducerMapLocalOf reads
+	// only the two operands' own slots, so a collection appearing on
+	// either side of the call keeps its own flattening. A Map is never
+	// admitted — none of the four methods exist on Map's interface.
+	if receiver, argument, isProducerCall := setProducerCallOf(node); isProducerCall {
+		if (receiver == name || argument == name) && !isMap {
+			return mapUseAdmission{Admitted: true}, true
+		}
+	}
 	// `m.set(k, v)` / `s.add(v)` / `m.get(k)` / `m.delete(k)` — the
 	// operations; their arguments still scan
 	if method, arguments, isCall := collectionMethodCallOf(node, name); isCall {
@@ -76,6 +88,18 @@ func admitCollectionUse(node *ast.Node, name string, isMap bool) (mapUseAdmissio
 			admitted = isMap && len(arguments) == 1
 		case "delete":
 			admitted = len(arguments) == 1
+		case "clear":
+			// `m.clear()` — MapClearAssignmentsOf resets every slot to the
+			// fresh-empty state, so the receiver's own occurrence is
+			// consumed whole; there is no argument to scan
+			admitted = len(arguments) == 0
+		case "getOrInsert":
+			// `m.getOrInsert(k, v)` — a Map-only get-or-default: the plain-
+			// value form MapGetOrInsertAssignmentsOf reads. Its cousin
+			// getOrInsertComputed (a callback second argument) is NOT
+			// admitted here — reading what the callback returns needs the
+			// callback-summary machinery, which this scan does not carry.
+			admitted = isMap && len(arguments) == 2
 		case "forEach":
 			// `m.forEach(cb)` — collectionForEachStatement reads the vals
 			// (and keys) slots and converts the callback, so the receiver's
@@ -102,6 +126,17 @@ func admitCollectionUse(node *ast.Node, name string, isMap bool) (mapUseAdmissio
 	// both arms still scan.
 	if test := testPositionOf(node); test != nil {
 		if arguments, isHasTest := hasCallInTestPosition(test, name); isHasTest {
+			ifStmt := node.AsIfStatement()
+			children := append([]*ast.Node{}, arguments...)
+			children = append(children, ifStmt.ThenStatement, ifStmt.ElseStatement)
+			return mapUseAdmission{Children: children, Admitted: true}, true
+		}
+		// `if (s.isSubsetOf(other)) { … }` / `.isSupersetOf` /
+		// `.isDisjointFrom` — the same opaque-branch admission `has`
+		// gets: a write-free, boolean-returning Set predicate whose
+		// result no slot spells, so the branch that tests nothing serves
+		// it exactly as it serves `has`.
+		if arguments, isSetPredicateTest := setPredicateCallInTestPosition(test, name, isMap); isSetPredicateTest {
 			ifStmt := node.AsIfStatement()
 			children := append([]*ast.Node{}, arguments...)
 			children = append(children, ifStmt.ThenStatement, ifStmt.ElseStatement)
@@ -175,7 +210,7 @@ func usesAreAllCollectionForms(body *ast.Node, declaration *ast.Node, name strin
 			return false
 		}
 		// Every other occurrence of the bare name — an alias, an argument,
-		// a return, `m.has(k)`, `m.clear()`, `m[k]` — is the WHOLE
+		// a return, `m.has(k)`, `m[k]` — is the WHOLE
 		// collection in a position the slots cannot spell.
 		if ast.IsIdentifier(node) && node.Text() == name && node != declarationName {
 			ok = false

@@ -263,14 +263,14 @@ func TestArraySlots_AnAliasedArrayDeclines(t *testing.T) {
 
 func TestArraySlots_AnUnlistedMethodDeclinesTheArray(t *testing.T) {
 	declaration := summaryDeclarationOf(t,
-		"function f(n: number) { const a = [1, 2]; a.pop(); return a.length; }")
+		"function f(n: number) { const a = [1, 2]; a.sort(); return a.length; }")
 	body := declaration.Body()
 	locals, ok := CollectLocals(body)
 	if !ok {
 		t.Fatalf("CollectLocals ok = false, want the array local collected")
 	}
 	if flattened := ArrayLocalsOf(body, locals.Locals, nil); len(flattened) != 0 {
-		t.Errorf("an array with a pop() flattened — the two slots do not carry a shrink")
+		t.Errorf("an array with a sort() flattened — the two slots do not carry a reorder")
 	}
 }
 

@@ -316,7 +316,7 @@ func closureCallHavocNamed(context *LoweringContext, call *ast.Node, target int,
 	if context == nil || call == nil || !ast.IsCallExpression(call) {
 		return nil, false
 	}
-	body, ok := localClosureBodyOf(context, call.AsCallExpression().Expression)
+	closure, ok := localClosureOf(context, call.AsCallExpression().Expression)
 	if !ok {
 		return nil, false
 	}
@@ -332,7 +332,7 @@ func closureCallHavocNamed(context *LoweringContext, call *ast.Node, target int,
 	if !havocOk {
 		return nil, false
 	}
-	written := ClosureWriteSlots(context, body)
+	written := ClosureWriteSlots(context, closure)
 	if len(written) == 0 {
 		return havocked, true
 	}

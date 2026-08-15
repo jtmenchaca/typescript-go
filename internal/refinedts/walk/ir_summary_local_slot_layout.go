@@ -197,7 +197,10 @@ func refusedLiteralLocalReadAsMember(body *ast.Node, declaration *ast.Node) bool
 		if node == declarationName {
 			return false
 		}
-		if root, _, isPath := propertyPathOf(node); isPath && root == name {
+		// `p?.a` counts as a member read here too: `p` is this local's own
+		// root, always defined once flattened, so the optional step is not
+		// a reason to treat the read as absent.
+		if root, _, isPath := propertyPathAdmittingRootOptionalStep(node); isPath && root == name {
 			found = true
 			return true
 		}

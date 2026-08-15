@@ -240,10 +240,12 @@ func closureCallStatement(
 }
 
 // localClosureOf resolves a call's callee — a plain identifier — to the
-// CLOSURE NODE the name was declared to hold, where localClosureBodyOf
-// answers the body. The two read the same declaration; this one answers
-// the function-like node the layout and the compile need, since a summary
-// is lowered from the declaration, not from the block.
+// CLOSURE NODE the name was declared to hold — the function-like node
+// the layout, the compile, and the write census all need. The census
+// (closureAssignedNames) collects a closure's own top-level writes only
+// when handed the function-like itself; a bare body block reads as "no
+// closures inside", the empty set that let a stored closure's writes
+// pass unhavocked.
 func localClosureOf(context *LoweringContext, callee *ast.Node) (*ast.Node, bool) {
 	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
 		return nil, false
@@ -271,46 +273,3 @@ func localClosureOf(context *LoweringContext, callee *ast.Node) (*ast.Node, bool
 	return closure, true
 }
 
-// localClosureBodyOf resolves a call's callee — a plain identifier — to
-// the FUNCTION BODY of a closure the name was declared to hold:
-// `const f = () => { … }` / `const f = function () { … }`, or a `let`
-// bound the same way.
-//
-// The resolution is the checker's symbol, so a name shadowed by an inner
-// scope resolves to the declaration the call actually reaches rather than
-// to the spelling. A symbol whose declaration is not a variable
-// declaration, or whose initializer is not a function literal with a
-// body, answers nothing — the site then takes the opaque tier it always
-// took.
-//
-// The declaration is NOT required to sit in this lowering's own body: an
-// arrow declared in an enclosing scope and called here writes the slots
-// this vector spells under the same names, and havocking them is right
-// wherever the closure was built. A name whose writes touch nothing this
-// vector holds yields an empty set, which costs the site nothing.
-func localClosureBodyOf(context *LoweringContext, callee *ast.Node) (*ast.Node, bool) {
-	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
-		return nil, false
-	}
-	head := Unwrapped(callee)
-	if head == nil || !ast.IsIdentifier(head) {
-		return nil, false
-	}
-	symbol := symbolAt(context.Flow.P.Checker, head)
-	if symbol == nil || symbol.ValueDeclaration == nil {
-		return nil, false
-	}
-	declaration := symbol.ValueDeclaration
-	if !ast.IsVariableDeclaration(declaration) {
-		return nil, false
-	}
-	initializer := declaration.AsVariableDeclaration().Initializer
-	if initializer == nil {
-		return nil, false
-	}
-	closure := Unwrapped(initializer)
-	if closure == nil || !ast.IsFunctionLike(closure) || closure.Body() == nil {
-		return nil, false
-	}
-	return closure.Body(), true
-}

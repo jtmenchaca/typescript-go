@@ -153,11 +153,147 @@ func TestMapSlots_AHasCallOutsideATestPositionStillDeclinesTheCollection(t *test
 	}
 }
 
-func TestMapSlots_AClearDeclinesTheCollection(t *testing.T) {
+func TestMapSlots_ASetPredicateAsAWholeIfTestKeepsTheCollectionFlattened(t *testing.T) {
+	for _, method := range []string{"isSubsetOf", "isSupersetOf", "isDisjointFrom"} {
+		flattened := mapLocalsOfSource(t,
+			"function f(v: number, other: Set<number>) { const s = new Set(); s.add(v); if (s."+method+"(other)) { return 1; } return 0; }")
+		if len(flattened) != 1 {
+			t.Errorf("%s in test position declined the collection — write-free and boolean, same shape as has()", method)
+		}
+	}
+}
+
+func TestMapSlots_ANegatedSetPredicateTestKeepsTheCollectionFlattened(t *testing.T) {
+	negated := mapLocalsOfSource(t,
+		"function f(v: number, other: Set<number>) { const s = new Set(); s.add(v); if (!s.isSubsetOf(other)) { return 1; } return 0; }")
+	if len(negated) != 1 {
+		t.Errorf("a negated isSubsetOf test declined the collection — `!` says no more about the result than the bare form")
+	}
+}
+
+func TestMapSlots_ASetPredicateOnAMapDeclinesTheCollection(t *testing.T) {
+	// none of the three exist on Map's own interface
+	// (lib.es2025.collection.d.ts declares them on Set/ReadonlySet only)
+	flattened := mapLocalsOfSource(t,
+		"function f(k: number, other: any) { const m = new Map(); m.set(k, 1); if ((m as any).isSubsetOf(other)) { return 1; } return 0; }")
+	if len(flattened) != 0 {
+		t.Errorf("isSubsetOf on a Map flattened — the predicate is a Set-only operation")
+	}
+}
+
+func TestMapSlots_ASetPredicateInAWhileHeadStillDeclinesTheCollection(t *testing.T) {
+	flattened := mapLocalsOfSource(t,
+		"function f(v: number, other: Set<number>) { const s = new Set(); s.add(v); while (s.isSubsetOf(other)) { s.delete(v); } return s.size; }")
+	if len(flattened) != 0 {
+		t.Errorf("isSubsetOf in a while head flattened — the loop form has no opaque variant, so the body declines anyway")
+	}
+}
+
+func TestMapSlots_ASetPredicateOutsideATestPositionStillDeclinesTheCollection(t *testing.T) {
+	bound := mapLocalsOfSource(t,
+		"function f(v: number, other: Set<number>) { const s = new Set(); s.add(v); const b = s.isSubsetOf(other); return b; }")
+	if len(bound) != 0 {
+		t.Errorf("isSubsetOf bound to a local flattened — its result would land in a slot with no reading for it")
+	}
+	returned := mapLocalsOfSource(t,
+		"function f(v: number, other: Set<number>) { const s = new Set(); s.add(v); return s.isSubsetOf(other); }")
+	if len(returned) != 0 {
+		t.Errorf("a returned isSubsetOf flattened — the result is the body's answer, which no slot spells")
+	}
+}
+
+func TestMapSlots_AUnionOverTwoFlattenedSetsProducesANewFlattenedLocal(t *testing.T) {
+	flattened := mapLocalsOfSource(t,
+		"function f(x: number, y: number) { const a = new Set(); a.add(x); const b = new Set(); b.add(y); const u = a.union(b); return u.size; }")
+	// three flattened locals: a, b, and the producer u
+	if len(flattened) != 3 {
+		t.Fatalf("MapLocalsOf found %d flattened collections, want 3 (a, b, u)", len(flattened))
+	}
+	found := false
+	for _, local := range flattened {
+		if local.Name == "u" {
+			found = true
+			if local.ProducerMethod != "union" {
+				t.Errorf("ProducerMethod = %q, want %q", local.ProducerMethod, "union")
+			}
+			if local.ProducerReceiver != "a" || local.ProducerArgument != "b" {
+				t.Errorf("producer operands = %q, %q, want a, b", local.ProducerReceiver, local.ProducerArgument)
+			}
+			if local.IsMap {
+				t.Errorf("IsMap = true, want false — every producer is a Set")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("u did not flatten as a producer local")
+	}
+}
+
+func TestMapSlots_TheOtherThreeSetAlgebraProducersAlsoFlatten(t *testing.T) {
+	for _, method := range []string{"intersection", "difference", "symmetricDifference"} {
+		flattened := mapLocalsOfSource(t,
+			"function f(x: number, y: number) { const a = new Set(); a.add(x); const b = new Set(); b.add(y); const u = a."+method+"(b); return u.size; }")
+		if len(flattened) != 3 {
+			t.Errorf("%s: MapLocalsOf found %d flattened collections, want 3 (a, b, u)", method, len(flattened))
+		}
+	}
+}
+
+func TestMapSlots_AProducerOverAnUnflattenedOperandDeclinesJustTheProducer(t *testing.T) {
+	// b is passed to g(), which declines b's own flattening; a stays
+	// flattened (its own uses are all recognized forms) but u cannot —
+	// there is no source to join b's vals from
+	flattened := mapLocalsOfSource(t,
+		"function f(x: number, y: number) { const a = new Set(); a.add(x); const b = new Set(); b.add(y); g(b); const u = a.union(b); return u.size; }")
+	names := map[string]bool{}
+	for _, local := range flattened {
+		names[local.Name] = true
+	}
+	if names["u"] {
+		t.Errorf("u flattened over an unflattened operand b — there is nothing to join from")
+	}
+}
+
+func TestMapSlots_AProducerOverAMapOperandDeclines(t *testing.T) {
+	flattened := mapLocalsOfSource(t,
+		"function f(k: number, y: number) { const m = new Map(); m.set(k, 1); const b = new Set(); b.add(y); const u = (m as any).union(b); return 1; }")
+	names := map[string]bool{}
+	for _, local := range flattened {
+		names[local.Name] = true
+	}
+	if names["u"] {
+		t.Errorf("u flattened over a Map receiver — none of the four algebra methods exist on Map's interface")
+	}
+}
+
+func TestMapSlots_AProducerWithMismatchedValueSortsDeclines(t *testing.T) {
+	flattened := mapLocalsOfSource(t,
+		`function f() { const a = new Set([1, 2]); const b = new Set(["x", "y"]); const u = a.union(b); return u.size; }`)
+	names := map[string]bool{}
+	for _, local := range flattened {
+		names[local.Name] = true
+	}
+	if names["u"] {
+		t.Errorf("u flattened over mismatched value sorts — one value slot cannot wear both number and string")
+	}
+}
+
+func TestMapSlots_AClearKeepsTheCollectionFlattened(t *testing.T) {
 	flattened := mapLocalsOfSource(t,
 		"function f(k: number) { const m = new Map(); m.set(k, 1); m.clear(); return m.size; }")
+	if len(flattened) != 1 {
+		t.Errorf("a collection with a clear() declined — MapClearAssignmentsOf resets every slot to the fresh-empty state")
+	}
+}
+
+func TestMapSlots_AClearWithAnArgumentDeclinesTheCollection(t *testing.T) {
+	// `clear()` takes no arguments; a call spelled with one is not the
+	// recognized form and costs the whole collection its flattening,
+	// exactly like any other unrecognized method call
+	flattened := mapLocalsOfSource(t,
+		"function f(k: number) { const m = new Map(); m.set(k, 1); (m as any).clear(k); return m.size; }")
 	if len(flattened) != 0 {
-		t.Errorf("a collection with a clear() flattened — the value slot would keep values the collection no longer holds")
+		t.Errorf("a clear() with an argument flattened — that is not the recognized zero-argument form")
 	}
 }
 
@@ -221,5 +357,51 @@ func TestMapSlots_AWeakMapDeclines(t *testing.T) {
 		"function f(k: number) { const m = new WeakMap(); return 1; }")
 	if len(flattened) != 0 {
 		t.Errorf("a WeakMap flattened — only Map and Set are recognized")
+	}
+}
+
+func TestMapSlots_AGetOrInsertKeepsTheCollectionFlattened(t *testing.T) {
+	flattened := mapLocalsOfSource(t,
+		"function f(k: number) { const m = new Map(); const r = m.getOrInsert(k, 1); return r; }")
+	if len(flattened) != 1 {
+		t.Errorf("a collection with a getOrInsert() declined — the plain-value form is a recognized Map operation")
+	}
+}
+
+func TestMapSlots_AGetOrInsertOnASetDeclinesTheCollection(t *testing.T) {
+	flattened := mapLocalsOfSource(t,
+		"function f(v: number) { const s = new Set(); s.add(v); (s as any).getOrInsert(v, 1); return s.size; }")
+	if len(flattened) != 0 {
+		t.Errorf("a Set with a getOrInsert() flattened — getOrInsert is a Map-only operation")
+	}
+}
+
+func TestMapSlots_AGetOrInsertComputedDeclinesTheCollection(t *testing.T) {
+	// the callback is a NAME, not an arrow — CollectLocals declines a
+	// body with a nested function outright, and what is under test here
+	// is the getOrInsertComputed call itself
+	flattened := mapLocalsOfSource(t,
+		"function f(k: number) { const m = new Map(); const r = m.getOrInsertComputed(k, cb); return r; }")
+	if len(flattened) != 0 {
+		t.Errorf("a getOrInsertComputed() flattened — its callback second argument needs machinery this scan does not carry")
+	}
+}
+
+// TestMapSlots_MapGroupByDeclines names the refusal: `Map.groupBy` is a
+// static call, not a `new Map(…)` construction, so
+// constructionOfNewExpression never recognizes the initializer at all —
+// NOT-YET-BUILT (a construction reader for this call shape, plus a
+// callback-summary-driven fresh size/key family), and separately a hard
+// wall for the value slot specifically: groupBy's value shape is `T[]`,
+// which the scalar-only vals slot cannot hold (ir_map_syntax.go declines
+// every array/object seed value the same way).
+func TestMapSlots_MapGroupByDeclines(t *testing.T) {
+	// the callback is a NAME, not an arrow — CollectLocals declines a
+	// body with a nested function outright, and what is under test here
+	// is Map.groupBy's own construction shape
+	flattened := mapLocalsOfSource(t,
+		`function f(xs: number[]) { const g = Map.groupBy(xs, keySelector); return g.size; }`)
+	if len(flattened) != 0 {
+		t.Errorf("Map.groupBy flattened — it is a static call, not a new-Map(...) construction, and its value shape (T[]) is not scalar")
 	}
 }

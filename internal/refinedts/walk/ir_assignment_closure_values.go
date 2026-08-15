@@ -75,8 +75,10 @@ func FunctionValuedDeclarationOf(context *LoweringContext, statement *ast.Node) 
 	}
 	// the closure's OWN write set, havocked here: the value may be called
 	// at a time no statement of this body places, so no statement after
-	// this one may believe a slot the body assigns
-	out := havocAssignments(ClosureWriteSlots(context, closure.Body()))
+	// this one may believe a slot the body assigns. The whole closure
+	// node goes to the census — a bare body block would read as "no
+	// closures inside" and miss the closure's own top-level writes.
+	out := havocAssignments(ClosureWriteSlots(context, closure))
 	if slot, has := IndexOf(context, d.Name()); has {
 		out = append(out, kernelbridge.IrStatement{
 			Kind:   kernelbridge.IrStatementAssign,
@@ -96,13 +98,19 @@ func FunctionValuedDeclarationOf(context *LoweringContext, statement *ast.Node) 
 // A spelling with no slot contributes nothing: nothing lowered can read
 // a name the vector never laid out, so there is no belief for the
 // closure's write to falsify.
-func ClosureWriteSlots(context *LoweringContext, body *ast.Node) map[int]struct{} {
+//
+// THE ARGUMENT IS THE CLOSURE NODE, never its body: the census walks a
+// non-function subtree looking for closures INSIDE it, so a bare body
+// block answers the empty set and the closure's own top-level writes
+// go unseen — the under-count that let a stored closure's writes pass
+// unhavocked.
+func ClosureWriteSlots(context *LoweringContext, closure *ast.Node) map[int]struct{} {
 	slots := map[int]struct{}{}
-	if context == nil || body == nil {
+	if context == nil || closure == nil {
 		return slots
 	}
 	written := map[string]struct{}{}
-	closureAssignedNames(body, written)
+	closureAssignedNames(closure, written)
 	for name := range written {
 		if slot, held := slotIndexOfName(context, name); held {
 			slots[slot] = struct{}{}

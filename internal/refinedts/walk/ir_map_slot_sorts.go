@@ -15,7 +15,14 @@ import (
 // anything else the lowering reads numerically. An EMPTY collection has
 // no value to read, so it takes the number sort the sets and the gets
 // speak.
+//
+// A PRODUCER (`const u = a.union(b)`) has no seed rows of its own; its
+// value sort was already resolved from its two operands at recognition
+// time (setProducerMapLocalOf) and rides in ProducerValsSort.
 func MapValueSort(local MapLocal) BindingKind {
+	if local.ProducerMethod != "" {
+		return local.ProducerValsSort
+	}
 	return sortOfSeedRow(local.SeedVals)
 }
 
@@ -40,7 +47,13 @@ func sortOfSeedRow(entries []*ast.Node) BindingKind {
 // MapValueTypeof is a flattened collection's value typeof evidence,
 // from the seed's syntax alone — only an all-same reading claims
 // anything, exactly as ArrayElementTypeof does.
+//
+// A PRODUCER reads ProducerValsTypeof, resolved at recognition time —
+// see MapValueSort.
 func MapValueTypeof(local MapLocal) TypeofTag {
+	if local.ProducerMethod != "" {
+		return local.ProducerValsTypeof
+	}
 	return typeofOfSeedRow(local.SeedVals)
 }
 

@@ -80,6 +80,72 @@ func TestPromiseLocalDeclaration_WithoutAnAllocateThereIsNoInnerSlotToFlattenInt
 	}
 }
 
+// awaitAllocatingScalarContext is awaitScalarContext with an Allocate
+// that grows the vector — what promiseLocalDeclarationOf needs to give
+// a new "p.inner" slot a home.
+func awaitAllocatingScalarContext() *LoweringContext {
+	context := awaitScalarContext()
+	context.Allocate = func(name string, sort BindingKind, tag TypeofTag) (int, bool) {
+		context.Bindings = append(context.Bindings, name)
+		context.Sorts = append(context.Sorts, sort)
+		context.Typeofs = append(context.Typeofs, tag)
+		return len(context.Bindings) - 1, true
+	}
+	return context
+}
+
+func TestPromiseLocalDeclaration_APromiseResolveInitializerFlattensToTheInnerSlot(t *testing.T) {
+	// `const p = Promise.resolve(s)` where s is a tracked scalar: the
+	// same gate `await Promise.resolve(s)` uses (RhsEffect admits only
+	// shapes CannotBeThenable would clear), carried into the promise-
+	// local route so `await p` downstream reads the flattened slot
+	context := awaitAllocatingScalarContext()
+	statements := awaitParse(t, `
+		async function total() {
+			const p = Promise.resolve(s);
+			const a = await p;
+		}
+	`)
+	body := statements[0].AsFunctionDeclaration().Body.AsBlock().Statements.Nodes
+	lowered, ok := promiseLocalDeclarationOf(context, body[0])
+	if !ok {
+		t.Fatalf("promiseLocalDeclarationOf(const p = Promise.resolve(s)) ok = false, want true")
+	}
+	if len(lowered) != 1 || lowered[0].Kind != kernelbridge.IrStatementAssign {
+		t.Fatalf("lowered = %+v, want one assign into the inner slot", lowered)
+	}
+	if lowered[0].Effect.Kind != kernelbridge.LoopEffectVar || lowered[0].Effect.Index != 1 {
+		t.Errorf("lowered[0].Effect = %+v, want the var read of s (slot 1)", lowered[0].Effect)
+	}
+	slot, held := promiseInnerSlotOf(context, "p")
+	if !held {
+		t.Fatalf("promiseInnerSlotOf(p) held = false after a Promise.resolve initializer, want true")
+	}
+	if lowered[0].Target != slot {
+		t.Errorf("lowered[0].Target = %d, want the held inner slot %d", lowered[0].Target, slot)
+	}
+}
+
+func TestPromiseLocalDeclaration_APromiseResolveOfAnUnreadableArgumentDeclines(t *testing.T) {
+	// `Promise.resolve(f())` — the argument is a call, which RhsEffect
+	// does not read; the promise-local route declines and the
+	// declaration takes whatever route it took before
+	context := awaitAllocatingScalarContext()
+	statements := awaitParse(t, `
+		async function total() {
+			const p = Promise.resolve(f());
+			const a = await p;
+		}
+	`)
+	body := statements[0].AsFunctionDeclaration().Body.AsBlock().Statements.Nodes
+	if _, ok := promiseLocalDeclarationOf(context, body[0]); ok {
+		t.Errorf("a Promise.resolve local with an unreadable argument flattened — RhsEffect cannot read a call")
+	}
+	if _, held := promiseInnerSlotOf(context, "p"); held {
+		t.Errorf("a declined Promise.resolve local left a held slot behind")
+	}
+}
+
 func TestPromiseInnerSlot_TheHeldSlotIsReadBackByNameAndAnUnheldNameAnswersNothing(t *testing.T) {
 	context := awaitScalarContext()
 	if _, held := promiseInnerSlotOf(context, "p"); held {

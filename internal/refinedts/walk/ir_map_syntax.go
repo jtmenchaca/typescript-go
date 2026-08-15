@@ -231,6 +231,119 @@ func hasCallInTestPosition(test *ast.Node, name string) (arguments []*ast.Node, 
 	return arguments, true
 }
 
+// setAlgebraPredicateNames is the three boolean-returning, write-free
+// Set methods that read no per-key knowledge and touch no slot — the
+// same shape `has` already rides. Set.prototype.isSubsetOf /
+// isSupersetOf / isDisjointFrom (lib.es2025.collection.d.ts) each take
+// one ReadonlySetLike argument and answer a boolean with no mutation of
+// either operand, so the opaque branch spells exactly what is known
+// about the result: nothing, same as `has`.
+var setAlgebraPredicateNames = map[string]bool{
+	"isSubsetOf":     true,
+	"isSupersetOf":   true,
+	"isDisjointFrom": true,
+}
+
+// setPredicateCallInTestPosition is setAlgebraPredicateNames' call
+// reading — the same parens/`!`-stripped test-position admission
+// hasCallInTestPosition gives `has`, generalized to the three Set
+// algebra predicates. A Set operation only: none of the three exist on
+// Map's own interface (lib.es2025.collection.d.ts declares them on Set
+// and ReadonlySet, not on Map).
+func setPredicateCallInTestPosition(test *ast.Node, name string, isMap bool) (arguments []*ast.Node, ok bool) {
+	if isMap {
+		return nil, false
+	}
+	head := Unwrapped(test)
+	for ast.IsPrefixUnaryExpression(head) &&
+		head.AsPrefixUnaryExpression().Operator == ast.KindExclamationToken {
+		head = Unwrapped(head.AsPrefixUnaryExpression().Operand)
+	}
+	method, arguments, isCall := collectionMethodCallOf(head, name)
+	if !isCall || !setAlgebraPredicateNames[method] || len(arguments) != 1 {
+		return nil, false
+	}
+	return arguments, true
+}
+
+// setAlgebraProducerNames is the four Set-producing algebra methods
+// (Set.prototype.union / intersection / difference / symmetricDifference,
+// lib.es2025.collection.d.ts) each returning a FRESH Set built from the
+// receiver and one ReadonlySetLike argument. Every member of the result
+// is drawn from the receiver's own members, the argument's own members,
+// or both — union_setSpec.md-equivalent: SetUnion/SetIntersection/
+// SetDifference/SetSymmetricDifference (ECMA-262) each iterate one or
+// both operands and add only values already present in one of them, so
+// join(receiver.vals, argument.vals) is a SOUND — if imprecise — claim
+// for every one of the four, regardless of which operator it is. What
+// is NOT claimable from syntax alone is the resulting SIZE: duplicates
+// between the two operands collapse for union, and intersection/
+// difference/symmetricDifference each depend on which members actually
+// coincide, none of which the two flattened operands' summaries can
+// settle — so size stays unknown for all four.
+var setAlgebraProducerNames = map[string]bool{
+	"union":               true,
+	"intersection":        true,
+	"difference":          true,
+	"symmetricDifference": true,
+}
+
+// setProducerCallOf reads a node as `a.union(b)` / `.intersection(b)` /
+// `.difference(b)` / `.symmetricDifference(b)` — a Set-producing algebra
+// call standing anywhere, not only in a declaration's initializer
+// position — what the use scan needs to rule on the call wherever it
+// appears, both the receiver and the argument bare identifiers. Mirrors
+// constructionOfNewExpression's split from collectionConstructionOf for
+// the same reason.
+//
+// A qualified receiver, a computed method name, an argument that is not
+// a bare name (a fresh set literal, a call, a property access) — none
+// of these are read: the two-sibling construction only fires where BOTH
+// operands are bare names this recognizer can look up against the
+// already-flattened Set table.
+func setProducerCallOf(node *ast.Node) (receiver string, argument string, ok bool) {
+	call := Unwrapped(node)
+	if !ast.IsCallExpression(call) {
+		return "", "", false
+	}
+	expression := call.AsCallExpression()
+	if !ast.IsPropertyAccessExpression(expression.Expression) {
+		return "", "", false
+	}
+	access := expression.Expression.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return "", "", false
+	}
+	if !ast.IsIdentifier(access.Expression) || !ast.IsIdentifier(access.Name()) {
+		return "", "", false
+	}
+	if !setAlgebraProducerNames[access.Name().Text()] {
+		return "", "", false
+	}
+	if expression.Arguments == nil || len(expression.Arguments.Nodes) != 1 {
+		return "", "", false
+	}
+	argumentHead := Unwrapped(expression.Arguments.Nodes[0])
+	if !ast.IsIdentifier(argumentHead) {
+		return "", "", false
+	}
+	return access.Expression.Text(), argumentHead.Text(), true
+}
+
+// setProducerConstructionOf is the same reading against a declaration's
+// initializer specifically — what the recognizer (setProducerMapLocalOf)
+// consults to read the NEW local's own construction.
+func setProducerConstructionOf(declaration *ast.Node) (receiver string, argument string, ok bool) {
+	if !ast.IsVariableDeclaration(declaration) {
+		return "", "", false
+	}
+	initializer := declaration.AsVariableDeclaration().Initializer
+	if initializer == nil {
+		return "", "", false
+	}
+	return setProducerCallOf(initializer)
+}
+
 // testPositionOf is the condition an IF tests, or nil for every other
 // statement — the one position a `has` is admitted in. A while head is
 // NOT admitted: the loop form carries per-binding condition sets and a
