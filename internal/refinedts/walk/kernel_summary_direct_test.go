@@ -129,16 +129,16 @@ func TestSummaryParameterEntries_AScalarParameterKeepsItsSingleWholeNameEntry(t 
 
 func TestSummaryParameterEntries_TheShapesThatStayWholeNameDeclines(t *testing.T) {
 	// each of these keeps the parameter a single unknown-sorted entry —
-	// the expansion answers no members for any of them
+	// the expansion answers no members for any of them. An optional
+	// member, a richer member, and a nested literal all EXPAND now (the
+	// accounting-argument widening scalarMemberListOfIn documents) —
+	// pinned separately below, not here.
 	sources := map[string]string{
 		"a class name":       "function f(p: Point) { return 1; }",
 		"an interface name":  "function f(p: Shape) { return 1; }",
 		"a union":            "function f(p: { lo: number } | { hi: number }) { return 1; }",
-		"an optional member": "function f(p: { lo?: number }) { return 1; }",
 		"a method":           "function f(p: { lo(): number }) { return 1; }",
 		"an index signature": "function f(p: { [k: string]: number }) { return 1; }",
-		"a nested literal":   "function f(p: { lo: { deep: number } }) { return 1; }",
-		"a richer member":    "function f(p: { lo: number[] }) { return 1; }",
 		"an empty literal":   "function f(p: {}) { return 1; }",
 	}
 	for name, source := range sources {
@@ -150,6 +150,179 @@ func TestSummaryParameterEntries_TheShapesThatStayWholeNameDeclines(t *testing.T
 		if !ok || len(entries) != 1 || entries[0].Name != "p" {
 			t.Errorf("%s: entries = %v (ok %v), want the single whole-name entry", name, entries, ok)
 		}
+	}
+}
+
+// TestSummaryParameterEntries_AnOptionalMemberExpandsWearingMayBeAbsent
+// pins the landed widening: an optional member is a WEAKER promise, not
+// a missing one, so it contributes its own leaf — sorted by its inner
+// annotation — wearing MayBeAbsent, rather than declining the whole
+// parameter (scalarMemberListOfIn's doc).
+func TestSummaryParameterEntries_AnOptionalMemberExpandsWearingMayBeAbsent(t *testing.T) {
+	declaration := summaryDeclarationOf(t, "function f(p: { lo?: number }) { return 1; }")
+	entries, ok := SummaryParameterEntries(declaration.Parameters()[0])
+	if !ok || len(entries) != 1 || entries[0].Name != "p.lo" || entries[0].Sort != BindingKindNumber {
+		t.Fatalf("entries = %v (ok %v), want [{p.lo number}]", entries, ok)
+	}
+	members, expanded := recordParamMembersOf(declaration.Parameters()[0])
+	if !expanded || len(members) != 1 {
+		t.Fatalf("members = %v (expanded %v), want the one optional member", members, expanded)
+	}
+	if !members[0].MayBeAbsent {
+		t.Errorf("members[0].MayBeAbsent = false, want true — the member is declared optional")
+	}
+}
+
+// TestSummaryParameterEntries_AnIndexSignatureIsSkippedBesideAScalarMember
+// pins the landed widening: an index signature contributes no leaf and
+// kills nothing, so its scalar sibling still expands — the same skip a
+// method signature already takes.
+func TestSummaryParameterEntries_AnIndexSignatureIsSkippedBesideAScalarMember(t *testing.T) {
+	declaration := summaryDeclarationOf(t, "function f(p: { lo: number, [k: string]: number }) { return p.lo; }")
+	entries, ok := SummaryParameterEntries(declaration.Parameters()[0])
+	if !ok || len(entries) != 1 || entries[0].Name != "p.lo" || entries[0].Sort != BindingKindNumber {
+		t.Fatalf("entries = %v (ok %v), want [{p.lo number}]", entries, ok)
+	}
+}
+
+func TestKernelSummaryDirect_ABodyReadingTheScalarSiblingOfAnIndexSignatureSummarizes(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	declaration := summaryDeclarationOf(t, "function f(p: { lo: number, [k: string]: number }) { return p.lo; }")
+	contract := &FunctionContract{Declaration: declaration}
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	argument := recordObject(t, map[string]float64{"lo": 2}, []string{"lo"})
+	answer, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{argument}, contract)
+	if !ok {
+		t.Fatalf("a body reading the scalar sibling of an index signature declined")
+	}
+	state, stateOk := StateOfKnown(answer)
+	if !stateOk || state.Top {
+		t.Fatalf("the answer did not spell as a scalar state: %+v", answer)
+	}
+	if !kernel.Member(state.Set, []float64{2}) {
+		t.Errorf("the summary of f({lo:2}) excludes the true value 2: %+v", state.Set)
+	}
+}
+
+func TestKernelSummaryDirect_AReadThroughAnIndexSignatureStillDeclines(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	// `p[k]` names no leaf the index signature ever contributes — the
+	// skip only frees the scalar sibling, never the indexed read itself
+	declaration := summaryDeclarationOf(t,
+		"function f(p: { lo: number, [k: string]: number }, k: string) { return p[k]; }")
+	contract := &FunctionContract{Declaration: declaration}
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	argument := recordObject(t, map[string]float64{"lo": 2}, []string{"lo"})
+	if _, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{argument, exactNumber(t, 0)}, contract); ok {
+		t.Errorf("a read through an index signature summarized — no leaf holds it")
+	}
+}
+
+// TestSummaryParameterEntriesIn_AComputedStableSymbolMemberExpandsUnderTheSymName
+// pins the landed widening: a type element named `[S]: number` under a
+// module-level `const S = Symbol()` contributes its leaf under the
+// derived `#sym:S` name, beside its scalar sibling `lo`, when the
+// reading holds a checker to resolve the const against.
+func TestSummaryParameterEntriesIn_AComputedStableSymbolMemberExpandsUnderTheSymName(t *testing.T) {
+	ctx, p := namedTypeCtx(t,
+		"const S = Symbol();\n"+
+			"function f(p: { lo: number, [S]: number }) { return p.lo; }\n")
+	declaration := namedTypeFunction(t, p, "f")
+	entries, ok := SummaryParameterEntriesIn(ctx, declaration.Parameters()[0])
+	if !ok || len(entries) != 2 {
+		t.Fatalf("entries = %v (ok %v), want two — p.lo and the #sym: leaf", entries, ok)
+	}
+	wantName := []string{"p.lo", "p.#sym:S"}
+	for i, entry := range entries {
+		if entry.Name != wantName[i] {
+			t.Errorf("entry %d name = %q, want %q", i, entry.Name, wantName[i])
+		}
+		if entry.Sort != BindingKindNumber {
+			t.Errorf("entry %d sort = %q, want number", i, entry.Sort)
+		}
+	}
+}
+
+// TestSummaryParameterEntries_AComputedStableSymbolMemberSkipsWithNoChecker
+// pins the ctx-less fallback the doc states: with no checker to resolve
+// the const against, the computed member SKIPS rather than refusing the
+// list — its scalar sibling still expands alone.
+func TestSummaryParameterEntries_AComputedStableSymbolMemberSkipsWithNoChecker(t *testing.T) {
+	// the ctx-less parse: no checker anywhere to resolve the const
+	// against, so the computed member skips even though a checker-backed
+	// reading of the very same shape resolves it (the test above)
+	declaration := summaryDeclarationOf(t, "function f(p: { lo: number, [S]: number }) { return p.lo; }")
+	entries, ok := SummaryParameterEntries(declaration.Parameters()[0])
+	if !ok || len(entries) != 1 || entries[0].Name != "p.lo" || entries[0].Sort != BindingKindNumber {
+		t.Fatalf("entries = %v (ok %v), want [{p.lo number}] — the computed member skipped", entries, ok)
+	}
+}
+
+// TestSummaryParameterEntriesIn_ANonStableComputedNameSkipsAndSiblingsExpand
+// pins the "any other computed name" branch: a computed name the checker
+// cannot pin to a stable symbol const (a plain string-literal computed
+// name here) skips exactly like the unresolvable case, and its scalar
+// sibling still expands.
+func TestSummaryParameterEntriesIn_ANonStableComputedNameSkipsAndSiblingsExpand(t *testing.T) {
+	ctx, p := namedTypeCtx(t,
+		"function f(p: { lo: number, [\"mid\"]: number }) { return p.lo; }\n")
+	declaration := namedTypeFunction(t, p, "f")
+	entries, ok := SummaryParameterEntriesIn(ctx, declaration.Parameters()[0])
+	if !ok || len(entries) != 1 || entries[0].Name != "p.lo" || entries[0].Sort != BindingKindNumber {
+		t.Fatalf("entries = %v (ok %v), want [{p.lo number}] — the non-stable computed member skipped", entries, ok)
+	}
+}
+
+func TestKernelSummaryDirect_ABodyReadingTheScalarSiblingOfAStableSymbolMemberSummarizes(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ctx, p := namedTypeCtx(t,
+		"const S = Symbol();\n"+
+			"function f(p: { lo: number, [S]: number }) { return p.lo; }\n")
+	declaration := namedTypeFunction(t, p, "f")
+	contract := &FunctionContract{Declaration: declaration}
+	// the argument must name BOTH declared leaves — p.lo and the
+	// #sym:S leaf the computed member now contributes — or the known
+	// object is missing a declared member and the call declines
+	// (expandedMemberEntryState's three-way rule)
+	argument := recordObject(t, map[string]float64{"lo": 2, "#sym:S": 0}, []string{"lo", "#sym:S"})
+	answer, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{argument}, contract)
+	if !ok {
+		t.Fatalf("a body reading the scalar sibling of a stable-symbol member declined")
+	}
+	state, stateOk := StateOfKnown(answer)
+	if !stateOk || state.Top {
+		t.Fatalf("the answer did not spell as a scalar state: %+v", answer)
+	}
+	if !kernel.Member(state.Set, []float64{2}) {
+		t.Errorf("the summary of f({lo:2}) excludes the true value 2: %+v", state.Set)
+	}
+}
+
+// TestSummaryParameterEntries_ARicherMemberExpandsUnknownSorted pins the
+// landed widening: a member whose annotation is not a scalar keyword
+// (an array, here) still names a leaf — the leaf just cannot state a
+// sort — rather than killing the expansion of every scalar sibling.
+func TestSummaryParameterEntries_ARicherMemberExpandsUnknownSorted(t *testing.T) {
+	declaration := summaryDeclarationOf(t, "function f(p: { lo: number[] }) { return 1; }")
+	entries, ok := SummaryParameterEntries(declaration.Parameters()[0])
+	if !ok || len(entries) != 1 || entries[0].Name != "p.lo" || entries[0].Sort != BindingKindUnknown {
+		t.Fatalf("entries = %v (ok %v), want [{p.lo unknown}]", entries, ok)
+	}
+}
+
+// TestSummaryParameterEntries_ANestedLiteralRecursesIntoTheChildLeaf
+// pins the landed NESTED FAMILY widening: a member whose own annotation
+// is itself a type literal is no longer a single unknown-sorted leaf —
+// it recurses, and the outer member contributes its CHILD's leaves
+// under the parent's own key, "p.lo.deep".
+func TestSummaryParameterEntries_ANestedLiteralRecursesIntoTheChildLeaf(t *testing.T) {
+	declaration := summaryDeclarationOf(t, "function f(p: { lo: { deep: number } }) { return 1; }")
+	entries, ok := SummaryParameterEntries(declaration.Parameters()[0])
+	if !ok || len(entries) != 1 || entries[0].Name != "p.lo.deep" || entries[0].Sort != BindingKindNumber {
+		t.Fatalf("entries = %v (ok %v), want [{p.lo.deep number}]", entries, ok)
 	}
 }
 
@@ -439,7 +612,11 @@ func TestSummaryParameterEntriesIn_ATypeAliasOfALiteralExpands(t *testing.T) {
 
 func TestSummaryParameterEntriesIn_TheNamedShapesThatStayWholeName(t *testing.T) {
 	// each of these resolves to a declaration whose members are not
-	// promised to every entry, so the parameter keeps its single slot
+	// promised to every entry, so the parameter keeps its single slot.
+	// An interface's method and optional member and richer member all
+	// EXPAND through a named type exactly as the inline-literal case
+	// does (recordParamMembersIn reads a named type by the same member
+	// rules) — pinned separately below, not here.
 	sources := map[string]string{
 		"a class": "class Point { lo: number = 0; hi: number = 0 }\n" +
 			"function f(p: Point) { return 1; }\n",
@@ -449,12 +626,6 @@ func TestSummaryParameterEntriesIn_TheNamedShapesThatStayWholeName(t *testing.T)
 			"function f(p: Box<number>) { return 1; }\n",
 		"an alias of a union": "type Either = { lo: number } | { hi: number };\n" +
 			"function f(p: Either) { return 1; }\n",
-		"an interface with a method": "interface Bounds { lo: number; go(): number }\n" +
-			"function f(p: Bounds) { return 1; }\n",
-		"an interface with an optional member": "interface Bounds { lo?: number }\n" +
-			"function f(p: Bounds) { return 1; }\n",
-		"an interface with a richer member": "interface Bounds { lo: number[] }\n" +
-			"function f(p: Bounds) { return 1; }\n",
 		"an empty interface": "interface Bounds { }\n" +
 			"function f(p: Bounds) { return 1; }\n",
 		"an unresolvable name": "function f(p: Nowhere) { return 1; }\n",
@@ -469,6 +640,52 @@ func TestSummaryParameterEntriesIn_TheNamedShapesThatStayWholeName(t *testing.T)
 		if !ok || len(entries) != 1 || entries[0].Name != "p" {
 			t.Errorf("%s: entries = %v (ok %v), want the single whole-name entry", name, entries, ok)
 		}
+	}
+}
+
+// TestSummaryParameterEntriesIn_ANamedInterfacesMethodAndOptionalAndRicherMembersExpand
+// pins the landed widening through a NAMED type: an interface's method
+// is skipped (contributes nothing) while its scalar sibling still
+// expands; an optional member contributes wearing MayBeAbsent; a richer
+// member contributes unknown-sorted — the same three rules
+// scalarMemberListOfIn states for the inline-literal case, read off a
+// resolved interface declaration by the same member reader.
+func TestSummaryParameterEntriesIn_ANamedInterfacesMethodAndOptionalAndRicherMembersExpand(t *testing.T) {
+	cases := map[string]struct {
+		source string
+		sort   BindingKind
+	}{
+		"a method beside a scalar member": {
+			source: "interface Bounds { lo: number; go(): number }\n" +
+				"function f(p: Bounds) { return 1; }\n",
+			sort: BindingKindNumber,
+		},
+		"an optional member": {
+			source: "interface Bounds { lo?: number }\n" +
+				"function f(p: Bounds) { return 1; }\n",
+			sort: BindingKindNumber,
+		},
+		"a richer member": {
+			source: "interface Bounds { lo: number[] }\n" +
+				"function f(p: Bounds) { return 1; }\n",
+			sort: BindingKindUnknown,
+		},
+	}
+	for name, given := range cases {
+		ctx, p := namedTypeCtx(t, given.source)
+		declaration := namedTypeFunction(t, p, "f")
+		entries, ok := SummaryParameterEntriesIn(ctx, declaration.Parameters()[0])
+		if !ok || len(entries) != 1 || entries[0].Name != "p.lo" || entries[0].Sort != given.sort {
+			t.Errorf("%s: entries = %v (ok %v), want [{p.lo %s}]", name, entries, ok, given.sort)
+		}
+	}
+	// the optional case also carries MayBeAbsent on the resolved member
+	ctx, p := namedTypeCtx(t, "interface Bounds { lo?: number }\n"+
+		"function f(p: Bounds) { return 1; }\n")
+	declaration := namedTypeFunction(t, p, "f")
+	members, expanded := recordParamMembersIn(ctx, declaration.Parameters()[0])
+	if !expanded || len(members) != 1 || !members[0].MayBeAbsent {
+		t.Errorf("members = %v (expanded %v), want the one member wearing MayBeAbsent", members, expanded)
 	}
 }
 
@@ -521,6 +738,84 @@ func TestKernelSummaryDirect_AnInterfaceTypedParametersFieldsBuildTheLeafEntries
 	// f({lo:2, hi:5}) = 7; the answer must ADMIT it
 	if !kernel.Member(state.Set, []float64{7}) {
 		t.Errorf("the summary of f({lo:2,hi:5}) excludes the true value 7: %+v", state.Set)
+	}
+}
+
+// TestSummaryParameterEntriesIn_AnInterfaceWithANestedMemberExpandsTheTwoStepLeaf
+// pins the gap this closed: an interface's OWN members now read through
+// the SAME widened reader (interfaceOwnMembersWithCheckerIn) a type
+// literal or alias already gets, so a nested member declared directly on
+// an interface expands to its two-step leaf exactly as
+// `p: { lo: number, inner: { deep: number } }` already does.
+func TestSummaryParameterEntriesIn_AnInterfaceWithANestedMemberExpandsTheTwoStepLeaf(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ctx, p := namedTypeCtx(t,
+		"interface Box { lo: number; inner: { deep: number } }\n"+
+			"function f(p: Box) { return p.inner.deep + p.lo; }\n")
+	declaration := namedTypeFunction(t, p, "f")
+	entries, entriesOk := SummaryParameterEntriesIn(ctx, declaration.Parameters()[0])
+	if !entriesOk || len(entries) != 2 {
+		t.Fatalf("entries = %v (ok %v), want two — p.lo and p.inner.deep", entries, entriesOk)
+	}
+	wantName := []string{"p.lo", "p.inner.deep"}
+	for i, entry := range entries {
+		if entry.Name != wantName[i] {
+			t.Errorf("entry %d name = %q, want %q", i, entry.Name, wantName[i])
+		}
+		if entry.Sort != BindingKindNumber {
+			t.Errorf("entry %d sort = %q, want number", i, entry.Sort)
+		}
+	}
+	// a body reading the two-step member off the interface-typed parameter
+	// summarizes exactly, the same end-to-end check the type-literal
+	// nested-family test makes
+	contract := &FunctionContract{Declaration: declaration}
+	inner := abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{{Name: "deep", Value: exactNumber(t, 2)}}, nil, true, abstractdomain.TrustProved, false)
+	argument := abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{
+			{Name: "lo", Value: exactNumber(t, 1)},
+			{Name: "inner", Value: inner},
+		}, nil, true, abstractdomain.TrustProved, false)
+	answer, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{argument}, contract)
+	if !ok {
+		t.Fatalf("a body reading an interface's two-step nested member declined")
+	}
+	state, stateOk := StateOfKnown(answer)
+	if !stateOk || state.Top {
+		t.Fatalf("the answer did not spell as a scalar state: %+v", answer)
+	}
+	// f({lo:1, inner:{deep:2}}) = 2+1 = 3; the answer must ADMIT it EXACTLY
+	if !kernel.Member(state.Set, []float64{3}) {
+		t.Errorf("the summary excludes the true value 3: %+v", state.Set)
+	}
+}
+
+// TestSummaryParameterEntriesIn_AnInterfaceWithAStableSymbolMemberExpandsTheSymLeaf
+// pins the same gap for the OTHER widening a checker unlocks: a computed
+// member name resolving to a stable module-level symbol const
+// (scalarMemberListWithCheckerIn's #sym: reading) now contributes its
+// leaf when the member is declared directly on an interface, not only
+// inside a type literal or alias.
+func TestSummaryParameterEntriesIn_AnInterfaceWithAStableSymbolMemberExpandsTheSymLeaf(t *testing.T) {
+	ctx, p := namedTypeCtx(t,
+		"const S = Symbol();\n"+
+			"interface Box { lo: number, [S]: number }\n"+
+			"function f(p: Box) { return p.lo; }\n")
+	declaration := namedTypeFunction(t, p, "f")
+	entries, ok := SummaryParameterEntriesIn(ctx, declaration.Parameters()[0])
+	if !ok || len(entries) != 2 {
+		t.Fatalf("entries = %v (ok %v), want two — p.lo and the #sym: leaf", entries, ok)
+	}
+	wantName := []string{"p.lo", "p.#sym:S"}
+	for i, entry := range entries {
+		if entry.Name != wantName[i] {
+			t.Errorf("entry %d name = %q, want %q", i, entry.Name, wantName[i])
+		}
+		if entry.Sort != BindingKindNumber {
+			t.Errorf("entry %d sort = %q, want number", i, entry.Sort)
+		}
 	}
 }
 
@@ -1427,5 +1722,139 @@ func TestKernelSummaryDirect_AnArrowAtACallSiteIsNotCollectedAsThisBodysLocal(t 
 	}
 	if hasName(names, "bump") {
 		t.Errorf("names = %v, must NOT hold `bump` — it is the arrow's local", names)
+	}
+}
+
+/* ── nested member families (Row 1) ──────────────────────────────── */
+
+// TestKernelSummaryDirect_ABodyReadingATwoStepNestedMemberSummarizesAndAnswersExactly
+// pins the landed NESTED FAMILY widening end to end: a body reading
+// `p.inner.deep + p.lo` over `p: { lo: number, inner: { deep: number } }`
+// summarizes, and the answer is exact over a fully-known argument.
+func TestKernelSummaryDirect_ABodyReadingATwoStepNestedMemberSummarizesAndAnswersExactly(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	declaration := summaryDeclarationOf(t,
+		"function f(p: { lo: number, inner: { deep: number } }) { return p.inner.deep + p.lo; }")
+	entries, entriesOk := SummaryParameterEntries(declaration.Parameters()[0])
+	if !entriesOk || len(entries) != 2 {
+		t.Fatalf("entries = %v (ok %v), want two — p.lo and p.inner.deep", entries, entriesOk)
+	}
+	wantName := []string{"p.lo", "p.inner.deep"}
+	for i, entry := range entries {
+		if entry.Name != wantName[i] {
+			t.Errorf("entry %d name = %q, want %q", i, entry.Name, wantName[i])
+		}
+		if entry.Sort != BindingKindNumber {
+			t.Errorf("entry %d sort = %q, want number", i, entry.Sort)
+		}
+	}
+	contract := &FunctionContract{Declaration: declaration}
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	inner := abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{{Name: "deep", Value: exactNumber(t, 2)}}, nil, true, abstractdomain.TrustProved, false)
+	argument := abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{
+			{Name: "lo", Value: exactNumber(t, 1)},
+			{Name: "inner", Value: inner},
+		}, nil, true, abstractdomain.TrustProved, false)
+	answer, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{argument}, contract)
+	if !ok {
+		t.Fatalf("a body reading a two-step nested member declined")
+	}
+	state, stateOk := StateOfKnown(answer)
+	if !stateOk || state.Top {
+		t.Fatalf("the answer did not spell as a scalar state: %+v", answer)
+	}
+	// f({lo:1, inner:{deep:2}}) = 2+1 = 3; the answer must ADMIT it EXACTLY
+	if !kernel.Member(state.Set, []float64{3}) {
+		t.Errorf("the summary excludes the true value 3: %+v", state.Set)
+	}
+}
+
+// TestSummaryParameterEntries_AnOptionalParentMakesTheNestedChildEntryAbsentAware
+// pins the absence-composition rule: an optional `inner?:` makes its
+// nested child possibly absent even though the child's OWN annotation
+// (`deep: number`) is required — the weaker promise composes down the
+// path, and the child's entry carries MayBeAbsent for it.
+func TestSummaryParameterEntries_AnOptionalParentMakesTheNestedChildEntryAbsentAware(t *testing.T) {
+	declaration := summaryDeclarationOf(t, "function f(p: { inner?: { deep: number } }) { return 1; }")
+	members, expanded := recordParamMembersOf(declaration.Parameters()[0])
+	if !expanded || len(members) != 1 {
+		t.Fatalf("members = %v (expanded %v), want the one nested child leaf", members, expanded)
+	}
+	// Key is the member's OWN name — the last Path segment; Path is the
+	// full identity from the holder down
+	if members[0].Key != "deep" {
+		t.Errorf("members[0].Key = %q, want %q", members[0].Key, "deep")
+	}
+	wantPath := []string{"inner", "deep"}
+	if len(members[0].Path) != len(wantPath) || members[0].Path[0] != wantPath[0] || members[0].Path[1] != wantPath[1] {
+		t.Errorf("members[0].Path = %v, want %v", members[0].Path, wantPath)
+	}
+	if !members[0].MayBeAbsent {
+		t.Errorf("members[0].MayBeAbsent = false, want true — the optional parent composes down to the child")
+	}
+}
+
+// TestSummaryParameterEntries_ACyclicAliasPairTerminatesWithoutHanging
+// pins the cycle guard nestedMemberLeavesOf's type-reference recursion
+// carries: `type A = { b: B }; type B = { a: A }` given straight as a
+// parameter's own annotation must not hang the reader. The parameter
+// itself is `p: A`, so `b`'s own nested family resolves through B, which
+// resolves back to A — the declaration already on the walk's path — and
+// the revisit answers false, falling back to `b`'s single unknown-sorted
+// leaf rather than recursing forever; `a`'s own scalar sibling `lo`
+// still expands. This exercises the ALIAS declaration's own visiting
+// path (scalarMemberListWithCheckerIn's recursion off a type-alias
+// literal); an INTERFACE pair's own members resolve through
+// interfaceOwnMembersWithCheckerIn, threaded with the SAME guard from
+// declaredTypeMembersOf, and reach the identical recursion — see
+// TestSummaryParameterEntriesIn_AnInterfaceWithANestedMemberExpandsTheTwoStepLeaf.
+func TestSummaryParameterEntries_ACyclicAliasPairTerminatesWithoutHanging(t *testing.T) {
+	ctx, p := namedTypeCtx(t,
+		"type B = { a: A };\n"+
+			"type A = { lo: number, b: B };\n"+
+			"function f(p: A) { return p.lo; }\n")
+	declaration := namedTypeFunction(t, p, "f")
+	entries, ok := SummaryParameterEntriesIn(ctx, declaration.Parameters()[0])
+	if !ok {
+		t.Fatalf("the cyclic-alias parameter declined outright — want at least p.lo served")
+	}
+	// termination is the fact this test exists to pin: b's own family
+	// stops at ONE leaf (its cyclic member falls back to unknown-sorted,
+	// never expanded into a's own lo again), and lo itself still expands
+	wantName := []string{"p.lo", "p.b.a"}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %v, want two — p.lo and b's single cyclic-fallback leaf p.b.a", entries)
+	}
+	for i, entry := range entries {
+		if entry.Name != wantName[i] {
+			t.Errorf("entry %d name = %q, want %q", i, entry.Name, wantName[i])
+		}
+	}
+	if entries[1].Sort != BindingKindUnknown {
+		t.Errorf("entries[1].Sort = %q, want unknown — the cyclic member falls back rather than recursing forever", entries[1].Sort)
+	}
+}
+
+// TestKernelSummaryDirect_AScalarAtTheInteriorStepDeclinesTheCall pins
+// the interior three-way rule: an argument whose "inner" field is a
+// definite SCALAR (never an object) can never carry "inner.deep", so
+// the call declines rather than TOPping past a value the caller's own
+// argument rules out.
+func TestKernelSummaryDirect_AScalarAtTheInteriorStepDeclinesTheCall(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	declaration := summaryDeclarationOf(t,
+		"function f(p: { inner: { deep: number } }) { return p.inner.deep; }")
+	contract := &FunctionContract{Declaration: declaration}
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	// p's own field "inner" is a definite number, not an object — the
+	// interior step can never carry "deep"
+	argument := abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{{Name: "inner", Value: exactNumber(t, 5)}}, nil, true, abstractdomain.TrustProved, false)
+	if _, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{argument}, contract); ok {
+		t.Errorf("a scalar at the interior step summarized — it can never carry the nested member")
 	}
 }

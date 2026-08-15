@@ -304,6 +304,43 @@ const (
 	// can match half an astral pair. Send this op ONLY with the pattern
 	// and the replacement established astral-safe.
 	LoopOpReplaceUnionSafe LoopEffectOp = "replaceUnionSafe"
+	// LoopOpReplaceSortSafe is the replace family's SORT row -- the
+	// string world's LoopOpTan. Where the union row's gates fail, an
+	// outright refusal answers the kernel's `top`, which admits the
+	// absent value and a thrown exit beside every word. This row claims
+	// exactly what `top` gives away: the result is a STRING -- some
+	// word, no alphabet and no length bounded -- never absent, never
+	// NaN, and the call never a thrown exit.
+	//
+	// The shapes it covers, each refused by the union row for a reason
+	// that does not touch the sort:
+	//   - a `g`-flagged regex and `replaceAll` (multi-match: no sound
+	//     length ceiling exists, but every result is still the
+	//     concatenation of receiver spans and GetSubstitution outputs --
+	//     sec-regexp.prototype-%symbol.replace% steps 14-17,
+	//     sec-string.prototype.replaceall steps 14-16);
+	//   - a `$` in the replacement template (sec-getsubstitution: "$&",
+	//     "$`" and "$'" expand to receiver spans, so no finite Bump is
+	//     sound; every branch still yields a String);
+	//   - a regex without `u`/`v` (the matcher walks code units, so a
+	//     match can split an astral pair and mint lone surrogates the
+	//     union alphabet never admitted; a lone surrogate is still a
+	//     scalar and the result still a String).
+	//
+	// NEVER THROWN is the load-bearing half, and the gate is THIS
+	// SIDE'S, carried in the name like LoopOpSplitElemSafe's: send it
+	// only with the receiver stated a string, the pattern an
+	// exactly-spelled string or a regex literal, the replacement an
+	// exactly-spelled string (never a function), and -- under
+	// `replaceAll` at a regex -- the `g` flag proven present in the
+	// literal, because sec-string.prototype.replaceall step 2.a.iii
+	// throws a TypeError without it and that is the family's one
+	// throwing shape. On those shapes every `?` step of
+	// sec-string.prototype.replace / .replaceall runs over Strings,
+	// GetSubstitution is invoked with `!` (captures empty,
+	// namedCaptures undefined), and the regex road runs over a regex
+	// literal's intrinsic behaviour, none of which throws.
+	LoopOpReplaceSortSafe LoopEffectOp = "replaceSortSafe"
 )
 
 // LoopEffect is one binding's body effect, lowered for the kernel's

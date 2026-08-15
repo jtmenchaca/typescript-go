@@ -1,0 +1,257 @@
+// split from ir_summary_body.go — the `this` bundle
+
+package walk
+
+import (
+	"github.com/microsoft/typescript-go/internal/ast"
+)
+
+/* ── the `this` bundle ───────────────────────────────────────────── */
+
+// thisBundleLayout is what a METHOD's own receiver is worth as entry
+// slots: the fields the body READS become entries spelled
+// "this.<field>", laid out after the declared parameters, and the fields
+// it WRITES are named so the outs can carry them back.
+//
+// `expanded` false is the whole decline of the EXPANSION, never of the
+// body: the method still lowers, its this-reads simply find no slot and
+// hit the opaque floor exactly as they do today. `escaped` says WHY it
+// declined when the reason was the receiver leaving the lowering's sight
+// — the caller notes it as the body's first havoc, because a bundle that
+// escaped may be written through a name nothing here saw.
+type thisBundleLayout struct {
+	Entries  []bodySlot
+	Written  map[string]struct{}
+	Expanded bool
+	Escaped  bool
+	// CaptureHavocNames: the slot spellings ("this.count") of the fields a
+	// method-calling CAPTURE can move — the captured methods' transitive
+	// write set. Non-empty puts the body's statement walk in havoc mode
+	// (LoweringContext.CaptureHavocSlots); each named field is also in
+	// Written, so the call sites read its exit state instead of keeping
+	// the caller's own.
+	CaptureHavocNames []string
+	// ReturnsSelf: the body ends `return this` — the serving seams must
+	// forget the caller's receiver knowledge (LoweredSummary
+	// .ReturnsReceiver carries the requirement out).
+	ReturnsSelf bool
+}
+
+// thisBundleOf reads a declaration's `this` bundle: (nothing) for
+// anything that is not a method, and otherwise the field census of the
+// enclosing class run over the method's body.
+//
+// The rules, per the wave-4 design:
+//
+//   - only a METHOD has a `this` bundle. An arrow keeps its enclosing
+//     `this`, but the arrow route lays out CAPTURES after the declared
+//     parameters, and a bundle would have to share that ground — so the
+//     two are exclusive and the caller asserts it rather than laying out
+//     both.
+//   - the READ fields become entries, in the class's own declaration
+//     order (FieldCensusOf answers in that order, which is what keeps
+//     the layout and the apply side building one vector).
+//   - COMPUTED access expands anyway: `this[k]` names no field, but the
+//     havoc floor already stands in for the statement that performed it,
+//     and the declaration still bounds which slots could be meant.
+//   - an ESCAPING receiver does NOT expand. The bundle may move through a
+//     name the census never saw, so an entry's state could be stale
+//     mid-body while the slot still reads as known — the one shape where
+//     expanding would claim more than it knows.
+func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
+	if declaration == nil {
+		return thisBundleLayout{}
+	}
+	// an ACCESSOR is a class member with a body and a `this`, exactly
+	// like a method — its bundle is what lets a getter over a backing
+	// field compile at all (the accessor-call route reads it)
+	if !ast.IsMethodDeclaration(declaration) &&
+		!ast.IsGetAccessorDeclaration(declaration) &&
+		!ast.IsSetAccessorDeclaration(declaration) &&
+		!ast.IsConstructorDeclaration(declaration) {
+		return thisBundleLayout{}
+	}
+	body := declaration.Body()
+	if body == nil {
+		return thisBundleLayout{}
+	}
+	classLike := declaration.Parent
+	if classLike == nil || !ast.IsClassLike(classLike) {
+		return thisBundleLayout{}
+	}
+	// declared members UNION constructor parameter properties — nest's
+	// classes declare most fields as `constructor(private readonly …)`
+	fields, isClass := ClassBundleFields(ctx, classLike)
+	if !isClass || len(fields) == 0 {
+		return thisBundleLayout{}
+	}
+	census := FieldCensusOf(body, "this", BundleFieldsAs("this", fields))
+	// a METHOD-CALLING capture is admissible HERE, because this consumer
+	// has the havoc machinery: the captured methods' transitive write set
+	// becomes the havoc slots every code-running statement brackets, and
+	// each of those fields is marked written so the call sites read its
+	// exit state. An incomputable write set keeps the escape.
+	var captureHavocNames []string
+	switch {
+	case census.Escapes:
+		return thisBundleLayout{Escaped: true}
+	case census.ComputedWrite:
+		// `this[k] = v` moves a slot nothing names — the DECLARATION
+		// bounds the set, so EVERY field joins the havoc set and every
+		// code-running or element-storing statement brackets them
+		for _, field := range fields {
+			captureHavocNames = append(captureHavocNames, "this."+field.Name)
+		}
+	case len(census.CapturedMethodCalls) > 0:
+		wipes, computable := CaptureWriteSet(classLike, fields, census.CapturedMethodCalls)
+		if !computable {
+			return thisBundleLayout{Escaped: true}
+		}
+		for _, field := range wipes {
+			captureHavocNames = append(captureHavocNames, "this."+field.Name)
+		}
+	}
+	// A CONSTRUCTOR RUNS MORE THAN ITS BODY. The class's field
+	// INITIALIZERS and its PARAMETER PROPERTIES are statements the runtime
+	// runs on the way in, and the constructor prelude
+	// (lowerSummaryBodyWithCaptures) emits exactly those assignments ahead
+	// of the body's own. The census, though, walks the BODY, so a field
+	// written only by its initializer — `private _statusCode = 200;` in a
+	// class whose constructor only calls super — appears in neither Reads
+	// nor Writes, and the bundle it belongs to never expands. That is a
+	// field the constructor demonstrably leaves a value in, reported as a
+	// field the constructor never touched.
+	//
+	// So a constructor's prelude-written fields join the census's own
+	// writes here, read off the class's declarations rather than off the
+	// body. They are the same fields the prelude will assign, resolved by
+	// the same two rules the prelude applies (an initialized property
+	// declaration, a parameter property), so the layout and the prelude
+	// name one set: every slot the prelude writes exists, and every slot
+	// laid out for a prelude write is one the prelude fills.
+	preludeWritten := constructorPreludeFields(declaration, fields)
+	if len(census.Reads) == 0 && len(census.Writes) == 0 &&
+		len(captureHavocNames) == 0 && len(preludeWritten) == 0 {
+		return thisBundleLayout{}
+	}
+	written := map[string]struct{}{}
+	for _, field := range census.Writes {
+		written[field.SlotName] = struct{}{}
+	}
+	for _, name := range captureHavocNames {
+		written[name] = struct{}{}
+	}
+	for _, field := range preludeWritten {
+		written[field.SlotName] = struct{}{}
+	}
+	// the READ fields carry entries. A write-only field has no entry state
+	// for the caller to fill — its slot is one the body creates, which the
+	// locals' own layout would have to hold — so this wave lays out the
+	// reads and names the writes among them.
+	//
+	// A CONSTRUCTOR's prelude-written fields carry entries too, and for the
+	// reason the read fields do not have to argue: the prelude ASSIGNS every
+	// one of them before any statement runs, so the entry's incoming value
+	// is overwritten before anything can read it. The entry state a caller
+	// would fill is dead on arrival, which is what makes laying out a
+	// write-only slot honest here and not in a method. The entry exists so
+	// the prelude has a slot to write and the exit row has a slot to report
+	// — which is what a `new C()` local's leaves are read from.
+	entries := make([]bodySlot, 0, len(census.Reads)+len(preludeWritten))
+	for _, field := range census.Reads {
+		entries = append(entries, bodySlot{
+			Name:      field.SlotName,
+			Sort:      field.Sort,
+			TypeofTag: field.TypeofTag,
+		})
+	}
+	// the prelude fields come after the read ones, each at most once — a
+	// field the body ALSO reads already has its entry, and a second would
+	// put the same spelling in the vector twice
+	laidOut := map[string]struct{}{}
+	for _, entry := range entries {
+		laidOut[entry.Name] = struct{}{}
+	}
+	for _, field := range preludeWritten {
+		if _, already := laidOut[field.SlotName]; already {
+			continue
+		}
+		laidOut[field.SlotName] = struct{}{}
+		entries = append(entries, bodySlot{
+			Name:      field.SlotName,
+			Sort:      field.Sort,
+			TypeofTag: field.TypeofTag,
+		})
+	}
+	return thisBundleLayout{
+		Entries:           entries,
+		Written:           written,
+		Expanded:          len(entries) > 0,
+		CaptureHavocNames: captureHavocNames,
+		ReturnsSelf:       census.ReturnsSelf,
+	}
+}
+
+// constructorPreludeFields is the field set a CONSTRUCTOR's prelude
+// writes before its body's first statement: every class member that is
+// an initialized property declaration, and every parameter property.
+//
+// It exists so the LAYOUT and the PRELUDE read one list. The prelude
+// (lowerSummaryBodyWithCaptures) emits an assignment per initialized
+// property and per parameter property, each onto the slot named
+// "this.<field>"; this function names exactly those fields off the same
+// declarations, so a slot the prelude looks up always exists, and a slot
+// laid out for a prelude write is always one the prelude fills. Reading
+// them apart is what let the two disagree: the layout asked the body
+// census, which never sees an initializer.
+//
+// Answered in the given field set's order — the declaration order the
+// slot vector is built in — and only for fields that set holds, so a
+// property the field reading declined (a computed key spelling no slot)
+// contributes nothing here either.
+//
+// Anything that is not a constructor answers nothing: a method has no
+// prelude, and its fields are exactly what its body touches.
+func constructorPreludeFields(declaration *ast.Node, fields []BundleField) []BundleField {
+	if declaration == nil || !ast.IsConstructorDeclaration(declaration) {
+		return nil
+	}
+	classLike := declaration.Parent
+	if classLike == nil || !ast.IsClassLike(classLike) {
+		return nil
+	}
+	assigned := map[string]struct{}{}
+	for _, member := range classLike.ClassLikeData().Members.Nodes {
+		if !ast.IsPropertyDeclaration(member) {
+			continue
+		}
+		property := member.AsPropertyDeclaration()
+		// an UNINITIALIZED declaration (`private _headers?: Headers;`)
+		// writes nothing — the field enters the body absent, and claiming a
+		// value was left in it would be the one thing this must not say
+		if property.Initializer == nil || property.Name() == nil || !ast.IsIdentifier(property.Name()) {
+			continue
+		}
+		assigned[property.Name().Text()] = struct{}{}
+	}
+	for _, parameter := range declaration.Parameters() {
+		if !isParameterPropertyDeclaration(parameter) {
+			continue
+		}
+		pd := parameter.AsParameterDeclaration()
+		if pd.Name() == nil || !ast.IsIdentifier(pd.Name()) {
+			continue
+		}
+		assigned[pd.Name().Text()] = struct{}{}
+	}
+	if len(assigned) == 0 {
+		return nil
+	}
+	written := make([]BundleField, 0, len(assigned))
+	for _, field := range fields {
+		if _, isAssigned := assigned[field.Name]; isAssigned {
+			written = append(written, field)
+		}
+	}
+	return written
+}

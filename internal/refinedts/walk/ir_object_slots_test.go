@@ -10,7 +10,42 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/program"
 )
+
+/* ── the recipe: a checker-backed program's top-level functions ────── */
+
+// functionDeclaredIn is the top-level function declaration named `text`
+// in a checker-backed program's entry file — the join-arm inferred-return
+// widening resolves through the checker, so its cases need a real
+// program rather than the throwaway parse summaryDeclarationOf gives.
+func functionDeclaredIn(t *testing.T, p *program.CheckerProgram, text string) *ast.Node {
+	t.Helper()
+	for _, statement := range p.Entry.Statements.Nodes {
+		if !ast.IsFunctionDeclaration(statement) {
+			continue
+		}
+		name := statement.Name()
+		if name != nil && ast.IsIdentifier(name) && name.Text() == text {
+			return statement
+		}
+	}
+	t.Fatalf("no top-level function named %s", text)
+	return nil
+}
+
+// objectSlotsCtx is a checker-backed context with an empty contract
+// registry, and the memos cleared — each case parses its own program, so
+// a remembered expansion or outcome from another case must not survive
+// into it.
+func objectSlotsCtx(t *testing.T, source string) (*FlowContext, *program.CheckerProgram) {
+	t.Helper()
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	p := entryEnvTestProgram(t, source)
+	return &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, p
+}
 
 func TestObjectSlots_AFixedShapeRecordLocalFlattensIntoPerKeySlotsAndSummarizes(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
@@ -196,6 +231,135 @@ func TestObjectSlots_TheRecognizerDeclinesAReadOfAnInteriorNode(t *testing.T) {
 	}
 	if flattened := ObjectLocalsOf(body, locals.Locals); len(flattened) != 0 {
 		t.Errorf("a read of an interior node flattened — it names no one scalar")
+	}
+}
+
+// TestObjectSlots_AJoinArmDeclarationsTwoRoutesAndTheirOutcomes pins the
+// ASYMMETRY the two arm-family readers land in today, both halves sound:
+//
+//   - SPELLED (`make(): Bounds`): the local FLATTENS into p.lo/p.hi
+//     (the recognizer tests above), and the body then settles POROUS at
+//     the "declaration" statement — the lowering has no route that reads
+//     `make() ?? {…}` INTO the flattened leaf slots, so the declaration
+//     havocs the leaves and the body serves nothing.
+//   - INFERRED (`make()` bare): the harness's ctx-less relower never
+//     resolves the return type, the local keeps its whole-name slot, and
+//     the body lowers COMPLETE through the CALL route — make() inlines,
+//     the join lands whole, and `p.lo` answers a sort-only claim (a
+//     number, unconstrained; verified to admit the true value 1).
+//
+// Neither half determines p.lo's VALUE. The named next construct is the
+// spelled half's wall: lowering a `call() ?? literal` initializer into
+// the flattened leaf slots member-wise, which would turn the porous row
+// complete AND carry the values.
+func TestObjectSlots_AJoinArmDeclarationsTwoRoutesAndTheirOutcomes(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	spelledOutcome, spelledConstruct := joinArmCalleeReturnKernelOutcome(t, kernel,
+		"interface Bounds { lo: number; hi: number }\n"+
+			"function make(): Bounds { return { lo: 1, hi: 2 }; }\n"+
+			"function f(n: number) { const p = make() ?? { lo: 0, hi: 0 }; return p.lo; }\n")
+	if spelledOutcome != SummaryPorous || spelledConstruct != "declaration" {
+		t.Errorf("the spelled arm settled outcome=%v construct=%q, want porous at the declaration — the join-into-leaves lowering is the named wall",
+			spelledOutcome, spelledConstruct)
+	}
+	inferredOutcome, inferredConstruct := joinArmCalleeReturnKernelOutcome(t, kernel,
+		"interface Bounds { lo: number; hi: number }\n"+
+			"function make() { return { lo: 1, hi: 2 }; }\n"+
+			"function f(n: number) { const p = make() ?? { lo: 0, hi: 0 }; return p.lo; }\n")
+	if inferredOutcome != SummaryComplete || inferredConstruct != "" {
+		t.Errorf("the unresolved arm settled outcome=%v construct=%q, want complete through the whole-value call route",
+			inferredOutcome, inferredConstruct)
+	}
+}
+
+// joinArmCalleeReturnKernelOutcome lowers `f` through the kernel summary
+// path and answers its settled SummaryOutcome and decline construct.
+func joinArmCalleeReturnKernelOutcome(t *testing.T, kernel *kernelbridge.RefinedTSKernel, source string) (SummaryOutcome, string) {
+	t.Helper()
+	ctx, p := objectSlotsCtx(t, source)
+	f := functionDeclaredIn(t, p, "f")
+	make_ := functionDeclaredIn(t, p, "make")
+	makeSymbol := p.Checker.GetSymbolAtLocation(make_.Name())
+	if makeSymbol == nil {
+		t.Fatalf("make's declaration has no symbol to register a contract under")
+	}
+	ctx.Contracts[makeSymbol] = &FunctionContract{Declaration: make_}
+	contract := &FunctionContract{Declaration: f}
+	KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{exactNumber(t, 7)}, contract)
+	outcome, construct, had := SummaryOutcomeOf(f)
+	if !had {
+		t.Fatalf("no outcome recorded for f")
+	}
+	return outcome, construct
+}
+
+func TestObjectSlots_TheRecognizerFlattensAJoinArmWhoseCalleeReturnIsInferredAsAnInterface(t *testing.T) {
+	// the recognizer alone, no kernel: `make()` returns an object literal
+	// with no annotation, and the arm's family comes from the RESOLVED
+	// return type's single interface declaration
+	ctx, p := objectSlotsCtx(t,
+		"interface Bounds { lo: number; hi: number }\n"+
+			"function make(): Bounds { return { lo: 1, hi: 2 }; }\n"+
+			"function f(n: number) { const p = make() ?? { lo: 0, hi: 0 }; return p.lo; }\n")
+	f := functionDeclaredIn(t, p, "f")
+	body := f.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the record local collected")
+	}
+	flattened := ObjectLocalsIn(ctx, body, locals.Locals)
+	if len(flattened) != 1 {
+		t.Fatalf("ObjectLocalsIn found %d flattened locals, want 1", len(flattened))
+	}
+	for _, local := range flattened {
+		if local.Name != "p" {
+			t.Errorf("flattened local name = %q, want p", local.Name)
+		}
+		if len(local.Keys) != 2 {
+			t.Fatalf("flattened local has %d keys, want 2", len(local.Keys))
+		}
+		if local.Keys[0].SlotName != "p.lo" || local.Keys[1].SlotName != "p.hi" {
+			t.Errorf("slot names = %q, %q, want p.lo, p.hi", local.Keys[0].SlotName, local.Keys[1].SlotName)
+		}
+	}
+}
+
+func TestObjectSlots_AJoinArmWhoseCalleeReturnIsInferredAsAPrimitiveDeclines(t *testing.T) {
+	// make() infers to `number` — no symbol, no interface, no family
+	ctx, p := objectSlotsCtx(t,
+		"function make() { return 1; }\n"+
+			"function f(n: number) { const p = make() ?? 0; return p; }\n")
+	f := functionDeclaredIn(t, p, "f")
+	body := f.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the record local collected")
+	}
+	if flattened := ObjectLocalsIn(ctx, body, locals.Locals); len(flattened) != 0 {
+		t.Errorf("a join arm whose inferred callee return is a primitive flattened — there is no member family to read")
+	}
+}
+
+func TestObjectSlots_AJoinArmWhoseCalleeReturnIsInferredAsAnAnonymousObjectLiteralType(t *testing.T) {
+	// make() infers an object type with NO interface or alias behind it —
+	// an anonymous literal type. Pinning what the machinery soundly does:
+	// the resolved type's symbol names the synthesized type-literal node
+	// itself, which is neither an interface nor a type-alias declaration,
+	// so the existing named-type reader refuses it and the arm keeps
+	// today's refusal.
+	ctx, p := objectSlotsCtx(t,
+		"function make() { return { lo: 1, hi: 2 }; }\n"+
+			"function f(n: number) { const p = make() ?? { lo: 0, hi: 0 }; return p.lo; }\n")
+	f := functionDeclaredIn(t, p, "f")
+	body := f.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the record local collected")
+	}
+	if flattened := ObjectLocalsIn(ctx, body, locals.Locals); len(flattened) != 0 {
+		t.Errorf("a join arm whose inferred callee return is an anonymous object literal type flattened — " +
+			"its resolved type names no interface or type-alias declaration for the named-type reader to take")
 	}
 }
 

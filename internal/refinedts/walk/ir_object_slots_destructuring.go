@@ -1,0 +1,155 @@
+// split from ir_object_slots.go — the leaf-exact destructuring lowerings
+
+package walk
+
+import (
+	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+)
+
+// DestructuringWithDefaultsOf is the leaf-exact destructuring with
+// per-element DEFAULTS: `const { x = 1, y } = p` from a flattened
+// holder. Each element assigns its leaf's slot, and a defaulted element
+// follows with the definedness branch the defaulted parameters ride —
+// only an undefined leaf takes the default. Rests, nested patterns,
+// computed keys, and defaults the effect grammar cannot spell decline
+// to the routes after.
+func DestructuringWithDefaultsOf(context *LoweringContext, statement *ast.Node) ([]kernelbridge.IrStatement, bool) {
+	if !ast.IsVariableStatement(statement) {
+		return nil, false
+	}
+	declarations := statement.AsVariableStatement().DeclarationList.AsVariableDeclarationList().Declarations.Nodes
+	if len(declarations) != 1 {
+		return nil, false
+	}
+	decl := declarations[0].AsVariableDeclaration()
+	if decl.Initializer == nil || !ast.IsObjectBindingPattern(decl.Name()) {
+		return nil, false
+	}
+	initializer := Unwrapped(decl.Initializer)
+	var holder string
+	switch {
+	case ast.IsIdentifier(initializer):
+		holder = initializer.Text()
+	case initializer.Kind == ast.KindThisKeyword:
+		holder = "this"
+	default:
+		return nil, false
+	}
+	var out []kernelbridge.IrStatement
+	sawDefault := false
+	for _, element := range decl.Name().AsBindingPattern().Elements.Nodes {
+		binding := element.AsBindingElement()
+		if binding.DotDotDotToken != nil || !ast.IsIdentifier(binding.Name()) {
+			return nil, false
+		}
+		read := binding.Name().Text()
+		if binding.PropertyName != nil {
+			if !ast.IsIdentifier(binding.PropertyName) {
+				return nil, false
+			}
+			read = binding.PropertyName.Text()
+		}
+		source, sourceOk := slotIndexOfName(context, holder+"."+read)
+		if !sourceOk {
+			return nil, false
+		}
+		target, targetOk := slotIndexOfName(context, binding.Name().Text())
+		if !targetOk {
+			return nil, false
+		}
+		out = append(out, kernelbridge.IrStatement{
+			Kind:   kernelbridge.IrStatementAssign,
+			Target: target,
+			Effect: varEffect(source),
+		})
+		if binding.Initializer == nil {
+			continue
+		}
+		sawDefault = true
+		if !writeAndCallFree(binding.Initializer) {
+			return nil, false
+		}
+		defaultEffect, lowered := RhsEffect(context, context.Sorts[target], binding.Initializer)
+		if !lowered {
+			return nil, false
+		}
+		out = append(out, kernelbridge.IrStatement{
+			Kind: kernelbridge.IrStatementBranch,
+			On:   target,
+			Test: kernelbridge.IrTestDefined,
+			Else: []kernelbridge.IrStatement{{
+				Kind:   kernelbridge.IrStatementAssign,
+				Target: target,
+				Effect: defaultEffect,
+			}},
+		})
+	}
+	// with no default present the plain route already served — this one
+	// only exists for the defaulted shape
+	if !sawDefault || len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// DestructuringAssignmentsOf is the destructuring lowering: `const { x,
+// y } = p` where p is a flattened record becomes one assignment per
+// bound name, each reading its leaf's slot. Declines unless every bound
+// name has a slot AND names a one-step leaf — a nested pattern or a
+// default reads shapes the flattening does not spell.
+func DestructuringAssignmentsOf(context *LoweringContext, statement *ast.Node) ([]AssignmentTarget, bool) {
+	if !ast.IsVariableStatement(statement) {
+		return nil, false
+	}
+	declarations := statement.AsVariableStatement().DeclarationList.AsVariableDeclarationList().Declarations.Nodes
+	if len(declarations) != 1 {
+		return nil, false
+	}
+	decl := declarations[0].AsVariableDeclaration()
+	if decl.Initializer == nil || !ast.IsObjectBindingPattern(decl.Name()) {
+		return nil, false
+	}
+	initializer := Unwrapped(decl.Initializer)
+	var holder string
+	switch {
+	case ast.IsIdentifier(initializer):
+		holder = initializer.Text()
+	case initializer.Kind == ast.KindThisKeyword:
+		// `const { count } = this` — the method's own bundle spells its
+		// fields "this.<name>", so the same leaf read serves
+		holder = "this"
+	default:
+		return nil, false
+	}
+	var out []AssignmentTarget
+	for _, element := range decl.Name().AsBindingPattern().Elements.Nodes {
+		binding := element.AsBindingElement()
+		if binding.DotDotDotToken != nil || binding.Initializer != nil {
+			return nil, false
+		}
+		if !ast.IsIdentifier(binding.Name()) {
+			return nil, false
+		}
+		read := binding.Name().Text()
+		if binding.PropertyName != nil {
+			if !ast.IsIdentifier(binding.PropertyName) {
+				return nil, false
+			}
+			read = binding.PropertyName.Text()
+		}
+		source, sourceOk := slotIndexOfName(context, holder+"."+read)
+		if !sourceOk {
+			return nil, false
+		}
+		target, targetOk := slotIndexOfName(context, binding.Name().Text())
+		if !targetOk {
+			return nil, false
+		}
+		out = append(out, AssignmentTarget{Target: target, Effect: varEffect(source)})
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}

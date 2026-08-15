@@ -550,6 +550,14 @@ func summaryTrustFloor(
 			continue
 		}
 		for _, member := range members {
+			// objectKeyIndex reads the ARGUMENT'S OWN top-level fields, so
+			// only a DEPTH-1 member (len(Path) == 1) can ever name one of
+			// them — a nested member's value sits inside a child object
+			// this flat lookup does not walk, and contributes nothing to
+			// the floor rather than being read under the wrong key.
+			if len(member.Path) != 1 {
+				continue
+			}
 			if at, has := objectKeyIndex(argument, member.Key); has {
 				floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(argument.Keys[at].Value))
 			}
@@ -723,16 +731,28 @@ func constEffectState(effect kernelbridge.LoopEffect) (kernelbridge.KnownStateWi
 // value the wire cannot spell declines THIS call (never the summary,
 // which quantifies over every entry).
 //
-// A NON-OBJECT argument for an expanded parameter fills every member
-// entry TOP, and an object that does not name a declared member fills
-// that one entry TOP — thisEntryState's rule below, which the class
-// bundle above already takes through BundleParamEntryStates. TOP, and
-// never absent: an argument the caller knows nothing about made no claim
-// that the member is undefined, and TOP is what the entry quantifier
-// already covers, so filling it costs precision and never soundness. The
-// SLOT VECTOR's shape is unaffected either way — one entry per declared
-// member goes out whatever the argument turned out to be, which is what
-// the layout agreement actually requires.
+// An expanded member's fill reads the argument three ways:
+//
+//   - a POSITIVELY NON-OBJECT argument (a definite scalar — a "values"
+//     kind holding a number, string, or boolean) DECLINES this call: the
+//     caller's own value can never carry the member the layout expects,
+//     so no entry state exists to send and the whole call is refused
+//     rather than served on a fabricated TOP;
+//   - a KNOWN OBJECT that does not name a declared member ALSO DECLINES:
+//     the caller's own object told the checker its keys, and none of
+//     them is the one the layout expects, so again there is no state to
+//     send;
+//   - anything else — an argument whose kind is unknown or opaque —
+//     fills that one entry TOP, thisEntryState's rule below, which the
+//     class bundle above already takes through BundleParamEntryStates.
+//     TOP, and never absent: an argument the caller knows nothing about
+//     made no claim that the member is undefined, and TOP is what the
+//     entry quantifier already covers, so filling it costs precision and
+//     never soundness.
+//
+// The SLOT VECTOR's shape is unaffected by any of the three: one entry
+// per declared member is what the layout agreement requires, and only a
+// DECLINE (never a fill) changes how many entries a call sends.
 //
 // Past the declared parameters the vector holds a METHOD's this-entries,
 // which the RECEIVER fills field by field (thisEntryStates below), or an
@@ -839,15 +859,18 @@ func summaryEntryStates(
 			}
 			continue
 		}
-		// each member entry reads the argument's own field, and TOPS where
-		// the argument is not a known object, does not name the member, or
-		// holds a value the wire cannot spell — thisEntryState's three
-		// fallbacks, which are the same three here. The count is one entry
-		// per declared member either way, so the vector the layout expects
-		// goes out whatever the argument was.
+		// each member entry reads the argument's own field, one PATH STEP
+		// at a time for a nested member — expandedMemberEntryState's rule,
+		// applied at every step: DECLINES this call on a positively
+		// non-object argument or a known object missing the step, TOPS
+		// only where the step's own kind is unknown or opaque.
 		argument := argKnowns[index]
 		for _, member := range members {
-			states = append(states, thisEntryState(argument, member.Key))
+			state, filled := expandedMemberEntryState(argument, member.Path)
+			if !filled {
+				return nil, false
+			}
+			states = append(states, state)
 		}
 	}
 	// the METHOD's this-entries, filled from the receiver's own field
@@ -908,6 +931,70 @@ func thisEntryState(receiver abstractdomain.AbstractValue, field string) kernelb
 		return kernelbridge.KnownStateWire{Top: true}
 	}
 	return wire
+}
+
+// isDefiniteScalarArgument answers whether an argument is a definite
+// SCALAR — a "values" kind holding a number, string, or boolean — the
+// one shape an expanded record parameter's member can never read a
+// value from, whatever the member's name.
+func isDefiniteScalarArgument(argument abstractdomain.AbstractValue) bool {
+	if argument.Kind != abstractdomain.KindValues {
+		return false
+	}
+	switch argument.KindTag {
+	case abstractdomain.PrimitiveNumber, abstractdomain.PrimitiveString, abstractdomain.PrimitiveBoolean:
+		return true
+	}
+	return false
+}
+
+// expandedMemberEntryState is what ONE expanded record parameter's
+// member entry enters holding, read from the call's own argument,
+// walking the member's key PATH one step per nesting level — ["lo"] for
+// a flat member, ["inner","deep"] for a member nestedMemberLeavesOf
+// recursed into.
+//
+// THE THREE-WAY RULE APPLIES AT EVERY STEP, interior or leaf. A
+// POSITIVELY NON-OBJECT value at that step (isDefiniteScalarArgument)
+// DECLINES THIS CALL: it can never carry the next segment, so there is
+// no state to send. A KNOWN OBJECT not naming the next segment also
+// DECLINES: the caller told the checker its own keys, and the segment
+// is not among them. Everything else — the step's own kind is unknown
+// or opaque — TOPS, thisEntryState's rule, because nothing here rules
+// the rest of the path either present or absent. An INTERIOR step that
+// TOPs stops the walk there: unknown of the parent means unknown of
+// every child, so the leaf entry also fills TOP rather than reading
+// further into a value nothing is known about.
+//
+// A single-segment path — every member before nested families existed,
+// and every flat member after — reads exactly ONE step and answers
+// thisEntryState's own reading, so nothing already landed changes
+// behavior.
+func expandedMemberEntryState(argument abstractdomain.AbstractValue, path []string) (kernelbridge.KnownStateWire, bool) {
+	if len(path) == 0 {
+		return kernelbridge.KnownStateWire{}, false
+	}
+	current := argument
+	for index, step := range path {
+		leaf := index == len(path)-1
+		if isDefiniteScalarArgument(current) {
+			return kernelbridge.KnownStateWire{}, false
+		}
+		if current.Kind != abstractdomain.KindObject {
+			// unknown or opaque at this step: TOP covers the rest of the
+			// path, leaf or interior alike — nothing here rules further
+			return kernelbridge.KnownStateWire{Top: true}, true
+		}
+		keyAt, has := objectKeyIndex(current, step)
+		if !has {
+			return kernelbridge.KnownStateWire{}, false
+		}
+		if leaf {
+			return thisEntryState(current, step), true
+		}
+		current = current.Keys[keyAt].Value
+	}
+	return kernelbridge.KnownStateWire{}, false
 }
 
 // promiseWrappedIfAsync is the ret-as-inner convention's boundary: an
