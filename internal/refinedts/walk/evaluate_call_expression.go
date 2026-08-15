@@ -81,6 +81,25 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 		}
 		return *builtin
 	}
+	// a GENERATOR call: the callee's body does NOT run here. The call
+	// builds a Generator object, and the body resumes only when
+	// something drains it. So the inline route below must not have it —
+	// the body's `return e` is a value the caller never sees, and
+	// answering it for the call would be a wrong answer, not a missing
+	// one. The call ADMITS as the opaque tier (a value from outside this
+	// walk's determination), which is what keeps the decline off the
+	// CALLING body: the caller keeps walking, and the routes that CAN
+	// say something about the generator — `.next()`, `[...g()]`,
+	// `Array.from(g())` — read its element through GeneratorElementOf
+	// on top of this admission.
+	if generated := GeneratorCallResult(ctx, env, e); generated != nil {
+		// the arguments still evaluate: their own effects happen at the
+		// call whether or not the body runs
+		for _, argument := range arguments {
+			evaluateExpression(ctx, env, argument)
+		}
+		return *generated
+	}
 	contract := ContractOf(ctx, call.Expression)
 	// a contracted METHOD call reaches here: its receiver expression
 	// still runs (a call result, a constructor) — walk it for its

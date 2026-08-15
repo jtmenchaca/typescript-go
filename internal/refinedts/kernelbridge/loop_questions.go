@@ -197,14 +197,113 @@ const (
 	// -- and {-1} u [0, +inf) with integrality when the receiver states
 	// no ceiling. Nothing gates it: the window holds for every needle.
 	LoopOpIndexOf LoopEffectOp = "indexOf"
-	// There is deliberately no slice, toUpperCase, or toLowerCase here.
-	// String.prototype.slice cuts at UTF-16 code UNIT positions, so a cut
-	// inside a surrogate pair yields a lone surrogate -- a scalar outside
-	// the receiver's set -- and a set-known receiver cannot be proved
-	// astral-free. The case mappings replace scalars outright, so the
-	// result's letters need not have occurred in the receiver at all.
-	// Sending either would be a claim the kernel cannot discharge; the
-	// walk havocs those positions instead.
+	// LoopOpSliceBmp is `s.slice(...)` over a receiver whose alphabet the
+	// KERNEL proves astral-free. String.prototype.slice cuts at UTF-16
+	// code UNIT positions (sec-string.prototype.slice), so on an
+	// astral-bearing receiver a cut can fall inside a surrogate pair and
+	// mint a lone surrogate the receiver's set never admitted -- which is
+	// why the bare op has no name at all. Where every scalar is in the
+	// BMP each is exactly one code unit, so unit positions and scalar
+	// positions coincide, every cut lands on a scalar boundary, and the
+	// piece is a contiguous subsequence of the receiver: the same
+	// drawn-from claim the trims carry, on the same row.
+	//
+	// UNLIKE LoopOpSplitElemSafe, this name carries NO promise. A split's
+	// premise is about the SEPARATOR, which the kernel never sees, so the
+	// adapter must establish it. This premise is about the receiver's own
+	// SET, which the kernel holds -- so the kernel decides it itself
+	// (`bmpAlphabetB`, set_functions/walk.lean) and answers top on a
+	// receiver whose set does not state the bound. Send it on syntax
+	// alone; an ungated receiver costs the claim, never soundness.
+	LoopOpSliceBmp LoopEffectOp = "sliceBmp"
+	// LoopOpUpperAscii and LoopOpLowerAscii are `toUpperCase` and
+	// `toLowerCase` over a receiver whose alphabet the KERNEL proves
+	// ASCII. Case mapping REPLACES scalars, so no drawn-from claim holds
+	// at all -- "a".toUpperCase() holds an "A" the receiver never did.
+	// What holds instead is that the result is the receiver mapped
+	// scalar-by-scalar: sec-string.prototype.tolowercase maps by code
+	// point (StringToCodePoints, the Unicode Default Case Conversion,
+	// then CodePointsToString), and toUpperCase is the same with the
+	// toUppercase algorithm.
+	//
+	// The ASCII premise is what makes that a per-scalar function. The
+	// clause's own note says the result "may not be the same length as
+	// the source String" because "the case mapping of some code points
+	// may produce multiple code points" -- the SpecialCasing rows it
+	// names. Below U+0080 none applies, so the mapping is simple and
+	// length is exactly preserved, which is why this row keeps BOTH
+	// repetition bounds where the drawn-from rows drop the floor.
+	//
+	// The gate and the MAPPING are both the kernel's: it decides the
+	// alphabet bound (`asciiAlphabetB`) and states the image class
+	// itself, rather than trusting a mapped class off this wire. The
+	// adapter cannot be the authority on a Unicode mapping the kernel is
+	// claiming soundness for.
+	LoopOpUpperAscii LoopEffectOp = "toUpperCaseAscii"
+	LoopOpLowerAscii LoopEffectOp = "toLowerCaseAscii"
+	// LoopOpTan is Math.tan. Its image is the whole line -- the tangent
+	// runs to both infinities between consecutive poles -- so the row
+	// claims no bound on the VALUE. What it claims is the SORT, and that
+	// is a real determination: refusing the op answers the kernel's
+	// `top`, which admits the absent value and a thrown exit alongside
+	// every number (`KnownState.denotes`, set_functions/known_state.lean).
+	// The row says the slot holds a NUMBER, possibly NaN, and never
+	// either of those, which is what a later `defined` test reads off.
+	//
+	// sec-math.tan: step 2 returns n itself at NaN and both zeros, step 3
+	// answers NaN at both infinities, step 4 is the
+	// implementation-approximated tangent. Every non-NaN outcome is a
+	// Number, and the claimed interval is [-inf, +inf].
+	LoopOpTan LoopEffectOp = "tan"
+	// LoopOpReplaceUnionSafe is `s.replace(pattern, replacement)` and
+	// `s.replaceAll(...)` where the REPLACEMENT is a string this side
+	// holds exactly. It replaced the old outright decline, whose reason
+	// was that a substitution injects caller-chosen text so neither the
+	// drawn-from nor the case-image closure applies. That reason holds
+	// for a replacement this side does not know -- and stops holding
+	// where it does.
+	//
+	// The claim is the closure over the UNION alphabet.
+	// sec-string.prototype.replace returns the string-concatenation of
+	// `preceding`, `replacement` and `following`; the outer two are
+	// substrings of the receiver, so their scalars are the receiver's,
+	// and the middle is GetSubstitution of a template this side holds,
+	// so its scalars are the replacement's. Every result scalar is
+	// therefore in A u B, which is the kernel's `repeatN_drawnFromUnion`
+	// row.
+	//
+	// THE `$` SUBSTITUTIONS DO NOT LEAK THE ALPHABET. Read against
+	// sec-getsubstitution on the string-pattern path: `$$` yields "$",
+	// which a template spelling `$$` contains; "$`", "$&" and "$'" yield
+	// spans of the receiver ("$&" is _matched_, which StringIndexOf found
+	// IN the receiver); "$n" and "$<...>" fall through to the literal
+	// _ref_ because _captures_ is "a new empty List" and _namedCaptures_
+	// is *undefined* on this path; and the default row copies one code
+	// unit of the template. Every branch lands in A u B already.
+	//
+	// They DO leak the LENGTH, which is why the adapter declines a
+	// template containing `$`: "$&" expands to the match and "$`"/"$'"
+	// to whole receiver spans, so the substituted text is not bounded by
+	// the template's length and no finite Bump is sound.
+	//
+	// A FUNCTIONAL replacement is never sent: its text is the ToString of
+	// a Call, so no set holds it and the union has no second half.
+	//
+	// THE CEILING rides in Bump, and it is why the two methods differ.
+	// `replace` rewrites the FIRST match only, so the result is at most
+	// the receiver plus the replacement -- a sound bump. `replaceAll`
+	// loops every match, so the injected text multiplies by a count no
+	// receiver set bounds; it is sent with NO ceiling to raise, which the
+	// kernel reads as the ceiling-free claim.
+	//
+	// THE GATE IS THIS SIDE'S, like LoopOpSplitElemSafe and unlike
+	// LoopOpSliceBmp: the premise is about the PATTERN and the
+	// REPLACEMENT, values the kernel never sees. A string pattern's match
+	// begins and ends on a scalar boundary for split's reason, and the
+	// hole is split's hole -- a pattern that is itself a lone surrogate
+	// can match half an astral pair. Send this op ONLY with the pattern
+	// and the replacement established astral-safe.
+	LoopOpReplaceUnionSafe LoopEffectOp = "replaceUnionSafe"
 )
 
 // LoopEffect is one binding's body effect, lowered for the kernel's
@@ -228,6 +327,17 @@ type LoopEffect struct {
 	Op LoopEffectOp // "un" / "bin" / "seqUn" / "seqNum"
 	A  *LoopEffect
 	B  *LoopEffect // "bin" / "concat" / "join"
+
+	// ReplSet, Bump: LoopOpReplaceUnionSafe only — the replacement's own
+	// scalar set, and the number of scalars a single substitution may
+	// add. The kernel needs both to STATE the union claim, which is what
+	// separates this op from every gated one above: those carry premises
+	// the kernel decides off the receiver's set, this one carries
+	// OPERANDS the kernel cannot see and cannot reconstruct. A zero Bump
+	// with no ceiling on the receiver is the ceiling-free form
+	// `replaceAll` rides.
+	ReplSet refinementsets.RefinedSet
+	Bump    int
 }
 
 // AbsentConst is the state constant `null`/`undefined` writes: the
@@ -272,6 +382,12 @@ func EffectWire(e LoopEffect) string {
 	case LoopEffectConcat:
 		return fmt.Sprintf(`{"concat":[%s,%s]}`, EffectWire(*e.A), EffectWire(*e.B))
 	case LoopEffectSeqUnary:
+		// the substitution row carries its two operands beside the name;
+		// every other sequence op writes the two-field shape it always did
+		if e.Op == LoopOpReplaceUnionSafe {
+			return fmt.Sprintf(`{"seqOp":"%s","replSet":%s,"bump":%d,"A":%s}`,
+				e.Op, EncodeSet(e.ReplSet), e.Bump, EffectWire(*e.A))
+		}
 		return fmt.Sprintf(`{"seqOp":"%s","A":%s}`, e.Op, EffectWire(*e.A))
 	case LoopEffectSeqNum:
 		return fmt.Sprintf(`{"seqNumOp":"%s","A":%s}`, e.Op, EffectWire(*e.A))

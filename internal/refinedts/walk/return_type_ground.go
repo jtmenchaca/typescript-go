@@ -208,6 +208,16 @@ func MapValueAnnotation(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractV
 // no scalar sort AND the type reader cannot spell it either — then
 // that part is the unknown, and a union with the unknown IS the
 // unknown.
+//
+// A GENERATOR / iterable return type never reaches here: the callers
+// answer it before this reader runs (unmodeled_call_result.go's
+// iterator row, and the generator route in
+// evaluate_call_expression.go). The reason is that the type reader
+// WOULD spell it — as an incomplete record of its `next`, `return` and
+// `throw` members — and that record is a true claim about a value no
+// caller reads that way. What callers read is what the iterator HANDS
+// OVER, which is the element, and the element is read through the yield
+// walk and the drain routes instead (generator_element.go).
 func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
 	t := ctx.P.Checker.GetTypeAtLocation(e)
 	parts := typePartsOf(t)
@@ -226,7 +236,17 @@ func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractVal
 			continue
 		}
 		if part.IsStringLiteral() {
-			v, _ := part.AsLiteralType().Value().(string)
+			// tsgo holds a string literal's value as a plain `string`
+			// (checker/types.go:885), so this assertion does match — but a
+			// value the checker never pinned reads as nil, and dropping the
+			// ok would append "" as though the return type stated the empty
+			// word. An unpinned literal is a part nothing spells, which
+			// leaves the whole ground nothing, the way the number branch
+			// below already does.
+			v, ok := part.AsLiteralType().Value().(string)
+			if !ok {
+				return nil
+			}
 			words = append(words, v)
 			continue
 		}

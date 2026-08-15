@@ -755,13 +755,43 @@ func sameParameterSorts(held []parameterSlotSort, wanted []parameterSlotSort) bo
 
 // sameCaptures is whether two capture layouts agree name for name in
 // order — the check a remembered blob's reuse turns on.
+//
+// WRITTEN is compared beside the name and the sort, and it has to be: a
+// blob compiled when a capture was read-only carries NO bundle row for
+// it, so a site that reused that blob while treating the capture as
+// written would map a write-back through a row the compile never made —
+// the caller would keep believing a slot the closure moved. The flag is
+// part of the entry layout, so it is part of the identity.
+//
+// AN OBJECT capture's LEAF VOCABULARY is compared the same way and for
+// the same reason, one step down: the member list IS the entry layout
+// for that capture, so a blob compiled against three leaves may not be
+// reused where the caller's flattening now offers two — entry k would
+// take a value belonging to entry j. Each leaf's own Sort and Written
+// join the comparison beside its name, because each is what its entry
+// and its row were compiled under. A scalar capture and an object
+// capture under one name are different layouts and differ here on the
+// member count.
 func sameCaptures(held []capturedSlot, wanted []capturedSlot) bool {
 	if len(held) != len(wanted) {
 		return false
 	}
 	for index := range held {
-		if held[index].Name != wanted[index].Name || held[index].Sort != wanted[index].Sort {
+		if held[index].Name != wanted[index].Name ||
+			held[index].Sort != wanted[index].Sort ||
+			held[index].Written != wanted[index].Written {
 			return false
+		}
+		if len(held[index].Members) != len(wanted[index].Members) {
+			return false
+		}
+		for leaf := range held[index].Members {
+			if held[index].Members[leaf].Member != wanted[index].Members[leaf].Member ||
+				held[index].Members[leaf].Sort != wanted[index].Members[leaf].Sort ||
+				held[index].Members[leaf].TypeofTag != wanted[index].Members[leaf].TypeofTag ||
+				held[index].Members[leaf].Written != wanted[index].Members[leaf].Written {
+				return false
+			}
 		}
 	}
 	return true

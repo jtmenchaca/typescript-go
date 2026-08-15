@@ -48,7 +48,10 @@ func KindOfClaim(k AbstractValue) ClaimSort {
 			return ClaimSortNone
 		}
 		return setSortOfForms(k.Set.Forms)
-	case KindObject, KindList, KindCollection, KindPromise, KindDate, KindRegex:
+	case KindObject, KindObjectStar, KindList, KindCollection, KindPromise, KindDate, KindRegex:
+		// an Array is an ordinary Object to typeof (sec-typeof-operator:
+		// every Object without [[Call]] answers "object"), so the star
+		// buckets with the rest of the graph values
 		return ClaimSortObject
 	default:
 		return ClaimSortNone
@@ -124,7 +127,7 @@ func TypeofWordOfKnown(k AbstractValue) string {
 		return "symbol"
 	case KindHostFunction:
 		return "function"
-	case KindObject, KindList, KindCollection, KindPromise, KindDate, KindRegex:
+	case KindObject, KindObjectStar, KindList, KindCollection, KindPromise, KindDate, KindRegex:
 		return "object"
 	case KindPossiblyNaN:
 		// NaN is a number, so the ride changes nothing when the inner

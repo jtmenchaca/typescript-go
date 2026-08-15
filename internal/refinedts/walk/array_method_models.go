@@ -42,6 +42,13 @@ func readArrayIsArray(site MethodCallSite) *abstractdomain.AbstractValue {
 		return answer(argument.KindTag == abstractdomain.PrimitiveArray)
 	case abstractdomain.KindList:
 		return answer(true)
+	case abstractdomain.KindObjectStar:
+		// the object-star is only ever built where the value IS an array
+		// exotic object — Array.from, a spread literal, a declared `T[]`,
+		// map/filter — so the brand is pinned even though the length is
+		// not. isArray reads the brand alone (sec-isarray), so the
+		// unstated count is beside the point.
+		return answer(true)
 	case abstractdomain.KindObject:
 		// a typeof-"object" ground never pinned the brand — an array
 		// satisfies that guard too, so the check stays open

@@ -19,6 +19,7 @@ package walk
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
@@ -80,17 +81,17 @@ func constructorDeclarationOf(context *LoweringContext, callee *ast.Node) *ast.N
 // SummaryCallOrHavoc is the one call-lowering door every route uses,
 // in three tiers:
 //
-//	1. a callee with a compiled summary → the CALL STATEMENT, which
-//	   splices the callee's own compiled program;
-//	2. a callee whose own build is STILL IN FLIGHT — a recursive call,
-//	   which cannot splice itself → the cycle havoc, which is the one
-//	   tier that must never ask the registry for a shape;
-//	3. every OTHER callee — one that does not resolve at all, or
-//	   resolves with no blob (a generator, a declined body, an
-//	   unmodeled library function, `x.y.then(cb)`) → the OPAQUE CALL
-//	   HAVOC (ir_opaque_havoc.go): the target takes `unknown` and so
-//	   does every flattened-local leaf the receiver or the arguments
-//	   mentioned.
+//  1. a callee with a compiled summary → the CALL STATEMENT, which
+//     splices the callee's own compiled program;
+//  2. a callee whose own build is STILL IN FLIGHT — a recursive call,
+//     which cannot splice itself → the cycle havoc, which is the one
+//     tier that must never ask the registry for a shape;
+//  3. every OTHER callee — one that does not resolve at all, or
+//     resolves with no blob (a generator, a declined body, an
+//     unmodeled library function, `x.y.then(cb)`) → the OPAQUE CALL
+//     HAVOC (ir_opaque_havoc.go): the target takes `unknown` and so
+//     does every flattened-local leaf the receiver or the arguments
+//     mentioned.
 //
 // Tier 3 is what stops an unreadable call from declining the whole body.
 // It computes its slot set through the SAME enumerator the statement
@@ -137,8 +138,14 @@ func SummaryCallOrHavoc(context *LoweringContext, call *ast.Node, target int) ([
 		return withReceiverBundleHavoc(context, call, cycled)
 	}
 	// `cleanup()` — a call through a name this same body bound to a
-	// closure: the closure's write set lands HERE, at the call, and that
-	// set is what the site havocs.
+	// closure. The SERVED route comes first: a closure whose every
+	// capture resolves to a caller slot compiles to a summary with one
+	// entry per capture, and the call statement fills each from the
+	// caller's own slot and maps the written ones back. Where any capture
+	// does not resolve, the write-set havoc below is the answer.
+	if served, ok := ClosureCallStatementOf(context, call, target); ok {
+		return served, true
+	}
 	if closed, ok := ClosureCallHavocOf(context, call, target); ok {
 		return withReceiverBundleHavoc(context, call, closed)
 	}
@@ -307,6 +314,579 @@ func ClosureCallHavocOf(context *LoweringContext, call *ast.Node, target int) ([
 	// the write set goes out AHEAD of the opaque answer, whose own target
 	// write stays last — the same ordering withReceiverBundleHavoc keeps
 	return append(havocAssignments(missing), havocked...), true
+}
+
+/* ── the served closure call ─────────────────────────────────────── */
+
+// ClosureCallStatementOf SERVES a call through a body-local closure —
+// `cleanup()`, `endStream()`, `onClose()` — instead of havocking the
+// closure's write set.
+//
+// WHAT MAKES IT POSSIBLE. A summary's entries used to be the callee's
+// parameters alone, so a closure writing the captured `settled` had no
+// entry spelling that write and nothing for a ret to map back through.
+// The capture rows are that spelling: the closure's summary allocates one
+// entry per captured name beside its parameters
+// (lowerSummaryBodyWithCaptures' capture loop), and a WRITTEN capture's
+// row rides out in BundleEntries exactly as a record-parameter leaf does.
+//
+// WHERE THE ENTRIES COME FROM. The caller and the closure share the
+// scope: a captured `settled` IS the caller's `settled` slot, identified
+// by spelled name against the caller's own slot table — the same
+// resolution ClosureWriteSlots already performs to compute the havoc set.
+// So entry j takes `var <that slot>` on the way in, and a written row's
+// exit maps back onto that same slot on the way out. Nothing is threaded
+// through a path or a holder; a capture's identity is its spelling.
+//
+// THE SERVING GATE, and every arm of it is a decline back to the
+// write-set havoc rather than a decline of the body:
+//
+//   - the census must READ the closure whole (closureCapturedCensus) —
+//     a nested function, a `this` in any position, an element step
+//     through a capture, or a captured object handed to code refuses it;
+//   - EVERY capture must resolve to a caller slot. One that does not —
+//     an import, a module-level const, an outer function's local the
+//     caller never laid out — has no `var` to bind its entry to and no
+//     slot for its write-back to land on. A partial fill is not an
+//     option: an unresolved capture's entry would enter absent, which
+//     CLAIMS the name is undefined inside the closure. An OBJECT capture
+//     resolves the same way one level down: its leaf vocabulary is the
+//     caller's own flattened leaves under that name — at whatever depth
+//     the caller laid them out, since a nested literal flattens to
+//     "p.a.b" and leafSlotsUnder hands that back under the path "a.b" —
+//     and a capture whose caller value was never flattened, or one
+//     reading a path the caller never laid out, has no vocabulary at all;
+//   - the closure's body must LOWER (lowerArrowSummary) and the kernel
+//     must compile it. Either refusal leaves the site exactly where it
+//     was.
+//
+// WHAT IS NOT WEAKER THAN THE HAVOC. The havoc route wrote `unknown`
+// into every slot the closure assigns. This route writes each written
+// capture's own EXIT into that same slot, and an exit is what the
+// closure actually left there — never weaker, since the kernel's own
+// walk answers top wherever the body could not say more.
+func ClosureCallStatementOf(
+	context *LoweringContext,
+	call *ast.Node,
+	target int,
+) ([]kernelbridge.IrStatement, bool) {
+	if context == nil || call == nil || !ast.IsCallExpression(call) {
+		return nil, false
+	}
+	if context.Flow == nil || context.SummaryTable == nil {
+		return nil, false
+	}
+	closure, ok := localClosureOf(context, call.AsCallExpression().Expression)
+	if !ok {
+		return nil, false
+	}
+	// a closure whose own build is running — `step()` calling itself —
+	// cannot splice itself, and the write-set havoc below is its floor
+	if _, building := context.Inlining[closure]; building {
+		return nil, false
+	}
+	// an ARGUMENT at a served closure call moves nothing the entries
+	// carry: the closure's parameters are laid out from its own
+	// annotations, and this route fills them from the arguments below
+	callExpression := call.AsCallExpression()
+	var callArguments []*ast.Node
+	if callExpression.Arguments != nil {
+		callArguments = callExpression.Arguments.Nodes
+	}
+	for _, argument := range callArguments {
+		if ast.IsSpreadElement(argument) || ContainsWrite(argument) {
+			return nil, false
+		}
+	}
+	if len(callArguments) > len(closure.Parameters()) {
+		return nil, false
+	}
+	captures, captureSlots, capturesOk := closureCapturesOf(context, closure)
+	if !capturesOk {
+		return nil, false
+	}
+	converted, convertedOk := convertLocalClosure(context, closure, captures)
+	if !convertedOk {
+		return nil, false
+	}
+	statement, statementOk := closureCallStatement(
+		context, converted, closure, captureSlots, callArguments, target)
+	if !statementOk {
+		return nil, false
+	}
+	return []kernelbridge.IrStatement{statement}, true
+}
+
+// closureCapturesOf runs the census over a closure and resolves every
+// captured name to the caller's own slot — the entry layout and the
+// caller slots the fill and the write-backs read, in ONE order.
+//
+// The order is the census's own (source order of first use), and it is
+// the order the layout lays the entries out in, so capture j's entry and
+// capture j's caller slot are the same j at both seams. A map's iteration
+// would not be.
+//
+// (false) where the census refused, or where ANY captured name has no
+// caller slot — the whole-or-nothing gate ClosureCallStatementOf's doc
+// states.
+func closureCapturesOf(
+	context *LoweringContext,
+	closure *ast.Node,
+) ([]capturedSlot, []int, bool) {
+	reads, objects, writes, ok := closureCapturedCensus(closure)
+	if !ok {
+		return nil, nil, false
+	}
+	var captures []capturedSlot
+	var slots []int
+	// the OBJECT captures first, each expanded into its leaves. Their
+	// SHAPE comes from the CALLER: the leaf vocabulary is whatever the
+	// caller's own slot family holds under that name (a flattened record
+	// local's leaves), and a member the census read that the caller never
+	// laid out has no slot to enter from — the whole capture refuses,
+	// exactly as a scalar capture with no caller slot does.
+	for _, object := range objects {
+		leaves, leavesOk := leafSlotsUnder(context, object.Name)
+		if !leavesOk {
+			// the caller's value under this name is NOT flattened — an
+			// ordinary scalar slot, an unrecognized local, a parameter the
+			// layout never expanded, an import. There is no leaf vocabulary
+			// to lay entries out from, so the site keeps the write-set havoc.
+			return nil, nil, false
+		}
+		slotOfPath := map[string]int{}
+		for _, leaf := range leaves {
+			slotOfPath[leaf.Path] = leaf.Index
+		}
+		// a method call the callee resolution says MAY move the receiver
+		// havocs every leaf inside the summary, so every leaf must ride out
+		// Written for the caller to take the moved values back
+		moves := false
+		methodWrites := map[string]struct{}{}
+		for _, method := range object.MethodCalls {
+			if capturedMethodMoves(context, closure, object.Name, method) {
+				methodWrites[method] = struct{}{}
+				moves = true
+			}
+		}
+		capture := capturedSlot{
+			Name:         object.Name,
+			MethodCalls:  object.MethodCalls,
+			MethodWrites: methodWrites,
+		}
+		for _, member := range object.Members {
+			slot, held := slotOfPath[member]
+			if !held {
+				// a member the closure reads that the caller's flattening never
+				// laid out: no slot to fill the entry from, and filling it
+				// absent would CLAIM the member is undefined inside the closure
+				return nil, nil, false
+			}
+			if slot >= len(context.Sorts) || slot >= len(context.Typeofs) {
+				return nil, nil, false
+			}
+			_, writtenHere := object.Written[member]
+			capture.Members = append(capture.Members, capturedLeaf{
+				Member:    member,
+				Sort:      context.Sorts[slot],
+				TypeofTag: context.Typeofs[slot],
+				Written:   writtenHere || moves,
+			})
+			slots = append(slots, slot)
+		}
+		if len(capture.Members) == 0 {
+			// a capture used only as a method receiver reads no leaf and
+			// carries no entry — the layout would allocate nothing for it and
+			// the havoc it needs would have no slot to land on
+			return nil, nil, false
+		}
+		captures = append(captures, capture)
+	}
+	for _, name := range reads {
+		index, found := slotIndexOfName(context, name)
+		if !found {
+			// no caller slot: no `var` to bind the entry to, and no place
+			// for a write-back to land
+			return nil, nil, false
+		}
+		if index >= len(context.Sorts) || index >= len(context.Typeofs) {
+			return nil, nil, false
+		}
+		// a capture the caller FLATTENED (a record, an array, a
+		// collection) has leaves the entry does not hold, and a write
+		// through one of them moves a slot no row names
+		if leaves := flattenedSlotsUnder(context, name); len(leaves) > 0 {
+			return nil, nil, false
+		}
+		_, written := writes[name]
+		captures = append(captures, capturedSlot{
+			Name:      name,
+			Sort:      context.Sorts[index],
+			TypeofTag: context.Typeofs[index],
+			Written:   written,
+		})
+		slots = append(slots, index)
+	}
+	// a write the census reported for a name the read list does not
+	// carry would be a row with no entry — the census appends every
+	// written name to its reads, so this states the invariant rather
+	// than fixing anything
+	for name := range writes {
+		held := false
+		for _, capture := range captures {
+			if capture.Name == name {
+				held = true
+				break
+			}
+		}
+		if !held {
+			return nil, nil, false
+		}
+	}
+	return captures, slots, true
+}
+
+// capturedMethodMoves answers whether `<capture>.<method>(…)` inside a
+// closure may move a member of the captured object.
+//
+// The reading is callee_effects' own, unchanged in substance: a callee
+// this package can SUMMARIZE answers from its summary — a body that
+// lowered, wrote no this-field and returned no receiver moved nothing on
+// the object it ran on (SummaryReceiverEffects) — and everything else
+// answers TRUE. An unresolved callee, a declined lowering, a builtin
+// (`removeListener`, `end`) whose declaration this package holds no body
+// for: each is a doubt, and every doubt moves the object.
+//
+// True costs the leaves their believability from that statement on; it
+// never costs the closure its serving, which is the difference between
+// this and the census refusing.
+func capturedMethodMoves(
+	context *LoweringContext,
+	closure *ast.Node,
+	name string,
+	method string,
+) bool {
+	if context == nil || context.Flow == nil {
+		return true
+	}
+	call, found := capturedMethodCallIn(closure, name, method)
+	if !found {
+		return true
+	}
+	contract := ContractOf(context.Flow, call.AsCallExpression().Expression)
+	if contract == nil || contract.Declaration == nil {
+		return true
+	}
+	// a callee whose lowering is already running cannot be summarized from
+	// underneath itself — the memo fills only when it finishes
+	if _, building := context.Inlining[contract.Declaration]; building {
+		return true
+	}
+	if _, lowered := LowerSummaryBody(context.Flow, contract.Declaration); !lowered {
+		return true
+	}
+	receiverTouched, _ := SummaryReceiverEffects(context.Flow, contract.Declaration)
+	return receiverTouched
+}
+
+// capturedMethodCallIn finds ONE call node spelling
+// `<name>.<method>(…)` inside a closure's body — the site the contract
+// lookup needs, since a contract resolves from an expression and the
+// census reports only spellings.
+//
+// The FIRST such call is enough: every call under one spelling resolves
+// through the same property access on the same name, so they answer one
+// contract.
+func capturedMethodCallIn(closure *ast.Node, name string, method string) (*ast.Node, bool) {
+	body := closure.Body()
+	if body == nil {
+		return nil, false
+	}
+	var found *ast.Node
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if found != nil || node == nil {
+			return true
+		}
+		if ast.IsCallExpression(node) {
+			callee := Unwrapped(node.AsCallExpression().Expression)
+			if callee != nil && ast.IsPropertyAccessExpression(callee) {
+				access := callee.AsPropertyAccessExpression()
+				receiver := Unwrapped(access.Expression)
+				if receiver != nil && ast.IsIdentifier(receiver) &&
+					receiver.Text() == name && ast.IsIdentifier(access.Name()) &&
+					access.Name().Text() == method {
+					found = node
+					return true
+				}
+			}
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	visit(body)
+	return found, found != nil
+}
+
+// localClosureBlobEntry is one body-local closure's compiled answer,
+// keyed by the closure NODE the way arrowBlobs keys a converted callback:
+// a closure belongs to the body that spells it, and its capture layout is
+// that body's slot vector — so it is deliberately not in the
+// declaration-keyed registry.
+type localClosureBlobEntry struct {
+	Blob     kernelbridge.SummaryBlob
+	Lowered  LoweredSummary
+	Captures []capturedSlot
+	Ok       bool
+}
+
+// localClosureBuilding is the set of closure nodes whose compile is
+// RUNNING right now — the cycle guard, and it has to be its own set
+// rather than the lowering context's Inlining map.
+//
+// A context seeds Inlining with the ONE declaration it is lowering, and
+// convertLocalClosure builds a FRESH context for the closure, so a
+// self-call (`const step = () => step()`) is caught by the inner
+// context's own seed. MUTUAL recursion is not: `a` calling `b` calling
+// `a` gives each context a seed naming only itself, and the compile
+// would descend forever. This set spans the whole descent, so the second
+// entry into either closure declines and the site takes the write-set
+// havoc — the same floor the registry's own in-flight tier gives a
+// recursive declaration.
+var (
+	localClosureBlobsMu  sync.Mutex
+	localClosureBlobs    = map[*ast.Node]localClosureBlobEntry{}
+	localClosureBuilding = map[*ast.Node]struct{}{}
+)
+
+// ClearLocalClosureBlobs drops every remembered closure blob. Keyed on
+// closure nodes from one program, so a caller that builds a new program
+// clears it, as it clears the layout's own memos.
+func ClearLocalClosureBlobs() {
+	localClosureBlobsMu.Lock()
+	localClosureBlobs = map[*ast.Node]localClosureBlobEntry{}
+	localClosureBuilding = map[*ast.Node]struct{}{}
+	localClosureBlobsMu.Unlock()
+}
+
+// convertLocalClosure lowers a body-local closure with its capture rows
+// and asks the kernel to compile it — the same two steps convertArrow
+// takes for a callback argument, and for the same reason: the entries a
+// blob is compiled under include the captures, so the blob belongs to the
+// capture layout that built it.
+//
+// A remembered blob is reused only where the capture layout AGREES name
+// for name; a re-lowering that resolved a different one is a different
+// entry vector and declines rather than filling the old blob's rows from
+// new slots.
+func convertLocalClosure(
+	context *LoweringContext,
+	closure *ast.Node,
+	captures []capturedSlot,
+) (localClosureBlobEntry, bool) {
+	localClosureBlobsMu.Lock()
+	held, has := localClosureBlobs[closure]
+	_, building := localClosureBuilding[closure]
+	if !has && !building {
+		localClosureBuilding[closure] = struct{}{}
+	}
+	localClosureBlobsMu.Unlock()
+	if has {
+		if !held.Ok || !sameCaptures(held.Captures, captures) {
+			return localClosureBlobEntry{}, false
+		}
+		return held, true
+	}
+	if building {
+		// this closure's own compile is already running further up the
+		// descent — a cycle, which cannot splice itself
+		return localClosureBlobEntry{}, false
+	}
+	defer func() {
+		localClosureBlobsMu.Lock()
+		delete(localClosureBuilding, closure)
+		localClosureBlobsMu.Unlock()
+	}()
+	lowered, loweredOk := lowerArrowSummary(context.Flow, closure, nil, captures)
+	if !loweredOk {
+		localClosureBlobsMu.Lock()
+		localClosureBlobs[closure] = localClosureBlobEntry{Captures: captures}
+		localClosureBlobsMu.Unlock()
+		return localClosureBlobEntry{}, false
+	}
+	blob, asked := kernelbridge.AskSummarize(lowered.SlotCount, lowered.Stmts, lowered.Table)
+	if !asked {
+		localClosureBlobsMu.Lock()
+		localClosureBlobs[closure] = localClosureBlobEntry{Captures: captures}
+		localClosureBlobsMu.Unlock()
+		return localClosureBlobEntry{}, false
+	}
+	entry := localClosureBlobEntry{Blob: blob, Lowered: lowered, Captures: captures, Ok: true}
+	localClosureBlobsMu.Lock()
+	localClosureBlobs[closure] = entry
+	localClosureBlobsMu.Unlock()
+	return entry, true
+}
+
+// closureCallStatement builds the ONE call statement a served closure
+// call takes.
+//
+// The entry vector, in the layout's own order: the closure's DECLARED
+// parameters take the call's arguments (absent where the call passed
+// none — the runtime's own answer for a missing argument), then the
+// CAPTURE entries each take a `var` of the caller slot that name resolved
+// to, then every remaining slot enters absent with the done flag at {0} —
+// exactly the entry states applySummary sends, so a spliced compile and a
+// direct apply agree.
+//
+// Rets: the closure's #ret out-state lands on `target` where the site has
+// one, and EVERY WRITTEN CAPTURE ROW maps its own exit back onto the
+// caller slot it was filled from. That second half is the write-back, and
+// it is read from the layout's own BundleEntries rather than recomputed —
+// the row's Index is the entry position the layout allocated, and the
+// caller slot is the one closureCapturesOf resolved for the same capture,
+// so the two seams walk one answer.
+func closureCallStatement(
+	context *LoweringContext,
+	converted localClosureBlobEntry,
+	closure *ast.Node,
+	captureSlots []int,
+	callArguments []*ast.Node,
+	target int,
+) (kernelbridge.IrStatement, bool) {
+	lowered := converted.Lowered
+	declared := len(closure.Parameters())
+	if declared+len(captureSlots) != lowered.ParamCount {
+		// the layout expanded a parameter into several entries (a record,
+		// an array, a class-typed bundle), which this route's argument fill
+		// does not spell — the havoc floor keeps the site
+		return kernelbridge.IrStatement{}, false
+	}
+	args := make([]kernelbridge.LoopEffect, 0, lowered.SlotCount)
+	for index := range declared {
+		if index >= len(callArguments) {
+			args = append(args, kernelbridge.AbsentConst())
+			continue
+		}
+		argument := callArguments[index]
+		effect, ok := RhsEffect(context, SortOfArg(context, argument), argument)
+		if !ok {
+			return kernelbridge.IrStatement{}, false
+		}
+		args = append(args, effect)
+	}
+	for _, slot := range captureSlots {
+		args = append(args, varEffect(slot))
+	}
+	for len(args) < lowered.SlotCount {
+		if len(args) == lowered.DoneIndex {
+			args = append(args, kernelbridge.LoopEffect{
+				Kind: kernelbridge.LoopEffectConst,
+				Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0})),
+			})
+			continue
+		}
+		args = append(args, kernelbridge.AbsentConst())
+	}
+	retsLength := lowered.RetIndex + 1
+	if lowered.SlotCount > retsLength {
+		retsLength = lowered.SlotCount
+	}
+	rets := make([]int, retsLength)
+	for index := range rets {
+		rets[index] = -1
+	}
+	if target >= 0 {
+		rets[lowered.RetIndex] = target
+	}
+	// the write-backs: each written capture row's exit onto the caller
+	// slot its entry was filled from.
+	//
+	// The key is the row's own spelling below the "#capture." prefix — a
+	// scalar row's caller name ("settled"), an OBJECT row's
+	// name-and-member ("stream.writableEnded") — and the map is walked in
+	// the SAME order the layout appended entries in, which is the order
+	// captureSlots holds. One position per entry on both sides, leaves
+	// included: that is what recordParamRets does with its leaf paths, and
+	// it is why neither seam re-derives an index.
+	slotOfCapture := map[string]int{}
+	position := 0
+	for _, capture := range converted.Captures {
+		if len(capture.Members) > 0 {
+			for _, leaf := range capture.Members {
+				if position < len(captureSlots) {
+					slotOfCapture[capture.Name+"."+leaf.Member] = captureSlots[position]
+				}
+				position++
+			}
+			continue
+		}
+		if position < len(captureSlots) {
+			slotOfCapture[capture.Name] = captureSlots[position]
+		}
+		position++
+	}
+	if position != len(captureSlots) {
+		// the layout's entry count and this site's slot vector disagree —
+		// the site declines rather than mapping a row onto a slot the
+		// allocator never paired it with
+		return kernelbridge.IrStatement{}, false
+	}
+	for _, entry := range lowered.BundleEntries {
+		name, isCapture := capturedNameOfSlot(entry.Path)
+		if !isCapture || !entry.Written {
+			continue
+		}
+		slot, held := slotOfCapture[name]
+		if !held {
+			// a row naming a capture this site did not resolve: the layout
+			// and this fill disagree, and the site declines rather than
+			// writing an exit into a slot nothing bound
+			return kernelbridge.IrStatement{}, false
+		}
+		if entry.Index < 0 || entry.Index >= len(rets) {
+			return kernelbridge.IrStatement{}, false
+		}
+		rets[entry.Index] = slot
+	}
+	return kernelbridge.IrStatement{
+		Kind:   kernelbridge.IrStatementCall,
+		Callee: context.SummaryTable.CalleeIndex(closure, converted.Blob),
+		Args:   args,
+		Rets:   rets,
+	}, true
+}
+
+// localClosureOf resolves a call's callee — a plain identifier — to the
+// CLOSURE NODE the name was declared to hold, where localClosureBodyOf
+// answers the body. The two read the same declaration; this one answers
+// the function-like node the layout and the compile need, since a summary
+// is lowered from the declaration, not from the block.
+func localClosureOf(context *LoweringContext, callee *ast.Node) (*ast.Node, bool) {
+	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
+		return nil, false
+	}
+	head := Unwrapped(callee)
+	if head == nil || !ast.IsIdentifier(head) {
+		return nil, false
+	}
+	symbol := symbolAt(context.Flow.P.Checker, head)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return nil, false
+	}
+	declaration := symbol.ValueDeclaration
+	if !ast.IsVariableDeclaration(declaration) {
+		return nil, false
+	}
+	initializer := declaration.AsVariableDeclaration().Initializer
+	if initializer == nil {
+		return nil, false
+	}
+	closure := Unwrapped(initializer)
+	if closure == nil || !ast.IsFunctionLike(closure) || closure.Body() == nil {
+		return nil, false
+	}
+	return closure, true
 }
 
 // localClosureBodyOf resolves a call's callee — a plain identifier — to

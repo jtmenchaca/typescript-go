@@ -34,9 +34,23 @@ import (
 // builtinIteratorClasses: the iterator classes the default library
 // declares for its own collections. Each carries its element type as
 // its one type argument.
+// A generator's own lib types belong here for the same reason the
+// collection views do: `Generator<T, …>` and `IterableIterator<T>` are
+// library-declared with no constructor a user can call, so a value of
+// that type came from a generator call, and T is what the body yields —
+// tsc checked every `yield e` against it. The names and the
+// first-argument rule live with the generator's other readings
+// (generator_element.go).
 var builtinIteratorClasses = map[string]bool{
 	"MapIterator": true, "SetIterator": true, "ArrayIterator": true,
 	"StringIterator": true, "RegExpStringIterator": true,
+}
+
+// builtinIteratorClassNamed answers whether a symbol name is one of the
+// iterator classes this file reads — the collection views above, or one
+// of the generator/iterable spellings.
+func builtinIteratorClassNamed(name string) bool {
+	return builtinIteratorClasses[name] || generatorReturnTypeNames[name]
 }
 
 // builtinIteratorElementOf: the element type of a receiver whose
@@ -50,7 +64,7 @@ func builtinIteratorElementOf(ctx *FlowContext, receiver *ast.Node) (*checker.Ty
 		return nil, false
 	}
 	symbol := t.Symbol()
-	if symbol == nil || !builtinIteratorClasses[symbol.Name] {
+	if symbol == nil || !builtinIteratorClassNamed(symbol.Name) {
 		return nil, false
 	}
 	if !ctx.P.Checker.SymbolInDefaultLib(symbol) {
@@ -80,10 +94,22 @@ func builtinIteratorElementOf(ctx *FlowContext, receiver *ast.Node) (*checker.Ty
 //
 // An element the reader cannot spell as a SET — a class instance, a
 // record, anything living in the object graph rather than the tuple
-// layer — leaves nothing to star: a sequence claim is a claim about
-// every position, and there is no set to put at one. Those answer
-// (zero, false) and the caller keeps the answer it already had.
+// layer — stars into the object-star: the same per-position claim,
+// carried where the graph answers it rather than the kernel. That is
+// what makes `Array.from(this._providers.values())` hold InstanceWrapper
+// elements. Only an element NEITHER layer holds answers (zero, false),
+// and the caller keeps the answer it already had.
 func builtinIteratorSequenceOf(ctx *FlowContext, receiver *ast.Node) (abstractdomain.AbstractValue, bool) {
+	// a GENERATOR call is an iterator too, and draining it is the same
+	// question: every value the body yields lands in the array, at a
+	// count the body's own control flow decides. Its element is read
+	// from the yields (or the declared yield type), which the
+	// generator's own file answers, and the star is built there over the
+	// very same recipe — so `[...g()]` and `Array.from(g())` reach it
+	// through this one door, exactly as `[...m.values()]` does.
+	if sequence, ok := GeneratorSequenceOf(ctx, receiver); ok {
+		return sequence, true
+	}
 	element, ok := builtinIteratorElementOf(ctx, receiver)
 	if !ok {
 		return abstractdomain.AbstractValue{}, false
@@ -131,20 +157,36 @@ func readIteratorNext(site MethodCallSite) *abstractdomain.AbstractValue {
 	if call.Arguments != nil && len(call.Arguments.Nodes) != 0 {
 		return nil
 	}
-	element, ok := builtinIteratorElementOf(ctx, receiverExpression)
-	if !ok {
-		return nil
-	}
 	// what the element type states. An unread type leaves the value
 	// unclaimed rather than opaque — the iterator's own contents came
 	// from a collection this file may yet determine.
 	value := silence.Residue()
-	if read, hasRead := typereading.ReadHostType(ctx.P.Checker, element, receiverExpression, 0); hasRead {
-		value = read
+	// `g().next()` reads the generator's own yields first: the body is
+	// in reach, so what it hands the caller is read from the yield
+	// expressions themselves rather than from the type argument alone.
+	// The declared route below still answers for a generator bound to a
+	// name, and for every collection view.
+	if yielded, ok := GeneratorElementOf(ctx, receiverExpression); ok {
+		value = yielded
+	} else {
+		element, ok := builtinIteratorElementOf(ctx, receiverExpression)
+		if !ok {
+			return nil
+		}
+		if read, hasRead := typereading.ReadHostType(ctx.P.Checker, element, receiverExpression, 0); hasRead {
+			value = read
+		}
 	}
-	// a next() past the last element yields the iterator's RETURN value
-	// (undefined for every one of these classes) with done true, so the
-	// value the caller reads is the element or nothing at all
+	// A next() the walk cannot order against the iterator's exhaustion
+	// may be the one PAST the last element, and that call's record holds
+	// the iterator's RETURN value with done true — undefined for every
+	// collection view, and for a generator whatever its `return e` gave
+	// (undefined where it has none). The element reading does not cover
+	// that value, so the field carries the element BESIDE absence: the
+	// maybe wrapper is what makes the record true of both the element
+	// calls and the finishing one, and the record's own `done` is what
+	// tells a caller which it holds — a caller that checks it narrows
+	// back to the element.
 	out := iteratorResultRecord(abstractdomain.PossiblyUndefined(value, abstractdomain.TrustSpec, true, false))
 	return &out
 }

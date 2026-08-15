@@ -35,6 +35,7 @@ import (
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
 
@@ -52,11 +53,26 @@ type ObjectLocal struct {
 // LAST path step, which is what a destructuring row and a one-step read
 // name), the slot name it is tracked under ("p.a.b"), and the
 // expression the literal assigned it.
+//
+// Initializer is nil for the families whose leaves come from a
+// DECLARATION rather than from a literal row — a constructor's exit
+// rows, a declared record type. Those leaves carry their evidence in
+// Sort/TypeofTag instead, which ObjectLocalKeySort and
+// ObjectLocalKeyTypeof read in front of the initializer's syntax. A
+// literal's leaf leaves both zero and keeps the syntax reading it has
+// always had.
 type ObjectLocalKey struct {
 	Path        []string
 	Key         string
 	SlotName    string
 	Initializer *ast.Node
+	// Sort and TypeofTag are the DECLARED evidence for a leaf with no
+	// initializer to read. Declared is what tells the two apart: a
+	// literal leaf and a declared leaf whose sort happens to be the zero
+	// BindingKind must not be confused.
+	Declared  bool
+	Sort      BindingKind
+	TypeofTag TypeofTag
 }
 
 // objectLiteralOfDeclaration is the object literal a declaration's
@@ -81,11 +97,43 @@ func objectLiteralOfDeclaration(declaration *ast.Node) *ast.Node {
 // another object literal contributes that literal's own leaves under
 // the row's key, so `{ a: { b: 1 } }` names the single leaf "p.a.b".
 // Every row must be a plain `key: expression` assignment with an
-// identifier key; spreads, computed keys, shorthand rows, methods,
-// accessors and array-literal values all decline — none of them names
-// one leaf holding one scalar. `prefix` is the path already walked
-// below the holder, `holder` the spelled root ("p").
+// identifier key OR a STABLE SYMBOL const key; spreads, other computed
+// keys, shorthand rows, methods, accessors and array-literal values all
+// decline — none of them names one leaf holding one scalar. `prefix` is
+// the path already walked below the holder, `holder` the spelled root
+// ("p").
+//
+// A SYMBOL-KEYED ROW (`{ [K_MODULE_ID]: id }`) contributes its leaf
+// under the derived `#sym:` name, which is the same key identity the
+// class census spells its symbol fields with (StableSymbolKeyName,
+// ir_field_bundles.go). What makes it one leaf is what makes it one
+// field there: the const cannot be rebound, its declaration runs once
+// per module, and the symbol IS the property key at runtime, so two rows
+// spelled with the same const are one key and rows spelled with
+// different consts are different keys.
+//
+// The SPELLING composes with the leaf vocabulary unchanged. A leaf named
+// `#sym:S` under holder `p` spells the slot "p.#sym:S", and every reader
+// of that spelling reads it as one step below p: leafSlotsUnder trims
+// the `p.` prefix and keeps the rest whole, and splitOneStep cuts at the
+// FIRST dot, so a `#sym:` name — which holds no dot — stays one member.
+// The `#` and `:` are what keep it apart from a plain property name and
+// from a `#`-named private one, exactly as the field census's own note
+// says.
 func flatKeysOfLiteral(literal *ast.Node, holder string, prefix []string) ([]ObjectLocalKey, bool) {
+	return flatKeysOfLiteralWith(nil, literal, holder, prefix)
+}
+
+// flatKeysOfLiteralWith is flatKeysOfLiteral carrying the checker the
+// STABLE SYMBOL KEY needs. With a nil checker every computed key
+// declines, which is the reading every caller had before the symbol key
+// reached this vocabulary.
+func flatKeysOfLiteralWith(
+	c *checker.Checker,
+	literal *ast.Node,
+	holder string,
+	prefix []string,
+) ([]ObjectLocalKey, bool) {
 	var keys []ObjectLocalKey
 	seen := map[string]struct{}{}
 	for _, property := range literal.AsObjectLiteralExpression().Properties.Nodes {
@@ -93,13 +141,22 @@ func flatKeysOfLiteral(literal *ast.Node, holder string, prefix []string) ([]Obj
 			return nil, false
 		}
 		assignment := property.AsPropertyAssignment()
-		if !ast.IsIdentifier(assignment.Name()) {
-			return nil, false
-		}
 		if assignment.Initializer == nil {
 			return nil, false
 		}
-		key := assignment.Name().Text()
+		var key string
+		switch {
+		case ast.IsIdentifier(assignment.Name()):
+			key = assignment.Name().Text()
+		default:
+			// a computed key names one leaf only through a stable symbol
+			// const; every other computed key names nothing the vector holds
+			symbolKey, isSymbolKey := symbolMemberFieldName(c, assignment.Name())
+			if !isSymbolKey {
+				return nil, false
+			}
+			key = symbolKey
+		}
 		if _, already := seen[key]; already {
 			return nil, false
 		}
@@ -109,7 +166,7 @@ func flatKeysOfLiteral(literal *ast.Node, holder string, prefix []string) ([]Obj
 		// a nested fixed-shape literal contributes its OWN leaves under
 		// this key — one more level of the same rule
 		if ast.IsObjectLiteralExpression(value) {
-			nested, ok := flatKeysOfLiteral(value, holder, path)
+			nested, ok := flatKeysOfLiteralWith(c, value, holder, path)
 			if !ok {
 				return nil, false
 			}
@@ -199,7 +256,16 @@ func recordShapeOf(keys []ObjectLocalKey) string {
 // occurrence — an alias, an argument, a return, an element access
 // `p[e]` — declines, because after flattening there is no one value for
 // it to denote.
+//
+// A SYMBOL-KEYED step `p[S]` is not one of those declines: under a
+// stable symbol const it names ONE declared leaf, so it reads and writes
+// that leaf exactly as `p.k` does. The refusal it used to take was the
+// bare-name arm catching `p` inside an element access, which is the
+// right answer for `p[e]` — an index nothing spells — and the wrong one
+// for a key the vocabulary now holds. `p?.[S]` still declines: an
+// absent receiver is what no leaf spells.
 func usesAreAllDeclaredKeySteps(
+	c *checker.Checker,
 	body *ast.Node,
 	declaration *ast.Node,
 	name string,
@@ -242,7 +308,7 @@ func usesAreAllDeclaredKeySteps(
 						return false
 					}
 					if ast.IsObjectLiteralExpression(right) {
-						if rows, rowsOk := flatKeysOfLiteral(right, name, nil); rowsOk && recordShapeOf(rows) == shape {
+						if rows, rowsOk := flatKeysOfLiteralWith(c, right, name, nil); rowsOk && recordShapeOf(rows) == shape {
 							// the rows' own initializers still have to be scanned —
 							// one of them could mention this record
 							for _, row := range rows {
@@ -286,6 +352,27 @@ func usesAreAllDeclaredKeySteps(
 				return true
 			}
 			return false
+		}
+		// `p[S]` under a stable symbol const — one declared leaf, read or
+		// written the way a dotted step is. The root is consumed here so it
+		// does not reach the bare-name test below.
+		if ast.IsElementAccessExpression(node) {
+			element := node.AsElementAccessExpression()
+			if root := Unwrapped(element.Expression); root != nil &&
+				ast.IsIdentifier(root) && root.Text() == name {
+				symbolKey, isSymbolKey := SymbolKeyedFieldName(c, node)
+				if !isSymbolKey {
+					ok = false // an index nothing spells
+					return true
+				}
+				if _, isDeclared := declared[symbolKey]; !isDeclared {
+					ok = false // a leaf the literal never gave a slot
+					return true
+				}
+				// the KEY expression is the const's own name, not a use of
+				// the record — nothing to walk under it
+				return false
+			}
 		}
 		// Every other occurrence of the bare name — an alias `q = p`, an
 		// argument `f(p)`, `return p`, an element access `p[e]`, an
@@ -362,32 +449,724 @@ func destructuredLeafNamesOf(pattern *ast.Node, keys []ObjectLocalKey) ([]destru
 // batch entry ObjectLocalsOf supplies it, and a lone call may pass nil
 // (no record-to-record assignment is then admitted).
 func ObjectLocalOf(body *ast.Node, declaration *ast.Node, sameShapeName func(other string) bool) (ObjectLocal, bool) {
-	literal := objectLiteralOfDeclaration(declaration)
-	if literal == nil {
-		return ObjectLocal{}, false
-	}
-	if !ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+	return ObjectLocalIn(nil, body, declaration, sameShapeName, nil)
+}
+
+// ObjectLocalIn is ObjectLocalOf with the check's own context, so the
+// declarations whose leaves come from a DECLARATION rather than a
+// literal are recognized too: a `new C()` whose constructor serves, a
+// declared record type over an opaque initializer, and a `??` or ternary
+// both of whose arms name one family.
+//
+// The four routes are tried in that order and are EXCLUSIVE — the first
+// that answers a family is the local's, and one name has one slot
+// family. The USE SCAN is then the same scan for every family: whatever
+// produced the leaves, every occurrence of the name in the body must
+// still be a path on a declared leaf or one of the recognized
+// whole-record forms. Widening which declarations produce families never
+// widens which uses are admitted.
+//
+// `familyOfName` answers the leaves another spelled local flattens to,
+// which the join arms read; the batch entry ObjectLocalsIn supplies it,
+// and nil admits no name-armed join.
+func ObjectLocalIn(
+	ctx *FlowContext,
+	body *ast.Node,
+	declaration *ast.Node,
+	sameShapeName func(other string) bool,
+	familyOfName func(name string) ([]ObjectLocalKey, bool),
+) (ObjectLocal, bool) {
+	if !ast.IsVariableDeclaration(declaration) ||
+		!ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
 		return ObjectLocal{}, false
 	}
 	name := declaration.AsVariableDeclaration().Name().Text()
-	keys, ok := flatKeysOfLiteral(literal, name, nil)
+	keys, ok := declarationLeavesOf(ctx, declaration, name, familyOfName)
 	if !ok {
 		return ObjectLocal{}, false
 	}
 	// a leaf's own initializer must not mention the record — `{ lo: 0, hi:
-	// p.lo }` reads a slot that does not exist yet
+	// p.lo }` reads a slot that does not exist yet. A DECLARED leaf has no
+	// initializer and no such row to check.
 	for _, key := range keys {
-		if mentionsName(key.Initializer, name) {
+		if key.Initializer != nil && mentionsName(key.Initializer, name) {
 			return ObjectLocal{}, false
 		}
 	}
 	if sameShapeName == nil {
 		sameShapeName = func(string) bool { return false }
 	}
-	if !usesAreAllDeclaredKeySteps(body, declaration, name, keys, sameShapeName) {
+	if !usesAreAllDeclaredKeySteps(checkerOf(ctx), body, declaration, name, keys, sameShapeName) {
 		return ObjectLocal{}, false
 	}
 	return ObjectLocal{Declaration: declaration, Name: name, Keys: keys}, true
+}
+
+// declarationLeavesOf is the one place the four family sources are
+// ordered: the object literal first (the reading that needs no context
+// and has always served), then the constructor's exit rows, then the
+// declared type, then the two-armed join. The first answer wins.
+func declarationLeavesOf(
+	ctx *FlowContext,
+	declaration *ast.Node,
+	name string,
+	familyOfName func(name string) ([]ObjectLocalKey, bool),
+) ([]ObjectLocalKey, bool) {
+	if literal := objectLiteralOfDeclaration(declaration); literal != nil {
+		return flatKeysOfLiteralWith(checkerOf(ctx), literal, name, nil)
+	}
+	if ctx == nil {
+		return nil, false
+	}
+	if keys, ok := constructedLeavesOf(ctx, declaration); ok {
+		return keys, true
+	}
+	if keys, ok := declaredTypeLeavesOf(ctx, declaration); ok {
+		return keys, true
+	}
+	return joinedArmLeavesOf(ctx, declaration, familyOfName)
+}
+
+/* ── the NON-LITERAL declarations that flatten ───────────────────── */
+
+// declaredLeavesOf turns a member list read off a DECLARATION — a
+// declared record type's members, a constructor's this-field exits —
+// into the leaf list a flattened local carries. Every leaf is one step
+// below the holder (a declaration names members, not paths), and each
+// carries its own declared sort rather than an initializer to read.
+func declaredLeavesOf(holder string, members []recordParamMember) []ObjectLocalKey {
+	keys := make([]ObjectLocalKey, 0, len(members))
+	for _, member := range members {
+		keys = append(keys, ObjectLocalKey{
+			Path:      []string{member.Key},
+			Key:       member.Key,
+			SlotName:  holder + "." + member.Key,
+			Declared:  true,
+			Sort:      member.Sort,
+			TypeofTag: member.TypeofTag,
+		})
+	}
+	return keys
+}
+
+// declaredTypeLeavesOf is recognizer (2): the leaves a declaration's own
+// TYPE ANNOTATION names, whatever its initializer turns out to be.
+//
+// WHY AN OPAQUE INITIALIZER IS STILL SOUND — the parameter precedent,
+// verbatim. A record-expanded PARAMETER already lays out one slot per
+// declared member and fills none of them with a value: the members come
+// from the annotation, the values come from whatever the caller passed,
+// and the entry slots stand for values this body has never seen. That is
+// exactly the position a `const x: Bounds = somethingOpaque()` local is
+// in — the annotation promises the member NAMES to every value the
+// initializer could produce, and the leaves claim nothing about the
+// member VALUES. Declared leaves with unknown values claim nothing
+// false; they only give the body's `x.lo` a slot to read, which then
+// answers the same unknown the whole-name slot answered. The soundness
+// does not come from the initializer at all, which is why an opaque one
+// costs nothing.
+//
+// The members read through recordParamMembersIn's own reader, so a
+// declared record local and a declared record parameter expand to
+// byte-identical member lists — one reading, two seams. Everything that
+// reader declines (a class, an unbounded generic, a merged interface, a
+// computed member name, a union whose arms share no member) declines here
+// too and the local keeps its whole-name slot. A member whose annotation
+// does not sort contributes an UNKNOWN-SORTED leaf rather than declining,
+// exactly as it does for a parameter — the leaf names the key and admits
+// only the definedness test.
+func declaredTypeLeavesOf(ctx *FlowContext, declaration *ast.Node) ([]ObjectLocalKey, bool) {
+	if !ast.IsVariableDeclaration(declaration) {
+		return nil, false
+	}
+	decl := declaration.AsVariableDeclaration()
+	if decl.Type == nil || decl.Name() == nil || !ast.IsIdentifier(decl.Name()) {
+		return nil, false
+	}
+	holder := decl.Name().Text()
+	members, isRecord := declaredTypeNodeMembers(ctx, holder, decl.Type)
+	if !isRecord {
+		return nil, false
+	}
+	return declaredLeavesOf(holder, members), true
+}
+
+// declaredTypeNodeMembers reads ONE type annotation as a scalar member
+// list: an inline type literal off its own syntax, a UNION through the
+// members its arms share, a named type through the resolution
+// recordParamMembersIn performs, and a TYPE PARAMETER through its own
+// CONSTRAINT.
+//
+// The type-parameter arm is what `<T extends Bounds>(x: T)` needs: the
+// constraint is the only thing the annotation promises about every T a
+// caller could apply, so the constraint's members are the ones the
+// leaves may name. An UNBOUNDED type parameter promises nothing and
+// declines — there is no member list a caller could not contradict.
+func declaredTypeNodeMembers(ctx *FlowContext, holder string, typeNode *ast.Node) ([]recordParamMember, bool) {
+	if typeNode == nil {
+		return nil, false
+	}
+	if ast.IsTypeLiteralNode(typeNode) {
+		return scalarMemberListOf(holder, typeNode.AsTypeLiteralNode().Members.Nodes)
+	}
+	// a UNION annotation reads through the same reader a record PARAMETER
+	// takes — the members every arm declares — so a declared local and a
+	// declared parameter written with one union expand to one member list
+	if ast.IsUnionTypeNode(typeNode) {
+		return namedTypeMembersOf(ctx, holder, typeNode)
+	}
+	if !ast.IsTypeReferenceNode(typeNode) {
+		return nil, false
+	}
+	if members, isRecord := namedTypeMembersOf(ctx, holder, typeNode); isRecord {
+		return members, true
+	}
+	return constraintMembersOf(ctx, holder, typeNode)
+}
+
+// constraintMembersOf resolves a type reference that names a TYPE
+// PARAMETER to the members its constraint spells.
+//
+// The reference's own decline rules apply first — type arguments and
+// qualified names are refused by namedTypeMembersOf before this is
+// reached — and the constraint is then read by the SAME member reader
+// every other route uses, so a constraint written as an inline literal
+// and one written behind an interface expand identically. A type
+// parameter with no constraint, or a constraint the member reader
+// declines, answers false and the declaration keeps its whole-name slot.
+func constraintMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]recordParamMember, bool) {
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+		return nil, false
+	}
+	reference := typeNode.AsTypeReferenceNode()
+	if reference.TypeArguments != nil && len(reference.TypeArguments.Nodes) > 0 {
+		return nil, false
+	}
+	typeName := reference.TypeName
+	if typeName == nil || !ast.IsIdentifier(typeName) {
+		return nil, false
+	}
+	symbol := symbolAt(ctx.P.Checker, typeName)
+	if symbol == nil || len(symbol.Declarations) != 1 {
+		return nil, false
+	}
+	declaration := symbol.Declarations[0]
+	if declaration == nil || declaration.Kind != ast.KindTypeParameter {
+		return nil, false
+	}
+	constraint := declaration.AsTypeParameterDeclaration().Constraint
+	if constraint == nil {
+		// an UNBOUNDED generic promises no member to any caller
+		return nil, false
+	}
+	// the constraint is read by the ordinary member rules; a constraint
+	// that is itself a type parameter is not followed — one link only, so
+	// the reading cannot loop
+	if ast.IsTypeLiteralNode(constraint) {
+		return scalarMemberListOf(holder, constraint.AsTypeLiteralNode().Members.Nodes)
+	}
+	return namedTypeMembersOf(ctx, holder, constraint)
+}
+
+// constructedLeavesOf is recognizer (1): a `const x = new C()` local
+// whose constructor SERVES flattens to the fields that constructor
+// writes, each leaf wearing its DECLARED field sort.
+//
+// The field family comes from the same rows constructorFieldRets
+// threads: a served constructor's summary carries one this-entry per
+// field the body touches, and the WRITTEN ones are the fields the
+// constructor actually left a value in. Those are the leaves worth
+// slots — an entry the constructor only READS holds whatever the field
+// entered with, which for a fresh instance is absent, so giving it a
+// leaf would offer a slot no exit ever fills.
+//
+// The SORT comes from the class's own field declarations (ClassFieldsOf,
+// the reading the receiver bundle already lays its slots out under), not
+// from the exit row: a BundleEntry names where a slot sits and whether
+// the body moved it, and nothing else. Reading the sort from the
+// declaration is what makes this local's leaf and the same field's slot
+// inside a method wear one sort. A written field the class does not
+// declare — one assigned in the constructor with no property
+// declaration — has no annotation to read and takes the unknown sort,
+// which admits only the definedness test.
+//
+// A constructor that does not serve — no summary, no resolvable class,
+// no written this-field — declines, and the local keeps its whole-name
+// slot exactly as today.
+func constructedLeavesOf(ctx *FlowContext, declaration *ast.Node) ([]ObjectLocalKey, bool) {
+	if ctx == nil || !ast.IsVariableDeclaration(declaration) {
+		return nil, false
+	}
+	decl := declaration.AsVariableDeclaration()
+	if decl.Initializer == nil || decl.Name() == nil || !ast.IsIdentifier(decl.Name()) {
+		return nil, false
+	}
+	construction := Unwrapped(decl.Initializer)
+	if construction == nil || !ast.IsNewExpression(construction) {
+		return nil, false
+	}
+	constructor := constructedClassConstructor(ctx, construction)
+	if constructor == nil {
+		return nil, false
+	}
+	shape, served := LowerSummaryBody(ctx, constructor)
+	if !served {
+		return nil, false
+	}
+	// the declared sorts of the class the constructor belongs to; a class
+	// whose fields do not read leaves every leaf unknown-sorted
+	sortOfField := map[string]BundleField{}
+	if fields, readable := ClassFieldsOf(ctx, constructor.Parent); readable {
+		for _, field := range fields {
+			sortOfField[field.Name] = field
+		}
+	}
+	holder := decl.Name().Text()
+	var keys []ObjectLocalKey
+	seen := map[string]struct{}{}
+	for _, entry := range shape.BundleEntries {
+		if !entry.Written {
+			continue
+		}
+		field, isThis := thisFieldNameOf(entry.Path)
+		if !isThis {
+			continue
+		}
+		if _, already := seen[field]; already {
+			continue
+		}
+		seen[field] = struct{}{}
+		sort, tag := BindingKindUnknown, TypeofTagNone
+		if declared, found := sortOfField[field]; found {
+			sort, tag = declared.Sort, declared.TypeofTag
+		}
+		keys = append(keys, ObjectLocalKey{
+			Path:      []string{field},
+			Key:       field,
+			SlotName:  holder + "." + field,
+			Declared:  true,
+			Sort:      sort,
+			TypeofTag: tag,
+		})
+	}
+	if len(keys) == 0 {
+		return nil, false
+	}
+	return keys, true
+}
+
+// constructedClassConstructor resolves a `new C()` to the CONSTRUCTOR
+// declaration whose summary the leaves are read from — the SAME
+// resolution the call lowering uses, so the leaves and the exit rows
+// that fill them always name one declaration. A `new` whose callee does
+// not resolve to a class with a constructor body answers nil.
+func constructedClassConstructor(ctx *FlowContext, construction *ast.Node) *ast.Node {
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+		return nil
+	}
+	callee := Unwrapped(construction.AsNewExpression().Expression)
+	if callee == nil || !ast.IsIdentifier(callee) {
+		return nil
+	}
+	symbol := symbolAt(ctx.P.Checker, callee)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return nil
+	}
+	classLike := symbol.ValueDeclaration
+	if !ast.IsClassLike(classLike) || ast.GetSourceFileOfNode(classLike).IsDeclarationFile {
+		return nil
+	}
+	for _, member := range classLike.ClassLikeData().Members.Nodes {
+		if ast.IsConstructorDeclaration(member) && member.Body() != nil {
+			return member
+		}
+	}
+	return nil
+}
+
+// joinedArmLeavesOf is recognizer (3): `const x = a ?? b` and
+// `const x = c ? a : b` where BOTH arms flatten to the SAME member
+// family, which the local then takes as its own.
+//
+// The join is per leaf: a member both arms spell keeps its sort where
+// the two agree and takes the unknown sort where they disagree — the
+// weaker reading, which claims nothing either arm contradicts. Arms
+// naming DIFFERENT member sets have no one family, so the local keeps
+// its whole-name slot: one name has one slot family, the exclusivity
+// rule the whole flattening rests on.
+//
+// Each arm is read by armLeavesOf: a spelled object literal, a name
+// whose own declaration flattens, or — for any arm at all — the members
+// its own DECLARED TYPE spells. So a member read (`request.socket`) is
+// an admissible arm whenever the member's annotation reads as a record;
+// what refuses it is the annotation, never the arm's syntax. An arm
+// whose type reads as a class, a union, or a generic still names no
+// member family, and the whole shape declines.
+func joinedArmLeavesOf(
+	ctx *FlowContext,
+	declaration *ast.Node,
+	familyOfName func(name string) ([]ObjectLocalKey, bool),
+) ([]ObjectLocalKey, bool) {
+	if !ast.IsVariableDeclaration(declaration) {
+		return nil, false
+	}
+	decl := declaration.AsVariableDeclaration()
+	if decl.Initializer == nil || decl.Name() == nil || !ast.IsIdentifier(decl.Name()) {
+		return nil, false
+	}
+	holder := decl.Name().Text()
+	left, right, isJoin := joinArmsOf(Unwrapped(decl.Initializer))
+	if !isJoin {
+		return nil, false
+	}
+	leftKeys, leftOk := armLeavesOf(ctx, holder, left, familyOfName)
+	if !leftOk {
+		return nil, false
+	}
+	rightKeys, rightOk := armLeavesOf(ctx, holder, right, familyOfName)
+	if !rightOk {
+		return nil, false
+	}
+	if recordShapeOf(leftKeys) != recordShapeOf(rightKeys) {
+		// the arms disagree about the family — no one slot layout serves
+		// both, so the name stays whole
+		return nil, false
+	}
+	sortOfPath := map[string]BindingKind{}
+	tagOfPath := map[string]TypeofTag{}
+	for _, key := range rightKeys {
+		sortOfPath[strings.Join(key.Path, ".")] = ObjectLocalKeySort(key)
+		tagOfPath[strings.Join(key.Path, ".")] = ObjectLocalKeyTypeof(key)
+	}
+	out := make([]ObjectLocalKey, 0, len(leftKeys))
+	for _, key := range leftKeys {
+		path := strings.Join(key.Path, ".")
+		sort := ObjectLocalKeySort(key)
+		tag := ObjectLocalKeyTypeof(key)
+		if other := sortOfPath[path]; other != sort {
+			sort = BindingKindUnknown
+		}
+		if other := tagOfPath[path]; other != tag {
+			tag = TypeofTagNone
+		}
+		out = append(out, ObjectLocalKey{
+			Path:      key.Path,
+			Key:       key.Key,
+			SlotName:  key.SlotName,
+			Declared:  true,
+			Sort:      sort,
+			TypeofTag: tag,
+		})
+	}
+	return out, true
+}
+
+// joinArmsOf is the two arms a joining initializer holds: `a ?? b`'s
+// sides, and a ternary's two branches. Its CONDITION is not an arm —
+// nothing about the record's shape comes from it.
+func joinArmsOf(initializer *ast.Node) (left *ast.Node, right *ast.Node, ok bool) {
+	if initializer == nil {
+		return nil, nil, false
+	}
+	if ast.IsBinaryExpression(initializer) {
+		bin := initializer.AsBinaryExpression()
+		if bin.OperatorToken.Kind == ast.KindQuestionQuestionToken {
+			return Unwrapped(bin.Left), Unwrapped(bin.Right), true
+		}
+		return nil, nil, false
+	}
+	if initializer.Kind == ast.KindConditionalExpression {
+		conditional := initializer.AsConditionalExpression()
+		if conditional.WhenTrue == nil || conditional.WhenFalse == nil {
+			return nil, nil, false
+		}
+		return Unwrapped(conditional.WhenTrue), Unwrapped(conditional.WhenFalse), true
+	}
+	return nil, nil, false
+}
+
+// armLeavesOf is the member family ONE arm of a join names, spelled
+// under the joined local's holder: an object literal's own leaves, the
+// family a spelled name's declaration already flattens to, or — for any
+// arm at all — the members the arm's own RESOLVED TYPE spells.
+//
+// WHY THE TYPE READING IS THE RIGHT THIRD ARM. The first two arms read
+// the arm's VALUE: a literal names its rows, a flattening name names the
+// family its declaration already carries. Neither reaches
+// `request.socket` or `pick()`, and the reason is not that those arms
+// promise less — it is that the reading was looking in the wrong place.
+// What a join arm has to supply is a MEMBER FAMILY, and a declared type
+// is exactly a promise of member names over every value the expression
+// could produce. That is the same argument declaredTypeLeavesOf already
+// makes for an opaque initializer, applied one level out: the annotation
+// promises the names, the leaves claim nothing about the values, and the
+// slots then answer whatever the whole-name slot answered.
+//
+// So the fallback is by DECLARED TYPE and works for ANY arm expression
+// whose resolution spells a record — a name, a member read, a call — and
+// every existing rule stands on top of it unchanged: the two arms must
+// still agree leaf for leaf (recordShapeOf), and the per-leaf sort join
+// still weakens a disagreement to unknown.
+//
+// A leaf here is one step by construction (declaredLeavesOf spells a
+// member list, never a path), which is what keeps a type-read arm and a
+// literal arm comparable at all.
+func armLeavesOf(
+	ctx *FlowContext,
+	holder string,
+	arm *ast.Node,
+	familyOfName func(name string) ([]ObjectLocalKey, bool),
+) ([]ObjectLocalKey, bool) {
+	if arm == nil {
+		return nil, false
+	}
+	if ast.IsObjectLiteralExpression(arm) {
+		return flatKeysOfLiteral(arm, holder, nil)
+	}
+	if ast.IsIdentifier(arm) && familyOfName != nil {
+		if keys, found := familyOfName(arm.Text()); found {
+			// respell the family under THIS local's holder — the arm's own
+			// holder names the arm's slots, not the joined local's
+			out := make([]ObjectLocalKey, 0, len(keys))
+			for _, key := range keys {
+				out = append(out, ObjectLocalKey{
+					Path:        key.Path,
+					Key:         key.Key,
+					SlotName:    holder + "." + strings.Join(key.Path, "."),
+					Initializer: key.Initializer,
+					Declared:    key.Declared,
+					Sort:        key.Sort,
+					TypeofTag:   key.TypeofTag,
+				})
+			}
+			return out, true
+		}
+	}
+	return resolvedTypeArmLeaves(ctx, holder, arm)
+}
+
+// resolvedTypeArmLeaves is the member family ONE join arm's own
+// DECLARED TYPE spells, whatever the arm's syntax is.
+//
+// The arm resolves through the checker to the declaration it names, and
+// that declaration's SPELLED type node is read by declaredTypeNodeMembers
+// — the same reader a declared record local and a record parameter take,
+// so an arm annotated `Bounds` and a local declared `Bounds` expand to
+// byte-identical member lists. The checker is asked only which
+// declaration an expression names; the members come off that
+// declaration's own syntax, which is what keeps the answer
+// check-independent the way the one-level reading is.
+//
+// The reachable arms, all through one resolution: a NAME resolves to its
+// variable or parameter declaration, a MEMBER READ (`h.window`) resolves
+// to the property declaration or signature it steps to, and a CALL
+// (`make()`) resolves through its CALLEE to that declaration's spelled
+// RETURN annotation (calleeReturnTypeNodeOf) — a call places no symbol
+// of its own, but what it promises is exactly what its callee declares
+// it returns. One shape resolves to no declaration and declines here:
+//
+//   - a member read whose RECEIVER is `any`. The checker resolves the
+//     whole access to `any` and places no symbol, which is the correct
+//     answer: an `any` receiver promises no member to anybody, so there
+//     is no annotation naming a family and none can be invented. This is
+//     what nest's `request.socket` is — `TRequest extends
+//     IncomingMessage = any` makes the receiver's resolved type `any`,
+//     and the arm names no family for that reason rather than for the
+//     class rule.
+//
+// Everything declaredTypeNodeMembers refuses refuses here too: a CLASS
+// type (an instance carries methods, private state and identity no
+// flattening holds), a union, a generic with type arguments, a merged
+// interface, a non-record annotation, and a declaration with no spelled
+// type at all (an inferred field). In each case the arm names no family
+// and the joined local keeps its whole-name slot.
+func resolvedTypeArmLeaves(ctx *FlowContext, holder string, arm *ast.Node) ([]ObjectLocalKey, bool) {
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil || arm == nil {
+		return nil, false
+	}
+	typeNode := declaredTypeNodeOfExpression(ctx, arm)
+	if typeNode == nil {
+		return nil, false
+	}
+	members, isRecord := declaredTypeNodeMembers(ctx, holder, typeNode)
+	if !isRecord {
+		return nil, false
+	}
+	return declaredLeavesOf(holder, members), true
+}
+
+// declaredTypeNodeOfExpression is the type node an EXPRESSION's own
+// declaration spells — declaredTypeNodeOfReceiver's reading
+// (return_type_ground.go) over a join arm rather than a `.get()`
+// receiver, and for the same reason: what matters is that the resolved
+// declaration spells its type, not how the expression is written.
+//
+// A name, a `this.field`, and a longer property chain all reach the same
+// declaration question. An expression the checker does not place, or one
+// whose declaration carries no spelled type, answers nil.
+//
+// A CALL is the one arm whose type is not its own declaration's: a call
+// expression places no symbol, so the reading above answers nil for
+// `flag ? make() : fallback` however well `make` is annotated. What a
+// call promises is its CALLEE's spelled RETURN type, so the call arm
+// resolves the callee to its declaration — the same resolution this
+// function performs on a name — and reads the return annotation off it.
+func declaredTypeNodeOfExpression(ctx *FlowContext, e *ast.Node) *ast.Node {
+	if ast.IsCallExpression(e) {
+		return calleeReturnTypeNodeOf(ctx, e)
+	}
+	symbol := ctx.P.Checker.GetSymbolAtLocation(e)
+	if symbol == nil {
+		return nil
+	}
+	declaration := symbol.ValueDeclaration
+	if declaration == nil {
+		// an interface member has no value declaration; its property
+		// signature is the spelling
+		for _, held := range symbol.Declarations {
+			if ast.IsPropertySignatureDeclaration(held) {
+				declaration = held
+				break
+			}
+		}
+	}
+	if declaration == nil {
+		return nil
+	}
+	switch {
+	case ast.IsParameterDeclaration(declaration):
+		return declaration.AsParameterDeclaration().Type
+	case ast.IsVariableDeclaration(declaration):
+		return declaration.AsVariableDeclaration().Type
+	case ast.IsPropertyDeclaration(declaration):
+		return declaration.AsPropertyDeclaration().Type
+	case ast.IsPropertySignatureDeclaration(declaration):
+		return declaration.AsPropertySignatureDeclaration().Type
+	}
+	return nil
+}
+
+// calleeReturnTypeNodeOf is the RETURN type node a call's callee
+// declares — the reading that lets `flag ? make() : fallback` name a
+// member family when the two-arm join reads a record.
+//
+// THE ROUTE, and why it is this one. The join arms are compared by
+// declaredTypeNodeMembers, which reads a type NODE — the annotation's
+// own syntax — so the answer has to be a node, not a checker type. A
+// call resolves to no declaration of its own, but its CALLEE does: a
+// bare name resolves to the function declaration, a `this.make()` or
+// `helpers.make()` to the method declaration or the property holding
+// the function. Reading the return annotation off that declaration is
+// the same claim declaredTypeNodeOfReceiver makes about a receiver's
+// declared type, one level in — the annotation promises the names over
+// every value the call could produce, and the leaves claim nothing about
+// the values.
+//
+// The alias-following symbol lookup is the one every registry uses, so
+// an IMPORTED `make` resolves to its declaration in the exporting file
+// and reads that file's annotation.
+//
+// WHAT ANSWERS NIL, each a plain refusal rather than a guess:
+//
+//   - an INFERRED return type. `function make() { return { … } }` spells
+//     no return annotation, so there is no node to read. The resolved
+//     TYPE holds the members, but the member reader consumes a node, and
+//     a synthesized node would be a second reading of member names
+//     beside the one this file guarantees both arms take. The arm names
+//     no family and the joined local keeps its whole-name slot.
+//   - a callee this resolution does not place — a call through a value
+//     (`handlers[k]()`), an immediately-invoked literal, an overloaded
+//     name whose declarations disagree.
+//   - a callee whose declaration is not a function form that spells a
+//     return type at all.
+//
+// Everything declaredTypeNodeMembers refuses still refuses on top of
+// this — a class type, a union, a generic with type arguments.
+func calleeReturnTypeNodeOf(ctx *FlowContext, call *ast.Node) *ast.Node {
+	callee := Unwrapped(call.AsCallExpression().Expression)
+	if callee == nil {
+		return nil
+	}
+	// the NAME half is what carries the symbol: a bare identifier is its
+	// own name, and a member call's name is the step
+	var name *ast.Node
+	switch {
+	case ast.IsIdentifier(callee):
+		name = callee
+	case ast.IsPropertyAccessExpression(callee):
+		name = callee.AsPropertyAccessExpression().Name()
+	default:
+		return nil
+	}
+	symbol := symbolAt(ctx.P.Checker, name)
+	if symbol == nil {
+		return nil
+	}
+	declaration := symbol.ValueDeclaration
+	if declaration == nil {
+		// an interface method or a declared function signature has no value
+		// declaration; the signature is the spelling
+		for _, held := range symbol.Declarations {
+			if returnTypeNodeOfDeclaration(held) != nil {
+				declaration = held
+				break
+			}
+		}
+	}
+	if declaration == nil {
+		return nil
+	}
+	return returnTypeNodeOfDeclaration(declaration)
+}
+
+// returnTypeNodeOfDeclaration is the return type node a DECLARATION
+// spells, over the forms a callee resolves to: the function-like forms
+// themselves, the interface/class method and function signatures, and a
+// `const f = (…): R => …` or `handler: (…) => R` whose annotation sits
+// on the initializer or on the property's own function type.
+func returnTypeNodeOfDeclaration(declaration *ast.Node) *ast.Node {
+	if declaration == nil {
+		return nil
+	}
+	switch {
+	case ast.IsArrowFunction(declaration):
+		return declaration.AsArrowFunction().Type
+	case ast.IsFunctionExpression(declaration):
+		return declaration.AsFunctionExpression().Type
+	case ast.IsFunctionDeclaration(declaration):
+		return declaration.AsFunctionDeclaration().Type
+	case ast.IsMethodDeclaration(declaration):
+		return declaration.AsMethodDeclaration().Type
+	case ast.IsMethodSignatureDeclaration(declaration):
+		return declaration.AsMethodSignatureDeclaration().Type
+	case ast.IsVariableDeclaration(declaration):
+		// `const make: () => Bounds = …` states the return on the variable's
+		// own function type; `const make = (): Bounds => …` states it on the
+		// initializer. The annotation wins where both are spelled — it is
+		// what every caller is checked against.
+		if annotation := declaration.AsVariableDeclaration().Type; annotation != nil {
+			return functionTypeReturnNodeOf(annotation)
+		}
+		return returnTypeNodeOfDeclaration(Unwrapped(declaration.AsVariableDeclaration().Initializer))
+	case ast.IsPropertyDeclaration(declaration):
+		if annotation := declaration.AsPropertyDeclaration().Type; annotation != nil {
+			return functionTypeReturnNodeOf(annotation)
+		}
+		return returnTypeNodeOfDeclaration(Unwrapped(declaration.AsPropertyDeclaration().Initializer))
+	case ast.IsPropertySignatureDeclaration(declaration):
+		return functionTypeReturnNodeOf(declaration.AsPropertySignatureDeclaration().Type)
+	}
+	return nil
+}
+
+// functionTypeReturnNodeOf is the return node of a spelled FUNCTION TYPE
+// — the `Bounds` of `(x: number) => Bounds`. Anything else spells no
+// return.
+func functionTypeReturnNodeOf(typeNode *ast.Node) *ast.Node {
+	if typeNode == nil || !ast.IsFunctionTypeNode(typeNode) {
+		return nil
+	}
+	return typeNode.AsFunctionTypeNode().Type
 }
 
 // mentionsName is whether a subtree contains the identifier at all, in
@@ -410,19 +1189,28 @@ func mentionsName(node *ast.Node, name string) bool {
 	return found
 }
 
-// ObjectLocalKeySort is a flattened leaf's sort, read the way LocalSort
-// reads a scalar local's: a string literal is a string, anything else
-// the lowering reads numerically.
+// ObjectLocalKeySort is a flattened leaf's sort. A leaf that came from a
+// DECLARATION — a constructor's exit row, a declared record member —
+// carries its own sort and answers it; a leaf that came from a literal
+// row reads the way LocalSort reads a scalar local's: a string literal
+// is a string, anything else the lowering reads numerically.
 func ObjectLocalKeySort(key ObjectLocalKey) BindingKind {
+	if key.Declared {
+		return key.Sort
+	}
 	if ast.IsStringLiteral(Unwrapped(key.Initializer)) {
 		return BindingKindString
 	}
 	return BindingKindNumber
 }
 
-// ObjectLocalKeyTypeof is a flattened leaf's typeof evidence, from its
-// initializer's syntax alone — the twin of LocalTypeof.
+// ObjectLocalKeyTypeof is a flattened leaf's typeof evidence: the
+// declared tag where the leaf came from a declaration, and the
+// initializer's syntax alone otherwise — the twin of LocalTypeof.
 func ObjectLocalKeyTypeof(key ObjectLocalKey) TypeofTag {
+	if key.Declared {
+		return key.TypeofTag
+	}
 	e := Unwrapped(key.Initializer)
 	if ast.IsStringLiteral(e) {
 		return TypeofTagString
@@ -456,12 +1244,43 @@ func slotIndexOfName(context *LoweringContext, spelled string) (int, bool) {
 // SpelledNameOf spells only one step, so a nested leaf's slot has to be
 // looked up from the path itself; a one-step path resolves to exactly
 // the name SpelledNameOf would have produced, so this subsumes it.
+//
+// A SYMBOL-KEYED step (`p[S]`) resolves here too, under the derived
+// `#sym:` leaf name the flattening spelled it with. The path is one step
+// by construction — the key is a const's own name, never a chain — so
+// the spelling is `p.#sym:S` and the lookup is the same lookup.
 func PathSlotIndexOf(context *LoweringContext, node *ast.Node) (int, bool) {
-	root, path, ok := propertyPathOf(Unwrapped(node))
-	if !ok {
-		return 0, false
+	head := Unwrapped(node)
+	if root, path, ok := propertyPathOf(head); ok {
+		return slotIndexOfName(context, root+"."+strings.Join(path, "."))
 	}
-	return slotIndexOfName(context, root+"."+strings.Join(path, "."))
+	if root, leaf, ok := symbolKeyedLeafOf(context, head); ok {
+		return slotIndexOfName(context, root+"."+leaf)
+	}
+	return 0, false
+}
+
+// symbolKeyedLeafOf reads `p[S]` as the holder and the derived `#sym:`
+// leaf name it steps to — the element-access twin of propertyPathOf's
+// one-step reading, over the same stable key identity the flattening
+// spelled the leaf with.
+//
+// A holder that is not a plain name, an optional step, or a key that is
+// not a stable symbol const answers false: those name no leaf, which is
+// the same answer the recognizer's own use scan gives them.
+func symbolKeyedLeafOf(context *LoweringContext, node *ast.Node) (root string, leaf string, ok bool) {
+	if context == nil || node == nil || !ast.IsElementAccessExpression(node) {
+		return "", "", false
+	}
+	holder := Unwrapped(node.AsElementAccessExpression().Expression)
+	if holder == nil || !ast.IsIdentifier(holder) {
+		return "", "", false
+	}
+	name, isSymbolKey := SymbolKeyedFieldName(checkerOf(context.Flow), node)
+	if !isSymbolKey {
+		return "", "", false
+	}
+	return holder.Text(), name, true
 }
 
 // ObjectLocalDeclarationAssignments is the object-literal declaration's
@@ -473,6 +1292,14 @@ func PathSlotIndexOf(context *LoweringContext, node *ast.Node) (int, bool) {
 func ObjectLocalDeclarationAssignments(context *LoweringContext, local ObjectLocal) ([]AssignmentTarget, bool) {
 	out := make([]AssignmentTarget, 0, len(local.Keys))
 	for _, key := range local.Keys {
+		if key.Declared || key.Initializer == nil {
+			// a DECLARED leaf has no row to lower: the declaration named the
+			// member, and the initializer said nothing about its value. The
+			// statement route declines and the declaration's own route — the
+			// opaque call's havoc, the constructor's exit rows — is what
+			// fills these slots.
+			return nil, false
+		}
 		target, found := slotIndexOfName(context, key.SlotName)
 		if !found {
 			return nil, false
@@ -961,16 +1788,73 @@ func DestructuringAssignmentsOf(context *LoweringContext, statement *ast.Node) (
 // leaves any partner that assigned from it declining too, on the next
 // pass — so the loop repeats until the admitted set stops shrinking.
 func ObjectLocalsOf(body *ast.Node, locals []*ast.Node) map[*ast.Node]ObjectLocal {
-	// candidate shapes, from the literals alone
+	return ObjectLocalsIn(nil, body, locals)
+}
+
+// ObjectLocalsIn is ObjectLocalsOf with the check's own context, so the
+// non-literal families are recognized. The context is threaded, not
+// consulted for anything but resolution: a nil one answers exactly what
+// ObjectLocalsOf always answered, which is what the seams holding no
+// checker keep.
+func ObjectLocalsIn(ctx *FlowContext, body *ast.Node, locals []*ast.Node) map[*ast.Node]ObjectLocal {
+	// candidate shapes, from each declaration's own family source. The
+	// LITERAL candidates are collected first and become the family table
+	// the join arms read, so `const x = a ?? b` sees whatever `a` and `b`
+	// already flatten to. A join whose arm is itself a join is not
+	// resolved — one level only, so the collection cannot depend on its
+	// own order.
 	shapeOfName := map[string]string{}
 	candidates := map[*ast.Node]string{}
+	literalFamilies := map[string][]ObjectLocalKey{}
 	for _, declaration := range locals {
+		if !ast.IsVariableDeclaration(declaration) ||
+			!ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+			continue
+		}
 		literal := objectLiteralOfDeclaration(declaration)
-		if literal == nil || !ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+		if literal == nil {
 			continue
 		}
 		name := declaration.AsVariableDeclaration().Name().Text()
-		keys, ok := flatKeysOfLiteral(literal, name, nil)
+		if keys, ok := flatKeysOfLiteral(literal, name, nil); ok {
+			literalFamilies[name] = keys
+		}
+	}
+	// a name's family for the join arms: its literal leaves where it has
+	// them, its DECLARED-TYPE leaves otherwise. The constructor and join
+	// routes are deliberately not offered here — a constructor's leaves
+	// depend on a summary the layout may still be building, and a join of
+	// joins would make the answer depend on collection order.
+	declaredFamilies := map[string][]ObjectLocalKey{}
+	if ctx != nil {
+		for _, declaration := range locals {
+			if !ast.IsVariableDeclaration(declaration) ||
+				!ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+				continue
+			}
+			name := declaration.AsVariableDeclaration().Name().Text()
+			if _, hasLiteral := literalFamilies[name]; hasLiteral {
+				continue
+			}
+			if keys, ok := declaredTypeLeavesOf(ctx, declaration); ok {
+				declaredFamilies[name] = keys
+			}
+		}
+	}
+	familyOfName := func(name string) ([]ObjectLocalKey, bool) {
+		if keys, found := literalFamilies[name]; found {
+			return keys, true
+		}
+		keys, found := declaredFamilies[name]
+		return keys, found
+	}
+	for _, declaration := range locals {
+		if !ast.IsVariableDeclaration(declaration) ||
+			!ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+			continue
+		}
+		name := declaration.AsVariableDeclaration().Name().Text()
+		keys, ok := declarationLeavesOf(ctx, declaration, name, familyOfName)
 		if !ok {
 			continue
 		}
@@ -991,7 +1875,7 @@ func ObjectLocalsOf(body *ast.Node, locals []*ast.Node) map[*ast.Node]ObjectLoca
 				held, seen := shapeOfName[other]
 				return seen && held != "" && held == shape
 			}
-			if local, ok := ObjectLocalOf(body, declaration, sameShape); ok {
+			if local, ok := ObjectLocalIn(ctx, body, declaration, sameShape, familyOfName); ok {
 				next[declaration] = local
 			}
 		}

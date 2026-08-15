@@ -280,6 +280,11 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 						out = append(out, guarded...)
 						return out, true
 					}
+					// the guard composer may HOIST before it refuses — a `??`
+					// whose call left took its temp and whose right side then
+					// read nothing — so the refusal truncates back, exactly as
+					// every other route's decline does
+					dropHoists()
 				}
 				// THE BRANCH-SHAPED RETURN: `return c ? a : b`,
 				// `return a ?? b`, `return a && b`, `return a || b`. The
@@ -669,6 +674,10 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 		}
 		// `switch (x) { case "a": … }` — the chain of equality branches.
 		if chain, ok := LowerSwitch(context, s); ok {
+			// a HEAD THAT RAN — `switch (await f())` — hoisted its call to a
+			// temp, and that call statement goes out ahead of the chain that
+			// followed it, which is where the source runs it
+			out = flush(out)
 			out = append(out, chain...)
 			// an arm that RETURNED: the rest of the block runs only where
 			// the done flag stayed down, exactly as a returning if-arm does
@@ -719,6 +728,17 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 		}
 		if ast.IsIfStatement(s) {
 			ifStmt := s.AsIfStatement()
+			// A HEAD THAT RUNS CODE — `if (await f()) { … }`,
+			// `if (this.get()) { … }` — hoists its call to a temp ahead of
+			// the branch, and the branch then tests the temp. The condition
+			// runs unconditionally and FIRST in source order, so the
+			// statement immediately before the branch is exactly where its
+			// call belongs (ConditionTestSlot holds the whole argument).
+			// Taken BEFORE the arms are walked: the nested LowerStatements
+			// calls below own their own accumulation and restore this one,
+			// so the head's temp survives them and flushes ahead of the
+			// branch.
+			headSlot, headHoisted := ConditionTestSlot(context, ifStmt.Expression)
 			// `if (i < a.length) { … a[i] … }`: inside the THEN arm the
 			// index is proved in range, so an index read there answers the
 			// element slot outright rather than the or-absent wrapping. The
@@ -735,9 +755,17 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			var guarded []kernelbridge.IrStatement
 			guardedOk := false
 			if thnOk && elsOk {
-				// the guard composer reads the head: single tests, typeof
-				// folds, `!`/`&&`/`||` nesting, and inlined call guards
-				guarded, guardedOk = LowerGuard(context, ifStmt.Expression, thn, els)
+				if headHoisted {
+					// the head already ran, into its temp; what remains is the
+					// branch on that temp — its truthiness where the sort names
+					// a test, untested where it does not
+					guarded = []kernelbridge.IrStatement{conditionBranchOn(context, headSlot, thn, els)}
+					guardedOk = true
+				} else {
+					// the guard composer reads the head: single tests, typeof
+					// folds, `!`/`&&`/`||` nesting, and inlined call guards
+					guarded, guardedOk = LowerGuard(context, ifStmt.Expression, thn, els)
+				}
 				if !guardedOk && OpaqueTestableCondition(ifStmt.Expression) {
 					// the last BRANCH route, after every reading declined: a
 					// condition that RUNS nothing the lowering must account for
@@ -753,11 +781,12 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 					guardedOk = true
 				}
 			}
-			// an arm that did not lower, or a condition the opaque branch
-			// refuses (it WRITES, or it awaits, or it constructs), falls to
-			// the havoc floor: the whole if havocs every slot either arm or
-			// the head could have written, which is sound and keeps the body.
+			// an arm that did not lower, or a condition no route read (it
+			// WRITES, or it runs something the hoist refused), falls to the
+			// havoc floor: the whole if havocs every slot either arm or the
+			// head could have written, which is sound and keeps the body.
 			if !guardedOk {
+				dropHoists()
 				havoc, havocOk := havocFloor(s)
 				if !havocOk {
 					return nil, false
@@ -765,6 +794,9 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 				out = append(out, havoc...)
 				continue
 			}
+			// the head's own call statement goes out FIRST, then the branch
+			// that reads its temp
+			out = flush(out)
 			out = append(out, guarded...)
 			// an arm that may have RETURNED: the block's remainder runs
 			// only where the done flag stayed down — the guard is an
@@ -1129,6 +1161,116 @@ func OpaqueTestableCondition(condition *ast.Node) bool {
 	return admitted
 }
 
+// ConditionTestSlot is the CONDITION-position hoist: a branch head that
+// runs code — `f()`, `this.get()`, `await f()` — lowered to a temp slot
+// the branch then tests, with the run itself emitted as a statement
+// ahead of the branch.
+//
+// A CALL, and a call whole. `new C()` is not one of these: the hoist
+// builds a call statement from a resolved callee's compiled blob, and a
+// constructor has no such door here. Nor is a COMPOSED head — `a && f()`
+// — and that refusal is the load-bearing one: the `&&` above decides
+// whether `f()` runs at all, so a temp written ahead of the branch would
+// run it on a path the source never does. The shape check below is what
+// enforces it, admitting only a head that IS the call after the
+// parentheses and one `await` come off.
+//
+// THE EVALUATION-ORDER ARGUMENT, which is what makes this position
+// different from an arm's. A branch's ARMS run conditionally, so hoisting
+// out of one would run unconditionally what the source runs on one side
+// — that is why returnValueStatements lowers CanHoist for the arms it
+// reads. The CONDITION is the other case entirely: it runs
+// UNCONDITIONALLY, and it runs FIRST, before either arm and before
+// anything the branch decides. Emitting its call as the statement
+// immediately preceding the branch therefore reproduces source order
+// exactly rather than reordering anything. The hoist's own ordering gate
+// (hoistingIsOrderSafe) still measures the call's write set against the
+// rest of the statement, so a condition whose call writes a slot the
+// statement reads around it refuses here as it does everywhere.
+//
+// WHAT COMES BACK is the temp's slot and the test the branch may put on
+// it. The temp holds the callee's ret out-state verbatim
+// (summaryCallStatement's `rets[outIndex] = target`), so a truthiness
+// test under the temp's sort reads what the callee returned. Where the
+// temp wears neither the number nor the string sort there is no
+// truthiness test on the wire and the caller branches untested; the
+// condition still RAN, which is the whole reason this route exists.
+//
+// A condition the hoist refuses — no compiled blob, no statement stream,
+// an unsafe reordering — answers nothing, and the caller keeps whatever
+// refusal it had.
+func ConditionTestSlot(context *LoweringContext, condition *ast.Node) (int, bool) {
+	if context == nil || condition == nil {
+		return 0, false
+	}
+	head := Unwrapped(condition)
+	// a condition that WRITES is refused before this route is ever
+	// reached, and refused again here: the hoist carries a call's own
+	// effects, never a write standing beside it
+	if ContainsWrite(head) {
+		return 0, false
+	}
+	// `await f(…)` peels to the same call — the ret-as-inner convention
+	// means the callee's ret slot already holds the settled value
+	callHead := head
+	if operand, isAwait := AwaitedOperandOf(head); isAwait {
+		callHead = Unwrapped(operand)
+	}
+	// THE WHOLE CONDITION MUST BE THE CALL. A composed head — `a && f()`,
+	// `f() || b`, `f() > 0 && g()` — is a BinaryExpression here and is
+	// refused: the operators above the call decide whether it runs, so its
+	// statement written ahead of the branch would run it unconditionally
+	// where the source runs it on one path. `if (await f())` and
+	// `if (this.get())` are the admitted spelling, and for those the
+	// condition IS the call and runs on every path through the branch.
+	if !ast.IsCallExpression(callHead) {
+		return 0, false
+	}
+	effect, hoisted := HoistCallEffect(context, callHead)
+	if !hoisted || effect.Kind != kernelbridge.LoopEffectVar {
+		return 0, false
+	}
+	return effect.Index, true
+}
+
+// conditionBranchOn is the branch a hoisted condition's temp takes: the
+// truthiness test where the temp's sort names one, and the untested
+// branch where it does not.
+//
+// The untested shape claims nothing about which arm ran, and both arms'
+// effects and writes ride and join — which is what a concrete run's one
+// arm is admitted by. It is the same no-test fallback the if route and
+// the returned ternary already take for a head no leaf reads.
+func conditionBranchOn(
+	context *LoweringContext,
+	on int,
+	thn, els []kernelbridge.IrStatement,
+) kernelbridge.IrStatement {
+	var test kernelbridge.IrBranchTest
+	if on < len(context.Sorts) {
+		switch context.Sorts[on] {
+		case BindingKindNumber:
+			test = kernelbridge.IrTestTruthyNum
+		case BindingKindString:
+			test = kernelbridge.IrTestTruthyStr
+		}
+	}
+	if test == "" {
+		return kernelbridge.IrStatement{
+			Kind: kernelbridge.IrStatementBranchBoth,
+			Then: thn,
+			Else: els,
+		}
+	}
+	return kernelbridge.IrStatement{
+		Kind: kernelbridge.IrStatementBranch,
+		On:   on,
+		Test: test,
+		Then: thn,
+		Else: els,
+	}
+}
+
 // loopBodyRaisesDone is whether a lowered LOOP statement's own body
 // writes the done flag — a `return` inside `for`, `for-of`, `while` or
 // `do-while`. RaisesDone reads a statement LIST and does not descend
@@ -1237,9 +1379,11 @@ func assignsOf(assignments []AssignmentTarget) []kernelbridge.IrStatement {
 // clause's, and the next's, until a clause that ends the run. That
 // concatenation is what each arm lowers here: `case 1: case 2: f();
 // break;` gives the empty clause 1 the statements of clause 2, and
-// `case 1: g(); case 2: f(); break;` gives clause 1 `g(); f();`. A
-// chain that reaches the end of the clause list without ever ending its
-// run keeps the refusal — nothing there says where the run stops.
+// `case 1: g(); case 2: f(); break;` gives clause 1 `g(); f();`. A run
+// that reaches the end of the clause list ends by LEAVING THE SWITCH —
+// there is nothing after the last clause to fall into — so it lowers
+// as its concatenated statements with no exit raise, exactly like an
+// arm whose last statement is a bare break.
 //
 // Total-or-decline: any arm whose statements or label do not lower
 // declines the whole switch, and the statement then takes its former
@@ -1258,12 +1402,59 @@ func LowerSwitch(context *LoweringContext, statement *ast.Node) ([]kernelbridge.
 	// instead, so each row points at the construct to go and build a
 	// reading for.
 	_, discriminantTracked := IndexOf(context, discriminant)
-	// an untracked discriminant that EVALUATES effect-free still lowers,
-	// as the tested-nothing chain below; one whose evaluation moves state
-	// has no statement position here and keeps its name
+	// A DISCRIMINANT THAT RUNS CODE — `switch (await f())`,
+	// `switch (this.kind())` — hoists its call to a temp ahead of the
+	// chain. The evaluation-order argument is the branch heads' own: the
+	// discriminant runs UNCONDITIONALLY and FIRST, before any clause and
+	// before the switch decides anything, so the statement position ahead
+	// of the chain reproduces source order. It also settles the repeated
+	// read: the chain mentions the discriminant once per label, and a call
+	// left in place would spell one run per label where the source runs it
+	// once. After the hoist every label reads the same temp.
+	//
+	// THE TEMP CARRIES THE CALLEE'S SORT, and that is what makes the
+	// LABELS testable. TestOf reads a strict equality under the SLOT'S
+	// sort — number against a number literal, string against a string
+	// literal — so a temp wearing the number or the string sort gives
+	// every label equality a wire form, and the chain below tests them
+	// exactly as `if (k === 1)` would. A temp whose callee's return type
+	// resolved to neither sort still wears BindingKindUnknown; that one
+	// has no label equality on the wire and keeps the untested chain,
+	// where the call runs once, every arm's effects ride, and the arms
+	// join, which a concrete run's one arm is admitted by.
+	//
+	// THE SORT CHANGES NOTHING ABOUT WHEN ANYTHING RUNS. The hoist's own
+	// statement lands in context.Hoisted, which the caller flushes ahead
+	// of the chain it appends, and every label reads that one temp — so
+	// the discriminant still runs once, unconditionally, before the
+	// chain. All the sort decides is whether the label equalities have
+	// wire forms.
+	//
+	// The slot is kept here because the guard below tests it DIRECTLY. A
+	// hoisted temp is spelled `#hoist<n>:`, which resolves to no name on
+	// purpose, so an equality synthesized over the discriminant NODE
+	// would be re-resolved by IndexOf and find nothing; the guard builds
+	// its test from this index instead, and the # spelling stays
+	// uncollidable with any source name.
+	hoistedSlot, hoisted := 0, false
+	// hoistedTestable is the temp that has a label equality on the wire:
+	// hoisted AND wearing a sort the equality tests read. A temp wearing
+	// BindingKindUnknown — a callee whose return type resolved to neither
+	// sort — leaves this false and takes the untested chain below, the
+	// same route it took before the temp carried a sort at all.
+	hoistedTestable := false
 	if !discriminantTracked && !OpaqueTestableCondition(discriminant) {
-		NoteSwitchRefusal(statement, "switch on an untracked discriminant")
-		return nil, false
+		if hoistedSlot, hoisted = ConditionTestSlot(context, discriminant); !hoisted {
+			// a discriminant whose evaluation moves state and that the hoist
+			// could not take — no compiled callee, no statement stream, an
+			// unsafe reordering — has no statement position here
+			NoteSwitchRefusal(statement, "switch on an untracked discriminant")
+			return nil, false
+		}
+		if hoistedSlot < len(context.Sorts) {
+			sort := context.Sorts[hoistedSlot]
+			hoistedTestable = sort == BindingKindNumber || sort == BindingKindString
+		}
 	}
 	clauses := switchStmt.CaseBlock.AsCaseBlock().Clauses.Nodes
 	if len(clauses) == 0 {
@@ -1296,7 +1487,7 @@ func LowerSwitch(context *LoweringContext, statement *ast.Node) ([]kernelbridge.
 			NoteSwitchRefusal(statement, "switch whose case arm did not lower")
 			return nil, false
 		}
-		if !discriminantTracked {
+		if !discriminantTracked && !hoistedTestable {
 			// no slot to test: the arm and the rest of the chain are
 			// SIBLINGS, both possible, and their exits join. A concrete run
 			// takes exactly one of them and the join admits it either way —
@@ -1314,7 +1505,7 @@ func LowerSwitch(context *LoweringContext, statement *ast.Node) ([]kernelbridge.
 		// label's test — the nesting LowerGuard already builds for `a || b`
 		guarded := chain
 		for labelIndex := len(arm.Labels) - 1; labelIndex >= 0; labelIndex-- {
-			test, testOk := switchLabelGuard(context, discriminant, arm.Labels[labelIndex], body, guarded)
+			test, testOk := switchLabelGuard(context, discriminant, hoistedSlot, hoistedTestable, arm.Labels[labelIndex], body, guarded)
 			if !testOk {
 				NoteSwitchRefusal(statement, "switch on a case label that is not a literal")
 				return nil, false
@@ -1356,42 +1547,64 @@ type switchArms struct {
 //     arm reached when no label matched, so it is collected on its own
 //     and its own run is read the same way, from its own clause forward.
 //
-// Refuses, by name: a run that reaches the end of the clause list
-// without ever ending (nothing says where it stops), a second default
-// clause (two arms for one "no label matched"), and an empty trailing
-// clause whose run is therefore empty and unended — except the LAST
-// clause of all, whose empty run is a no-op arm that ends the switch by
-// having nothing left to fall into.
+// A run that reaches the end of the clause list ENDS THERE: it has
+// nothing left to fall into, so it leaves the switch, which is the same
+// continuation a bare `break` gives one clause earlier (runFrom's own
+// comment holds the argument). An empty trailing clause is the same
+// thing with no statements — a no-op arm.
+//
+// The one refusal left is a second default clause, and it names
+// ill-formed input rather than a construct: the grammar admits at most
+// one DefaultClause, so it cannot fire on a program that compiles.
 func switchArmsOf(statement *ast.Node, clauses []*ast.Node) (switchArms, bool) {
 	// the run of clause `start`: its statements and the following
-	// clauses' until one ends the run. (nil, false) where none does.
-	runFrom := func(start int) ([]*ast.Node, bool) {
+	// clauses' until one ends the run, or until the clause list runs out.
+	runFrom := func(start int) []*ast.Node {
 		var run []*ast.Node
 		for index := start; index < len(clauses); index++ {
 			body := clauses[index].AsCaseOrDefaultClause().Statements.Nodes
 			run = append(run, body...)
 			if armEndsItsRun(body) {
-				return run, true
+				return run
 			}
 		}
-		// the run walked off the end of the clause list. An empty run is
-		// the LAST clause with no statements — nothing runs and there is
-		// nothing to fall into, which is an ended run of zero statements.
-		return run, len(run) == 0
+		// THE END OF THE CLAUSE LIST IS AN ENDING. A run that falls past
+		// the last clause has nothing left to fall into, so it leaves the
+		// switch — which is exactly what a bare `break` does, one clause
+		// earlier. The two are the same continuation, and the chain
+		// already spells it: stripTrailingBreak DROPS a trailing bare
+		// break precisely because the arm's statements end where the arm
+		// ends and control resumes after the switch, with no exit raise.
+		// An end-of-list run is that same arm with the break never
+		// written, so it lowers to the same statements and takes the same
+		// continuation. `switch (x) { case 1: n = 1; case 2: n = 2; }`
+		// gives case 1 the run `n = 1; n = 2;` and case 2 the run
+		// `n = 2;`, both ending by leaving the switch.
+		//
+		// The concatenation is what makes this exact rather than
+		// approximate: the run collected here is every statement a
+		// matching run actually executes, in order, and there is no
+		// statement after it inside the switch to account for.
+		return run
 	}
 	out := switchArms{}
 	var pendingLabels []*ast.Node
 	for index, clause := range clauses {
 		if ast.IsDefaultClause(clause) {
 			if out.HasDefault {
-				NoteSwitchRefusal(statement, "switch with a second default clause")
+				// ILL-FORMED INPUT, not a construct to go and read. CaseBlock's
+				// two productions (ECMA-262, sec-switch-statement) are
+				// `{ CaseClauses? }` and `{ CaseClauses? DefaultClause
+				// CaseClauses? }` — the DefaultClause appears once and does not
+				// repeat, so a second `default:` is a Syntax Error and tsc
+				// reports it. This guard therefore cannot fire on a program
+				// that compiles; it stands so a malformed tree reaching the
+				// lowering answers nothing rather than building a chain with
+				// two innermost elses.
+				NoteSwitchRefusal(statement, "switch whose clause list is ill-formed: two default clauses, which the grammar does not admit")
 				return switchArms{}, false
 			}
-			run, ended := runFrom(index)
-			if !ended {
-				NoteSwitchRefusal(statement, "switch with a falling-through case")
-				return switchArms{}, false
-			}
+			run := runFrom(index)
 			// labels grouped ahead of the default reach the default's own
 			// run, which is already the chain's innermost else — every one
 			// of them lands there by matching no OTHER label, so the arm
@@ -1409,11 +1622,7 @@ func switchArmsOf(statement *ast.Node, clauses []*ast.Node) (switchArms, bool) {
 			pendingLabels = append(pendingLabels, label)
 			continue
 		}
-		run, ended := runFrom(index)
-		if !ended {
-			NoteSwitchRefusal(statement, "switch with a falling-through case")
-			return switchArms{}, false
-		}
+		run := runFrom(index)
 		labels := append(append([]*ast.Node{}, pendingLabels...), label)
 		pendingLabels = nil
 		out.Cases = append(out.Cases, switchCaseArm{Labels: labels, Statements: run})
@@ -1430,9 +1639,22 @@ func switchArmsOf(statement *ast.Node, clauses []*ast.Node) (switchArms, bool) {
 // switchLabelGuard is one `case k:` as its equality branch, built
 // through the shared guard composer so the discriminant's sort decides
 // the reading exactly as an `if (x === k)` head would.
+//
+// A HOISTED DISCRIMINANT TESTS ITS SLOT DIRECTLY. The composer resolves
+// the head's left operand by IndexOf, which reads a spelled NAME, and a
+// hoisted temp is spelled `#hoist<n>:` — a spelling nothing resolves,
+// which is what keeps it uncollidable with any source name. So where the
+// discriminant hoisted, the equality is built from the temp's INDEX
+// against the label's literal rather than synthesized as a node over the
+// discriminant, taking the same two arms TestOf takes: IrTestEq with W
+// under the number sort, IrTestEqSeq with the label's code points under
+// the string sort. The temp keeping its # spelling out of the name table
+// is the point — the slot travels as an index, never as a name.
 func switchLabelGuard(
 	context *LoweringContext,
 	discriminant *ast.Node,
+	hoistedSlot int,
+	hoisted bool,
 	label *ast.Node,
 	thn []kernelbridge.IrStatement,
 	els []kernelbridge.IrStatement,
@@ -1443,6 +1665,9 @@ func switchLabelGuard(
 	if !literalOk {
 		return nil, false
 	}
+	if hoisted {
+		return hoistedLabelGuard(context, hoistedSlot, literal, thn, els)
+	}
 	factory := ast.NewNodeFactory(ast.NodeFactoryHooks{})
 	equality := factory.NewBinaryExpression(
 		nil,
@@ -1452,6 +1677,60 @@ func switchLabelGuard(
 		literal,
 	)
 	return LowerGuard(context, equality, thn, els)
+}
+
+// hoistedLabelGuard is one `case k:` against a HOISTED discriminant's
+// temp: the equality read straight off the slot index, since the temp's
+// `#hoist<n>:` spelling resolves to no name and a synthesized node would
+// find nothing.
+//
+// The two arms are TestOf's own equality arms under the slot's sort
+// (ir_guard.go:150-162) and the statement is assembled the way lowerGuard
+// assembles one — the number sort takes IrTestEq carrying the literal's
+// value in W, the string sort takes IrTestEqSeq carrying the literal's
+// code points. A slot wearing neither sort has no equality on the wire:
+// it answers nothing here, and the caller's chain keeps the untested
+// siblings.
+func hoistedLabelGuard(
+	context *LoweringContext,
+	on int,
+	literal *ast.Node,
+	thn []kernelbridge.IrStatement,
+	els []kernelbridge.IrStatement,
+) ([]kernelbridge.IrStatement, bool) {
+	if context == nil || on >= len(context.Sorts) {
+		return nil, false
+	}
+	if context.Sorts[on] == BindingKindNumber {
+		w, isNumber := NumberOf(literal)
+		if !isNumber {
+			return nil, false
+		}
+		return []kernelbridge.IrStatement{{
+			Kind: kernelbridge.IrStatementBranch,
+			On:   on,
+			Test: kernelbridge.IrTestEq,
+			W:    &w,
+			Then: thn,
+			Else: els,
+		}}, true
+	}
+	if context.Sorts[on] == BindingKindString && ast.IsStringLiteral(literal) {
+		text := literal.AsStringLiteral().Text
+		points := make([]float64, 0, len(text))
+		for _, r := range text {
+			points = append(points, float64(r))
+		}
+		return []kernelbridge.IrStatement{{
+			Kind:   kernelbridge.IrStatementBranch,
+			On:     on,
+			Test:   kernelbridge.IrTestEqSeq,
+			Points: points,
+			Then:   thn,
+			Else:   els,
+		}}, true
+	}
+	return nil, false
 }
 
 // switchLabelLiteral is the literal token a case label names, which is
@@ -1612,6 +1891,11 @@ func stripTrailingBreak(statements []*ast.Node) []*ast.Node {
 // does not, branchBoth carries no test and both arms walk from the state
 // as it stood. Both are sound: a concrete run takes one arm, and the
 // join over the two admits it either way.
+//
+// A CONDITION THAT RUNS CODE takes the hoist first (ConditionTestSlot):
+// the condition evaluates UNCONDITIONALLY and FIRST in source order, so
+// a statement position ahead of the branch is exactly where its call
+// belongs, and after the hoist what the branch reads is a temp.
 func returnBranchStatements(
 	context *LoweringContext,
 	expression *ast.Node,
@@ -1631,16 +1915,27 @@ func returnBranchStatements(
 		if ContainsWrite(cond.Condition) {
 			return nil, false
 		}
-		// and a condition that RUNS something has no statement position
-		// either — OpaqueTestableCondition is the branch routes' own test
-		// for exactly that, and the if route reads it for the same reason.
-		if !OpaqueTestableCondition(cond.Condition) {
+		// a condition that RUNS something is hoisted where it can be — the
+		// hoisted temp then stands in for the whole condition — and refused
+		// where it cannot. OpaqueTestableCondition is the branch routes'
+		// own test for "evaluating this moves nothing the walk carries",
+		// and it is asked of what the branch will actually read.
+		hoistedTest, viaHoist := ConditionTestSlot(context, cond.Condition)
+		if !viaHoist && !OpaqueTestableCondition(cond.Condition) {
 			return nil, false
 		}
 		thn, thnOk := returnValueStatements(context, cond.WhenTrue, sort, raise)
 		els, elsOk := returnValueStatements(context, cond.WhenFalse, sort, raise)
 		if !thnOk || !elsOk {
 			return nil, false
+		}
+		if viaHoist {
+			// the condition already ran, into its temp; what remains is the
+			// branch on that temp. A temp wearing the number or the string
+			// sort takes its truthiness test; an unknown-sorted one has no
+			// truthiness test on the wire and takes the untested branch,
+			// both arms riding and joining.
+			return []kernelbridge.IrStatement{conditionBranchOn(context, hoistedTest, thn, els)}, true
 		}
 		if guarded, ok := LowerGuard(context, cond.Condition, thn, els); ok {
 			return guarded, true
@@ -1671,23 +1966,50 @@ func returnBranchStatements(
 // The wire has no test-and-reuse: a branch names a slot to test, and an
 // arm names an effect to write, with no way to say "the value already
 // computed for the test". So the only left operands this route admits
-// are ones whose evaluation MOVES NOTHING and can therefore be read
-// twice — the test reads slot `on`, the arm reads slot `on` again, and
-// two reads of a slot are the same value with nothing run between them.
-// That is exactly a TRACKED SLOT read, which is what IndexOf answers,
-// and it is what LowerGuard's own `??` arm already requires of its left
-// side (ir_guard.go's definedness branch).
+// are ones whose evaluation lands in a SLOT that can be read twice — the
+// test reads slot `on`, the arm reads slot `on` again, and two reads of
+// a slot are the same value with nothing run between them.
 //
-// A left operand that RUNS something — `f() ?? b`, `this.get() || b` —
-// is declined here rather than hoisted. Hoisting would put the call
-// before the branch, which is where it belongs for `a`'s single
-// evaluation; but the hoisted temp is unknown-sorted and carries no
-// definedness or truthiness the branch could test, so the test would
-// have nothing to read and the branch would degrade to branchBoth with
-// a call already run — no better than the floor, and with an extra
-// statement standing between the reader and the truth. The plain
-// sentence is the honest answer: this route reads a short circuit whose
-// left side is a tracked slot, and no other.
+// TWO SPELLINGS SATISFY THAT, and both land here.
+//
+//   - A TRACKED SLOT READ, which is what IndexOf answers, and what
+//     LowerGuard's own `??` arm requires of its left side (ir_guard.go's
+//     definedness branch). Evaluating it moves nothing, so reading it
+//     twice is reading one value.
+//
+//   - A SERVED CALL, hoisted to its temp slot ahead of the branch —
+//     `f() ?? b`, `this.get() || b`. The hoist (ir_call_hoist.go) emits
+//     the call statement BEFORE the statement holding the expression,
+//     which is exactly where `a`'s single evaluation belongs: the left
+//     operand of a short circuit is the FIRST thing the expression
+//     evaluates, and the branch that follows tests what it produced.
+//     After the hoist the two reads are two reads of the temp, with the
+//     call standing before both — the same one-value discipline the
+//     tracked-slot spelling has.
+//
+// WHAT THE TEMP CARRIES, which is what the earlier refusal here got
+// wrong. The hoisted temp wears the UNKNOWN sort, and the refusal read
+// that as "carries no definedness". Sort and STATE are different things:
+// summaryCallStatement threads `rets[outIndex] = target`, so the temp's
+// state is the callee's own ret out-state verbatim — absence included,
+// which is what the orAbsent vocabulary and the returned/thrown split
+// put there. IrTestDefined reads that STATE (the kernel's narrowDefined
+// splits any KnownState, `.top` included, into its defined and absent
+// halves) and never consults the sort. So a served callee whose summary
+// says "a value or undefined" hands this branch exactly the definedness
+// it tests, and one whose summary says nothing hands it `.top`, which
+// narrowDefined still splits soundly — the arms then claim only what
+// each side's own writes claim.
+//
+// TRUTHINESS IS THE SORTED TEST, and that is where `&&`/`||` differ:
+// TruthyNum and TruthyStr are the only two on the wire, so a slot
+// wearing neither sort — an unknown-sorted temp among them — has no
+// truthiness test to name. It does NOT decline: a branch with no test
+// (branchBoth) walks both arms from the state as it stood and joins
+// their exits, which is what a concrete run's one arm is admitted by.
+// Each arm's effects and its `#ret` write ride either way; what is lost
+// is only the narrowing the test would have put on the left arm. That is
+// strictly more than the decline served and claims nothing false.
 //
 // The RIGHT operand rides as an ordinary arm — the full statement
 // vocabulary, calls included — because it sits inside a branch arm,
@@ -1703,18 +2025,17 @@ func returnShortCircuitStatements(
 		kind != ast.KindBarBarToken {
 		return nil, false
 	}
-	left := Unwrapped(binary.Left)
-	// the left side is read TWICE — once as the branch's test, once as an
-	// arm's value — so it must be a slot, whose two reads are one value
-	on, tracked := IndexOf(context, left)
+	on, tracked := shortCircuitLeftSlot(context, binary.Left)
 	if !tracked {
 		return nil, false
 	}
 	// which test picks the side is the operator's own rule: `??` asks
-	// definedness, `&&`/`||` ask truthiness under the slot's sort. A slot
-	// wearing neither the number nor the string sort has no truthiness
-	// test on the wire, so those two operators decline there.
+	// definedness, which every slot answers; `&&`/`||` ask truthiness
+	// under the slot's sort, and a slot wearing neither the number nor
+	// the string sort has no truthiness test on the wire — that side takes
+	// the untested branch instead, both arms riding and joining.
 	test := kernelbridge.IrTestDefined
+	tested := true
 	if kind != ast.KindQuestionQuestionToken {
 		switch context.Sorts[on] {
 		case BindingKindNumber:
@@ -1722,7 +2043,7 @@ func returnShortCircuitStatements(
 		case BindingKindString:
 			test = kernelbridge.IrTestTruthyStr
 		default:
-			return nil, false
+			tested = false
 		}
 	}
 	// the arm holding `a` writes the slot it just tested — the same read,
@@ -1741,6 +2062,13 @@ func returnShortCircuitStatements(
 	if kind == ast.KindAmpersandAmpersandToken {
 		then, els = rightArm, leftArm
 	}
+	if !tested {
+		return []kernelbridge.IrStatement{{
+			Kind: kernelbridge.IrStatementBranchBoth,
+			Then: then,
+			Else: els,
+		}}, true
+	}
 	return []kernelbridge.IrStatement{{
 		Kind: kernelbridge.IrStatementBranch,
 		On:   on,
@@ -1748,6 +2076,53 @@ func returnShortCircuitStatements(
 		Then: then,
 		Else: els,
 	}}, true
+}
+
+// shortCircuitLeftSlot resolves a short circuit's LEFT operand to the
+// slot the branch tests and the left arm reads — the two reads of one
+// value the form needs.
+//
+// A tracked read answers its own slot: evaluating it moves nothing, so
+// the second read finds what the first did.
+//
+// A CALL answers its hoisted temp. The hoist is sound at this position
+// for the reason the whole form turns on: in `a ?? b`, `a` is the first
+// thing the expression evaluates and it runs UNCONDITIONALLY — the short
+// circuit decides only whether `b` runs. Emitting the call statement
+// ahead of the branch therefore preserves source order exactly, and the
+// hoist's own ordering gate (hoistingIsOrderSafe) still measures the
+// call's write set against the rest of the statement, so a call that
+// writes something the statement reads around it refuses here as it does
+// anywhere.
+//
+// A call the hoist refuses — no compiled blob, no statement stream, an
+// unsafe reordering — answers nothing, and the route keeps its decline.
+func shortCircuitLeftSlot(context *LoweringContext, left *ast.Node) (int, bool) {
+	head := Unwrapped(left)
+	if on, tracked := IndexOf(context, head); tracked {
+		return on, true
+	}
+	// `await f(…)` peels to the same call: the ret-as-inner convention
+	// means the callee's ret slot already holds the settled value, which
+	// is the very slot HoistCallEffect answers
+	callHead := head
+	if operand, isAwait := AwaitedOperandOf(head); isAwait {
+		callHead = Unwrapped(operand)
+	}
+	// THE LEFT OPERAND MUST BE THE CALL WHOLE. `(a && f()) ?? b` reaches
+	// here with a BinaryExpression left and is refused: the `&&` inside it
+	// decides whether `f()` runs, so hoisting the call ahead of the branch
+	// would run it on a path the source does not. What makes `f() ?? b`
+	// admissible is precisely that nothing stands above the call — it is
+	// the first thing the expression evaluates, on every path.
+	if !ast.IsCallExpression(callHead) {
+		return 0, false
+	}
+	effect, hoisted := HoistCallEffect(context, callHead)
+	if !hoisted || effect.Kind != kernelbridge.LoopEffectVar {
+		return 0, false
+	}
+	return effect.Index, true
 }
 
 // returnValueStatements lowers ONE branch arm of a returned ternary or
@@ -1852,8 +2227,25 @@ func returnValueStatements(
 	// AN ARM WITH NO READING. Its value is unknown, and whatever its
 	// evaluation could have moved is havocked at the arm's own position —
 	// the havoc floor's rule, applied inside the branch rather than in
-	// place of it. An expression whose write set is not enumerable keeps
-	// the decline: there would be nothing to stand in for what it moved.
+	// place of it.
+	//
+	// THE ENUMERABILITY GATE IS ASKED FIRST, the same way the floor's two
+	// other entries ask it (OpaqueHavocStatements and OpaqueCallHavoc,
+	// ir_opaque_havoc.go). The enumerator itself never says no — it walks
+	// the syntax and answers the slots it found — so the impossibilities
+	// are havocEnumerable's to name, and an arm that skipped the gate
+	// would havoc a mention set that does not bound what the arm moved.
+	// Most of those impossibilities cannot appear in an ARM at all, an
+	// arm being an expression: a `return`, a `throw`, a `with`, a bare
+	// break or continue are statements, and the only statement positions
+	// inside an expression sit in a function body, which the gate's scan
+	// stops at because that body's transfers are its own. The one that
+	// does reach here is a bare `eval(…)` — `c ? eval(s) : 1` — whose
+	// code runs in THIS scope and may write any binding in it, so no
+	// mention set bounds it. That one keeps the decline.
+	if !havocEnumerable(arm) {
+		return nil, false
+	}
 	slots, enumerable := havocSlotsOfStatement(context, arm)
 	if !enumerable {
 		return nil, false

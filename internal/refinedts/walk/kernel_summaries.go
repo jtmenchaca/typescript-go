@@ -213,9 +213,26 @@ func mayContainZero(set refinementsets.RefinedSet) bool {
 // another body's slot: an awaited call reads a settled value, which is
 // exactly what the callee's ret already holds.
 //
-// A GENERATOR still declines: its call's value is an iterator, and no
-// slot in this grammar spells one, so there is no inner value for a
-// boundary wrapper to adopt.
+// A GENERATOR still declines, and the reason is the RESUMPTION
+// PROTOCOL, not the shape of its result. Every `yield` in the body is a
+// re-entry point: the body runs to that expression, hands its value
+// out, stops, and resumes there later with a value the CALLER supplies
+// to `next(v)` — so one call of the declaration is many entries and
+// many exits, in an order no call site fixes. The statement grammar
+// this lowering targets holds one entry and one exit per body, and a
+// summary quantifies over entries; neither can carry a body whose
+// control flow leaves and re-enters at every yield. That is outside the
+// grammar rather than unbuilt in it, so this refusal stands where the
+// others are provisional.
+//
+// What the call site does with the refusal is the part that matters: it
+// does NOT decline the calling body. A generator call admits at the
+// opaque tier — the call value enters from outside this walk's
+// determination (evaluate_call_expression.go's GeneratorCallResult on
+// the walk side, OpaqueCallHavoc's tier 3 on the lowering side) — and
+// the caller keeps going. The values the generator hands over are read
+// on top of that admission, from the body's own yields rather than from
+// a summary of it (generator_element.go).
 func summaryLowerable(declaration *ast.Node) bool {
 	if declaration == nil || declaration.Body() == nil {
 		return false

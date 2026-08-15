@@ -148,6 +148,23 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 				out := abstractdomain.KnownValues([]float64{float64(len(receiver.Items))}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 				return &out
 			}
+			// an OBJECT-STAR states no count, so its length answers only
+			// what the sort itself guarantees: an array's length is always
+			// a non-negative integer below 2^32 (sec-array-exotic-objects'
+			// ArraySetLength rejects anything else). That is a real claim —
+			// it decides `length >= 0` and every negative comparison — and
+			// it is the whole of what the form knows.
+			if receiver.Kind == abstractdomain.KindObjectStar {
+				out := abstractdomain.KnownSet(
+					refinementsets.MakeRefinedSet(
+						refinementsets.Integer,
+						refinementsets.AtLeast(0),
+						refinementsets.AtMost(4294967295),
+					),
+					nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone,
+				)
+				return &out
+			}
 			if receiver.Kind == abstractdomain.KindSet && receiver.SetKindTag == abstractdomain.SetKindTagNone {
 				// a difference's members are all members of its minuend, so the
 				// minuend's length window bounds every one of them — a pattern-

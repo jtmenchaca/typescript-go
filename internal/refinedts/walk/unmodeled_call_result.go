@@ -16,6 +16,20 @@ import (
 // UnmodeledCallResult is unmodeledCallResult in the TS source.
 func UnmodeledCallResult(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractValue {
 	call := e.AsCallExpression()
+	// a call whose RESULT is a generator or an iterable that reached
+	// HERE — the contract lookup did not place its declaration, so the
+	// generator route in evaluate_call_expression.go never saw it, but
+	// the call's own resolved type still says `Generator<T>` /
+	// `IterableIterator<T>`. The value is the iterator object, which
+	// nothing in the tuple layer or the object graph spells, so the
+	// reading is the opaque one: it entered from outside this walk's
+	// determination. Without this row the ground reader below would
+	// spell the iterator as a record of its `next`/`return`/`throw`
+	// members — true, and useless, and it would stand in the way of the
+	// element readings the drain routes take through the same type.
+	if _, isIterator := generatorDeclaredElement(ctx, e); isIterator {
+		return abstractdomain.Opaque
+	}
 	// an unmodeled call whose RESOLVED return type reads as a stated
 	// annotation wears the annotation: `ports.get(k)` typed
 	// `Port | undefined` with Port = z.infer<typeof zPort> answers

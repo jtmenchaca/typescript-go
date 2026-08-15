@@ -277,16 +277,17 @@ func TestIrSwitchLowering_GroupedLabelsShareOneArm(t *testing.T) {
 	}
 }
 
-func TestIrSwitchLowering_AFallingThroughCaseTakesTheHavocFloor(t *testing.T) {
+func TestIrSwitchLowering_AFallingThroughCaseConcatenatesItsRun(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	context := recordLoweringContext(kernel,
 		[]string{"x", "n"},
 		[]BindingKind{BindingKindNumber, BindingKindNumber})
-	// the equality CHAIN still refuses a falling-through case (its
-	// statements run on into the next clause, which the chain has no
-	// arm for), and the whole switch then takes the havoc floor: its
-	// breaks are CONTAINED, so every path through it ends at the
-	// statement's own exit, where the havoc's writes sit
+	// a falling-through case's run is its own statements followed by
+	// the next clause's, up to the first ending — so case 1 runs
+	// `n = 1; n = 2; break` and case 2 runs `n = 2; break`. Every path
+	// through case 1 overwrites the intermediate 1, which is what the
+	// exit must show: n leaves as 2 on a matched run and untouched on
+	// an unmatched one, and 1 is unobservable.
 	stmts, ok := LowerStatements(context, loweringParse(t, `
 		switch (x) {
 			case 1: n = 1;
@@ -294,19 +295,21 @@ func TestIrSwitchLowering_AFallingThroughCaseTakesTheHavocFloor(t *testing.T) {
 		}
 	`))
 	if !ok {
-		t.Fatalf("a falling-through switch declined outright, want the havoc floor")
+		t.Fatalf("a falling-through switch declined, want the concatenated equality chain")
 	}
-	sawN := false
-	for _, s := range stmts {
-		if s.Kind != kernelbridge.IrStatementAssign || s.Effect.Kind != kernelbridge.LoopEffectUnknown {
-			t.Fatalf("stmts = %+v, want only unknown assigns", stmts)
-		}
-		if s.Target == 1 {
-			sawN = true
-		}
+	exit := kernel.Walk([]kernelbridge.KnownStateWire{
+		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1, 2, 5}))},
+		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0}))},
+	}, stmts)
+	set := loweringSetOf(t, exit[1])
+	if !kernel.Member(set, []float64{2}) {
+		t.Errorf("member(n, [2]) = false, want true — a matched run lands on 2")
 	}
-	if !sawN {
-		t.Errorf("n (slot 1) was not havocked — the arms' writes would be skipped")
+	if !kernel.Member(set, []float64{0}) {
+		t.Errorf("member(n, [0]) = false, want true — an unmatched x leaves n alone")
+	}
+	if kernel.Member(set, []float64{1}) {
+		t.Errorf("member(n, [1]) = true, want false — every path through case 1 overwrites the 1")
 	}
 }
 

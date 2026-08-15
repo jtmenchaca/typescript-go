@@ -113,6 +113,15 @@ func MapOutcome(walk *CallbackWalk, method string) abstractdomain.AbstractValue 
 		}
 		return finish(abstractdomain.KnownSet(built, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
 	}
+	// an output the tuple layer cannot hold — the callback answered a
+	// record or a class instance — builds the OBJECT-STAR instead: map
+	// answers one output per input, so every position of the result
+	// holds what the body answered. The count the receiver's window
+	// stated does not ride along (the object-star claims no length),
+	// which says less than `map` proves and never more.
+	if built, ok := abstractdomain.KnownObjectStar(flattened, abstractdomain.TrustProved); ok {
+		return finish(built)
+	}
 	// an OPAQUE output element makes the built array opaque with
 	// it; a plain unknown stays the walk's own gap
 	if flattened.Kind == abstractdomain.KindUnknown && flattened.Opaque {
@@ -230,6 +239,15 @@ func FilterOutcome(walk *CallbackWalk) abstractdomain.AbstractValue {
 	keptSet, hasKeptSet := abstractdomain.SetOfKnown(kept)
 	// filter never adds members: the unnarrowed element is sound
 	if !hasKeptSet {
+		// a GRAPH-shaped kept element keeps the per-position claim even
+		// though the tuple layer holds nothing: filter selects a subset of
+		// the receiver's own elements (sec-array.prototype.filter), so
+		// every position of the result holds what one position of the
+		// receiver held. The count drops, which filter never proved
+		// anyway.
+		if built, ok := abstractdomain.KnownObjectStar(kept, abstractdomain.TrustProved); ok {
+			return finish(built)
+		}
 		return finish(silence.Residue())
 	}
 	return finish(abstractdomain.KnownSet(refinementsets.MakeRefinedSet(refinementsets.Star(keptSet)), nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))

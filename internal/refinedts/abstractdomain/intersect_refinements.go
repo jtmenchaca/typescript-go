@@ -18,8 +18,12 @@ func NarrowKnown(k AbstractValue, forms []refinementsets.Refinement) AbstractVal
 	// and only the tightest per class constrains — same set, far
 	// cheaper question
 	switch k.Kind {
-	case KindValues, KindObject, KindList, KindCollection, KindPromise,
+	case KindValues, KindObject, KindObjectStar, KindList, KindCollection, KindPromise,
 		KindDate, KindSymbol, KindHostFunction, KindBigints, KindRegex:
+		// a set guard says something about a SCALAR; none of these is one,
+		// and the form the guard carries names no position of a sequence.
+		// The value stands unchanged rather than absorbing a claim that
+		// was never about it.
 		return k
 	case KindSet:
 		combined := append(append([]refinementsets.Refinement{}, k.Set.Forms...), forms...)

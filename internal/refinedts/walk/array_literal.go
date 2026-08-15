@@ -126,6 +126,15 @@ func EvaluateArrayLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomain
 // nests. Such an element poses no one-position claim, so it goes quiet
 // with the rest rather than flattening into a false element set.
 func sequenceOfElements(elements []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	// every element GRAPH-shaped: the positions hold records or class
+	// instances, so the claim is the object-star's — the join of what
+	// the elements admit, at a length this literal no longer pins (an
+	// unpinned spread is what brought the walk here). The tuple layer
+	// holds none of it, which is why the scalar walk below would go
+	// quiet on the very same values.
+	if star, ok := objectStarOfElements(elements); ok {
+		return star
+	}
 	var union *refinementsets.RefinedSet
 	grade := abstractdomain.TrustProved
 	for _, element := range elements {
@@ -150,6 +159,27 @@ func sequenceOfElements(elements []abstractdomain.AbstractValue) abstractdomain.
 		grade,
 		abstractdomain.SetKindTagNone,
 	)
+}
+
+// objectStarOfElements builds the object-star over a literal's
+// elements when EVERY one is graph-shaped: the value at an arbitrary
+// position is one of them, so the element claim is their join. One
+// non-graph element (a number beside the records) leaves no single
+// per-position reading the graph holds, and the scalar walk gets its
+// turn instead.
+func objectStarOfElements(elements []abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
+	if len(elements) == 0 {
+		return abstractdomain.AbstractValue{}, false
+	}
+	joined := elements[0]
+	for _, element := range elements[1:] {
+		joined = abstractdomain.JoinKnown(joined, element)
+	}
+	grade := abstractdomain.TrustProved
+	for _, element := range elements {
+		grade = abstractdomain.MinTrustLevel(grade, abstractdomain.TrustLevelOf(element))
+	}
+	return abstractdomain.KnownObjectStar(joined, grade)
 }
 
 // scalarPositionSet is the set ONE array position admits, where the

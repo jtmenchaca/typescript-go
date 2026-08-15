@@ -38,8 +38,14 @@ func UnknownSymbol() abstractdomain.AbstractValue {
 
 // StarOfElement is starOfElement in the TS source: a sequence of this
 // element -- NaN riding on the element rides on the star (`number[]`).
-// The zero value with ok=false stands in for the TS source's null
-// (the element is not a set).
+//
+// Two layers, one recipe. An element the tuple layer holds stars into
+// a refined SET the kernel decides. An element the OBJECT GRAPH holds
+// -- a record, a class instance -- stars into the object-star instead:
+// the same "these elements, length unstated" claim, carried where the
+// graph can answer it. The zero value with ok=false is left for an
+// element neither layer holds (an unknown), where no position claim
+// exists to state.
 func StarOfElement(element abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
 	nanRides := false
 	inner := element
@@ -49,7 +55,11 @@ func StarOfElement(element abstractdomain.AbstractValue) (abstractdomain.Abstrac
 	}
 	items, ok := abstractdomain.SetOfKnown(inner)
 	if !ok {
-		return abstractdomain.AbstractValue{}, false
+		// an element the tuple layer cannot hold — a record, a class
+		// instance — is a sequence claim all the same: every position
+		// holds that element, at a length the type does not state. The
+		// object-star carries exactly that, and nothing more.
+		return abstractdomain.KnownObjectStar(inner, abstractdomain.TrustProved)
 	}
 	worn := abstractdomain.KnownSet(
 		refinementsets.MakeRefinedSet(refinementsets.Star(items)),

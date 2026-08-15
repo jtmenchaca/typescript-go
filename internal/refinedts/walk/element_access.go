@@ -252,6 +252,17 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 				// in it. A sequence that ARRIVES unproved — a parameter, a
 				// summary read — is not a KindList at all; it reaches the
 				// set-shaped arm above, which is where the absence is worn.
+				// an OBJECT-STAR slot: every position that exists holds the
+				// element, and the form claims NO count — so no index is
+				// provably in bounds and the read is the element or nothing
+				// (sec-array-exotic-objects: a get past the end answers
+				// undefined). The absence is POSITIVELY derived — the star
+				// states the length is unclaimed, so a run where this index
+				// is past the end is admitted, not merely unproved.
+				if element, ok := abstractdomain.ElementOfObjectStar(receiver); ok {
+					out := abstractdomain.PossiblyUndefined(element, abstractdomain.TrustSpec, true, true)
+					return &out
+				}
 				if receiver.Kind == abstractdomain.KindList && index.Kind == abstractdomain.KindValues &&
 					len(index.Values) == 1 && isInteger(index.Values[0]) {
 					i := index.Values[0]

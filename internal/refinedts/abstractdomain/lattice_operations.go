@@ -34,6 +34,30 @@ func MeetKnown(a, b AbstractValue) AbstractValue {
 	if b.Kind == KindValues {
 		return b
 	}
+	// two object-stars over the same runtime value: both claims hold of
+	// every position, so the position holds their MEET. The length is
+	// unstated on both sides, so there is nothing to reconcile there.
+	if a.Kind == KindObjectStar && b.Kind == KindObjectStar {
+		elementA, okA := ElementOfObjectStar(a)
+		elementB, okB := ElementOfObjectStar(b)
+		if okA && okB {
+			if met, ok := KnownObjectStar(MeetKnown(elementA, elementB), MinTrustLevel(TrustLevelOf(a), TrustLevelOf(b))); ok {
+				return met
+			}
+		}
+		return a
+	}
+	// an object-star met with an exact LIST: the list already states
+	// both the count and each slot, which is everything the star says
+	// and more, so the list is the meet outright. (The star's element
+	// claim is true of the list's slots by hypothesis — both describe
+	// the same runtime value.)
+	if a.Kind == KindObjectStar && b.Kind == KindList {
+		return b
+	}
+	if b.Kind == KindObjectStar && a.Kind == KindList {
+		return a
+	}
 	if a.Kind == KindSet && b.Kind == KindSet &&
 		a.Temporal == nil && b.Temporal == nil &&
 		a.SetKindTag == SetKindTagNone && b.SetKindTag == SetKindTagNone {
@@ -74,6 +98,12 @@ func Truthiness(k AbstractValue) (bool, bool) {
 		return false, false
 	case KindObject, KindList, KindCollection, KindPromise, KindDate, KindRegex:
 		return true, true // an object — always truthy
+	case KindObjectStar:
+		// an Array is an Object, and ToBoolean maps every Object to true
+		// (sec-toboolean: only undefined, null, false, ±0, NaN, "" and 0n
+		// are false). An EMPTY array is still an object, so the unstated
+		// length changes nothing here.
+		return true, true
 	case KindSymbol:
 		return true, true // every symbol is truthy
 	case KindHostFunction:
@@ -164,6 +194,13 @@ func SameKnown(a, b AbstractValue) bool {
 			}
 		}
 		return true
+	case KindObjectStar:
+		// the element is the whole claim — neither side states a length,
+		// so two stars over the same element say the same thing
+		if a.Inner == nil || b.Inner == nil {
+			return a.Inner == b.Inner
+		}
+		return SameKnown(*a.Inner, *b.Inner)
 	case KindCollection:
 		if a.CollectionFlavor != b.CollectionFlavor || a.Complete != b.Complete {
 			return false
@@ -318,6 +355,13 @@ func SetOfKnown(k AbstractValue) (refinementsets.RefinedSet, bool) {
 	switch k.Kind {
 	case KindObject:
 		return refinementsets.RefinedSet{}, false // objects live in the graph, not the tuple layer
+	case KindObjectStar:
+		// the star of an object element: the elements are graph values,
+		// so there is no member set to put at a position and no tuple the
+		// kernel could decide. This refusal is what keeps the form off
+		// every kernel question — the wire carries sets, and this states
+		// none.
+		return refinementsets.RefinedSet{}, false
 	case KindList, KindCollection, KindPromise, KindDate:
 		return refinementsets.RefinedSet{}, false // nested structure the tuple layer cannot formatAt
 	case KindVariable:
@@ -600,6 +644,44 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 		}
 		return AtTrustLevel(AbstractValue{Kind: KindBigints, BigintValues: merged}, grade)
 	}
+	// two OBJECT-STARS join element-wise: the runtime value came through
+	// one arm or the other, and each arm's positions hold its own
+	// element, so every position of the joined value holds one of the
+	// two — their join. Neither side stated a length, so the joined
+	// value states none either and nothing is lost there.
+	if a.Kind == KindObjectStar && b.Kind == KindObjectStar {
+		elementA, okA := ElementOfObjectStar(a)
+		elementB, okB := ElementOfObjectStar(b)
+		if okA && okB {
+			if joined, ok := KnownObjectStar(JoinKnown(elementA, elementB), grade); ok {
+				return joined
+			}
+		}
+		// the elements joined to something the graph does not hold (two
+		// unrelated shapes whose join keeps no key): no position claim
+		// survives, and the visible gap is the honest answer
+		return Unknown
+	}
+	// an OBJECT-STAR joined with an exact LIST: the list's own count
+	// does not survive (the star side states none), but every position
+	// of either arm holds a value admitted by the star's element joined
+	// with all of the list's items — so the joined value is the star of
+	// that join. An EMPTY list contributes no item and joins as the
+	// star unchanged: a zero-length array vacuously satisfies every
+	// per-position claim.
+	if a.Kind == KindObjectStar && b.Kind == KindList {
+		return joinObjectStarWithList(a, b, grade)
+	}
+	if b.Kind == KindObjectStar && a.Kind == KindList {
+		return joinObjectStarWithList(b, a, grade)
+	}
+	// an object-star beside anything else — a set, a bare object, a
+	// collection — shares no position claim with it: one is a sequence
+	// and the other is not, and there is no reading true of both. The
+	// walk's own gap is the answer, and it stays visible as one.
+	if a.Kind == KindObjectStar || b.Kind == KindObjectStar {
+		return Unknown
+	}
 	if a.Kind == KindList && b.Kind == KindList {
 		if len(a.Items) != len(b.Items) {
 			return Unknown
@@ -759,6 +841,26 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 		KnownSet(refinementsets.MakeRefinedSet(refinementsets.Union(left, right)), nil, grade, SetKindTagNone),
 		sharedMeasures,
 	)
+}
+
+// joinObjectStarWithList joins an object-star with an exact list: the
+// element claim has to hold at every position of EITHER arm, so it is
+// the star's element joined with each of the list's items. The list's
+// count does not survive — the star side states none.
+func joinObjectStarWithList(star, list AbstractValue, grade TrustLevel) AbstractValue {
+	element, ok := ElementOfObjectStar(star)
+	if !ok {
+		return Unknown
+	}
+	for _, item := range list.Items {
+		element = JoinKnown(element, item)
+	}
+	if joined, ok := KnownObjectStar(element, grade); ok {
+		return joined
+	}
+	// the list held a non-graph item (a number, a set), so no ONE
+	// position claim covers both arms
+	return Unknown
 }
 
 // sidesOf is the TS source's `a.variants ?? [a]` read at each join call

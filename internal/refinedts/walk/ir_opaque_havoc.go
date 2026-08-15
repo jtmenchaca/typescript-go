@@ -386,11 +386,12 @@ func breakTargetOf(node *ast.Node, isContinue bool) bool {
 //     slot AND evaluating it moves state, so there is no arm-testing
 //     chain and no tested-nothing chain either;
 //   - "switch with no clauses";
-//   - "switch with a falling-through case" — a run that walks off the
-//     end of the clause list without a break or a return, so nothing
-//     says where it stops;
-//   - "switch with a second default clause" — two arms for one "no label
-//     matched";
+//   - "switch whose clause list is ill-formed: two default clauses,
+//     which the grammar does not admit" — NOT an open gap. CaseBlock's
+//     productions (ECMA-262, sec-switch-statement) hold at most one
+//     DefaultClause, so a second `default:` fails to parse and tsc
+//     reports it; the guard cannot fire on a program that compiles and
+//     stands only so a malformed tree answers nothing;
 //   - "switch on a case label that is not a literal" — a label that is
 //     no literal, no const chain to one, and no enum member;
 //   - "switch whose default arm did not lower" and "switch whose case

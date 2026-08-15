@@ -54,6 +54,13 @@ func SwitchLabelValuesWith(c *checker.Checker, labels []*ast.Node) (abstractdoma
 			stringsSeen = append(stringsSeen, resolved.AsStringLiteral().Text)
 		} else if ast.IsNoSubstitutionTemplateLiteral(resolved) {
 			stringsSeen = append(stringsSeen, resolved.Text())
+		} else if resolved.Kind == ast.KindTrueKeyword {
+			// a boolean label rides the number sort: true is the exact
+			// word 1 and false the word 0, the spec's own ToNumber — the
+			// same encoding every boolean literal in this package wears
+			numbersSeen = append(numbersSeen, 1)
+		} else if resolved.Kind == ast.KindFalseKeyword {
+			numbersSeen = append(numbersSeen, 0)
 		} else {
 			return abstractdomain.AbstractValue{}, false
 		}

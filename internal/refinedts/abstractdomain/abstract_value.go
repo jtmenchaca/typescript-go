@@ -35,6 +35,7 @@ const (
 	KindValues            Kind = "values"
 	KindSet               Kind = "set"
 	KindObject            Kind = "object"
+	KindObjectStar        Kind = "objectStar"
 	KindVariable          Kind = "variable"
 	KindList              Kind = "list"
 	KindCollection        Kind = "collection"
@@ -137,7 +138,10 @@ type AbstractValue struct {
 	CollectionFlavor Flavor
 	Entries          []CollectionEntry
 
-	// "promise" / "possiblyUndefined" / "possiblyNaN": the wrapped value.
+	// "promise" / "possiblyUndefined" / "possiblyNaN" / "objectStar":
+	// the wrapped value. For "objectStar" it is the ELEMENT — what one
+	// position of the sequence holds — and the sequence states no length
+	// of its own.
 	Inner *AbstractValue
 
 	// "date": the time value, as its own AbstractValue (number knowledge).

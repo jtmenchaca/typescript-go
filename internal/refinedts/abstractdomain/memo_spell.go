@@ -171,6 +171,19 @@ func spellInto(b *strings.Builder, known AbstractValue) bool {
 		b.WriteByte(';')
 		b.WriteString(string(known.Grade))
 		b.WriteByte(')')
+	case KindObjectStar:
+		// the element is the whole claim, so the element's spelling plus
+		// the grade is the whole key — there is no length to write
+		b.WriteString("os(")
+		if known.Inner == nil {
+			return false
+		}
+		if !spellInto(b, *known.Inner) {
+			return false
+		}
+		b.WriteByte(';')
+		b.WriteString(string(known.Grade))
+		b.WriteByte(')')
 	case KindVariable:
 		b.WriteString("var(")
 		fmt.Fprintf(b, "%p", known.Symbol)

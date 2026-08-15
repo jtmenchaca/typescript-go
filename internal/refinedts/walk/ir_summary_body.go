@@ -40,18 +40,104 @@ type recordParamMember struct {
 	SlotName  string
 	Sort      BindingKind
 	TypeofTag TypeofTag
+	// MayBeAbsent: the member was declared OPTIONAL (`lo?: number`), so
+	// its value is the declared sort OR the absent value. The sort
+	// vocabulary has three words — number, string, unknown — and none of
+	// them spells "number-or-absent", so the absence rides the ENTRY
+	// STATE instead: a maybe-wrapped abstract value crosses the wire as
+	// its inner set with Absent set (StateOfKnown's KindPossiblyUndefined
+	// arm, kernel_delegation.go), which is exactly the state a call fills
+	// this entry with. The slot keeps the inner sort; the state carries
+	// the absence. That is the same division declared_value.go makes for
+	// an optional object KEY — the key's reads wear PossiblyUndefined
+	// around the sort-bearing value, never a third sort.
+	MayBeAbsent bool
 }
 
 // scalarMemberListOf reads a list of TYPE ELEMENTS as the member list a
 // record parameter expands to, spelled under `holder` ("p.lo"/"p.hi").
 //
-// The rule is total-or-decline over the whole list: every element must
-// be a PROPERTY SIGNATURE with a plain identifier name, no `?`, no
-// initializer, and its own annotation exactly number, boolean, or
-// string. A method signature, an index signature, a call or construct
-// signature, a computed name, an optional member, a nested literal, a
-// union, an array, a duplicate key, or an EMPTY list answers false and
-// the parameter keeps its single whole-name slot.
+// Every element must be a PROPERTY SIGNATURE with a plain identifier
+// name and no initializer. A computed name, an initializer, an index
+// signature, a duplicate key, or an EMPTY list answers false and the
+// parameter keeps its single whole-name slot.
+//
+// A MEMBER'S ANNOTATION NO LONGER HAS TO BE A SCALAR KEYWORD. A property
+// whose annotation this reading cannot sort — a type reference
+// (`module: Type<any>`), an array (`imports?: Array<…>`), a function
+// type, a nested literal, a union — CONTRIBUTES, wearing the unknown
+// sort. It is the contract split ClassFieldsOf already documents
+// (ir_field_bundles.go): the census reports the shape it found, and the
+// consumer decides what an unknown-sorted slot is worth.
+//
+// THE ACCOUNTING ARGUMENT, which is why this is not a weakening. Every
+// reason the total-or-decline rule existed is preserved by the
+// unknown-sorted leaf rather than by the refusal:
+//
+//   - the member is NAMED, so the uses discipline still accounts for it.
+//     usesAreAllDeclaredKeySteps keys on declaredLeafPaths — the leaf
+//     PATHS — and recordParameterUseOf on the member KEYS, neither on a
+//     sort. A body reading `p.module` reads a declared one-step path
+//     either way, so the "these are the members, all of them" promise
+//     every consumer reads a `true` answer as is exactly as true as it
+//     was: the list still names every declared property. What refusing
+//     did was make the list UNAVAILABLE, never more complete.
+//   - the entry TOP-fills. thisEntryState (kernel_summaries.go) fills a
+//     member entry from the argument's own field by KEY, and TOPs where
+//     the argument is not a known object, does not name the member, or
+//     holds a value the wire cannot spell. An unknown-sorted member is
+//     the third of those, which the fill already handles — it is the
+//     established parameter discipline: declared members, unknown values.
+//   - no test admits an unknown-sorted slot. Every read and test gate is
+//     a POSITIVE sort test — TestOf admits only IrTestDefined outside
+//     `== BindingKindNumber` / `== BindingKindString`, NumberIndexOf and
+//     EffectOf's numberSlot admit only the number sort. So an
+//     unknown-sorted leaf answers definedness and nothing else, which is
+//     precisely what is known about it.
+//
+// What the refusal actually cost was every SCALAR SIBLING of the
+// unreadable member: one `module: Type<any>` killed the expansion of
+// `global?: boolean` beside it. That is the same trade the optional-member
+// and method-signature rules above already rejected, for the same reason —
+// a fact one member cannot state is not a reason to stop stating the
+// others.
+//
+// A CALL or CONSTRUCT SIGNATURE is SKIPPED, exactly as a method signature
+// is and for the same reason: it resolves as a call, names no slot, and
+// the uses discipline refuses any body that reads a name no leaf holds.
+// `interface Type<T> { new (...args: any[]): T }` is the shape this
+// exists for — its one construct signature leaves the list contributing
+// nothing rather than unreadable.
+//
+// AN OPTIONAL MEMBER (`lo?: number`) CONTRIBUTES ITS LEAF, wearing
+// MayBeAbsent. The expansion contract is that every member is PROMISED
+// to every entry, and an optional member is promised — as possibly
+// absent. That is a WEAKER promise, not a missing one: the annotation
+// still says this key is a number where it is there at all, and still
+// says no other key is declared. What the earlier refusal actually
+// objected to was the SORT — no word in the three-word sort vocabulary
+// spells "number-or-absent" — and the absence does not have to live in
+// the sort. It lives in the entry STATE, which is what entry states are
+// for: a maybe-wrapped value crosses as its inner set with Absent set
+// (StateOfKnown, kernel_delegation.go), so the slot stays number-sorted
+// and the caller's own knowledge of the key — present, absent, or
+// unknown — is what fills it. A caller that knows nothing fills TOP,
+// which the entry quantifier already covers. Refusing instead cost the
+// whole parameter its expansion over a fact the state already carries;
+// recharts' props records are optional members almost throughout.
+//
+// A METHOD SIGNATURE (`writeHead?(...): void`) IS SKIPPED — it
+// contributes no leaf and kills nothing. A method is not a slot; it
+// resolves as a CALL, which is the established rule (ir_field_bundles
+// .go's class-field census refuses methods for the same reason). The
+// record contract tolerates members no leaf names exactly as a
+// Complete:false object does, and the USES discipline is what keeps
+// that honest: a body that actually calls `res.write(…)` reads a
+// one-step path whose name is in no leaf, which
+// usesAreAllDeclaredKeySteps (ir_object_slots.go) and
+// recordParameterUseOf both refuse — so a skipped method's absence can
+// never let a call read as an accounted-for leaf use. Skipping only
+// stops a method from poisoning a list of readable scalar members.
 //
 // Each member's sort and typeof read through declaredParamSort's own
 // reading, member-wise: number and boolean ride the number sort (their
@@ -63,36 +149,114 @@ type recordParamMember struct {
 // byte-identical member lists — they must, because the layout and the
 // call sites both build their entry vectors from this answer.
 func scalarMemberListOf(holder string, members []*ast.Node) ([]recordParamMember, bool) {
+	return scalarMemberListOfIn(holder, members, nil, true)
+}
+
+// scalarMemberListOfIn is the member reading scalarMemberListOf performs,
+// told two things about the position it is reading in.
+//
+// `parameterNames` are the TYPE PARAMETERS of the declaration these
+// members were written on, and the rule they carry is an INVARIANCE
+// argument: a member whose own annotation never mentions a parameter of
+// its declaration reads the same at every instantiation. `writable:
+// boolean` on `interface S<T>` is boolean for S<A> and S<B> alike —
+// nothing a caller applies can change it, because T does not appear in
+// it. So the parameterization is irrelevant to what that member's leaf
+// is, and the member reads exactly as written. That is why the whole
+// declaration no longer has to be refused for carrying parameters: the
+// parameters are a property of the DECLARATION, and soundness is a
+// question about each MEMBER.
+//
+// A member that DOES mention a parameter is the case the argument does
+// not cover, and it CONTRIBUTES UNKNOWN-SORTED rather than being skipped.
+// Its true annotation is whatever the instantiation substituted, which
+// this reader has no instantiation to substitute from; a default or a
+// constraint would only give one reading among many, and reading `T` as
+// its default would claim of every caller what is true of the ones that
+// applied nothing. But "I cannot say what sort this member is" is
+// exactly what the unknown sort says, and the member is DECLARED — the
+// name is promised to every instantiation whatever `T` turns out to be,
+// since a type argument substitutes a member's TYPE and never removes
+// the member.
+//
+// So the two readings are made consistent by the same accounting
+// argument the scalar widening above makes: contribute-unknown beats
+// skip for a DECLARED name. A skipped member leaves its name in no leaf,
+// which costs the body every read of it (recordParameterUseOf refuses a
+// path no leaf holds); a contributed one names the leaf, TOP-fills its
+// entry, and admits only the definedness test. The skip claimed less
+// and served less. Nothing about the parameterization makes the NAME
+// less promised, and the sort is where the ignorance belongs.
+//
+// A METHOD stays skipped, and the difference is not an inconsistency: a
+// method names no slot at all, being a call rather than a value, so
+// there is no leaf whose sort could carry the ignorance.
+//
+// The scan for a mention is SYNTACTIC — every identifier in the member's
+// annotation, at any depth, tested against the declaration's parameter
+// names. A name that shadows a parameter inside the annotation would be
+// read as a mention and the member skipped, which is the safe direction.
+//
+// `atEntry` is the position split declaredTypeMembersOf states: at an
+// entry a list yielding no leaf declines, at a LINK it contributes an
+// empty list. An all-methods interface is the shape this exists for.
+func scalarMemberListOfIn(
+	holder string,
+	members []*ast.Node,
+	parameterNames map[string]struct{},
+	atEntry bool,
+) ([]recordParamMember, bool) {
 	if len(members) == 0 {
-		return nil, false
+		if atEntry {
+			return nil, false
+		}
+		return nil, true
 	}
 	seen := map[string]struct{}{}
 	out := make([]recordParamMember, 0, len(members))
 	for _, member := range members {
+		// a METHOD, a CALL signature, and a CONSTRUCT signature all
+		// resolve as calls, never as slots: they name no leaf and refuse
+		// none, and the uses discipline refuses any body that actually
+		// calls one
+		if ast.IsMethodSignatureDeclaration(member) ||
+			ast.IsCallSignatureDeclaration(member) ||
+			ast.IsConstructSignatureDeclaration(member) {
+			continue
+		}
 		if !ast.IsPropertySignatureDeclaration(member) {
 			return nil, false
 		}
 		signature := member.AsPropertySignatureDeclaration()
-		// `lo?: number` admits absence, which a scalar entry slot cannot
-		// carry apart from its value; the whole parameter declines
-		if signature.PostfixToken != nil || signature.Initializer != nil {
+		// an INITIALIZER on a type element is not a value any entry
+		// carries — no route applies it, so the list declines
+		if signature.Initializer != nil {
 			return nil, false
 		}
+		// `lo?: number` is the member promised as possibly absent: the
+		// leaf is contributed sorted by the inner annotation, and the
+		// absence rides the entry state
+		mayBeAbsent := signature.PostfixToken != nil
 		if signature.Type == nil || signature.Name() == nil || !ast.IsIdentifier(signature.Name()) {
 			return nil, false
 		}
-		var sort BindingKind
-		var tag TypeofTag
-		switch signature.Type.Kind {
-		case ast.KindNumberKeyword:
-			sort, tag = BindingKindNumber, TypeofTagNumber
-		case ast.KindBooleanKeyword:
-			// booleans ride the number sort — declaredParamSort's own rule
-			sort, tag = BindingKindNumber, TypeofTagBoolean
-		case ast.KindStringKeyword:
-			sort, tag = BindingKindString, TypeofTagString
-		default:
-			return nil, false
+		// the member's sort, or UNKNOWN where this reading cannot state
+		// one. Two cases land on unknown, argued above: an annotation that
+		// is not a scalar keyword, and an annotation MENTIONING a type
+		// parameter of its own declaration (whose sort varies by
+		// instantiation, which is exactly what unknown says). Either way
+		// the member is declared, so it contributes its named leaf.
+		sort, tag := BindingKindUnknown, TypeofTagNone
+		if !mentionsTypeParameter(signature.Type, parameterNames) {
+			switch signature.Type.Kind {
+			case ast.KindNumberKeyword:
+				sort, tag = BindingKindNumber, TypeofTagNumber
+			case ast.KindBooleanKeyword:
+				// booleans ride the number sort — declaredParamSort's own rule
+				sort, tag = BindingKindNumber, TypeofTagBoolean
+			case ast.KindStringKeyword:
+				sort, tag = BindingKindString, TypeofTagString
+			}
 		}
 		key := signature.Name().Text()
 		if _, already := seen[key]; already {
@@ -100,18 +264,93 @@ func scalarMemberListOf(holder string, members []*ast.Node) ([]recordParamMember
 		}
 		seen[key] = struct{}{}
 		out = append(out, recordParamMember{
-			Key:       key,
-			SlotName:  holder + "." + key,
-			Sort:      sort,
-			TypeofTag: tag,
+			Key:         key,
+			SlotName:    holder + "." + key,
+			Sort:        sort,
+			TypeofTag:   tag,
+			MayBeAbsent: mayBeAbsent,
 		})
+	}
+	// a list contributing no leaf — all methods, all call or construct
+	// signatures, or empty. At an ENTRY the holder keeps its whole-name
+	// slot; at a LINK the side contributes nothing and the child reads on.
+	// (A parameter-mentioning member no longer lands here: it contributes
+	// its named leaf unknown-sorted.)
+	if len(out) == 0 {
+		if atEntry {
+			return nil, false
+		}
+		return nil, true
 	}
 	return out, true
 }
 
+// typeParameterNamesOf is the set of names a declaration's TYPE
+// PARAMETERS bind — the names a member's annotation is scanned against.
+// A declaration with no parameter list answers the empty set, under
+// which every member reads as written.
+func typeParameterNamesOf(list *ast.NodeList) map[string]struct{} {
+	if list == nil || len(list.Nodes) == 0 {
+		return nil
+	}
+	names := map[string]struct{}{}
+	for _, parameter := range list.Nodes {
+		if !ast.IsTypeParameterDeclaration(parameter) {
+			continue
+		}
+		name := parameter.AsTypeParameterDeclaration().Name()
+		if name == nil || !ast.IsIdentifier(name) {
+			continue
+		}
+		names[name.Text()] = struct{}{}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+// mentionsTypeParameter says whether an annotation names any of the
+// declaration's type parameters, anywhere inside it.
+//
+// The walk is over every identifier the annotation contains, at any
+// depth, because a parameter can appear anywhere a type can: `T`,
+// `T[]`, `Map<string, T>`, `{ x: T }`, `T extends U ? A : B`. Matching
+// on the NAME is what makes this a sound over-approximation — a
+// different entity that happens to share a parameter's spelling reads as
+// a mention and costs that member its leaf, never the reverse.
+//
+// A nil annotation is not a mention; the member reading below refuses it
+// on its own ground.
+func mentionsTypeParameter(annotation *ast.Node, parameterNames map[string]struct{}) bool {
+	if annotation == nil || len(parameterNames) == 0 {
+		return false
+	}
+	mentions := false
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if mentions {
+			return true
+		}
+		if ast.IsIdentifier(node) {
+			if _, named := parameterNames[node.Text()]; named {
+				mentions = true
+				return true
+			}
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	visit(annotation)
+	return mentions
+}
+
 // namedTypeMembersOf resolves a parameter annotation that is a TYPE
 // REFERENCE to a PLAIN IDENTIFIER — `p: Bounds` — to the members it
-// stands for, or (false).
+// stands for, or (false). A UNION annotation written straight on the
+// parameter is admitted here too, expanding to the members every arm
+// declares (unionMembersOf's own argument); everything below is about
+// the reference case.
 //
 // WHY THIS IS CHECK-INDEPENDENT. The identity of the answer is the
 // resolved DECLARATION NODE, and the members are then read off that
@@ -122,16 +361,13 @@ func scalarMemberListOf(holder string, members []*ast.Node) ([]recordParamMember
 // to a different declaration, and every shape where that is possible
 // declines below:
 //
-//   - a QUALIFIED name (`ns.Bounds`) or a name carrying TYPE ARGUMENTS
-//     (`Box<number>`) — the members would depend on the arguments, which
-//     no entry vector spells;
+//   - a name carrying TYPE ARGUMENTS (`Box<number>`) — the members would
+//     depend on the arguments, which no entry vector spells;
 //   - a symbol with NO declaration, or with declarations that are none of
 //     the two admitted kinds — nothing to read syntax off;
 //   - a symbol with MORE THAN ONE declaration — an interface declared
 //     twice merges its members across declarations, and reading only the
 //     first would build a member list the other declaration contradicts;
-//   - an interface or alias with TYPE PARAMETERS — the members'
-//     annotations are not the ones any instance actually holds;
 //   - a TYPE ALIAS whose right side is not a TYPE LITERAL (a union,
 //     another reference, a mapped or conditional type) — the census reads
 //     syntax, and only a literal spells its members;
@@ -146,13 +382,41 @@ func scalarMemberListOf(holder string, members []*ast.Node) ([]recordParamMember
 // heritage walks too), and the child's members SHADOW a parent's on a
 // name collision — TypeScript's own rule for an inherited property a
 // derived interface redeclares. Every existing decline still holds at
-// every link of the chain: type arguments on the reference or type
-// parameters on the declaration, a merged symbol (more than one
-// declaration), a qualified parent name, a parent that is not a plain
-// interface or an alias of a type literal, and any member the scalar
-// rules refuse. A CYCLE in the chain (illegal TS, but not assumed
+// every link of the chain: type arguments on the reference, a merged
+// symbol (more than one declaration), a parent that is not a plain
+// interface or an alias of a type literal, and any member the per-member
+// rules refuse (a computed name, an initializer, a duplicate key — a
+// member whose annotation does not SORT contributes unknown-sorted
+// rather than refusing). A CYCLE in the chain (illegal TS, but not assumed
 // pre-checked) declines rather than looping — the walk carries the
 // declaration nodes already on its own path and refuses to re-enter one.
+//
+// TWO THINGS A LINK NO LONGER REFUSES, each argued where it is decided.
+// A parent declaring NO DATA MEMBER contributes nothing rather than
+// declining the child (declaredTypeMembersOf's position split), and a
+// declaration carrying TYPE PARAMETERS is read member-wise rather than
+// refused whole (scalarMemberListOfIn's invariance rule). Together they
+// are what lets `interface WritableStream extends EventEmitter` read:
+// the parent is an all-methods generic interface, so it contributes no
+// leaf and needs no generic reasoning at all, and the child's own
+// `writable: boolean` mentions no parameter of anything.
+//
+// A QUALIFIED NAME (`NodeJS.WritableStream`) resolves too. The two-level
+// form is still one entity: the checker is asked which declaration the
+// whole name is, exactly as it is asked for a plain identifier, and the
+// members come off that declaration's own syntax. Nothing about a
+// namespace qualifier makes the answer depend on what a call applied —
+// that was the type-ARGUMENT objection, which stands unchanged. Refusing
+// the qualifier refused a name, not an ambiguity.
+//
+// THE DECLARING FILE IS NOT A REASON TO REFUSE. A name whose declaration
+// lives in a lib or .d.ts file reads through the same reader as a user
+// one: each member the reader can spell is as true of a lib-declared
+// record as of a user-declared one, and the member rules are what decide
+// readability either way. This mirrors typereading's landed lib-record
+// argument verbatim (host_type.go: "the declaring file is not the thing
+// that made them expensive") — what lib shapes really cost is their
+// SIZE, and the member budget below is what bounds that.
 //
 // The answer stays check-independent for the same reason the one-level
 // reading is: the checker is asked only which declaration a name is, and
@@ -163,6 +427,16 @@ func scalarMemberListOf(holder string, members []*ast.Node) ([]recordParamMember
 // lowering that runs without a checker keeps exactly today's behaviour
 // rather than crashing.
 func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]recordParamMember, bool) {
+	// a UNION written straight on the annotation
+	// (`p: Type | DynamicModule`) is not a name to resolve; it expands to
+	// the members EVERY arm declares, read at the ENTRY position so arms
+	// sharing nothing decline here (unionMembersOf)
+	if ast.IsUnionTypeNode(typeNode) {
+		if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+			return nil, false
+		}
+		return unionMembersOf(ctx, holder, typeNode, nil, true)
+	}
 	if !ast.IsTypeReferenceNode(typeNode) {
 		return nil, false
 	}
@@ -172,15 +446,34 @@ func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]
 		return nil, false
 	}
 	typeName := reference.TypeName
-	// only a PLAIN identifier: a qualified name reaches into a namespace
-	// whose resolution this reading does not claim
-	if typeName == nil || !ast.IsIdentifier(typeName) {
+	// a plain identifier or a QUALIFIED name — both name one entity the
+	// checker resolves to one declaration
+	if !isResolvableTypeName(typeName) {
 		return nil, false
 	}
 	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
 		return nil, false
 	}
-	return declaredTypeMembersOf(ctx, holder, typeName, nil)
+	// the ENTRY position: a name expanding to no member declines here, so
+	// the holder keeps its single whole-name slot
+	return declaredTypeMembersOf(ctx, holder, typeName, nil, true)
+}
+
+// isResolvableTypeName says whether a type NAME is one the member
+// reading resolves: a plain identifier (`Bounds`) or a QUALIFIED name
+// (`NodeJS.WritableStream`).
+//
+// Both name ONE entity, and the reading asks the checker exactly one
+// question about either — which declaration is this. A qualified name's
+// left side is a namespace, which changes where the name is looked up
+// and nothing about what the answer means; the checker performs that
+// lookup itself when asked about the whole name. So the qualifier costs
+// this reader nothing it was relying on.
+func isResolvableTypeName(typeName *ast.Node) bool {
+	if typeName == nil {
+		return false
+	}
+	return ast.IsIdentifier(typeName) || ast.IsQualifiedName(typeName)
 }
 
 // declaredTypeMembersOf is the reading namedTypeMembersOf performs at
@@ -188,14 +481,43 @@ func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]
 // declaration and answer the members that declaration stands for,
 // including whatever it inherits.
 //
+// The name may be plain or QUALIFIED, and its declaration may live in a
+// LIB or .d.ts file — neither changes what is read. symbolAt answers
+// which declaration the name is, and the members come off that
+// declaration's own syntax under the same per-member rules a user
+// interface takes. A lib record's readable members are as true as a user
+// record's (typereading/host_type.go's landed argument); what bounds the
+// cost is the member reading itself, never the declaring file.
+//
 // `visiting` holds the declaration nodes already on this walk's path. A
 // name resolving back onto one of them is a cycle, which answers false
 // rather than recursing forever.
+//
+// EMPTY MEANS TWO DIFFERENT THINGS DEPENDING ON POSITION, which is what
+// `atEntry` splits. At the ENTRY — the annotation a parameter or a local
+// is actually written with — a name expanding to no member is a name
+// that bought nothing: the holder keeps its single whole-name slot,
+// because laying out zero leaves for a value the body reads would leave
+// every read of it unserved with no slot to point at. That is the
+// decline-on-empty rule, and it stays.
+//
+// At a LINK — a heritage parent, an intersection side — empty means the
+// side declares no DATA member, and that is a complete, true answer
+// rather than a failure. The child's promise is its own members plus
+// whatever the parent declares, so a parent declaring nothing adds no
+// leaf and takes none away. Refusing the child over it would confuse
+// "this side contributes nothing" with "this side is unreadable", which
+// are opposite facts: the first is knowledge, the second is its absence.
+// The unreadable case still declines the whole reading at every link
+// (intersectionMembersOf's own argument) — this only stops a parent that
+// is READ, and read to zero data members, from poisoning a child that
+// spells members of its own.
 func declaredTypeMembersOf(
 	ctx *FlowContext,
 	holder string,
 	typeName *ast.Node,
 	visiting []*ast.Node,
+	atEntry bool,
 ) ([]recordParamMember, bool) {
 	symbol := symbolAt(ctx.P.Checker, typeName)
 	if symbol == nil || len(symbol.Declarations) != 1 {
@@ -212,10 +534,8 @@ func declaredTypeMembersOf(
 	}
 	if ast.IsInterfaceDeclaration(declaration) {
 		asInterface := declaration.AsInterfaceDeclaration()
-		if asInterface.TypeParameters != nil && len(asInterface.TypeParameters.Nodes) > 0 {
-			return nil, false
-		}
-		own, ownOk := interfaceOwnMembersOf(holder, asInterface)
+		parameterNames := typeParameterNamesOf(asInterface.TypeParameters)
+		own, ownOk := interfaceOwnMembersOf(holder, asInterface, parameterNames)
 		if !ownOk {
 			return nil, false
 		}
@@ -228,36 +548,378 @@ func declaredTypeMembersOf(
 			return nil, false
 		}
 		merged := mergeShadowedMembers(inherited, own)
-		if len(merged) == 0 {
+		if atEntry && len(merged) == 0 {
 			return nil, false
 		}
 		return merged, true
 	}
 	if ast.IsTypeAliasDeclaration(declaration) {
 		asAlias := declaration.AsTypeAliasDeclaration()
-		if asAlias.TypeParameters != nil && len(asAlias.TypeParameters.Nodes) > 0 {
+		parameterNames := typeParameterNamesOf(asAlias.TypeParameters)
+		if asAlias.Type == nil {
 			return nil, false
 		}
-		if asAlias.Type == nil || !ast.IsTypeLiteralNode(asAlias.Type) {
-			return nil, false
+		if ast.IsTypeLiteralNode(asAlias.Type) {
+			members, readable := scalarMemberListOfIn(
+				holder, asAlias.Type.AsTypeLiteralNode().Members.Nodes, parameterNames, atEntry)
+			return members, readable
 		}
-		return scalarMemberListOf(holder, asAlias.Type.AsTypeLiteralNode().Members.Nodes)
+		if ast.IsIntersectionTypeNode(asAlias.Type) {
+			// a PARAMETERIZED alias of an intersection would have to
+			// substitute into each side before reading it, and the sides are
+			// read as written — so the invariance argument does not reach
+			// here and the alias declines
+			if len(parameterNames) > 0 {
+				return nil, false
+			}
+			path := make([]*ast.Node, len(visiting), len(visiting)+1)
+			copy(path, visiting)
+			return intersectionMembersOf(ctx, holder, asAlias.Type, append(path, declaration), atEntry)
+		}
+		if ast.IsUnionTypeNode(asAlias.Type) {
+			// a PARAMETERIZED alias of a union would have to substitute into
+			// each arm before reading it, and the arms are read as written —
+			// so the invariance argument does not reach here and the alias
+			// declines, exactly as the intersection alias does
+			if len(parameterNames) > 0 {
+				return nil, false
+			}
+			path := make([]*ast.Node, len(visiting), len(visiting)+1)
+			copy(path, visiting)
+			return unionMembersOf(ctx, holder, asAlias.Type, append(path, declaration), atEntry)
+		}
+		return nil, false
 	}
 	// a class, an enum, a module, a type parameter — none expand
 	return nil, false
 }
 
+// intersectionMembersOf reads an INTERSECTION annotation
+// (`type W = NodeJS.WritableStream & WriteHeaders`) as one member list.
+//
+// WHAT AN INTERSECTION MEANS HERE. A value of `A & B` is a value of A and
+// a value of B at once, so it carries EVERY member of A and every member
+// of B. That is the whole rule, and it is why the sides union rather than
+// meet: each side's members are individually promised to every value the
+// annotation admits, which is exactly the promise a record expansion
+// needs before a member may become a slot.
+//
+// Each intersectee is read by the SAME member reader every other route
+// uses — a type literal off its own syntax, a named interface through the
+// heritage-walking route, a nested alias recursively, cycle-guarded by
+// the `visiting` path this walk already carries. So an intersection of
+// two interfaces and the one interface spelling the same members expand
+// identically.
+//
+// WHERE TWO SIDES NAME ONE MEMBER, mergeShadowedMembers keeps the later
+// side's reading at the earlier side's position — the same discipline the
+// heritage walk uses for a redeclared inherited property, and the same
+// reason: the slot vector must not move because a second side restated a
+// member. The two sides agreeing is the ordinary case; where they
+// disagree about a member's SORT, an intersection member's true type is
+// the two member types' own intersection, which this reader has no form
+// for. It does not guess: a member the two sides sort differently is a
+// member no single slot can stand for, and the WHOLE expansion declines
+// rather than picking one side's sort. Picking would be the unsound
+// move — a slot sorted number for a member some callers pass a string.
+//
+// WHERE THE SIDES DISAGREE ABOUT ABSENCE, the REQUIRED reading wins, and
+// this one has an answer where the sort does not. A value of `A & B`
+// satisfies both, so a member A declares required and B declares
+// optional is required of every such value: the intersection of "number"
+// and "number-or-absent" is "number". Taking the required reading is
+// therefore the true one, not a guess — and it is also the conservative
+// direction, since it never claims a value may be absent that must be
+// there.
+//
+// AN UNREADABLE SIDE DECLINES THE WHOLE READING, and this is the part
+// worth stating rather than assuming. The tempting argument runs: an
+// intersection can only ADD members, so the readable side's members are
+// still promised to every value, and expanding on them alone is sound.
+// The promise half of that is true. What it misses is that every consumer
+// reads a `true` answer as "these are the members, all of them" — which
+// is why an unreadable SIDE is different in kind from an unreadable
+// MEMBER: a member whose annotation does not sort is still NAMED, so the
+// list stays complete and only the sort goes unknown, while a side this
+// reader cannot read hides members it cannot even name. A record local's leaves
+// (ir_object_slots.go) are laid out as the value's WHOLE flattening, and
+// the uses that would observe the value as a value are then refused on
+// the ground that every leaf is accounted for. Answering a partial list
+// as if it were whole would let a use of an unnamed member read as
+// accounted-for when nothing holds it. The honest reading of a side this
+// reader cannot read is that it does not know what that side declares —
+// not that it declares nothing — so the answer is false and the holder
+// keeps its whole-name slot. A side becoming readable later widens the
+// answer; nothing has to be taken back.
+func intersectionMembersOf(
+	ctx *FlowContext,
+	holder string,
+	intersection *ast.Node,
+	visiting []*ast.Node,
+	atEntry bool,
+) ([]recordParamMember, bool) {
+	sides := intersection.AsIntersectionTypeNode().Types
+	if sides == nil || len(sides.Nodes) == 0 {
+		return nil, false
+	}
+	var merged []recordParamMember
+	sortOfKey := map[string]BindingKind{}
+	tagOfKey := map[string]TypeofTag{}
+	// whether any side so far declared this member REQUIRED
+	requiredKey := map[string]bool{}
+	for _, side := range sides.Nodes {
+		var members []recordParamMember
+		var readable bool
+		switch {
+		case ast.IsTypeLiteralNode(side):
+			// a SIDE is a link: a literal side of nothing but methods
+			// contributes no member and declines nothing
+			members, readable = scalarMemberListOfIn(
+				holder, side.AsTypeLiteralNode().Members.Nodes, nil, false)
+		case ast.IsTypeReferenceNode(side):
+			reference := side.AsTypeReferenceNode()
+			// the entry reference's own refusal, at every side: type
+			// arguments make the members depend on what was applied. A
+			// QUALIFIED side name resolves like a plain one — it names one
+			// entity, which is what `NodeJS.WritableStream & WriteHeaders`
+			// needs from this reader.
+			if reference.TypeArguments != nil && len(reference.TypeArguments.Nodes) > 0 {
+				return nil, false
+			}
+			if !isResolvableTypeName(reference.TypeName) {
+				return nil, false
+			}
+			members, readable = declaredTypeMembersOf(ctx, holder, reference.TypeName, visiting, false)
+		}
+		if !readable {
+			return nil, false
+		}
+		// a member both sides name must be sorted the same on both, or no
+		// one slot stands for it. Absence is noted per key and settled
+		// once over the whole answer below.
+		for _, member := range members {
+			sort, named := sortOfKey[member.Key]
+			if named && (sort != member.Sort || tagOfKey[member.Key] != member.TypeofTag) {
+				return nil, false
+			}
+			sortOfKey[member.Key] = member.Sort
+			tagOfKey[member.Key] = member.TypeofTag
+			requiredKey[member.Key] = requiredKey[member.Key] || !member.MayBeAbsent
+		}
+		merged = mergeShadowedMembers(merged, members)
+	}
+	// an intersection every side of which contributed no data member: at
+	// an entry the holder keeps its whole-name slot, at a link the
+	// intersection itself contributes nothing
+	if atEntry && len(merged) == 0 {
+		return nil, false
+	}
+	// the required reading applied once over the whole answer, so a side
+	// declaring a member required settles it whether it came before or
+	// after the side that declared it optional. Written into a COPY: a
+	// single-side merge hands back the side's own slice, which another
+	// reading may hold.
+	settled := make([]recordParamMember, len(merged))
+	copy(settled, merged)
+	for at := range settled {
+		if requiredKey[settled[at].Key] {
+			settled[at].MayBeAbsent = false
+		}
+	}
+	return settled, true
+}
+
+// unionMembersOf reads a UNION annotation (`p: A | B | C`) as the members
+// EVERY arm declares.
+//
+// WHAT A UNION MEANS HERE, and why it is the mirror of the intersection
+// above. A value of `A | B` is a value of A OR a value of B, so the only
+// members the annotation promises to every such value are the ones EVERY
+// arm declares — the arms' member lists INTERSECT rather than union. A
+// member only one arm spells is a member the value may simply not have,
+// and giving it a slot would name a leaf for a value that never carries
+// it. A member every arm spells is there whichever arm the value is, and
+// that is exactly the promise a record expansion needs before a member
+// may become a slot.
+//
+// Each ARM is read by the SAME member reader every other route uses — a
+// type literal off its own syntax, a named interface through the
+// heritage-walking route, a nested alias recursively, cycle-guarded by
+// the `visiting` path this walk already carries. So a union of two
+// interfaces and the one interface spelling the members they share expand
+// identically.
+//
+// AN ARM'S SORT MUST AGREE WITH THE OTHERS', or the whole expansion
+// declines — the same rule intersectionMembersOf argues at its own merge,
+// for the same reason. A member the arms sort differently is a member no
+// single slot can stand for, and picking one arm's sort would be the
+// unsound move: a slot sorted number for a member the value carries as a
+// string whenever it is the other arm. The reader does not guess.
+//
+// WHERE THE ARMS DISAGREE ABOUT ABSENCE, THE WEAKER PROMISE WINS — and
+// this is the exact opposite of the intersection's rule, because the
+// connective is. A value of `A | B` satisfies ONE of them, so a member A
+// declares required and B declares optional is only optional of that
+// value: the value may be the arm where the member is optional, and
+// nothing in the annotation says which arm it is. So the union of
+// "number" and "number-or-absent" is "number-or-absent", and the member
+// is carried MayBeAbsent as soon as ANY arm marks it. Taking the required
+// reading would claim a value must carry a member the B arm lets it
+// omit — the unsound direction. Carrying the absence is the true reading
+// and also the conservative one, since the absence rides the entry state
+// and never claims a value is there.
+//
+// AN UNREADABLE ARM DECLINES THE WHOLE EXPANSION, verbatim the argument
+// intersectionMembersOf makes for an unreadable side. The tempting move
+// is to intersect over the readable arms alone and say the result is
+// still promised — but every consumer reads a `true` answer as "these are
+// the members, all of them", and an unreadable ARM hides members it
+// cannot name (unlike an unsortable MEMBER, which is named and merely
+// unknown-sorted). An arm this reader cannot read is an arm whose members it
+// does not KNOW — not one that declares nothing — and intersecting
+// against an unknown list would keep members that arm may well not have.
+// The honest answer is false, and the holder keeps its whole-name slot. An
+// arm becoming readable later widens the answer; nothing has to be taken
+// back.
+//
+// AN EMPTY INTERSECTION DECLINES AT AN ENTRY. Arms sharing no member
+// expand to nothing, and expanding to nothing is not expanding: the
+// holder keeps its single whole-name slot, exactly as the entry rule
+// states everywhere else. At a LINK the empty answer is the true one —
+// the union side contributes no member and takes none away.
+//
+// A CLASS arm is read by whatever declaredTypeMembersOf makes of it, and
+// that reader refuses a class outright. So a union with a class arm
+// declines whole, which is the honest reading: this walk has no member
+// list for that arm at all.
+func unionMembersOf(
+	ctx *FlowContext,
+	holder string,
+	union *ast.Node,
+	visiting []*ast.Node,
+	atEntry bool,
+) ([]recordParamMember, bool) {
+	arms := union.AsUnionTypeNode().Types
+	if arms == nil || len(arms.Nodes) == 0 {
+		return nil, false
+	}
+	// the running intersection: the first arm seeds it, every later arm
+	// keeps only what it also declares
+	var common []recordParamMember
+	// whether any arm so far declared this member OPTIONAL — the weaker
+	// promise, settled once over the whole answer below
+	absentKey := map[string]bool{}
+	for at, arm := range arms.Nodes {
+		members, readable := unionArmMembersOf(ctx, holder, arm, visiting)
+		if !readable {
+			return nil, false
+		}
+		byKey := map[string]recordParamMember{}
+		for _, member := range members {
+			// an arm spelling one member twice is a list the scalar reader
+			// already refuses, so a collision here cannot happen; the map is
+			// the arm's own lookup for the intersection step
+			byKey[member.Key] = member
+			absentKey[member.Key] = absentKey[member.Key] || member.MayBeAbsent
+		}
+		if at == 0 {
+			// the first arm's list, copied: the intersection is narrowed in
+			// place below and the arm's own slice may be held by another
+			// reading
+			common = make([]recordParamMember, len(members))
+			copy(common, members)
+			continue
+		}
+		kept := make([]recordParamMember, 0, len(common))
+		for _, member := range common {
+			armMember, declared := byKey[member.Key]
+			if !declared {
+				// a member this arm does not declare is a member the value may
+				// not have — it leaves the intersection
+				continue
+			}
+			// a member the arms sort differently is a member no one slot
+			// stands for
+			if armMember.Sort != member.Sort || armMember.TypeofTag != member.TypeofTag {
+				return nil, false
+			}
+			kept = append(kept, member)
+		}
+		common = kept
+		if len(common) == 0 {
+			break
+		}
+	}
+	// arms sharing no member: at an entry the holder keeps its whole-name
+	// slot, at a link the union contributes nothing
+	if atEntry && len(common) == 0 {
+		return nil, false
+	}
+	// the weaker promise applied once over the whole answer, so an arm
+	// declaring a member optional settles it whether it came before or
+	// after the arm that declared it required
+	for index := range common {
+		if absentKey[common[index].Key] {
+			common[index].MayBeAbsent = true
+		}
+	}
+	return common, true
+}
+
+// unionArmMembersOf reads ONE arm of a union as a member list.
+//
+// An arm is a LINK, never an entry: an arm that declares no data member
+// is READ, and reading it to nothing is a true answer about that arm —
+// it just leaves the running intersection empty, which the caller settles
+// under its own entry rule. The arm forms admitted are the ones every
+// other route admits: an inline type literal off its own syntax, and a
+// type reference resolved through declaredTypeMembersOf under the entry
+// reference's own refusals (type arguments make the members depend on
+// what was applied; a name that is neither plain nor qualified names no
+// one entity). Every other arm form — a literal type, a keyword, an
+// array, a function type — is an arm this reader cannot read, and it
+// declines the whole union.
+func unionArmMembersOf(
+	ctx *FlowContext,
+	holder string,
+	arm *ast.Node,
+	visiting []*ast.Node,
+) ([]recordParamMember, bool) {
+	switch {
+	case ast.IsTypeLiteralNode(arm):
+		return scalarMemberListOfIn(holder, arm.AsTypeLiteralNode().Members.Nodes, nil, false)
+	case ast.IsTypeReferenceNode(arm):
+		reference := arm.AsTypeReferenceNode()
+		if reference.TypeArguments != nil && len(reference.TypeArguments.Nodes) > 0 {
+			return nil, false
+		}
+		if !isResolvableTypeName(reference.TypeName) {
+			return nil, false
+		}
+		return declaredTypeMembersOf(ctx, holder, reference.TypeName, visiting, false)
+	}
+	return nil, false
+}
+
 // interfaceOwnMembersOf reads an interface's OWN member list under the
-// scalar rules, allowing the EMPTY list that scalarMemberListOf refuses:
+// scalar rules, allowing the EMPTY list an entry reading refuses:
 // `interface Bounds extends Base {}` declares nothing itself and takes
-// every member from its parent. The caller refuses the whole expansion
-// when the merged list is empty, so an interface with no members and no
-// heritage still declines exactly as before.
-func interfaceOwnMembersOf(holder string, asInterface *ast.InterfaceDeclaration) ([]recordParamMember, bool) {
+// every member from its parent. The caller applies the entry rule to the
+// MERGED list, so an interface with no members and no heritage still
+// declines at an entry exactly as before.
+//
+// `parameterNames` are the interface's own type parameters, carried in
+// so each member is tested for mentioning one — the invariance rule
+// scalarMemberListOfIn states.
+func interfaceOwnMembersOf(
+	holder string,
+	asInterface *ast.InterfaceDeclaration,
+	parameterNames map[string]struct{},
+) ([]recordParamMember, bool) {
 	if asInterface.Members == nil || len(asInterface.Members.Nodes) == 0 {
 		return nil, true
 	}
-	return scalarMemberListOf(holder, asInterface.Members.Nodes)
+	return scalarMemberListOfIn(holder, asInterface.Members.Nodes, parameterNames, false)
 }
 
 // heritageMembersOf reads everything an interface INHERITS: each
@@ -265,10 +927,15 @@ func interfaceOwnMembersOf(holder string, asInterface *ast.InterfaceDeclaration)
 // the same reading, in clause and reference order, later parents
 // shadowing earlier ones the way TypeScript's own resolution does.
 //
-// A parent reference carrying TYPE ARGUMENTS (`extends Box<number>`) or
-// spelled by anything but a plain identifier (`extends ns.Base`)
-// declines — the same two shapes the entry reference itself refuses,
-// for the same reasons.
+// A parent reference carrying TYPE ARGUMENTS (`extends Box<number>`)
+// declines — the same shape the entry reference itself refuses, for the
+// same reason.
+//
+// A QUALIFIED parent (`extends NodeJS.EventEmitter`) resolves like a
+// plain one. In a heritage clause the qualifier is spelled as a PROPERTY
+// ACCESS rather than a QualifiedName — the parser reads a heritage
+// parent as an expression — so both spellings are admitted here, and
+// symbolAt answers on either.
 func heritageMembersOf(
 	ctx *FlowContext,
 	holder string,
@@ -292,10 +959,16 @@ func heritageMembersOf(
 			if parent.TypeArguments != nil && len(parent.TypeArguments.Nodes) > 0 {
 				return nil, false
 			}
-			if parent.Expression == nil || !ast.IsIdentifier(parent.Expression) {
+			// a plain parent name, or a QUALIFIED one — spelled as a
+			// property access in heritage position
+			if parent.Expression == nil ||
+				!(ast.IsIdentifier(parent.Expression) || ast.IsPropertyAccessExpression(parent.Expression)) {
 				return nil, false
 			}
-			members, ok := declaredTypeMembersOf(ctx, holder, parent.Expression, visiting)
+			// a parent is a LINK, not the entry: one that reads to no data
+			// member contributes nothing rather than declining this
+			// interface
+			members, ok := declaredTypeMembersOf(ctx, holder, parent.Expression, visiting, false)
 			if !ok {
 				return nil, false
 			}
@@ -387,13 +1060,24 @@ func recordParamMembersOf(parameter *ast.Node) ([]recordParamMember, bool) {
 //	    then read off THAT declaration's syntax by the same member rules
 //	    (namedTypeMembersOf states why the answer is check-independent).
 //
-// A class name, a generic, a union, an intersection, a qualified name,
-// an unresolvable name, an optional member, a method, an index
-// signature, a nested literal, or a member whose own annotation is not
-// number/boolean/string answers false and the parameter keeps its single
-// whole-name slot — exactly today's behaviour. A declaration's summary
-// quantifies over every caller, and only what the annotation itself
-// promises to every entry may become slots.
+// A class name, a generic with no readable constraint, an unresolvable
+// name, an index signature, a computed member name, or a duplicate key
+// answers false and the parameter keeps its single whole-name slot. A
+// declaration's summary quantifies over every caller, and only what the
+// annotation itself promises to every entry may become slots. A member
+// whose own annotation is not number/boolean/string does not refuse: it
+// contributes its named leaf unknown-sorted, which promises the NAME to
+// every entry and claims nothing about the value
+// (scalarMemberListOfIn's accounting argument).
+//
+// An OPTIONAL member is such a promise — a weaker one — so it
+// contributes its leaf wearing MayBeAbsent; a METHOD signature names no
+// slot and is skipped; a QUALIFIED name resolves like a plain one; an
+// INTERSECTION reads as the union of its sides' members
+// (intersectionMembersOf); and a UNION reads as the members every ARM
+// declares, the intersection of the arms' lists, with the weaker absence
+// promise winning across arms (unionMembersOf). Each is argued at its own
+// reader above.
 func recordParamMembersIn(ctx *FlowContext, parameter *ast.Node) ([]recordParamMember, bool) {
 	pd := parameter.AsParameterDeclaration()
 	if pd.Type == nil || pd.Name() == nil {
@@ -428,6 +1112,13 @@ func recordParamMembersIn(ctx *FlowContext, parameter *ast.Node) ([]recordParamM
 		return held, len(held) > 0
 	}
 	members, expanded := namedTypeMembersOf(ctx, holder, pd.Type)
+	if !expanded && ast.IsTypeReferenceNode(pd.Type) {
+		// a GENERIC parameter reads through its CONSTRAINT: the constraint
+		// is the only member set the annotation promises to every type
+		// argument a caller could apply, so it is exactly what may become
+		// slots. An unbounded generic promises nothing and stays declined.
+		members, expanded = constraintMembersOf(ctx, holder, pd.Type)
+	}
 	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
 		// nothing resolved and nothing to remember: a later reading WITH a
 		// context must still be free to resolve this parameter
@@ -697,14 +1388,35 @@ const (
 //     back to whoever filled them, which the layout arranges as one pair
 //     (lowerSummaryBodyWithCaptures' record-parameter branch).
 //
+// A WRITE TO A DECLARED MEMBER (`p.lo = 1`, `p.lo += 1`, `p.lo++`) is
+// SERVED, and this is the one classification that changed: the leaf has a
+// slot of its own — the expansion laid "p.lo" out as an entry, and
+// SpelledNameOf spells exactly that one step — so the write lowers as an
+// ordinary assignment to that slot, and the leaf row goes out Written so
+// the caller takes the moved value back through the call statement's rets
+// (recordParamRets, ir_summary_call.go). That is the same write-back
+// threading a HANDED-OVER record's leaves already ride; the difference is
+// only that here the lowering can see the write and name its value,
+// instead of standing in for code it cannot read.
+//
+// The written members are reported beside the use, because the layout
+// needs to know WHICH leaves moved: a member the body only reads keeps
+// its row unwritten, so the caller goes on believing it. Marking every
+// leaf written would be sound and needlessly coarse.
+//
 // These still make the body unreadable, each because no slot stands for
 // what was written:
 //
 //   - a member the annotation never declared (`p.mid`) — no slot holds
-//     it, and reading it would silently answer another slot's state;
-//   - a WRITE to a member (`p.lo = 1`, `p.lo += 1`, `p.lo++`, `delete
-//     p.lo`) — the caller's own object would move, and a summary carries
-//     no effect back out through its entries;
+//     it, and reading it would silently answer another slot's state.
+//     THIS IS ALSO WHAT KEEPS THE METHOD SKIP HONEST: a method signature
+//     contributes no leaf (scalarMemberListOf), so a body that calls
+//     `p.write(…)` reads a one-step path on an undeclared name and lands
+//     here. The call is refused, never admitted as an accounted-for leaf
+//     use. Skipping widens which member LISTS read; it never widens
+//     which USES are served;
+//   - a `delete p.lo` — the leaf slot holds a value, and no slot state
+//     spells "this key is no longer present";
 //   - a deep path (`p.lo.x`) — the members are scalars, so no such leaf
 //     exists;
 //   - a COMPUTED or OPTIONAL step (`p[e]`, `p?.lo`) — the first names no
@@ -713,17 +1425,48 @@ const (
 // The answer is the WORST use found: one hand-over makes the whole body's
 // leaves movable, and one unreadable use declines it whatever else it
 // does.
-func recordParameterUseOf(body *ast.Node, name string, members []recordParamMember) recordParameterUse {
+func recordParameterUseOf(
+	body *ast.Node,
+	name string,
+	members []recordParamMember,
+) (recordParameterUse, map[string]struct{}) {
 	declared := map[string]struct{}{}
 	for _, member := range members {
 		declared[member.Key] = struct{}{}
 	}
-	// a node that WRITES through this parameter's spelling
+	// the declared members this body ASSIGNS through the parameter — the
+	// leaves whose rows go out Written
+	writtenMembers := map[string]struct{}{}
+	// writeThroughParameter classifies a node that writes through this
+	// parameter's spelling: (served, unreadable). A one-step write on a
+	// DECLARED member notes the member and is served; every other write
+	// through the name is unreadable.
+	writeThroughParameter := func(target *ast.Node, deletes bool) (served bool, unreadable bool) {
+		root, path, ok := propertyPathOf(Unwrapped(target))
+		if !ok || root != name {
+			return false, false
+		}
+		if deletes {
+			// no slot state spells an absent KEY
+			return false, true
+		}
+		if len(path) != 1 {
+			return false, true
+		}
+		if _, isDeclared := declared[path[0]]; !isDeclared {
+			return false, true
+		}
+		writtenMembers[path[0]] = struct{}{}
+		return true, false
+	}
+	// a node that WRITES through this parameter's spelling, answering
+	// whether the write is unreadable — a served member write answers
+	// false here and has already been noted
 	writesThroughParameter := func(node *ast.Node) bool {
 		if ast.IsBinaryExpression(node) {
 			bin := node.AsBinaryExpression()
 			if bin.OperatorToken.Kind >= ast.KindFirstAssignment && bin.OperatorToken.Kind <= ast.KindLastAssignment {
-				if root, _, ok := propertyPathOf(Unwrapped(bin.Left)); ok && root == name {
+				if _, unreadable := writeThroughParameter(bin.Left, false); unreadable {
 					return true
 				}
 			}
@@ -731,7 +1474,7 @@ func recordParameterUseOf(body *ast.Node, name string, members []recordParamMemb
 		if ast.IsPrefixUnaryExpression(node) {
 			unary := node.AsPrefixUnaryExpression()
 			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
-				if root, _, ok := propertyPathOf(Unwrapped(unary.Operand)); ok && root == name {
+				if _, unreadable := writeThroughParameter(unary.Operand, false); unreadable {
 					return true
 				}
 			}
@@ -739,13 +1482,13 @@ func recordParameterUseOf(body *ast.Node, name string, members []recordParamMemb
 		if ast.IsPostfixUnaryExpression(node) {
 			unary := node.AsPostfixUnaryExpression()
 			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
-				if root, _, ok := propertyPathOf(Unwrapped(unary.Operand)); ok && root == name {
+				if _, unreadable := writeThroughParameter(unary.Operand, false); unreadable {
 					return true
 				}
 			}
 		}
 		if ast.IsDeleteExpression(node) {
-			if root, _, ok := propertyPathOf(Unwrapped(node.AsDeleteExpression().Expression)); ok && root == name {
+			if _, unreadable := writeThroughParameter(node.AsDeleteExpression().Expression, true); unreadable {
 				return true
 			}
 		}
@@ -791,7 +1534,12 @@ func recordParameterUseOf(body *ast.Node, name string, members []recordParamMemb
 		return false
 	}
 	visit(body)
-	return worst
+	if worst == recordParameterUnreadable {
+		// the body declines whole; the members noted before the refusal
+		// name nothing the layout will lay out
+		return worst, nil
+	}
+	return worst, writtenMembers
 }
 
 // wholeRecordUseAt classifies ONE whole-name occurrence by the position
@@ -937,7 +1685,27 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 			captureHavocNames = append(captureHavocNames, "this."+field.Name)
 		}
 	}
-	if len(census.Reads) == 0 && len(census.Writes) == 0 && len(captureHavocNames) == 0 {
+	// A CONSTRUCTOR RUNS MORE THAN ITS BODY. The class's field
+	// INITIALIZERS and its PARAMETER PROPERTIES are statements the runtime
+	// runs on the way in, and the constructor prelude
+	// (lowerSummaryBodyWithCaptures) emits exactly those assignments ahead
+	// of the body's own. The census, though, walks the BODY, so a field
+	// written only by its initializer — `private _statusCode = 200;` in a
+	// class whose constructor only calls super — appears in neither Reads
+	// nor Writes, and the bundle it belongs to never expands. That is a
+	// field the constructor demonstrably leaves a value in, reported as a
+	// field the constructor never touched.
+	//
+	// So a constructor's prelude-written fields join the census's own
+	// writes here, read off the class's declarations rather than off the
+	// body. They are the same fields the prelude will assign, resolved by
+	// the same two rules the prelude applies (an initialized property
+	// declaration, a parameter property), so the layout and the prelude
+	// name one set: every slot the prelude writes exists, and every slot
+	// laid out for a prelude write is one the prelude fills.
+	preludeWritten := constructorPreludeFields(declaration, fields)
+	if len(census.Reads) == 0 && len(census.Writes) == 0 &&
+		len(captureHavocNames) == 0 && len(preludeWritten) == 0 {
 		return thisBundleLayout{}
 	}
 	written := map[string]struct{}{}
@@ -947,12 +1715,42 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 	for _, name := range captureHavocNames {
 		written[name] = struct{}{}
 	}
+	for _, field := range preludeWritten {
+		written[field.SlotName] = struct{}{}
+	}
 	// the READ fields carry entries. A write-only field has no entry state
 	// for the caller to fill — its slot is one the body creates, which the
 	// locals' own layout would have to hold — so this wave lays out the
 	// reads and names the writes among them.
-	entries := make([]bodySlot, 0, len(census.Reads))
+	//
+	// A CONSTRUCTOR's prelude-written fields carry entries too, and for the
+	// reason the read fields do not have to argue: the prelude ASSIGNS every
+	// one of them before any statement runs, so the entry's incoming value
+	// is overwritten before anything can read it. The entry state a caller
+	// would fill is dead on arrival, which is what makes laying out a
+	// write-only slot honest here and not in a method. The entry exists so
+	// the prelude has a slot to write and the exit row has a slot to report
+	// — which is what a `new C()` local's leaves are read from.
+	entries := make([]bodySlot, 0, len(census.Reads)+len(preludeWritten))
 	for _, field := range census.Reads {
+		entries = append(entries, bodySlot{
+			Name:      field.SlotName,
+			Sort:      field.Sort,
+			TypeofTag: field.TypeofTag,
+		})
+	}
+	// the prelude fields come after the read ones, each at most once — a
+	// field the body ALSO reads already has its entry, and a second would
+	// put the same spelling in the vector twice
+	laidOut := map[string]struct{}{}
+	for _, entry := range entries {
+		laidOut[entry.Name] = struct{}{}
+	}
+	for _, field := range preludeWritten {
+		if _, already := laidOut[field.SlotName]; already {
+			continue
+		}
+		laidOut[field.SlotName] = struct{}{}
 		entries = append(entries, bodySlot{
 			Name:      field.SlotName,
 			Sort:      field.Sort,
@@ -966,6 +1764,70 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 		CaptureHavocNames: captureHavocNames,
 		ReturnsSelf:       census.ReturnsSelf,
 	}
+}
+
+// constructorPreludeFields is the field set a CONSTRUCTOR's prelude
+// writes before its body's first statement: every class member that is
+// an initialized property declaration, and every parameter property.
+//
+// It exists so the LAYOUT and the PRELUDE read one list. The prelude
+// (lowerSummaryBodyWithCaptures) emits an assignment per initialized
+// property and per parameter property, each onto the slot named
+// "this.<field>"; this function names exactly those fields off the same
+// declarations, so a slot the prelude looks up always exists, and a slot
+// laid out for a prelude write is always one the prelude fills. Reading
+// them apart is what let the two disagree: the layout asked the body
+// census, which never sees an initializer.
+//
+// Answered in the given field set's order — the declaration order the
+// slot vector is built in — and only for fields that set holds, so a
+// property the field reading declined (a computed key spelling no slot)
+// contributes nothing here either.
+//
+// Anything that is not a constructor answers nothing: a method has no
+// prelude, and its fields are exactly what its body touches.
+func constructorPreludeFields(declaration *ast.Node, fields []BundleField) []BundleField {
+	if declaration == nil || !ast.IsConstructorDeclaration(declaration) {
+		return nil
+	}
+	classLike := declaration.Parent
+	if classLike == nil || !ast.IsClassLike(classLike) {
+		return nil
+	}
+	assigned := map[string]struct{}{}
+	for _, member := range classLike.ClassLikeData().Members.Nodes {
+		if !ast.IsPropertyDeclaration(member) {
+			continue
+		}
+		property := member.AsPropertyDeclaration()
+		// an UNINITIALIZED declaration (`private _headers?: Headers;`)
+		// writes nothing — the field enters the body absent, and claiming a
+		// value was left in it would be the one thing this must not say
+		if property.Initializer == nil || property.Name() == nil || !ast.IsIdentifier(property.Name()) {
+			continue
+		}
+		assigned[property.Name().Text()] = struct{}{}
+	}
+	for _, parameter := range declaration.Parameters() {
+		if !isParameterPropertyDeclaration(parameter) {
+			continue
+		}
+		pd := parameter.AsParameterDeclaration()
+		if pd.Name() == nil || !ast.IsIdentifier(pd.Name()) {
+			continue
+		}
+		assigned[pd.Name().Text()] = struct{}{}
+	}
+	if len(assigned) == 0 {
+		return nil
+	}
+	written := make([]BundleField, 0, len(assigned))
+	for _, field := range fields {
+		if _, isAssigned := assigned[field.Name]; isAssigned {
+			written = append(written, field)
+		}
+	}
+	return written
 }
 
 // summarySlotBudget is the summary route's own slot ceiling — the same
@@ -1459,7 +2321,24 @@ func localSlotsOf(
 	patterns []*ast.Node,
 	parameterNames map[string]struct{},
 ) []bodySlot {
-	objectLocals := ObjectLocalsOf(body, locals)
+	return localSlotsIn(nil, c, body, locals, patterns, parameterNames)
+}
+
+// localSlotsIn is localSlotsOf holding the check's own context, so the
+// record families whose leaves come from a DECLARATION — a served
+// constructor's exit rows, a declared record type over an opaque
+// initializer, a two-armed join — are recognized beside the literal one.
+// The ctx-less spelling above stays for the seams that hold no context;
+// they keep exactly today's layout.
+func localSlotsIn(
+	ctx *FlowContext,
+	c *checker.Checker,
+	body *ast.Node,
+	locals []*ast.Node,
+	patterns []*ast.Node,
+	parameterNames map[string]struct{},
+) []bodySlot {
+	objectLocals := ObjectLocalsIn(ctx, body, locals)
 	// the collections flatten first: the array recognizer needs them to
 	// admit the bridge (`[...m.values()]` reads the map's slots)
 	collectionLocals := MapLocalsOf(body, locals)
@@ -1578,6 +2457,95 @@ type capturedSlot struct {
 	Name      string
 	Sort      BindingKind
 	TypeofTag TypeofTag
+	// Written: the closure's body ASSIGNS this captured name. The entry
+	// still enters from the caller's own slot — a captured `settled` IS
+	// the caller's `settled`, read before it is written — and the row
+	// additionally rides out in BundleEntries so the call site maps its
+	// EXIT back onto that same caller slot.
+	//
+	// This is the one bit that turns a capture from a value passed in
+	// into a place written through, and it is why a written capture is
+	// laid out exactly as a record-parameter leaf is: both are entries
+	// whose exits belong to a slot the caller already holds.
+	Written bool
+	// Members: an OBJECT capture's leaves, in the census's own order.
+	//
+	// A capture with no members is the SCALAR one above — one entry
+	// under the name, carrying the name's own value. A capture WITH
+	// members is a bundle: no entry stands for the name itself, and one
+	// entry stands for each leaf, spelled
+	// "#capture.<name>.<member>". That is the record-parameter shape
+	// applied to a capture, and it is laid out the same way for the same
+	// reason — the caller already holds a slot per leaf, so each leaf's
+	// value comes in from that slot and each moved leaf's exit goes back
+	// to it.
+	//
+	// Sort and TypeofTag above belong to the SCALAR case only. A
+	// bundle's evidence is per leaf, so it rides in the member rows.
+	Members []capturedLeaf
+	// MethodCalls: the members this closure calls AS METHODS on the
+	// capture. MethodWrites is the subset the callee resolution found
+	// MAY move the receiver — nil means the resolution was not
+	// performed at all, which the layout reads as "every call may
+	// move", the doubt direction.
+	MethodCalls  []string
+	MethodWrites map[string]struct{}
+}
+
+// capturedLeaf is ONE member of an object capture: the member name, the
+// evidence the caller's leaf slot wears, and whether the closure moves
+// it.
+//
+// Written here means the same thing it means on a record-parameter leaf
+// row: the closure assigned this member directly, or code the closure
+// handed the object to may have moved it. Either way the caller takes
+// the leaf's exit back rather than keeping its own value.
+type capturedLeaf struct {
+	Member    string
+	Sort      BindingKind
+	TypeofTag TypeofTag
+	Written   bool
+}
+
+// capturedSlotName is the BundleEntries path a capture row rides under.
+//
+// The path vocabulary already spells two rooted families — "this.<field>"
+// for a method's receiver bundle, "<holder>.<member>" for a record or
+// class-typed parameter's leaves — and both are read back by splitting on
+// their root. A capture is neither: it is the caller's OWN name, spelled
+// exactly as the caller spells it, with no holder in front. So it takes
+// its own prefix rather than borrowing a rooted one, which keeps the
+// readers total — bundleRetsAndArgs asks for "this.", bundleParamRetsAndArgs
+// asks for a holder, and neither can mistake a capture row for its own.
+func capturedSlotName(name string) string { return "#capture." + name }
+
+// capturedNameOfSlot is capturedSlotName read backwards: the caller name
+// a capture row stands for, and whether the path is a capture row at all.
+//
+// An OBJECT capture's leaf rides under "#capture.<name>.<member>", so
+// this answers "<name>.<member>" for one — the whole spelling below the
+// prefix, which is exactly the key the call site's write-back map holds
+// its leaf slots under. One reader serves both kinds of row.
+func capturedNameOfSlot(path string) (string, bool) {
+	if !strings.HasPrefix(path, "#capture.") {
+		return "", false
+	}
+	return strings.TrimPrefix(path, "#capture."), true
+}
+
+// capturedLeafSlotName is the entry name ONE leaf of an OBJECT capture
+// rides under: "#capture.disconnectSource.writableEnded".
+//
+// The record-parameter leaves are spelled "<holder>.<member>" with no
+// prefix, because a parameter's holder is a name the callee declared and
+// no caller slot competes for it. A capture's holder is the CALLER's own
+// name, so an unprefixed "stream.writableEnded" would be exactly the
+// spelling the caller's own flattened local already wears — one string
+// standing for two different bodies' slots. The prefix keeps the two
+// apart, and it is the same prefix the scalar capture rows wear, so one
+// reader recognizes both kinds.
+func capturedLeafSlotName(name string, member string) string {
+	return "#capture." + name + "." + member
 }
 
 // lowerSummaryBody lowers a declaration's whole body for the summary
@@ -1825,7 +2793,8 @@ func lowerSummaryBodyReporting(
 			// from its own flattened record local takes them back through the
 			// call statement's rets (recordParamRets, ir_summary_call.go) — so
 			// nobody, in either body, is left believing a stale slot.
-			use := recordParameterUseOf(body, parameter.AsParameterDeclaration().Name().Text(), members)
+			use, writtenMembers := recordParameterUseOf(
+				body, parameter.AsParameterDeclaration().Name().Text(), members)
 			if use == recordParameterUnreadable {
 				return LoweredSummary{}, "", "a whole-record parameter use", false
 			}
@@ -1835,18 +2804,34 @@ func lowerSummaryBodyReporting(
 			if index < len(parameterSorts) {
 				return LoweredSummary{}, "", "a record parameter of an arrow argument", false
 			}
+			// the leaf SLOT NAMES this body writes directly ("p.lo"), read
+			// off the member list so the entry loop below and the use scan
+			// agree by spelling rather than by position
+			writtenSlotNames := map[string]struct{}{}
+			for _, member := range members {
+				if _, moved := writtenMembers[member.Key]; moved {
+					writtenSlotNames[member.SlotName] = struct{}{}
+				}
+			}
 			for _, entry := range entries {
 				// a record parameter's leaf is a bundle entry the call site may
-				// have to map back. Written is the HAND-OVER bit: a body that
-				// only reads its members, or reads the whole record out, never
-				// moves a leaf (a write through the parameter declined above),
-				// while a body that hands the record to code may have every
-				// leaf moved by that code — and the row's write-back is what
-				// carries the movement into the caller.
+				// have to map back, and Written is now the union of TWO ways a
+				// leaf moves:
+				//
+				//   - the HAND-OVER bit — the body passed the whole record to
+				//     code, so any leaf may have been moved by that code;
+				//   - a DIRECT MEMBER WRITE (`p.lo = 1`) this body performs
+				//     itself, which lowers as an ordinary assignment onto the
+				//     leaf's own slot.
+				//
+				// Both carry the movement into the caller through the same
+				// rets threading; a leaf that is neither keeps its value, and
+				// the caller goes on believing it.
+				_, writtenHere := writtenSlotNames[entry.Name]
 				bundleEntries = append(bundleEntries, BundleEntry{
 					Path:    entry.Name,
 					Index:   len(paramNames),
-					Written: handedOver,
+					Written: handedOver || writtenHere,
 				})
 				if handedOver {
 					handOverHavocNames = append(handOverHavocNames, entry.Name)
@@ -1936,7 +2921,30 @@ func lowerSummaryBodyReporting(
 	// to, so the two orders must agree exactly. A capture whose name a
 	// parameter already claims is the parameter's, not the capture's:
 	// the inner binding shadows, and the scan never reported it free.
+	//
+	// A WRITTEN capture takes one more thing: a bundle row, so the call
+	// site maps its exit back onto the caller's own slot. THE ROW AND THE
+	// ENTRY ARE ALLOCATED IN ONE STEP HERE, and that is the lockstep
+	// discipline the whole write-back machinery rests on — the row's
+	// Index is `len(paramNames)` read at the moment the entry is
+	// appended, so the row can never name a position the entry did not
+	// take. Every other bundle family in this layout (the record leaves
+	// above, the this-fields below) allocates the same way for the same
+	// reason: one allocator, and every seam that reads the rows reads
+	// what this loop wrote rather than re-deriving an index of its own.
+	//
+	// An OBJECT capture takes the SAME step, once per leaf: the leaf's
+	// row and the leaf's entry are appended together, so a leaf row can
+	// never name a position its entry did not take either. The lockstep
+	// argument is the whole argument, and extending it to leaves is
+	// extending the argument rather than adding a second one — the loop
+	// below still writes `len(paramNames)` at the moment of the append,
+	// and there is still exactly one allocator.
 	declaredCount := len(paramNames)
+	// an object capture's leaf slots, by the spelling the body reads
+	// them under — read below to put them in the havoc vector where a
+	// method call on the capture may move them
+	captureLeafSlots := map[string]int{}
 	for _, capture := range captures {
 		shadowed := false
 		for _, name := range paramNames[:declaredCount] {
@@ -1947,6 +2955,39 @@ func lowerSummaryBodyReporting(
 		}
 		if shadowed {
 			return LoweredSummary{}, "", "a capture shadowed by a parameter", false
+		}
+		if len(capture.Members) > 0 {
+			for _, leaf := range capture.Members {
+				// the ENTRY is spelled the way the BODY reads the leaf —
+				// "stream.writableEnded", which is what SpelledNameOf answers
+				// for the member access, so the statement walk resolves it
+				// through slotIndexOfName like any other slot. The ROW is
+				// spelled "#capture.stream.writableEnded", because a row is
+				// read at the CALL SITE, where "stream.writableEnded" is
+				// already the caller's own leaf and the two must not collide.
+				// The scalar capture rows keep the same two spellings for the
+				// same reason.
+				spelled := capture.Name + "." + leaf.Member
+				if leaf.Written {
+					bundleEntries = append(bundleEntries, BundleEntry{
+						Path:    capturedLeafSlotName(capture.Name, leaf.Member),
+						Index:   len(paramNames),
+						Written: true,
+					})
+				}
+				captureLeafSlots[spelled] = len(paramNames)
+				paramNames = append(paramNames, spelled)
+				paramSorts = append(paramSorts, leaf.Sort)
+				paramTypeofs = append(paramTypeofs, leaf.TypeofTag)
+			}
+			continue
+		}
+		if capture.Written {
+			bundleEntries = append(bundleEntries, BundleEntry{
+				Path:    capturedSlotName(capture.Name),
+				Index:   len(paramNames),
+				Written: true,
+			})
 		}
 		paramNames = append(paramNames, capture.Name)
 		paramSorts = append(paramSorts, capture.Sort)
@@ -2028,7 +3069,7 @@ func lowerSummaryBodyReporting(
 	if ctx != nil && ctx.P != nil {
 		slotChecker = ctx.P.Checker
 	}
-	slots := localSlotsOf(slotChecker, body, locals, patterns, parameterNames)
+	slots := localSlotsIn(ctx, slotChecker, body, locals, patterns, parameterNames)
 	// MUTABLE vectors: composition allocates fresh slots past #ret
 	bindings := append([]string{}, paramNames...)
 	sorts := append([]BindingKind{}, paramSorts...)
@@ -2118,6 +3159,57 @@ func lowerSummaryBodyReporting(
 	for _, havocName := range handOverHavocNames {
 		if slot, held := slotIndexOfName(context, havocName); held {
 			context.CaptureHavocSlots = append(context.CaptureHavocSlots, slot)
+		}
+	}
+	// A METHOD CALL ON AN OBJECT CAPTURE — `disconnectSource.removeListener(…)`,
+	// `response.end()` — rides the same vector, and this is where the sound
+	// reading is written down.
+	//
+	// WHY HAVOC AND NOT A REFUSAL. The caller's leaf slots are a CLOSED set:
+	// the caller flattened exactly these members and believes nothing about
+	// the object beyond them. So "the callee may have moved any member" is,
+	// for the caller, exactly "every leaf of this capture moved" — a
+	// statement the row vocabulary can make, because every leaf already has
+	// an entry and a row. Havocking them inside the summary makes the
+	// summary's own walk stop believing them from that statement on, and
+	// each havocked leaf goes out Written (closureCapturesOf marks it), so
+	// the caller reads the exit rather than keeping the value it sent.
+	// Refusing instead would be sound too, and strictly weaker: the whole
+	// closure would fall back to the write-set havoc, which forgets the same
+	// leaves AND every other slot the closure touches.
+	//
+	// A member the callee writes that the caller never flattened moves
+	// nothing anyone believes — no slot on either side spells it — which is
+	// what makes the closed set enough.
+	//
+	// WHERE THE CALLEE RESOLVES AND SAYS UNTOUCHED, nothing is havocked:
+	// receiverWritten answers from the callee's own summary
+	// (SummaryReceiverEffects), and a body that lowered and wrote no
+	// this-field and returned no receiver moved no member of the object it
+	// was called on. An unresolved callee, or one whose body declined to
+	// lower, answers written — the doubt direction — and takes the havoc.
+	for _, capture := range captures {
+		if len(capture.Members) == 0 || len(capture.MethodCalls) == 0 {
+			continue
+		}
+		moves := false
+		for _, method := range capture.MethodCalls {
+			if capture.MethodWrites == nil {
+				moves = true
+				break
+			}
+			if _, written := capture.MethodWrites[method]; written {
+				moves = true
+				break
+			}
+		}
+		if !moves {
+			continue
+		}
+		for _, leaf := range capture.Members {
+			if slot, held := captureLeafSlots[capture.Name+"."+leaf.Member]; held {
+				context.CaptureHavocSlots = append(context.CaptureHavocSlots, slot)
+			}
 		}
 	}
 	// allocate grows the CONTEXT's own vectors, not copies of them: a slot
@@ -2235,12 +3327,42 @@ func lowerSummaryBodyReporting(
 	defaultEffects := map[int]kernelbridge.LoopEffect{}
 	for _, defaulted := range defaultedSlots {
 		effect, lowered := RhsEffect(context, context.Sorts[defaulted.Slot], defaulted.Initializer)
+		// A DEFAULT THAT IS A CALL — `= createContextId()`,
+		// `= this.container.getModules()` — is SERVED where the callee has
+		// a summary, instead of taking unknown.
+		//
+		// The earlier refusal said the prelude has no statement stream, and
+		// that predates the branch-shaped prelude: the else arm below IS a
+		// statement list, which is exactly the position SummaryCallOrHavoc
+		// needs, and it writes the call's value into the parameter's own
+		// slot. The summary TABLE is live too — `table` and `context` are
+		// built above this loop, and SummaryBlobFor builds a callee's blob
+		// on demand — so a callee's blob is reachable here on the same
+		// terms it is reachable from any body statement.
+		//
+		// The call goes in the ELSE ARM alone, which is where the runtime
+		// runs it: a supplied argument never evaluates the default, so
+		// putting the call on the then arm would run code the real run does
+		// not. The bracketing around the branch is unchanged and still
+		// required — the call runs code, so a stored closure of this body
+		// may run inside it.
+		var defaultCall []kernelbridge.IrStatement
+		if !lowered && context.SummaryTable != nil {
+			if head := Unwrapped(defaulted.Initializer); head != nil &&
+				(ast.IsCallExpression(head) || ast.IsNewExpression(head)) {
+				if served, servedOk := SummaryCallOrHavoc(context, head, defaulted.Slot); servedOk {
+					defaultCall = served
+				}
+			}
+		}
 		if lowered {
 			defaultEffects[defaulted.Slot] = effect
 		} else {
 			// the default is a construct the effect grammar cannot spell.
 			// The slot takes unknown on the arm the default runs on; no
-			// value is claimed, so nothing said here is wrong.
+			// value is claimed, so nothing said here is wrong. A SERVED
+			// call replaces that unknown outright — the statements it built
+			// write the slot themselves.
 			effect = kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}
 		}
 		runsCode := StatementRunsCode(defaulted.Initializer)
@@ -2261,6 +3383,11 @@ func lowerSummaryBodyReporting(
 			Target: defaulted.Slot,
 			Effect: effect,
 		}}
+		if len(defaultCall) > 0 {
+			// the served call's own statements write the slot; the unknown
+			// assign above would only overwrite what the call answered
+			defaultArm = defaultCall
+		}
 		if ClosureEscapesTrackedWrite(context, defaulted.Initializer) {
 			if written, enumerable := havocSlotsOfStatement(context, defaulted.Initializer); enumerable {
 				defaultArm = append(defaultArm, havocAssignments(written)...)

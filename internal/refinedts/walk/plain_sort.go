@@ -292,7 +292,8 @@ func SortOutsidePlain(known abstractdomain.AbstractValue, demanded string) (stri
 		return firstOutside, true
 	case abstractdomain.KindPossiblyNaN, abstractdomain.KindPossiblyUndefined:
 		return SortOutsidePlain(*known.Inner, demanded)
-	case abstractdomain.KindObject, abstractdomain.KindList,
+	case abstractdomain.KindObject, abstractdomain.KindObjectStar,
+		abstractdomain.KindList,
 		abstractdomain.KindCollection, abstractdomain.KindPromise,
 		abstractdomain.KindDate, abstractdomain.KindRegex,
 		abstractdomain.KindHostFunction:

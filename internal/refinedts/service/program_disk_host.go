@@ -25,11 +25,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/bundled"
 	"github.com/microsoft/typescript-go/internal/compiler"
-	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
@@ -82,8 +82,71 @@ func StampsOf(p *compiler.Program) map[string]int64 {
 // diskHost is diskHost in the TS source, narrowed: the real OS
 // filesystem, wrapped for the bundled default-library files. No
 // shared-parse caching layer (see file header).
-func diskHost(options *core.CompilerOptions) compiler.CompilerHost {
-	return compiler.NewCompilerHost("/", bundled.WrapFS(osvfs.FS()), bundled.LibPath(), nil, nil, nil)
+//
+// currentDirectory is the directory the automatic @types scan starts
+// from — see analysisDirectory for why it cannot stay "/".
+func diskHost(currentDirectory string) compiler.CompilerHost {
+	return compiler.NewCompilerHost(currentDirectory, bundled.WrapFS(osvfs.FS()), bundled.LibPath(), nil, nil, nil)
+}
+
+// analysisDirectory is the directory the program's automatic type
+// directive scan walks UP from: the covering project's directory when
+// the entries have one, and otherwise the entries' common ancestor.
+//
+// The direction is what makes this load-bearing.
+// GetAutomaticTypeDirectiveNames (module/resolver.go:2108) asks
+// GetEffectiveTypeRoots, which — with no stated typeRoots —
+// ForEachAncestorDirectory's from a base directory, appending
+// node_modules/@types at each ancestor
+// (core/compileroptions.go:318-322). The walk only ever goes upward,
+// so a corpus's own node_modules/@types is reachable only from a
+// directory INSIDE that corpus. The host was built with "/", whose
+// only ancestor is itself, so the single type root considered was
+// /node_modules/@types — a directory that does not exist. Every
+// corpus program therefore loaded no @types package at all, and
+// NodeJS.* names had nothing to resolve against.
+//
+// The covering project's directory is preferred because that is the
+// base GetEffectiveTypeRoots itself uses when ConfigFilePath is set,
+// so host and options agree on where the walk begins.
+func analysisDirectory(entryPaths []string) string {
+	if len(entryPaths) == 0 {
+		return "/"
+	}
+	if covering := CoveringProjectCached(entryPaths[0]); covering.ConfigPath != "" {
+		return tspath.NormalizeSlashes(filepath.Dir(covering.ConfigPath))
+	}
+	common := filepath.Dir(absoluteOf(entryPaths[0]))
+	for _, entryPath := range entryPaths[1:] {
+		common = commonAncestor(common, filepath.Dir(absoluteOf(entryPath)))
+	}
+	return tspath.NormalizeSlashes(common)
+}
+
+// commonAncestor is the deepest directory containing both paths — it
+// shortens the left path until it covers the right one.
+func commonAncestor(left string, right string) string {
+	for left != string(filepath.Separator) && left != "." {
+		if left == right || strings.HasPrefix(right, left+string(filepath.Separator)) {
+			return left
+		}
+		parent := filepath.Dir(left)
+		if parent == left {
+			break
+		}
+		left = parent
+	}
+	return left
+}
+
+// absoluteOf resolves one entry path, keeping it as given when the
+// working directory cannot be read.
+func absoluteOf(entryPath string) string {
+	resolved, err := filepath.Abs(entryPath)
+	if err != nil {
+		return entryPath
+	}
+	return resolved
 }
 
 // BuiltProgram is builtProgram in the TS source, narrowed to the
@@ -105,10 +168,16 @@ func BuiltProgram(entryPaths []string) *compiler.Program {
 	// programs build sequentially (one per covering project group).
 	checkerCount := min(runtime.GOMAXPROCS(0), 8)
 	options.Checkers = &checkerCount
-	host := diskHost(options)
+	// the host and the command line state the SAME directory: the
+	// host's is where the automatic @types scan walks up from, and the
+	// command line's is what root file names are resolved against. A
+	// disagreement between the two would resolve entries relative to
+	// one directory and scan type roots from another.
+	currentDirectory := analysisDirectory(entryPaths)
+	host := diskHost(currentDirectory)
 	config := tsoptions.NewParsedCommandLine(options, fileNamesOf(entryPaths), tspath.ComparePathsOptions{
 		UseCaseSensitiveFileNames: true,
-		CurrentDirectory:          "/",
+		CurrentDirectory:          currentDirectory,
 	})
 	p := compiler.NewProgram(compiler.ProgramOptions{Config: config, Host: host})
 	p.BindSourceFiles()

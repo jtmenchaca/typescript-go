@@ -695,8 +695,10 @@ func jsonStringifyOf(known abstractdomain.AbstractValue, noteGrade func(grade ab
 		return b.String(), true
 	default:
 		// set, variable, possiblyUndefined, possiblyNaN, kindUnion,
-		// collection, promise, date, symbol, hostFunction, bigints,
-		// regex, unknown: none of them pin one exact value
+		// objectStar, collection, promise, date, symbol, hostFunction,
+		// bigints, regex, unknown: none of them pin one exact value. The
+		// object-star in particular states no LENGTH, so there is not
+		// even a position count to write brackets around.
 		return "", false
 	}
 }

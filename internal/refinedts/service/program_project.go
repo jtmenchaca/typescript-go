@@ -36,6 +36,16 @@ import (
 // reads as off — the same answer tsc gives a file with no covering
 // project. A project that states the flag brings it through
 // adoptedOptions.
+//
+// Types states the wildcard because in this tree an EMPTY Types reads
+// as "no automatic type packages", not as "all of them":
+// GetAutomaticTypeDirectiveNames (module/resolver.go:2098) returns
+// early with []string{} unless UsesWildcardTypes() — the "*" has to be
+// present for the node_modules/@types scan to run at all. Without it
+// no corpus program ever loads @types/node, so every NodeJS.* name
+// resolved to an unresolved placeholder. A project that states its own
+// `types` replaces this in adoptedOptions, which is how a stated
+// `types: []` correctly SUPPRESSES the scan.
 func Options() *core.CompilerOptions {
 	return &core.CompilerOptions{
 		Strict:                     core.TSTrue,
@@ -45,6 +55,7 @@ func Options() *core.CompilerOptions {
 		AllowImportingTsExtensions: core.TSTrue,
 		NoEmit:                     core.TSTrue,
 		SkipLibCheck:               core.TSTrue,
+		Types:                      []string{"*"},
 	}
 }
 
@@ -210,6 +221,31 @@ func adoptedOptions(project *core.CompilerOptions) *core.CompilerOptions {
 	}
 	if project.Jsx != core.JsxEmitNone {
 		adopted.Jsx = project.Jsx
+	}
+	// types decides WHICH @types packages load without being imported.
+	// nil is "not stated" and keeps our "*" wildcard; a stated list
+	// replaces it, and a stated empty list is how a project SUPPRESSES
+	// automatic inclusion — ParseStringArray gives `types: []` a
+	// non-nil empty slice, so != nil is exactly the "was stated" test
+	// and the suppression rides through unchanged.
+	if project.Types != nil {
+		adopted.Types = project.Types
+	}
+	// typeRoots replaces the ancestor walk with the project's own
+	// directories: GetEffectiveTypeRoots (core/compileroptions.go:302)
+	// returns them verbatim instead of walking node_modules/@types
+	// upward, so a project that relocates its type packages is scanned
+	// where they actually live.
+	if project.TypeRoots != nil {
+		adopted.TypeRoots = project.TypeRoots
+	}
+	// ConfigFilePath is what GetEffectiveTypeRoots prefers over the
+	// host's current directory when deciding where the ancestor walk
+	// STARTS. adoptedOptions builds a fresh Options() and copies rows,
+	// so without this the covering project's location is lost and the
+	// walk falls back to the host directory.
+	if project.ConfigFilePath != "" {
+		adopted.ConfigFilePath = project.ConfigFilePath
 	}
 	if project.JsxImportSource != "" {
 		adopted.JsxImportSource = project.JsxImportSource

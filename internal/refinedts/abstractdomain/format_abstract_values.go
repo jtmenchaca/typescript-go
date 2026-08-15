@@ -239,6 +239,20 @@ func formatAbstractValueAt(known AbstractValue, top bool) (string, bool) {
 		}
 		return "[" + strings.Join(items, ", ") + "]", true
 
+	case KindObjectStar:
+		// the element, then `[]` — the type language's own way of saying
+		// "a sequence of these", and it says exactly what the form claims:
+		// the element at each position, no count. Self-delimited by the
+		// brackets, so it reads the same at both positions.
+		if known.Inner == nil {
+			return "", false
+		}
+		element, ok := formatAbstractValueAt(*known.Inner, false)
+		if !ok {
+			return "", false
+		}
+		return element + "[]", true
+
 	case KindCollection:
 		var entries []string
 		for _, e := range known.Entries {

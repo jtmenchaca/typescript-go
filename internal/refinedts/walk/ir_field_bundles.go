@@ -215,6 +215,44 @@ func symbolMemberFieldName(c *checker.Checker, name *ast.Node) (string, bool) {
 	return StableSymbolKeyName(c, name.AsComputedPropertyName().Expression)
 }
 
+// symbolKeyedMethodOf is the class METHOD declared under a stable symbol
+// key — the `[S]() { … }` of a class that also spells `this[S](…)` in one
+// of its bodies — or nil.
+//
+// WHY A SYMBOL-KEYED METHOD IS A METHOD. The key identity
+// (StableSymbolKeyName) is what makes `#sym:S` name ONE thing: the const
+// cannot be rebound, its declaration runs once per module, and the symbol
+// IS the property key at runtime. That argument says nothing about
+// whether the member holding the key is a field or a method — it settles
+// the KEY, and the member kind is then read off the declaration exactly
+// as a dotted name's is. So a symbol-keyed method resolves to one body
+// the write-set closure can walk, which is the whole of what the closure
+// needs from a method name.
+//
+// Only a method WITH A BODY answers: an overload signature, an accessor,
+// and an arrow-valued property declaration each hold writes this reading
+// cannot enumerate, and the closure's own (nil, false) is what they get.
+// A STATIC member never answers — it belongs to the constructor object,
+// not to any instance, so no receiver's call reaches it.
+func symbolKeyedMethodOf(c *checker.Checker, classLike *ast.Node, name string) *ast.Node {
+	if c == nil || classLike == nil || !ast.IsClassLike(classLike) {
+		return nil
+	}
+	for _, member := range classLike.ClassLikeData().Members.Nodes {
+		if !ast.IsMethodDeclaration(member) || member.Body() == nil {
+			continue
+		}
+		if ast.GetCombinedModifierFlags(member)&ast.ModifierFlagsStatic != 0 {
+			continue
+		}
+		spelled, isSymbolKey := symbolMemberFieldName(c, member.Name())
+		if isSymbolKey && spelled == name {
+			return member
+		}
+	}
+	return nil
+}
+
 // checkerOf is the census's nil-tolerant reach for the checker: the
 // field readings run under ctx-less callers (a lowering with no program,
 // the syntax-only tests), and those decline every symbol key rather than
@@ -665,10 +703,11 @@ type FieldCensus struct {
 	// Deduplicated, in first-mention order.
 	CapturedMethodCalls []string
 	// DirectMethodCalls: the receiver methods the body calls in plain
-	// statement position (`this.register(x)`). These lower as real call
-	// statements and need nothing from the census — the field exists for
-	// CaptureWriteSet's closure, where a captured method's own direct
-	// calls carry its transitive writes.
+	// statement position (`this.register(x)`, and `this[S](…)` where the
+	// class declares S as a method, under its `#sym:` spelling). These
+	// lower as real call statements and need nothing from the census —
+	// the field exists for CaptureWriteSet's closure, where a captured
+	// method's own direct calls carry its transitive writes.
 	DirectMethodCalls []string
 	// ReturnsSelf: the body ends `return this` (this-receivers only —
 	// the fluent-builder shape). Not an escape: nothing moves during
@@ -775,6 +814,20 @@ func FieldCensusWith(c *checker.Checker, body *ast.Node, receiverName string, fi
 		}
 		writeNames[name] = struct{}{}
 		return true
+	}
+
+	// noteDirectMethodCall records a receiver method the body calls in
+	// plain statement position, once, in first-mention order. The name is
+	// a dotted step's own identifier or a symbol-keyed member's `#sym:`
+	// spelling — the write-set closure resolves both back to one
+	// declaration, so one list holds them.
+	noteDirectMethodCall := func(name string) {
+		for _, held := range census.DirectMethodCalls {
+			if held == name {
+				return
+			}
+		}
+		census.DirectMethodCalls = append(census.DirectMethodCalls, name)
 	}
 
 	// fieldAccessOf: is this a plain `<receiver>.<name>` property access,
@@ -1198,30 +1251,20 @@ func FieldCensusWith(c *checker.Checker, body *ast.Node, receiverName string, fi
 			if call.QuestionDotToken == nil {
 				callee := Unwrapped(call.Expression)
 				if name, isField := fieldAccessOf(callee); isField {
-					switch {
-					case noteRead(name):
-					case ast.IsElementAccessExpression(callee):
-						// `this[S]()` where the class declares no member for S.
-						// The name is a `#sym:` spelling no method declaration
-						// can carry, so it would make CaptureWriteSet's closure
-						// incomputable rather than name a method to walk. It is
-						// a call through a slot nothing holds — the same worth a
-						// computed read has, and no more.
-						census.Computed = true
-					default:
-						// the callee is a METHOD name, not a field — recorded
-						// for CaptureWriteSet's closure, nothing else
-						already := false
-						for _, held := range census.DirectMethodCalls {
-							if held == name {
-								already = true
-								break
-							}
-						}
-						if !already {
-							census.DirectMethodCalls = append(census.DirectMethodCalls, name)
-						}
-					}
+					// the callee names a FIELD or a METHOD, and BOTH join the
+					// call list. A method resolves through its declaration; a
+					// declared field called as a function is a read of that
+					// field AND a call through whatever the class stored in
+					// it, whose body may write fields of its own — the
+					// write-set closure resolves either from the class's own
+					// text (fieldValuedFunctionBodies).
+					//
+					// A `#sym:` spelling from the element-access arm lands
+					// here on the same terms a dotted name does: the stable
+					// key names one member, and nothing about the bracket
+					// makes it less placeable than a dot.
+					noteRead(name)
+					noteDirectMethodCall(name)
 					consumeReceiver(consumed, Unwrapped(call.Expression))
 					consumed[call.Expression] = struct{}{}
 					for _, argument := range call.Arguments.Nodes {
@@ -1302,13 +1345,35 @@ func (census FieldCensus) Believable() bool {
 // havoc set a consumer applies at every call statement when it admits a
 // method-calling capture.
 //
-// The closure is over the class's declared methods alone. Each visited
-// method's own census must itself be tame: no escape, no computed
-// write; its Writes accumulate, and its own captured method calls join
-// the worklist. Any method the class does not declare as a plain
-// method-with-body (an inherited name, an accessor, an overload
-// signature, a computed name) makes the whole set incomputable and the
-// answer is (nil, false) — the caller then keeps the escape.
+// The closure is over the class's own declared members. Each visited
+// method's census must itself be tame: no escape, no computed write;
+// its Writes accumulate, and its own captured and direct method calls
+// join the worklist. Any name the class does not declare at all (an
+// inherited method, an accessor, an overload signature) makes the whole
+// set incomputable and the answer is (nil, false) — the caller then
+// keeps the escape.
+//
+// A name that declares a FIELD rather than a method is a call through a
+// stored function value, and it answers here too. The class's own
+// assignments to that field are the only sources of what it holds
+// (a field the census let out would have escaped already), so:
+//
+//   - every assignment a function LITERAL this walk can read — the
+//     initializer arrow, a constructor-assigned arrow — contributes its
+//     body's write set, and the field's call moves their UNION;
+//   - any assignment it cannot read (an imported handler, a parameter, a
+//     call's result) leaves the stored body unknown, and the answer is
+//     EVERY field of the class with ok true — the declaration bounds
+//     which fields exist, so whole-bundle havoc says exactly what is
+//     true. It is strictly stronger than refusing: refusing costs the
+//     class every field READING as well, and no reading is wrong here.
+//
+// A worklist name may be a plain identifier or a `#sym:` spelling. The
+// second resolves through symbolKeyedMethodOf: a computed name is not
+// unreadable when its key is a STABLE SYMBOL const, because that key
+// names one declaration, and one declaration is all this closure needs
+// to walk a body. Only a computed name whose key is NOT stable is
+// unreadable, and no such name ever reaches this worklist.
 func CaptureWriteSet(classLike *ast.Node, fields []BundleField, methods []string) ([]BundleField, bool) {
 	return CaptureWriteSetWith(nil, classLike, fields, methods)
 }
@@ -1345,9 +1410,55 @@ func CaptureWriteSetWith(c *checker.Checker, classLike *ast.Node, fields []Bundl
 			break
 		}
 		if body == nil {
-			// an inherited method, an accessor, an arrow-valued property, a
-			// bodyless overload — its writes are unenumerable
-			return nil, false
+			// a SYMBOL-KEYED method (`[S]() { … }`), named on the worklist
+			// under its `#sym:` spelling. The key identity resolves it to
+			// one declaration the same way it resolves an access, so the
+			// closure walks its body exactly as it walks a dotted method's.
+			if method := symbolKeyedMethodOf(c, classLike, name); method != nil {
+				body = method.Body()
+			}
+		}
+		if body == nil {
+			// the name declares no METHOD — but a class field can HOLD a
+			// function (`private readonly handler = (x: number) => { … }`,
+			// or a constructor-assigned one), and `this.handler()` calls
+			// through that stored value. The class's own assignments to the
+			// field are the only sources of what it holds, so where every one
+			// of them is a function literal this walk can read, the union of
+			// their bodies' write sets is what the call can move.
+			literals, everyAssignmentWalkable, isField := fieldValuedFunctionBodies(c, classLike, name)
+			switch {
+			case !isField:
+				// an inherited method, an accessor, a bodyless overload — the
+				// name resolves to no declaration of this class at all, so
+				// nothing bounds its writes
+				return nil, false
+			case !everyAssignmentWalkable:
+				// the field holds something this walk cannot read — an
+				// imported handler, a constructor parameter, a value returned
+				// by a call. The DECLARATION still bounds which fields exist,
+				// so every field of the class joins the havoc set: the call
+				// through the stored closure may write any of them, and none
+				// of them may be believed past it. That is strictly stronger
+				// than refusing the bundle, which costs the class every
+				// READING too — a field this body reads before the call keeps
+				// its answer either way, and refusing throws it away for
+				// nothing.
+				return append([]BundleField{}, fields...), true
+			default:
+				for _, literal := range literals {
+					literalCensus := FieldCensusWith(c, literal, "this", spelled)
+					if literalCensus.Escapes || literalCensus.ComputedWrite {
+						return nil, false
+					}
+					for _, field := range literalCensus.Writes {
+						written[field.Name] = struct{}{}
+					}
+					worklist = append(worklist, literalCensus.CapturedMethodCalls...)
+					worklist = append(worklist, literalCensus.DirectMethodCalls...)
+				}
+				continue
+			}
 		}
 		census := FieldCensusWith(c, body, "this", spelled)
 		if census.Escapes || census.ComputedWrite {
@@ -1366,6 +1477,186 @@ func CaptureWriteSetWith(c *checker.Checker, classLike *ast.Node, fields []Bundl
 		}
 	}
 	return out, true
+}
+
+// fieldValuedFunctionBodies answers what a call through a class FIELD
+// holding a function can move: the BODIES of every function literal the
+// class assigns to that field, and whether the class's assignments were
+// ALL such literals.
+//
+// THE CLOSED-SET ARGUMENT, which is what makes the union sound. A field
+// holds whatever was last stored into it, so the write set of a call
+// through it is the union over the possible stored values. The class's
+// OWN TEXT bounds that set: the field's initializer and every
+// `this.<field> = …` in its members are the only stores, because a store
+// from anywhere else needs the instance, and an instance the class let
+// out is an ESCAPE the census already reported (Escapes kills the bundle
+// before this walk runs). So enumerating the class's assignments
+// enumerates the sources.
+//
+// WHAT COUNTS AS WALKABLE: an arrow function or a function expression
+// with a body. Its body is then read by the caller with the SAME census
+// machinery a method's body is read by — a stored closure writing
+// `this.count` writes the field a method writing it writes, and the
+// arrow keeps the enclosing `this`, which is the instance.
+//
+// A function-expression assignment is walkable on the same terms with
+// one difference the caller does not have to know: `function () { … }`
+// rebinds `this`, so a `this.count` inside it denotes some other
+// receiver and the census reads nothing of this bundle from it. That is
+// a body contributing no writes, not a body whose writes are unknown.
+//
+// Answers (bodies, everyAssignmentWalkable, isField). isField false means
+// the name declares no field of this class either, so the caller keeps
+// its refusal.
+func fieldValuedFunctionBodies(
+	c *checker.Checker,
+	classLike *ast.Node,
+	name string,
+) (bodies []*ast.Node, everyAssignmentWalkable bool, isField bool) {
+	if classLike == nil || !ast.IsClassLike(classLike) {
+		return nil, false, false
+	}
+	members := classLike.ClassLikeData().Members.Nodes
+	// the DECLARATION: a non-static property whose name spells this field,
+	// dotted or under a stable symbol key
+	var declared *ast.Node
+	for _, member := range members {
+		if !ast.IsPropertyDeclaration(member) {
+			continue
+		}
+		if ast.GetCombinedModifierFlags(member)&ast.ModifierFlagsStatic != 0 {
+			continue
+		}
+		if fieldMemberName(c, member.Name()) != name {
+			continue
+		}
+		declared = member
+		break
+	}
+	if declared == nil {
+		return nil, false, false
+	}
+	everyAssignmentWalkable = true
+	note := func(value *ast.Node) {
+		value = Unwrapped(value)
+		if value == nil {
+			everyAssignmentWalkable = false
+			return
+		}
+		if !ast.IsArrowFunction(value) && !ast.IsFunctionExpression(value) {
+			// an imported handler, a parameter, a call's result, another
+			// field's value — this walk cannot say what body it holds
+			everyAssignmentWalkable = false
+			return
+		}
+		body := value.Body()
+		if body == nil {
+			everyAssignmentWalkable = false
+			return
+		}
+		bodies = append(bodies, body)
+	}
+	if initializer := declared.AsPropertyDeclaration().Initializer; initializer != nil {
+		note(initializer)
+	}
+	// every `this.<field> = …` the class's own members spell — the
+	// constructor's assignment is the common one, a method re-assigning
+	// the handler is the same kind of store, and a store inside another
+	// field's initializer is one too. A member with neither a body nor an
+	// initializer spells no assignment.
+	for _, member := range members {
+		scanned := member.Body()
+		if scanned == nil && ast.IsPropertyDeclaration(member) {
+			scanned = member.AsPropertyDeclaration().Initializer
+		}
+		if scanned == nil {
+			continue
+		}
+		var visit func(node *ast.Node) bool
+		visit = func(node *ast.Node) bool {
+			if node == nil {
+				return false
+			}
+			if ast.IsBinaryExpression(node) {
+				binary := node.AsBinaryExpression()
+				operator := binary.OperatorToken.Kind
+				if operator >= ast.KindFirstAssignment && operator <= ast.KindLastAssignment {
+					if target := Unwrapped(binary.Left); thisFieldStoreNameOf(c, target) == name {
+						if operator == ast.KindEqualsToken {
+							note(binary.Right)
+						} else {
+							// a COMPOUND store into a function-valued field
+							// (`this.handler ||= f`) leaves a value this reading
+							// cannot name
+							everyAssignmentWalkable = false
+						}
+						visit(binary.Right)
+						return false
+					}
+				}
+			}
+			node.ForEachChild(visit)
+			return false
+		}
+		visit(scanned)
+	}
+	return bodies, everyAssignmentWalkable, true
+}
+
+// fieldMemberName spells a class member's name the way the field set
+// spells it — a plain or private identifier under its own text, a
+// computed name under its `#sym:` name when the key is a stable symbol
+// const — or "" when the name spells no field.
+func fieldMemberName(c *checker.Checker, name *ast.Node) string {
+	if name == nil {
+		return ""
+	}
+	if ast.IsIdentifier(name) || ast.IsPrivateIdentifier(name) {
+		return name.Text()
+	}
+	if spelled, isSymbolKey := symbolMemberFieldName(c, name); isSymbolKey {
+		return spelled
+	}
+	return ""
+}
+
+// thisFieldStoreNameOf spells the field a `this.<name>` or `this[S]`
+// STORE TARGET names — the two spellings the census reads a field under
+// — or "" for anything else. Both spellings answer here so the
+// assignment scan reads `this.handler = …` and `this[S] = …` as stores
+// into one field. (thisFieldNameOf, kernel_summaries.go, is the same
+// question over a slot's PATH STRING rather than over a target node.)
+func thisFieldStoreNameOf(c *checker.Checker, node *ast.Node) string {
+	if node == nil {
+		return ""
+	}
+	if ast.IsElementAccessExpression(node) {
+		element := node.AsElementAccessExpression()
+		if Unwrapped(element.Expression) == nil ||
+			Unwrapped(element.Expression).Kind != ast.KindThisKeyword {
+			return ""
+		}
+		if spelled, isSymbolKey := SymbolKeyedFieldName(c, node); isSymbolKey {
+			return spelled
+		}
+		return ""
+	}
+	if !ast.IsPropertyAccessExpression(node) {
+		return ""
+	}
+	access := node.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return ""
+	}
+	receiver := Unwrapped(access.Expression)
+	if receiver == nil || receiver.Kind != ast.KindThisKeyword {
+		return ""
+	}
+	if !ast.IsIdentifier(access.Name()) && !ast.IsPrivateIdentifier(access.Name()) {
+		return ""
+	}
+	return access.Name().Text()
 }
 
 // receiverMethodBindOf recognizes `<receiver>.<m>.bind(<receiver>)` —
@@ -1545,6 +1836,19 @@ func captureMentions(
 		// collected method is computable. A non-identifier or optional
 		// callee step fails outright. The ARGUMENTS walk on under the
 		// same rules.
+		//
+		// A SYMBOL-KEYED callee (`this[S](…)`) is the same call under a
+		// different spelling and takes the same arm, collected under its
+		// `#sym:` name. The stable key names ONE member, which is all this
+		// collection needs; whether that member is a METHOD whose body the
+		// closure can walk or a FIELD holding a function value is
+		// CaptureWriteSetWith's question, and it answers it identically for
+		// both spellings — a name resolving to a method-with-body
+		// contributes that body's writes, and a name resolving to anything
+		// else makes the whole set incomputable and the caller keeps the
+		// escape. Deciding it here instead would refuse the symbol-keyed
+		// field call one stage earlier than the dotted one spells the same
+		// refusal, for no reason the two shapes justify.
 		if ast.IsCallExpression(child) {
 			call := child.AsCallExpression()
 			callee := Unwrapped(call.Expression)
@@ -1557,6 +1861,19 @@ func captureMentions(
 					return true
 				}
 				calledMethods = append(calledMethods, access.Name().Text())
+				for _, argument := range call.Arguments.Nodes {
+					visit(argument)
+				}
+				return false
+			}
+			if ast.IsElementAccessExpression(callee) &&
+				isReceiver(Unwrapped(callee.AsElementAccessExpression().Expression)) {
+				name, isSymbolKey := SymbolKeyedFieldName(c, callee)
+				if call.QuestionDotToken != nil || !isSymbolKey {
+					readOnly = false
+					return true
+				}
+				calledMethods = append(calledMethods, name)
 				for _, argument := range call.Arguments.Nodes {
 					visit(argument)
 				}
@@ -1586,18 +1903,16 @@ func captureMentions(
 		// dotted read is — reading moves nothing. Every other bracketed
 		// key names no field and fails below.
 		//
-		// `this[S](…)` is NOT that read. It CALLS whatever the slot holds,
-		// and the called function may write any field at a time this scan
-		// cannot place — while the `#sym:` spelling names no method
-		// declaration the write-set closure could walk. It fails the
-		// admission, and the caller keeps the escape.
+		// A `this[S](…)` CALL never reaches here: the call arm above takes
+		// it, admitting it where the class declares a method for S and
+		// refusing it where nothing does. What is left in this position is
+		// a read of the slot's own value, which is what the field rules
+		// answer.
 		if ast.IsElementAccessExpression(child) {
 			element := child.AsElementAccessExpression()
 			if isReceiver(Unwrapped(element.Expression)) {
 				name, isSymbolKey := SymbolKeyedFieldName(c, child)
-				calledDirectly := child.Parent != nil && ast.IsCallExpression(child.Parent) &&
-					Unwrapped(child.Parent.AsCallExpression().Expression) == child
-				if !isSymbolKey || calledDirectly {
+				if !isSymbolKey {
 					readOnly = false
 					return true
 				}

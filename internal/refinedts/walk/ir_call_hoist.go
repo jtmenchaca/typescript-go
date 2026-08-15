@@ -39,6 +39,7 @@ import (
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
 
@@ -106,17 +107,42 @@ func HoistCallEffect(context *LoweringContext, call *ast.Node) (kernelbridge.Loo
 	if !hoistingIsOrderSafe(context, head, callee) {
 		return kernelbridge.LoopEffect{}, false
 	}
-	// the temp wears the UNKNOWN sort. The callee's compiled shape carries
-	// where its ret slot sits, not what sort that slot wears, and the sorts
-	// are the adapter's own reading gates rather than anything the kernel
-	// walks — an unknown-sorted temp holds the call's whole answer either
-	// way. What it costs is precision at the READER: arithmetic and
-	// sequence building each admit only their own sort, so an unknown-sorted
-	// temp reads as a var wherever a var is admitted and declines where a
-	// sort is demanded. That is the honest floor until the shape carries a
-	// ret sort; guessing `number` here would let a string-returning callee's
-	// temp into arithmetic.
-	temp, allocated := context.Allocate(hoistedTempName(head), BindingKindUnknown, TypeofTagNone)
+	// the temp wears the callee's RESOLVED RETURN SORT. What lands in it is
+	// the callee's ret out-state verbatim (summaryCallStatement threads
+	// `rets[outIndex] = target`), so the sort the temp may wear is the sort
+	// of the value that call returns — which the host's own resolved type
+	// at the call states, under exactly the masking LocalSortResolved
+	// applies to `const x = f()`. The two readings are the same masking on
+	// the same type, so a hoisted `f(x)` and a `const x = f(x)` of the same
+	// callee sort identically.
+	//
+	// WHY NOT THE SUMMARY. A serving callee's LoweredSummary carries where
+	// its ret slot sits and no sort for it — the shape has RetIndex and no
+	// ret sort field at all — so the type is the only authority that
+	// speaks here. Nothing is being preferred over a summary reading; there
+	// is none to prefer.
+	//
+	// THE TYPE IS READ AT THE ORIGINAL NODE, before the await peel. The
+	// temp holds the SETTLED value (the ret-as-inner convention), and the
+	// checker resolves an await expression to its awaited type — so
+	// `await g(y)` on an `async function g(): Promise<number>` sorts the
+	// temp `number`, while the bare call node would have resolved
+	// `Promise<number>` and sorted it unknown.
+	//
+	// THE TRUST GRADE. A resolved return type is the ANNOTATION'S claim,
+	// carrying the same grade every declared type in this walk carries: a
+	// parameter's sort (declaredParamSort), a field's (annotationSort), a
+	// getter's temp (accessorReturnEvidence) are each the declaration's own
+	// word, and this is that word for a return. A callee whose annotation
+	// LIES about what it returns is the established annotation boundary
+	// (TRUST.md) and not a new one this opens — the same lie already
+	// mis-sorts `const x: number = f()` and every parameter bound from it.
+	// A type the masking does not spell — a union across sorts, `any`,
+	// `unknown`, an object, an unresolved Promise — stays unknown, which
+	// admits only the definedness test: that loses coverage and never
+	// soundness, and it is where every callee sat before this reading.
+	sort, typeofTag := ResolvedExpressionSort(hoistCheckerOf(context), Unwrapped(call))
+	temp, allocated := context.Allocate(hoistedTempName(head), sort, typeofTag)
 	if !allocated {
 		return kernelbridge.LoopEffect{}, false
 	}
@@ -134,6 +160,17 @@ func HoistCallEffect(context *LoweringContext, call *ast.Node) (kernelbridge.Loo
 	}
 	context.HoistedTemp[head] = temp
 	return varEffect(temp), true
+}
+
+// hoistCheckerOf is the nil-tolerant reach for the host checker the
+// temp's sort is resolved against. A lowering that runs without a
+// program has none, and its temps then wear the unknown sort — exactly
+// the behaviour every hoist had before the sort was read.
+func hoistCheckerOf(context *LoweringContext) *checker.Checker {
+	if context == nil || context.Flow == nil || context.Flow.P == nil {
+		return nil
+	}
+	return context.Flow.P.Checker
 }
 
 // hoistedTempName spells a hoisted call's temp slot. The spelling is

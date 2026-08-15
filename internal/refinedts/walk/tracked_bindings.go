@@ -231,6 +231,66 @@ func LocalSortResolved(c *checker.Checker, declaration *ast.Node) BindingKind {
 	return BindingKindUnknown
 }
 
+// ResolvedExpressionSort is LocalSortResolved's masking applied to an
+// EXPRESSION rather than to a declaration's initializer: the sort and
+// the typeof evidence the host's own resolved type states for a value
+// the lowering has no declaration to read.
+//
+// The one caller today is the hoisted call temp (ir_call_hoist.go),
+// which holds a callee's return with no `const x = f()` anywhere to
+// read the sort off. LocalSortResolved cannot serve it — that function
+// takes a VariableDeclaration and asks LocalSort first, and a hoisted
+// temp has neither — so the masking it states is restated here over the
+// type alone, and the two must agree or one call site would sort its
+// result differently from `const x = f()` on the same callee.
+//
+// THE MASKING IS LocalSortResolved'S, unchanged: a type wearing ONLY
+// number/boolean flags is the number sort (booleans ride the number
+// sort by this package's own rule, stated on LocalSort), one wearing
+// only string flags the string sort, and everything else — a union
+// across the two, `any`, `unknown`, an object, a Promise — is unknown,
+// which admits only the definedness test. A nil checker or an
+// unresolvable type is unknown for the same reason.
+//
+// THE TYPEOF HALF is what the resolved type can say and the sort
+// cannot: number and boolean share the number sort, and `typeof`
+// answers differently for them. A type wearing only boolean flags
+// answers "boolean", only number flags "number", only string flags
+// "string" — the same three annotationSort spells from a type NODE,
+// read here from the resolved type instead.
+func ResolvedExpressionSort(c *checker.Checker, e *ast.Node) (BindingKind, TypeofTag) {
+	if c == nil || e == nil {
+		return BindingKindUnknown, TypeofTagNone
+	}
+	t := c.GetTypeAtLocation(e)
+	if t == nil {
+		return BindingKindUnknown, TypeofTagNone
+	}
+	// the same masking the statement dispatch reads a sort under, and the
+	// same one LocalSortResolved applies to a call initializer
+	flags := t.Flags()
+	num := checker.TypeFlagsNumber | checker.TypeFlagsNumberLiteral
+	boolean := checker.TypeFlagsBoolean | checker.TypeFlagsBooleanLiteral
+	numOrBool := num | boolean
+	if (flags&numOrBool) != 0 && (flags & ^numOrBool) == 0 {
+		// number and boolean share the SORT and differ in typeof: a type
+		// wearing boolean flags alone answers "boolean", one wearing number
+		// flags alone "number", and a mixture of the two claims neither
+		switch {
+		case (flags & ^boolean) == 0:
+			return BindingKindNumber, TypeofTagBoolean
+		case (flags & ^num) == 0:
+			return BindingKindNumber, TypeofTagNumber
+		}
+		return BindingKindNumber, TypeofTagNone
+	}
+	strOrLit := checker.TypeFlagsString | checker.TypeFlagsStringLiteral
+	if (flags&strOrLit) != 0 && (flags & ^strOrLit) == 0 {
+		return BindingKindString, TypeofTagString
+	}
+	return BindingKindUnknown, TypeofTagNone
+}
+
 // LocalTypeof is a local's typeof evidence, from its initializer's
 // syntax alone.
 func LocalTypeof(declaration *ast.Node) TypeofTag {

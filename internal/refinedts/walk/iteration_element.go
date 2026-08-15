@@ -48,6 +48,13 @@ func ElementOf(iterable abstractdomain.AbstractValue) abstractdomain.AbstractVal
 			}
 		}
 	}
+	// an OBJECT-STAR states one thing and it is exactly this question:
+	// what one position holds. No count is involved, so the element
+	// comes back whole — the same reading the `.next().value` route
+	// gives for the same iterator.
+	if element, ok := abstractdomain.ElementOfObjectStar(iterable); ok {
+		return element
+	}
 	if iterable.Kind == abstractdomain.KindVariable && iterable.StarDepth > 0 {
 		out := iterable
 		out.StarDepth = iterable.StarDepth - 1

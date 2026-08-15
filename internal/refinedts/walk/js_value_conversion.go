@@ -117,8 +117,10 @@ func JsValueExact(known abstractdomain.AbstractValue, noteGrade func(grade abstr
 		return out
 	default:
 		// set, variable, possiblyUndefined, possiblyNaN, kindUnion,
-		// collection, promise, date, symbol, hostFunction, bigints,
-		// regex, unknown: none of them pin one exact value
+		// objectStar, collection, promise, date, symbol, hostFunction,
+		// bigints, regex, unknown: none of them pin one exact value. The
+		// object-star states no LENGTH, so it names no list of positions
+		// to hand a consumer that reads its result as total.
 		return nil
 	}
 }
