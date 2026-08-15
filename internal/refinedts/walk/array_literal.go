@@ -28,6 +28,19 @@ func EvaluateArrayLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomain
 	lengthKnown := true
 	var elements []abstractdomain.AbstractValue
 	for _, element := range lit.Elements.Nodes {
+		// an ELISION — the gap in `[1, , 3]` — is the one way a literal
+		// builds a HOLE: the slot exists and counts toward the length, and
+		// reading it answers undefined. It is the only element the walk
+		// cannot evaluate, so the slot wears the absence outright rather
+		// than the read sites having to doubt every literal-built list.
+		// Every OTHER slot here is written by this loop from its own
+		// element, which is what lets the element reads treat a KindList
+		// as hole-free.
+		if ast.IsOmittedExpression(element) {
+			items = append(items, abstractdomain.Undef)
+			elements = append(elements, abstractdomain.Undef)
+			continue
+		}
 		// a spread of an exact sequence flattens its elements in place
 		if ast.IsSpreadElement(element) {
 			spread := evaluateExpression(ctx, env, element.AsSpreadElement().Expression)
@@ -53,7 +66,20 @@ func EvaluateArrayLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomain
 			// an unpinned spread loses the LENGTH — its own elements are
 			// what it admits, and the walk keeps building past it
 			lengthKnown = false
-			elements = append(elements, ElementOf(spread))
+			spreadElement := ElementOf(spread)
+			// the walk holds no items for a builtin ITERATOR — `[...m.values()]`
+			// spreads a view over a collection it never tracked — but the
+			// iterator's own type argument states what one element is, and a
+			// spread yields every element the iterator yields
+			// (sec-runtime-semantics-arrayaccumulation). So the element the
+			// star is built over comes from the same reading `.next().value`
+			// takes, and only the LENGTH stays unstated.
+			if spreadElement.Kind == abstractdomain.KindUnknown && !spreadElement.Opaque {
+				if sequence, ok := builtinIteratorSequenceOf(ctx, element.AsSpreadElement().Expression); ok {
+					spreadElement = ElementOf(sequence)
+				}
+			}
+			elements = append(elements, spreadElement)
 			continue
 		}
 		walked := evaluateExpression(ctx, env, element)

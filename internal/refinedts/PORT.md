@@ -214,7 +214,11 @@ Package `internal/checker`:
   `TypeFlagsUnion` (1<<27), plus combined masks like
   `TypeFlagsStringLike`, `TypeFlagsUnionOrIntersection`.
 - Literal values: `t.AsLiteralType().Value()` — the value is an `any`
-  holding string / float64 / bool / jsnum.PseudoBigInt.
+  holding `string | jsnum.Number | bool | PseudoBigInt`. Number-literal
+  values must be read through a type switch accepting `jsnum.Number`,
+  not a bare `.(float64)` assertion; see `numberLiteralValue` in
+  `walk/literal_values.go` and `numberLiteralValueOf` in
+  `typereading/host_type.go`.
 
 Package `internal/ast`:
 

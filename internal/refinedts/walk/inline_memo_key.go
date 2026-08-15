@@ -28,9 +28,16 @@ import (
 // The nodes and the values both come from the ONE effective-argument
 // list the binding itself uses (EffectiveArgumentsOf), so a tagged
 // template's slots key the same way a plain call's do, and the key's
-// argument spellings are exactly the values ParameterKnown binds. A nil
+// argument spellings are exactly the values ParameterKnown reads. A nil
 // node is a position with no expression to scan — a synthesized
 // template object, or an item expanded out of a spread.
+//
+// The BINDING then meets each of those values with its parameter's
+// declared type (BoundParameterKnown), so two calls the key separates may
+// bind equal values — the key distinguishes more calls than the bindings
+// do. That direction is the safe one: a hit still replays a walk whose
+// bindings were equal, and the only cost is a repeat walk where a replay
+// would have served.
 //
 // EXPANSION AND THE KEY: a spread changes how many positions one call
 // node occupies, and the key spells every effective VALUE in order, so

@@ -67,6 +67,21 @@ const (
 	// sets. It is not an enclosure operation, so it never reaches the
 	// arithmetic transfers and rides its own wire field.
 	LoopEffectConcat LoopEffectKind = "concat"
+	// LoopEffectSeqUnary is the SEQUENCE unary: a string METHOD over a
+	// receiver known only as a set. Like concat it lives in the tuple
+	// layer rather than the enclosure world, so it never reaches the
+	// arithmetic transfers and rides its own wire field, carrying the
+	// method name in Op and the receiver in A.
+	LoopEffectSeqUnary LoopEffectKind = "seqUn"
+	// LoopEffectSeqNum is the NUMERIC-FROM-SEQUENCE unary: a string
+	// method whose RECEIVER is a word and whose RESULT is a number. It is
+	// its own kind because the operand and the result live in different
+	// worlds -- the receiver is read in the tuple layer, the answer is
+	// stated as an enclosure -- and no other kind crosses that way. The
+	// method name rides in Op and the receiver in A; there is no needle
+	// operand, because the window the kernel claims holds for every
+	// needle.
+	LoopEffectSeqNum LoopEffectKind = "seqNum"
 	LoopEffectJoin   LoopEffectKind = "join"
 	// LoopEffectOrAbsent is the unguarded index read: `a[i]` with nothing
 	// bounding i against the length produces the element or undefined.
@@ -74,6 +89,19 @@ const (
 	// A field like the unary forms — and the absent outcome rides beside
 	// it, since the absent value lives outside every set.
 	LoopEffectOrAbsent LoopEffectKind = "orAbsent"
+	// LoopEffectThrown is what an ESCAPING THROW writes into the result
+	// slot: a run that left by throwing produced no completion at all.
+	// It is its own kind rather than a flag on constState, because the
+	// outcome it writes is not a value and no set can hold it — the
+	// kernel's fourth Outcome constructor, one step further out than
+	// the absent VALUE.
+	//
+	// This is what keeps `if (x) throw new E(); return v` serving `v`
+	// rather than `v ∪ undefined`: the throw arm writes the thrown
+	// outcome, the join with the real return raises only the thrown
+	// flag, and the kernel's ret-row split then reads the return alone.
+	// Sending AbsentConst here instead is what merged the two.
+	LoopEffectThrown LoopEffectKind = "thrown"
 )
 
 // LoopEffectOp is the op field of a unary or binary LoopEffect.
@@ -103,6 +131,80 @@ const (
 	LoopOpShl    LoopEffectOp = "shl"
 	LoopOpSar    LoopEffectOp = "sar"
 	LoopOpShr    LoopEffectOp = "shr"
+	// The bounded-image unaries. These spell the same names the
+	// transfer wire uses, and the kernel's loopOp1Of reads them into
+	// LoopOp1. On the EFFECT wire their image is the interval each
+	// operation's own clause names and nothing finer — the transfer
+	// wire's tight windows need a singleton operand, which a
+	// loop-carried binding is not:
+	//
+	//   sqrt → [0, +∞)   (sec-math.sqrt: every non-NaN row is a square
+	//                     root or one of +0/-0/+∞)
+	//   sin  → [-1, 1]   (sec-math.sin)
+	//   cos  → [-1, 1]   (sec-math.cos)
+	//   atan → [-2, 2]   (sec-math.atan: "in the inclusive interval
+	//                     from 𝔽(-π / 2) to 𝔽(π / 2)")
+	LoopOpSqrt LoopEffectOp = "sqrt"
+	LoopOpSin  LoopEffectOp = "sin"
+	LoopOpCos  LoopEffectOp = "cos"
+	LoopOpAtan LoopEffectOp = "atan"
+	// LoopOpPow is `**` and Math.pow, which the kernel evaluates with
+	// the same transferPow the transfer wire answers with: the pinned
+	// Number::exponentiate rows (sec-numeric-types-number-exponentiate)
+	// plus the exact integer path, and unknown where the
+	// implementation-approximated remainder is reachable.
+	LoopOpPow LoopEffectOp = "pow"
+	// LoopOpAtan2 is the two-argument inverse tangent, bounded by its
+	// own clause's interval: sec-math.atan2 states the result "is in
+	// the inclusive interval from -π to +π", so [-4, 4] encloses it.
+	LoopOpAtan2 LoopEffectOp = "atan2"
+	// The SEQUENCE unaries, read by the kernel's seqOp1Of. These are the
+	// string methods whose result set is provable from the receiver's
+	// set alone, and the claim they carry is the DRAWN-FROM one: every
+	// scalar of the result already occurred in the receiver, and the
+	// result is no longer. The kernel keeps the receiver's character
+	// class and its length CEILING, and drops the floor -- a trim can
+	// empty the word.
+	//
+	// This is sound because sec-trimstring removes leading and/or
+	// trailing white space by CODE POINT, so no surrogate pair is split
+	// and no scalar the receiver never held can appear.
+	LoopOpTrim      LoopEffectOp = "trim"
+	LoopOpTrimStart LoopEffectOp = "trimStart"
+	LoopOpTrimEnd   LoopEffectOp = "trimEnd"
+	// LoopOpSplitElemSafe is the ELEM half of `s.split(sep)`: what one
+	// piece may hold. A piece is a contiguous stretch of the receiver, so
+	// its scalars all occurred there and it is no longer than the
+	// receiver -- the same drawn-from claim the trims carry, which is why
+	// it rides the same kernel row.
+	//
+	// The name carries a GATE, and the gate is what separates it from
+	// slice. A slice cuts at a caller-chosen code-unit position and can
+	// split a surrogate pair; a split cuts only where the separator
+	// MATCHES, and a match of a well-formed separator begins and ends on
+	// a scalar boundary. The exception is a separator that is itself a
+	// lone surrogate, which can match one half of an astral pair. Send
+	// this op ONLY with the separator established astral-safe, or the
+	// receiver established astral-free; the kernel refuses a bare
+	// "split", so an ungated lowering gets no claim rather than a wrong
+	// one.
+	LoopOpSplitElemSafe LoopEffectOp = "splitElemSafe"
+	// LoopOpIndexOf is the numeric-from-sequence op: the UTF-16 index of
+	// a first match, or -1 (sec-string.prototype.indexof). The kernel
+	// answers the window the receiver's set supports -- {-1} u [0, 2*hi)
+	// for a receiver with scalar-count ceiling hi, since TERMS-v2 §12
+	// pins a scalar-count-n word's code-unit length at n <= length <= 2n
+	// -- and {-1} u [0, +inf) with integrality when the receiver states
+	// no ceiling. Nothing gates it: the window holds for every needle.
+	LoopOpIndexOf LoopEffectOp = "indexOf"
+	// There is deliberately no slice, toUpperCase, or toLowerCase here.
+	// String.prototype.slice cuts at UTF-16 code UNIT positions, so a cut
+	// inside a surrogate pair yields a lone surrogate -- a scalar outside
+	// the receiver's set -- and a set-known receiver cannot be proved
+	// astral-free. The case mappings replace scalars outright, so the
+	// result's letters need not have occurred in the receiver at all.
+	// Sending either would be a claim the kernel cannot discharge; the
+	// walk havocs those positions instead.
 )
 
 // LoopEffect is one binding's body effect, lowered for the kernel's
@@ -123,7 +225,7 @@ type LoopEffect struct {
 	Absent bool
 	Nan    bool
 
-	Op LoopEffectOp // "un" / "bin"
+	Op LoopEffectOp // "un" / "bin" / "seqUn" / "seqNum"
 	A  *LoopEffect
 	B  *LoopEffect // "bin" / "concat" / "join"
 }
@@ -138,6 +240,18 @@ func AbsentConst() LoopEffect {
 		Set:    refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)),
 		Absent: true,
 	}
+}
+
+// ThrownConst is what an escaping throw writes into the result slot:
+// the run produced no completion at all. It carries no set and no
+// flags — the outcome it names lives outside everything a set holds,
+// and the kernel writes the empty set with the thrown flag alone.
+//
+// Use this, never AbsentConst, for a throw that leaves the body: a
+// throw did not return undefined, it returned NOTHING, and the two
+// are distinct outcomes to the kernel.
+func ThrownConst() LoopEffect {
+	return LoopEffect{Kind: LoopEffectThrown}
 }
 
 // EffectWire is effectWire in the TS source.
@@ -157,10 +271,16 @@ func EffectWire(e LoopEffect) string {
 		return fmt.Sprintf(`{"op":"%s","A":%s,"B":%s}`, e.Op, EffectWire(*e.A), EffectWire(*e.B))
 	case LoopEffectConcat:
 		return fmt.Sprintf(`{"concat":[%s,%s]}`, EffectWire(*e.A), EffectWire(*e.B))
+	case LoopEffectSeqUnary:
+		return fmt.Sprintf(`{"seqOp":"%s","A":%s}`, e.Op, EffectWire(*e.A))
+	case LoopEffectSeqNum:
+		return fmt.Sprintf(`{"seqNumOp":"%s","A":%s}`, e.Op, EffectWire(*e.A))
 	case LoopEffectJoin:
 		return fmt.Sprintf(`{"join":[%s,%s]}`, EffectWire(*e.A), EffectWire(*e.B))
 	case LoopEffectOrAbsent:
 		return fmt.Sprintf(`{"orAbsent":%s}`, EffectWire(*e.A))
+	case LoopEffectThrown:
+		return `{"thrown":true}`
 	}
 	panic(fmt.Sprintf("EffectWire: unreached kind %q", e.Kind))
 }

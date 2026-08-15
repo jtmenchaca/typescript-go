@@ -146,7 +146,7 @@ func ReplayInline(ctx *FlowContext, env Env, contract FunctionContract, effectiv
 		WriteBackParameter(ctx, env, writeBackParameterParams{
 			parameter:     parameter,
 			post:          held.ParamPosts[i].Value,
-			entry:         ParameterKnown(parameter, i, effective),
+			entry:         BoundParameterKnown(ctx, parameter, i, effective),
 			argument:      argument,
 			restArguments: argumentNodes[i:],
 		})

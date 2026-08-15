@@ -29,6 +29,14 @@ type WornSetParams struct {
 	SpelledTarget string
 	Temporal      *refinementsets.TemporalAnnotation
 	BoundsStated  bool
+	// OneArmOf says the known is ONE ARM of a wider union the value
+	// may take, not the whole of what the value can be. A subset
+	// failure on such an arm refutes that arm, and the value only MAY
+	// take it — so the sentence says "may be", the way possibly-NaN
+	// knowledge says it (nan_wrapper.go). A definite "is not
+	// assignable" there is a claim the checker's own set does not
+	// support.
+	OneArmOf bool
 }
 
 // CheckWornSet is checkWornSet in the TS source.
@@ -62,12 +70,7 @@ func CheckWornSet(p WornSetParams) {
 		targetSort := target.KindTag
 		if (scalarish(knownSort) && sequenceish(targetSort)) ||
 			(sequenceish(knownSort) && scalarish(targetSort)) {
-			ctx.Report(assignability.At(
-				node,
-				7001,
-				what+" is "+say(knownSort)+", and the position states "+
-					say(targetSort)+" — "+say(knownSort)+" is not allowed here",
-			))
+			ctx.Report(assignability.At(node, 7001, wornCrossSortText(p, say(knownSort), say(targetSort))))
 			return
 		}
 		ctx.Report(assignability.At(node, 7002, assignability.AlertText))
@@ -87,12 +90,7 @@ func CheckWornSet(p WornSetParams) {
 	// is numeric.)
 	if known.SetKindTag == abstractdomain.SetKindTagNone && target.KindTag == "" {
 		if refinementsets.OnOneTupleLayer(known.Set) && StatesSequence(*target.Set) {
-			ctx.Report(assignability.At(
-				node,
-				7001,
-				what+" is a number, and the position states a string or "+
-					"an array — a number is not allowed here",
-			))
+			ctx.Report(assignability.At(node, 7001, wornCrossSortText(p, "a number", "a string or an array")))
 			return
 		}
 		if StatesSequence(known.Set) && refinementsets.OnOneTupleLayer(*target.Set) &&
@@ -103,12 +101,7 @@ func CheckWornSet(p WornSetParams) {
 			// library-rooted statement vouches numeric intent, values
 			// outside the alphabet prove it
 			(target.LibraryAdapter != "" || !WithinCodepointDoor(*target.Set, false)) {
-			ctx.Report(assignability.At(
-				node,
-				7001,
-				what+" is a string or an array, and the position states "+
-					"a number — it is not allowed here",
-			))
+			ctx.Report(assignability.At(node, 7001, wornCrossSortText(p, "a string or an array", "a number")))
 			return
 		}
 	}
@@ -147,12 +140,7 @@ func CheckWornSet(p WornSetParams) {
 		} else {
 			spelledKnown = p.SpelledSet(known.Set)
 		}
-		ctx.Report(assignability.At(
-			node,
-			7001,
-			what+" of type '"+spelledKnown+"' is not assignable "+
-				"to type '"+p.SpelledTarget+"'",
-		))
+		ctx.Report(assignability.At(node, 7001, wornRefutationText(p, what, spelledKnown, "")))
 		return
 	}
 	// a SEQUENCE MEASURE the target states (an exact reduce total,
@@ -203,12 +191,34 @@ func checkWornScalarSubset(p WornSetParams) {
 	if targetInt && !knownInt && !p.Stringy {
 		hint = wornIntegerHint(ctx, known.Set, target.Set)
 	}
-	ctx.Report(assignability.At(
-		node,
-		7001,
-		what+" of type '"+p.SpelledSet(known.Set)+"' is not assignable "+
-			"to type '"+p.SpelledTarget+"'"+hint,
-	))
+	ctx.Report(assignability.At(node, 7001, wornRefutationText(p, what, p.SpelledSet(known.Set), hint)))
+}
+
+// wornRefutationText is the sentence a failed subset earns. The WHOLE
+// value missing its target is stated definitely; one ARM of a union
+// missing it is stated as a possibility, since the value only may take
+// that arm — the same "may be" nan_wrapper.go states when NaN is the
+// one obstacle. Both sentences name the same two sets.
+func wornRefutationText(p WornSetParams, what, spelledKnown, hint string) string {
+	if p.OneArmOf {
+		return what + " may be of type '" + spelledKnown + "', which is not " +
+			"assignable to type '" + p.SpelledTarget + "'" + hint
+	}
+	return what + " of type '" + spelledKnown + "' is not assignable " +
+		"to type '" + p.SpelledTarget + "'" + hint
+}
+
+// wornCrossSortText is the sentence a sort crossing earns. The whole
+// value wearing the wrong sort is stated definitely — no run
+// satisfies it; one ARM wearing it says so as a possibility, since the
+// value only may take that arm.
+func wornCrossSortText(p WornSetParams, knownSaid, targetSaid string) string {
+	if p.OneArmOf {
+		return p.What + " may be " + knownSaid + ", and the position states " +
+			targetSaid + " — " + knownSaid + " is not allowed here"
+	}
+	return p.What + " is " + knownSaid + ", and the position states " +
+		targetSaid + " — " + knownSaid + " is not allowed here"
 }
 
 // wornIntegerHint is the TS source's try/catch around the follow-up
@@ -256,12 +266,7 @@ func checkWornNaNElements(p WornSetParams) (reported bool) {
 		}
 	}()
 	if !ctx.Kernel.SeqSubset(known.Set, *target.Set) {
-		ctx.Report(assignability.At(
-			node,
-			7001,
-			what+" of type '"+p.SpelledSet(known.Set)+"' is not "+
-				"assignable to type '"+p.SpelledTarget+"'",
-		))
+		ctx.Report(assignability.At(node, 7001, wornRefutationText(p, what, p.SpelledSet(known.Set), "")))
 		return true
 	}
 	return false

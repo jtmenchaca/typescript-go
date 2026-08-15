@@ -259,7 +259,15 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		callEnv.Set(name.Text(), ParameterKnown(parameter, i, effective))
+		// the parameter wears its argument MET WITH ITS OWN DECLARED TYPE.
+		// The caller's exact value is the point of inlining and the meet
+		// keeps it: the annotation is a ceiling, so a value inside it
+		// passes through whole (entryStateMeet's own argument). What the
+		// meet removes is a claim the declaration cannot carry — an
+		// object literal's COMPLETE key set bound to a parameter declared
+		// `Record<K, V>`. The keys stay; the closed-world claim goes,
+		// because one call site's key set is not the parameter's.
+		callEnv.Set(name.Text(), BoundParameterKnown(ctx, parameter, i, effective))
 		if i < len(argumentNodes) && argumentNodes[i] != nil {
 			argument := argumentNodes[i]
 			if ast.IsArrowFunction(argument) || ast.IsFunctionExpression(argument) {
@@ -369,7 +377,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		WriteBackParameter(ctx, env, writeBackParameterParams{
 			parameter:     parameter,
 			post:          post(name.Text()),
-			entry:         ParameterKnown(parameter, i, effective),
+			entry:         BoundParameterKnown(ctx, parameter, i, effective),
 			argument:      argument,
 			restArguments: argumentNodes[i:],
 		})

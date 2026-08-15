@@ -137,7 +137,11 @@ func exactKeyAtPath(held abstractdomain.AbstractValue, path []string) (abstractd
 			held = *held.Inner
 		}
 		// an INDEX segment reads a list item by position; it names no
-		// object key, so an object under one is not reached
+		// object key, so an object under one is not reached. The bare
+		// Items read needs no absence: a KindList is hole-free by
+		// construction (element_access.go states the argument), and an
+		// elision already holds Undef in its own slot, which the exact
+		// reading below treats as the value it is.
 		if slot, isIndex := dataflowfacts.IndexSegmentOf(key); isIndex {
 			if held.Kind != abstractdomain.KindList || slot >= len(held.Items) {
 				return abstractdomain.AbstractValue{}, false

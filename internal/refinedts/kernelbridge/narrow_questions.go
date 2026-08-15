@@ -92,25 +92,49 @@ type NarrowAnswer struct {
 
 // KnownStateWire is a knowledge state on the wire — the kernel's flat
 // normal form of the checker's scalar knowledge: no knowledge at all
-// (Top), or a refined set with an or-absent flag and an or-NaN flag.
+// (Top), or a refined set with an or-absent flag, an or-NaN flag, and
+// an or-THROWN flag.
+//
+// Thrown is the third flag, and it says something the other two do
+// not: whether a run could have left this position by THROWING rather
+// than completing. A thrown exit is not the absent value — absence is
+// a value a run produced, a thrown exit is no completion at all — and
+// keeping them apart is what lets a body that guards with
+// `if (x) throw` serve its plain returned value.
+//
+// The flag is OPTIONAL on the wire in both directions, and its absence
+// means false, which is what every wire written before it existed
+// meant. So an older kernel and an older checker interoperate with
+// this one unchanged.
 type KnownStateWire struct {
 	Top bool
 
 	Set    refinementsets.RefinedSet
 	Absent bool
 	Nan    bool
+	Thrown bool
 }
 
-// StateWire is stateWire in the TS source.
+// StateWire is stateWire in the TS source. The thrown flag rides only
+// when it is UP, so a state that cannot be thrown encodes byte-for-byte
+// as it always did and every cached question stays valid.
 func StateWire(s KnownStateWire) string {
 	if s.Top {
 		return `{"top":true}`
+	}
+	if s.Thrown {
+		return fmt.Sprintf(
+			`{"set":%s,"absent":%v,"nan":%v,"thrown":true}`,
+			EncodeSet(s.Set), s.Absent, s.Nan,
+		)
 	}
 	return fmt.Sprintf(`{"set":%s,"absent":%v,"nan":%v}`, EncodeSet(s.Set), s.Absent, s.Nan)
 }
 
 // DecodeWireState is decodeWireState in the TS source. Panics when raw
-// is absent or malformed, mirroring the TS `throw`.
+// is absent or malformed, mirroring the TS `throw`. A missing `thrown`
+// field reads as false — a state that says nothing about thrown exits
+// is a state no thrown exit reaches.
 func DecodeWireState(raw any) KnownStateWire {
 	if raw == nil {
 		panic("kernel answered no knowledge state at all")
@@ -125,10 +149,36 @@ func DecodeWireState(raw any) KnownStateWire {
 	set, setHeld := o["set"]
 	absent, absentOK := o["absent"].(bool)
 	nan, nanOK := o["nan"].(bool)
+	thrown, _ := o["thrown"].(bool)
 	if setHeld && set != nil && absentOK && nanOK {
-		return KnownStateWire{Set: DecodeWireSet(set), Absent: absent, Nan: nan}
+		return KnownStateWire{
+			Set: DecodeWireSet(set), Absent: absent, Nan: nan, Thrown: thrown,
+		}
 	}
 	panic(fmt.Sprintf("kernel answered an unexpected knowledge state: %v", raw))
+}
+
+// Returned is the RETURNED HALF of a ret state: what the runs that
+// COMPLETED left in the slot. It is the same state with the thrown
+// flag cleared, which removes no value — the kernel proves this exact
+// reading sound (returned_denotes, set_functions/known_state.lean).
+//
+// A caller that has PROVED the throw arm dead, or handled it with a
+// try, reads this in place of the whole state. A caller that has done
+// neither must account for the thrown exit, and MayThrow says so.
+func (s KnownStateWire) Returned() KnownStateWire {
+	if s.Top {
+		return s
+	}
+	s.Thrown = false
+	return s
+}
+
+// MayThrow says whether this state admits a thrown exit. An unknown
+// state admits one, as it admits everything (mayThrow_denotes,
+// set_functions/known_state.lean).
+func (s KnownStateWire) MayThrow() bool {
+	return s.Top || s.Thrown
 }
 
 // NarrowWire is narrowWire in the TS source.

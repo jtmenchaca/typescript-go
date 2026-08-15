@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
@@ -238,6 +239,11 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 					out := silence.Residue()
 					return &out
 				}
+				// A STRING receiver is dense by construction: its positions
+				// are UTF-16 units of an immutable primitive, so an in-range
+				// index always names a unit and the read is exactly the
+				// element. Arrays get the absence below.
+				receiverIsString := primitives.IsStringKind(p.Ctx.P.Checker, elem.Expression)
 				// a SUM measure bounds nonnegative elements: the fold of
 				// nonnegatives is monotone under fl (fl(a+b) ≥ max(a,b)
 				// for a, b ≥ 0), so no element exceeds the stated total
@@ -256,7 +262,32 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 					out := abstractdomain.PossiblyNaN(read)
 					return &out
 				}
-				return &read
+				// The index is IN BOUNDS, which is not the same as the slot
+				// being POPULATED. Every arm above (underFloor, underLength,
+				// underSum) is a claim about the LENGTH — the floor is raised
+				// by a length guard (assume_condition.go's
+				// LengthGuardNarrowings), the other two read a `.length`
+				// ledger row. On an array with holes, length COUNTS the holes:
+				// `const t = []; t[3] = x` has length 4 with slots 0..2
+				// absent, so `i < t.length` holds at i = 1 while `t[1]` is
+				// undefined. A repetition set is a membership claim about the
+				// positions that ARE there ("every element lies in this set,
+				// count between lo and hi") and states nothing about density,
+				// so a receiver that ARRIVED as a repetition — a parameter, a
+				// value read back through a summary — is unproved and the
+				// read wears the absence.
+				//
+				// This is the same answer the honored noUncheckedIndexedAccess
+				// gives type-side (`T | undefined`), so the two layers agree
+				// rather than one contradicting the other. A receiver the walk
+				// itself built element-by-element is a KindList, not a
+				// repetition, and keeps its exact bare read
+				// (element_access.go).
+				if receiverIsString {
+					return &read
+				}
+				out := abstractdomain.PossiblyUndefined(read, abstractdomain.TrustSpec, true, false)
+				return &out
 			}
 		}
 	}
@@ -319,10 +350,19 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 	}
 	// an UNVOUCHED read of a repetition-shaped sequence at a
 	// NUMBER-typed index is still an element OR undefined — out of
-	// range (or fractional) answers the absent value, in range the
-	// element set (sec-array-exotic-objects; a validated array has
-	// no holes). Absence then narrows like any other maybe. A
-	// string-typed index could name "length" or a method — no claim.
+	// range (or fractional) answers the absent value, and in range the
+	// element set or, on an array with holes, undefined again
+	// (sec-array-exotic-objects). Absence then narrows like any other
+	// maybe. A string-typed index could name "length" or a method — no
+	// claim.
+	//
+	// The earlier wording here said "a validated array has no holes",
+	// which claimed more than the repetition proves: a repetition states
+	// what the present positions hold and how many there are, never that
+	// the slots between them are populated. It does not matter to THIS
+	// arm's answer — the index is unvouched, so the read wears the
+	// absence either way — but the same sentence was doing load-bearing
+	// work at the vouched arm above, where it is now retired.
 	rep, repOk := refinementsets.AsRepetition(p.Receiver.Set)
 	if repOk && !p.Receiver.NaNElements &&
 		(p.Ctx.P.Checker.GetTypeAtLocation(elem.ArgumentExpression).Flags()&checker.TypeFlagsNumberLike) != 0 {

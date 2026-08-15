@@ -150,6 +150,22 @@ func CheckSetMembership(
 	node *ast.Node,
 	what string,
 ) {
+	checkSetMembershipOfArm(ctx, known, target, node, what, false)
+}
+
+// checkSetMembershipOfArm is checkSetMembership with the one extra
+// fact the union dispatcher holds: this known is ONE ARM of a wider
+// union, so a subset failure is a possibility about the value, not a
+// verdict on it. No TS twin — the TS source states the definite
+// sentence on every arm, which is the A2 misfire.
+func checkSetMembershipOfArm(
+	ctx *FlowContext,
+	known abstractdomain.AbstractValue,
+	target annotations.DeclaredRefinement,
+	node *ast.Node,
+	what string,
+	oneArmOf bool,
+) {
 	if target.Kind != annotations.DeclaredSet {
 		ctx.Report(assignability.At(node, 7002, assignability.AlertText))
 		return
@@ -189,7 +205,7 @@ func CheckSetMembership(
 	}
 	boundsStated := temporal != nil && (temporal.HasMin || temporal.HasMax)
 
-	reported := checkSetMembershipQuestions(ctx, known, target, node, what, stringy, quoted, spelledTarget, temporal, boundsStated, spelledSet)
+	reported := checkSetMembershipQuestions(ctx, known, target, node, what, stringy, quoted, spelledTarget, temporal, boundsStated, spelledSet, oneArmOf)
 	if !reported.decided {
 		// the kernel declined the question — nothing is proven here, and
 		// the decline NAMES the bound it hit (a decline is an outcome)
@@ -224,6 +240,7 @@ func checkSetMembershipQuestions(
 	temporal *refinementsets.TemporalAnnotation,
 	boundsStated bool,
 	spelledSet func(refinementsets.RefinedSet) string,
+	oneArmOf bool,
 ) (outcome setMembershipOutcome) {
 	outcome.decided = true
 	defer func() {
@@ -254,6 +271,7 @@ func checkSetMembershipQuestions(
 		SpelledTarget: spelledTarget,
 		Temporal:      temporal,
 		BoundsStated:  boundsStated,
+		OneArmOf:      oneArmOf,
 	})
 	return outcome
 }

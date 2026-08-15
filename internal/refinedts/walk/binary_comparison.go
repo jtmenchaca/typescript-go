@@ -65,8 +65,15 @@ func ReadInKeyword(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abstr
 			return abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec), true
 		}
 		// ABSENCE still needs the complete key set: only a
-		// literal-built object knows every key it has
-		if target.Complete {
+		// literal-built object knows every key it has — and never a
+		// target whose declared type is an OPEN MAP (element_access.go's
+		// OpenMapAt), where any key may be present at some other call.
+		// The presence half above is untouched: a stated key is there
+		// whatever the type says, so it needs no completeness at all.
+		// The parameter binding now strips the completeness an open-map
+		// parameter never earned; this gate is defense in depth for the
+		// evaluation-path routes that cross no parameter binding.
+		if target.Complete && !openMapReceiver(ctx, bin.Right) {
 			return abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec), true
 		}
 	}

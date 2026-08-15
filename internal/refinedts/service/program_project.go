@@ -29,6 +29,13 @@ import (
 // (strict, target, module resolution, noEmit) — a project's stated
 // rows override these in adoptedOptions, and anything unreadable
 // falls back to this alone.
+//
+// NoUncheckedIndexedAccess is deliberately absent: tsc's `strict` does
+// NOT imply it, and the checker gates on == TSTrue (checker.go's
+// getIndexedAccessTypeOrUndefined), so the unset TSUnknown zero value
+// reads as off — the same answer tsc gives a file with no covering
+// project. A project that states the flag brings it through
+// adoptedOptions.
 func Options() *core.CompilerOptions {
 	return &core.CompilerOptions{
 		Strict:                     core.TSTrue,
@@ -235,6 +242,58 @@ func adoptedOptions(project *core.CompilerOptions) *core.CompilerOptions {
 	}
 	if project.UseUnknownInCatchVariables != core.TSUnknown {
 		adopted.UseUnknownInCatchVariables = project.UseUnknownInCatchVariables
+	}
+	// noUncheckedIndexedAccess decides what GetTypeAtLocation answers for
+	// EVERY indexed read: `T` with the flag off, `T | undefined` with it
+	// on. Dropping it made a project that states the flag get analyzed
+	// with it off — arr[i] read back as a plain object, so a KindObject
+	// receiver was unconditionally truthy, `obj == undefined` decided
+	// false, and if_statement fired 7001 "provably false" against the
+	// very guards tsc REQUIRES the author to write. Sixteen such fires on
+	// recharts were each proved wrong with a witness.
+	if project.NoUncheckedIndexedAccess != core.TSUnknown {
+		adopted.NoUncheckedIndexedAccess = project.NoUncheckedIndexedAccess
+	}
+	// exactOptionalPropertyTypes changes an optional property's type:
+	// with it off `{ a?: string }` reads as `string | undefined`, with it
+	// on the undefined is NOT admitted by an assignment, and the read of
+	// a missing key is still absent. It moves what the checker hands us
+	// for every optional key, so the shape channel has to see the
+	// project's own answer rather than ours.
+	if project.ExactOptionalPropertyTypes != core.TSUnknown {
+		adopted.ExactOptionalPropertyTypes = project.ExactOptionalPropertyTypes
+	}
+	// strictFunctionTypes decides whether a parameter position compares
+	// contravariantly, which changes which call signatures a value's type
+	// admits — a type we read off a callback-bearing value differs
+	// between the two settings.
+	if project.StrictFunctionTypes != core.TSUnknown {
+		adopted.StrictFunctionTypes = project.StrictFunctionTypes
+	}
+	// strictBindCallApply decides whether bind/call/apply answer their
+	// precise signature or the loose `any`-shaped one — a read through
+	// any of the three gets a different type per setting.
+	if project.StrictBindCallApply != core.TSUnknown {
+		adopted.StrictBindCallApply = project.StrictBindCallApply
+	}
+	// strictBuiltinIteratorReturn decides whether a built-in iterator's
+	// `next()` answers `IteratorResult<T, undefined>` or `<T, any>` — the
+	// value read out of an iteration differs between the two.
+	if project.StrictBuiltinIteratorReturn != core.TSUnknown {
+		adopted.StrictBuiltinIteratorReturn = project.StrictBuiltinIteratorReturn
+	}
+	// noImplicitThis decides whether an unannotated `this` reads as `any`
+	// or is an error position — it changes the type of every `this` the
+	// walk reads inside a plain function.
+	if project.NoImplicitThis != core.TSUnknown {
+		adopted.NoImplicitThis = project.NoImplicitThis
+	}
+	// useDefineForClassFields decides whether a declared-but-unassigned
+	// class field exists as own-property `undefined` at construction or
+	// is absent — the field's value differs between the two, and the
+	// class-field invariants read that value.
+	if project.UseDefineForClassFields != core.TSUnknown {
+		adopted.UseDefineForClassFields = project.UseDefineForClassFields
 	}
 	return &adopted
 }

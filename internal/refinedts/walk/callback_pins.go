@@ -29,6 +29,15 @@ import (
 // switch recognized three, which left `ys = xs.reduce(cb, seed)`
 // falling through with no attempt while the accumulator law below sat
 // fully implemented. A name added here needs a case there.
+//
+// The RETURN-position entry (SummaryCallbackReturnOf) serves a SUBSET
+// of these names, and the subset is decided by where the result lands
+// rather than by which callbacks are modeled. `reduce`, `find` and
+// `flatMap` answer a scalar, which the body's result slot holds; `map`
+// and `filter` answer an ARRAY, which wants the ".len"/".elem" pair the
+// result slot has not got, and `forEach` answers nothing. So a name
+// added here needs a case in the statement switch, and a case in the
+// return entry only if what it answers is a scalar.
 var ArrayCallbackMethods = map[string]struct{}{
 	"map":     {},
 	"filter":  {},

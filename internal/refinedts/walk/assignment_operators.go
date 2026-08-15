@@ -64,6 +64,23 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 		}
 		return value, true
 	}
+	// a `this[S] = value` store under a STABLE symbol const: the value
+	// sinks for the field-invariant collection under its #sym: name —
+	// the same sink a dotted `this.key = value` feeds — and the held
+	// `this` forgets to its invariants, which now carry this field.
+	// A symbol key is disjoint from every string key, so the field
+	// collection reads the store exactly as it reads a dotted one.
+	if bin.OperatorToken.Kind == ast.KindEqualsToken && ast.IsElementAccessExpression(bin.Left) {
+		elem := bin.Left.AsElementAccessExpression()
+		if elem.Expression.Kind == ast.KindThisKeyword && ctx.ThisWriteSink != nil {
+			if fieldName, isSymbolKey := SymbolKeyedFieldName(ctx.P.Checker, bin.Left); isSymbolKey {
+				value := evaluateExpression(ctx, env, bin.Right)
+				ctx.ThisWriteSink[fieldName] = append(ctx.ThisWriteSink[fieldName], value)
+				ForgetThisHeld(ctx, env, e)
+				return value, true
+			}
+		}
+	}
 	// a write THROUGH a property: `obj.key = v`. The object's facts
 	// are only as good as its keys, so the key takes the new value —
 	// and where the path is not a plain `name.key`, the whole object

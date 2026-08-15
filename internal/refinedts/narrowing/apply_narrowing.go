@@ -634,6 +634,13 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 	// that slot narrows in place and the rest stay as they were. A slot
 	// past the items says nothing — the list holds no value there for the
 	// narrowing to sharpen.
+	//
+	// The in-range slot needs no absence wrapper: a KindList is hole-free
+	// by construction (walk/element_access.go states the argument — every
+	// builder writes each slot from its own walked source, an elision
+	// writes Undef, and an index write retires the whole receiver rather
+	// than growing it). Narrowing an Undef slot is a no-op, which is the
+	// right answer for a hole.
 	if known.Kind == abstractdomain.KindList {
 		slot, isIndex := dataflowfacts.IndexSegmentOf(path[0])
 		if !isIndex || slot >= len(known.Items) {

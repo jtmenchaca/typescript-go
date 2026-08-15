@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
@@ -149,6 +150,98 @@ func numericStepWrite(node *ast.Node) bool {
 	return false
 }
 
+// symbolKeyedThisAccess answers the field name behind a `this[S]` where
+// the `this` handed in is the ELEMENT ACCESS's own receiver and S is a
+// stable symbol const (ir_field_bundles.go's key identity). The name is
+// the derived `#sym:` spelling, so the declaration, every write, and
+// every read of one symbol land on one key in the maps below.
+func symbolKeyedThisAccess(c *checker.Checker, thisNode *ast.Node) (string, bool) {
+	parent := thisNode.Parent
+	if parent == nil || !ast.IsElementAccessExpression(parent) {
+		return "", false
+	}
+	if Unwrapped(parent.AsElementAccessExpression().Expression) != thisNode {
+		return "", false
+	}
+	return SymbolKeyedFieldName(c, parent)
+}
+
+// ExportedSymbolConst is whether the symbol const a key names is
+// EXPORTED from its module — the split that says how private the field
+// it keys really is.
+//
+// A symbol property is reachable only by code holding the symbol VALUE.
+// An UNEXPORTED module-level const never hands that value out, so the
+// only writers of the field are the module's own text: closer to `#`
+// privacy than to the `private` modifier, which is erased at runtime and
+// guards nothing. An EXPORTED const hands the key to every importer, and
+// any of them can write the field — so it is exactly as open as a public
+// field, and takes the treatment a public field takes.
+//
+// It reads the const's own declaration statement, which is where the
+// `export` modifier sits (a `const` inside a VariableStatement), and the
+// module's `export { S }` list, which exports the same binding without
+// touching the declaration. Anything it cannot read answers TRUE — an
+// unread export is the shape that would wrongly claim privacy.
+func ExportedSymbolConst(c *checker.Checker, key *ast.Node) bool {
+	if c == nil || key == nil {
+		return true
+	}
+	symbol := symbolAt(c, key)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return true
+	}
+	declaration := symbol.ValueDeclaration
+	if declaration.Parent == nil || declaration.Parent.Parent == nil {
+		return true
+	}
+	statement := declaration.Parent.Parent
+	if ast.GetCombinedModifierFlags(statement)&ast.ModifierFlagsExport != 0 {
+		return true
+	}
+	sourceFile := ast.GetSourceFileOfNode(declaration)
+	if sourceFile == nil {
+		return true
+	}
+	// `export { S }` names the binding from a separate clause, so the
+	// declaration carries no modifier and the file's own export
+	// statements are what say the const left the module
+	name := declaration.AsVariableDeclaration().Name()
+	if name == nil || !ast.IsIdentifier(name) {
+		return true
+	}
+	spelled := name.Text()
+	for _, statement := range sourceFile.Statements.Nodes {
+		if !ast.IsExportDeclaration(statement) {
+			continue
+		}
+		exportDeclaration := statement.AsExportDeclaration()
+		if exportDeclaration.ModuleSpecifier != nil {
+			// `export … from "other"` re-exports another module's bindings,
+			// never this file's own const
+			continue
+		}
+		clause := exportDeclaration.ExportClause
+		if clause == nil || !ast.IsNamedExports(clause) {
+			// a clause this reading does not spell — the const may be in it
+			return true
+		}
+		for _, element := range clause.AsNamedExports().Elements.Nodes {
+			specifier := element.AsExportSpecifier()
+			// the LOCAL name is PropertyName under `export { S as T }` and
+			// Name() under a bare `export { S }`
+			local := specifier.PropertyName
+			if local == nil {
+				local = specifier.Name()
+			}
+			if local != nil && ast.IsIdentifier(local) && local.Text() == spelled {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // FieldInvariantsOf is the invariants of a class's private fields —
 // the `#`-named ones survive a `this` escape, the modifier-private
 // ones do not. Memoized per declaration; the collection walk runs each
@@ -199,11 +292,28 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 	// the fields whose ONLY non-plain writes are numeric steps — those
 	// widen to the number ground rather than dropping out
 	numericallyStepped := map[string]struct{}{}
+	c := checkerOf(ctx)
 	var inspect func(node *ast.Node)
 	inspect = func(node *ast.Node) {
 		if node.Kind == ast.KindThisKeyword {
 			parent := node.Parent
-			if !ast.IsPropertyAccessExpression(parent) || parent.AsPropertyAccessExpression().Expression != node {
+			// `this[S]` under a STABLE SYMBOL const is a plain key access
+			// like `this.x`: the const names one property, so this walk
+			// still reads every write to it and the instance goes nowhere.
+			// Every other bracketed key hands the instance to code that can
+			// reach any property, which is the escape.
+			if symbolKey, isSymbolKey := symbolKeyedThisAccess(c, node); isSymbolKey {
+				if writtenAt(parent) == writtenAtOther {
+					if numericStepWrite(parent) {
+						if _, already := poisoned[symbolKey]; !already {
+							numericallyStepped[symbolKey] = struct{}{}
+						}
+					} else {
+						delete(numericallyStepped, symbolKey)
+						poisoned[symbolKey] = struct{}{}
+					}
+				}
+			} else if !ast.IsPropertyAccessExpression(parent) || parent.AsPropertyAccessExpression().Expression != node {
 				escapes = true
 			} else if writtenAt(parent) == writtenAtOther {
 				key := parent.AsPropertyAccessExpression().Name().Text()
@@ -257,24 +367,53 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 		}
 		pd := member.AsPropertyDeclaration()
 		name := pd.Name()
-		if !ast.IsIdentifier(name) && !ast.IsPrivateIdentifier(name) {
-			continue
-		}
 		flags := ast.GetCombinedModifierFlags(member)
 		if flags&ast.ModifierFlagsStatic != 0 {
 			continue
 		}
-		if flags&ast.ModifierFlagsPrivate == 0 && !ast.IsPrivateIdentifier(name) {
+		// THE SYMBOL-KEYED MEMBER, and where its privacy actually comes
+		// from. `private readonly [INSTANCE_ID_SYMBOL]: string` is keyed
+		// by a module-level symbol const, and a symbol property is
+		// reachable only by code holding the symbol VALUE. Where the
+		// module does not EXPORT that const, the only holders are the
+		// module's own text — closer to `#` privacy than to the `private`
+		// modifier, which is erased and guards nothing at runtime. Where
+		// the module DOES export it (nest exports INSTANCE_ID_SYMBOL and
+		// INSTANCE_METADATA_SYMBOL), every importer holds the key and can
+		// write the field, so it is as open as a public field is.
+		//
+		// NEITHER SIDE OF THAT SPLIT BECOMES A CANDIDATE HERE, and the
+		// reason is the collection, not the privacy: the write sink
+		// records `this.key = v` stores by their DOTTED name, and a
+		// `this[S] = v` store never reaches it. A candidate whose writes
+		// the collection cannot see would answer its initializer alone —
+		// `Undef` for the very field nest's constructor fills with a
+		// string. So the symbol field takes no invariant, and its reads
+		// answer the opaque floor (InitialThisStateOf seeds the key, and
+		// the element read routes to the same reader the dotted read
+		// uses). What the recognition DOES buy is above: `this[S]` is no
+		// longer an escape, so every OTHER private field in the class
+		// keeps the invariant that access used to wipe out.
+		_, isSymbolKey := symbolMemberFieldName(c, name)
+		var nameText string
+		switch {
+		case isSymbolKey:
+			continue
+		case name != nil && (ast.IsIdentifier(name) || ast.IsPrivateIdentifier(name)):
+			nameText = name.Text()
+			if flags&ast.ModifierFlagsPrivate == 0 && !ast.IsPrivateIdentifier(name) {
+				continue
+			}
+			// after an escape only the `#`-named fields survive: the language
+			// keeps outside code from writing them at all, so this walk still
+			// reads every write. A `private`-modifier field is writable
+			// through the escaped reference at runtime.
+			if escapes && !ast.IsPrivateIdentifier(name) {
+				continue
+			}
+		default:
 			continue
 		}
-		// after an escape only the `#`-named fields survive: the language
-		// keeps outside code from writing them at all, so this walk still
-		// reads every write. A `private`-modifier field is writable
-		// through the escaped reference at runtime.
-		if escapes && !ast.IsPrivateIdentifier(name) {
-			continue
-		}
-		nameText := name.Text()
 		if _, isPoisoned := poisoned[nameText]; isPoisoned {
 			continue
 		}
@@ -357,15 +496,24 @@ func InitialThisStateOf(ctx *FlowContext, site *ast.Node) *abstractdomain.Abstra
 		if !ast.IsPropertyDeclaration(member) {
 			continue
 		}
-		pd := member.AsPropertyDeclaration()
-		name := pd.Name()
-		if !ast.IsIdentifier(name) && !ast.IsPrivateIdentifier(name) {
-			continue
-		}
+		name := member.AsPropertyDeclaration().Name()
 		if ast.GetCombinedModifierFlags(member)&ast.ModifierFlagsStatic != 0 {
 			continue
 		}
-		nameText := name.Text()
+		var nameText string
+		switch {
+		case name != nil && (ast.IsIdentifier(name) || ast.IsPrivateIdentifier(name)):
+			nameText = name.Text()
+		default:
+			// a symbol-keyed member gets a key under its derived `#sym:`
+			// name, so a `this[S]` read has a place to narrow the same way a
+			// dotted field does
+			symbolKey, isSymbolKey := symbolMemberFieldName(checkerOf(ctx), name)
+			if !isSymbolKey {
+				continue
+			}
+			nameText = symbolKey
+		}
 		if _, ok := keys[nameText]; !ok {
 			keyOrder = append(keyOrder, nameText)
 		}

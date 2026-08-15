@@ -13,6 +13,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // allowCasts is ALLOW_CASTS in the TS source (service/analysis_limits.ts).
@@ -161,7 +162,69 @@ func EvaluateAwait(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstra
 	if landed.Kind == abstractdomain.KindPromise {
 		return abstractdomain.AtTrustLevel(*landed.Inner, abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(landed), abstractdomain.TrustLevelOf(*landed.Inner)))
 	}
+	// the operand carries no promise wrapper the walk built — a MEMBER
+	// read (`await this.x`, `await obj.member()`) reaches its value
+	// through the ordinary readers, and nothing in that route wraps a
+	// Promise: the wrapper is only ever built by a modeled call or an
+	// async summary. So the operand's own RESOLVED type is what names
+	// the promise here, and the await reads its fulfillment value.
+	//
+	// The spec route is the same one Promise.resolve travels. Await
+	// (clause "await") step 2 is "Let promise be ?
+	// PromiseResolve(%Promise%, arg)", and the caller then resumes with
+	// the value that promise fulfils with. PromiseResolve
+	// (sec-promise-resolve) step 1 returns _resolution_ itself when
+	// IsPromise is true and its constructor is %Promise%; otherwise it
+	// wraps and the [[Resolve]] closure adopts the thenable. Either
+	// route, what the await hands back is the value the operand's
+	// promise settles to.
+	//
+	// Only the DEFAULT-LIBRARY `Promise<T>` is read below, which is the
+	// case where T names that settled value: a Promise<T> in tsc's own
+	// lib is already the flattened one — its own type argument is the
+	// settled value, since assigning a promise into a Promise<T> slot
+	// requires T to be the settled type. T is therefore read straight
+	// through the resolved-type reader, at that reader's own grade.
+	//
+	// The reading applies only where the walk's evaluation said
+	// NOTHING. A landed value the walk determined is the stronger
+	// claim and stands; the type is the last reader, exactly as it is
+	// everywhere else the walk falls silent.
+	if landed.Kind == abstractdomain.KindUnknown && !landed.Opaque {
+		if settled, ok := settledTypeOfOperand(ctx, inner); ok {
+			return settled
+		}
+	}
 	return landed
+}
+
+// settledTypeOfOperand reads what an awaited operand's RESOLVED type
+// says the await hands back: the single type argument of a default-lib
+// `Promise<T>`, read through the resolved-type reader.
+//
+// A type that is not a default-lib Promise reference answers false —
+// the await over a non-thenable hands the value itself back, which the
+// caller already holds, and a thenable this reader cannot name states
+// nothing. The default-lib check is what keeps a user type spelled
+// `Promise` from being read as the built-in one.
+func settledTypeOfOperand(ctx *FlowContext, operand *ast.Node) (abstractdomain.AbstractValue, bool) {
+	t := ctx.P.Checker.GetTypeAtLocation(operand)
+	if (t.ObjectFlags() & checker.ObjectFlagsReference) == 0 {
+		return abstractdomain.AbstractValue{}, false
+	}
+	symbol := t.Symbol()
+	if symbol == nil || symbol.Name != "Promise" || !ctx.P.Checker.SymbolInDefaultLib(symbol) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	arguments := ctx.P.Checker.GetTypeArguments(t)
+	if len(arguments) != 1 {
+		return abstractdomain.AbstractValue{}, false
+	}
+	settled, ok := typereading.ReadHostType(ctx.P.Checker, arguments[0], operand, 0)
+	if !ok || settled.Kind == abstractdomain.KindUnknown {
+		return abstractdomain.AbstractValue{}, false
+	}
+	return settled, true
 }
 
 // CannotBeThenable answers whether a value's KIND rules out a callable
@@ -266,6 +329,23 @@ func EvaluateCast(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	from := primitives.SortOfPresent(ctx.P.Checker, ctx.P.Checker.GetTypeAtLocation(innermost))
 	to := primitives.SortOfPresent(ctx.P.Checker, ctx.P.Checker.GetTypeAtLocation(e))
 	value := evaluateExpression(ctx, env, innermost)
+	// a cast to a BARE type parameter states no sort at all, so there
+	// is no crossing to demote for. `x as T` with T unconstrained does
+	// not say the value is read under another sort — it says nothing
+	// about the sort — and a cast can only narrow what the checker
+	// claims, never widen it. The value's own reading is therefore what
+	// the position holds, exactly as the aliasing sites already treat
+	// an `as` cast as reference-preserving (peeledReference in
+	// variable_statement.go). A CONSTRAINED parameter is left to the
+	// crossing test below: its constraint is a stated type, and a word
+	// crossing into it is the reread the rule exists for.
+	//
+	// An UNKNOWN value is left to the branch below either way: it has no
+	// reading for the cast to preserve, and that branch is where opaque
+	// provenance keeps its own canonical answer.
+	if value.Kind != abstractdomain.KindUnknown && castsToBareTypeParameter(ctx, e) {
+		return value
+	}
 	if from != to || from == primitives.SortOpaque {
 		// OPAQUE provenance survives any crossing — there are no words
 		// to reread
@@ -281,6 +361,41 @@ func EvaluateCast(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		return abstractdomain.AtTrustLevel(value, abstractdomain.TrustAsserted)
 	}
 	return value
+}
+
+// castsToBareTypeParameter answers whether the cast's TARGET type is a
+// type parameter with no constraint of its own — `as T` where T is
+// declared bare. Such a target names no set and no sort: the type
+// reader refuses it for exactly this reason
+// (typereading/host_type.go's constraint branch returns nothing when
+// GetConstraintOfType is nil or is the parameter itself), so there is
+// no asserted claim for the cast to demote the value to.
+//
+// The absence members are peeled the way SortOfPresent peels them: `as
+// T | undefined` still states nothing about the present part's sort.
+// A parameter WITH a constraint is not answered here — its constraint
+// is a real stated type and the crossing test judges it.
+func castsToBareTypeParameter(ctx *FlowContext, e *ast.Node) bool {
+	target := ctx.P.Checker.GetTypeAtLocation(e)
+	parts := []*checker.Type{target}
+	if target.IsUnion() {
+		parts = target.Types()
+	}
+	sawParameter := false
+	for _, part := range parts {
+		if (part.Flags() & (checker.TypeFlagsUndefined | checker.TypeFlagsNull | checker.TypeFlagsVoid)) != 0 {
+			continue
+		}
+		if (part.Flags() & checker.TypeFlagsTypeParameter) == 0 {
+			return false
+		}
+		constrained := ctx.P.Checker.GetConstraintOfType(part)
+		if constrained != nil && constrained != part {
+			return false
+		}
+		sawParameter = true
+	}
+	return sawParameter
 }
 
 // castExpressionOf reads e's own inner expression for the three cast

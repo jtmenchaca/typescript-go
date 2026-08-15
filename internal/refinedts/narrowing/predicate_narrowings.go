@@ -8,7 +8,9 @@ package narrowing
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // PredicateCallNarrowings is predicateCallNarrowings in the TS source:
@@ -18,6 +20,9 @@ import (
 // expression, so the call's truthiness IS the body's — both branches
 // carry over exactly. (BranchNarrowings{}, false) where the callee's
 // body is not pinned or nothing carries out.
+//
+// Where the body reading recovers nothing, the callee's DECLARED type
+// predicate speaks instead — see StatedPredicateNarrowings.
 func PredicateCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(name string) bool) (BranchNarrowings, bool) {
 	if PredicateReadDepth(c) >= 3 {
 		return BranchNarrowings{}, false
@@ -25,7 +30,7 @@ func PredicateCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(
 	callExpr := call.AsCallExpression()
 	fn := PinnedFunctionOf(c, callExpr.Expression)
 	if fn == nil {
-		return BranchNarrowings{}, false
+		return StatedPredicateNarrowings(c, call, isTracked)
 	}
 	var parameters []string
 	for _, parameter := range fn.Parameters() {
@@ -52,7 +57,6 @@ func PredicateCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(
 		return BranchNarrowings{}, false
 	}
 	OpenPredicateRead(c)
-	defer ClosePredicateRead(c)
 	inner, ok := PredicateBodyBranches(c, fn, func(name string) bool {
 		for _, p := range parameters {
 			if p == name {
@@ -61,15 +65,218 @@ func PredicateCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(
 		}
 		return false
 	})
+	ClosePredicateRead(c)
 	if !ok {
-		return BranchNarrowings{}, false
+		return StatedPredicateNarrowings(c, call, isTracked)
 	}
 	whenTrue := RemapPlaces(inner.WhenTrue, parameters, argumentPlaces)
 	whenFalse := RemapPlaces(inner.WhenFalse, parameters, argumentPlaces)
 	if len(whenTrue) == 0 && len(whenFalse) == 0 {
-		return BranchNarrowings{}, false
+		// the body recovered nothing that carries out — a predicate whose
+		// parameter is `any`/`unknown` has nothing to shed, so every leaf
+		// the body reads lands on a place with no held sort. The declared
+		// type predicate is the fact that pins it.
+		return StatedPredicateNarrowings(c, call, isTracked)
+	}
+	// the body spoke on at least one side; the declared predicate fills
+	// the side it left empty. `isNumber = (v: unknown): v is number =>
+	// (typeof v === 'number' || v instanceof Number) && !isNan(v)` reads
+	// nothing on the TRUE side (a `||` composes only its false side), so
+	// without this the held branch of `isNumber(interval)` learned
+	// nothing the guard proves.
+	if len(whenTrue) == 0 || len(whenFalse) == 0 {
+		if stated, statedOk := StatedPredicateNarrowings(c, call, isTracked); statedOk {
+			if len(whenTrue) == 0 {
+				whenTrue = stated.WhenTrue
+			}
+			if len(whenFalse) == 0 {
+				whenFalse = stated.WhenFalse
+			}
+		}
 	}
 	return BranchNarrowings{WhenTrue: whenTrue, WhenFalse: whenFalse}, true
+}
+
+// StatedPredicateNarrowings reads the callee's DECLARED type predicate
+// — `(val: any): val is string` — as a guard in its own right: the
+// held side narrows the tested place to T's reading, the refuted side
+// excludes T's sort. It is a first-class channel beside the body
+// reading, and the one that answers where the body cannot: a predicate
+// over an `any`/`unknown` parameter has nothing to shed, so every leaf
+// its body reads lands on a place holding no sort and carries nothing
+// out.
+//
+// TRUST: the annotation is taken at the same grade the checker gives
+// any declared type. `val is T` is tsc-checked SYNTAX whose body tsc
+// does NOT verify — a predicate may lie about its own body and tsc
+// will not say so — which is exactly the standing of every parameter
+// and return annotation this checker already reads and trusts. Trusting
+// the predicate is therefore not a new concession; refusing it while
+// reading `param: string` from the same signature would be the
+// inconsistency.
+//
+// The result is the ordinary leaf shape — a Shape on the true side, an
+// ExcludesKind on the false side, both landing on a TrackedPlace — so
+// &&/||/! and ternary conditions fold it through the same condition
+// tree every other narrowing goes through, with no new plumbing.
+func StatedPredicateNarrowings(c *checker.Checker, call *ast.Node, isTracked func(name string) bool) (BranchNarrowings, bool) {
+	callExpr := call.AsCallExpression()
+	predicate := DeclaredTypePredicateOf(c, callExpr.Expression)
+	if predicate == nil {
+		return BranchNarrowings{}, false
+	}
+	predicateNode := predicate.AsTypePredicateNode()
+	// an ASSERTING signature says nothing about the call's truthiness —
+	// it returns void and narrows by returning at all, which is
+	// AssertionCallNarrowings's reading, not this one
+	if predicateNode.AssertsModifier != nil || predicateNode.Type == nil {
+		return BranchNarrowings{}, false
+	}
+	if predicateNode.ParameterName == nil || !ast.IsIdentifier(predicateNode.ParameterName) {
+		return BranchNarrowings{}, false
+	}
+	// which ARGUMENT the predicate names: `val is T` on the signature's
+	// first parameter narrows the first argument, and so on down. A
+	// predicate naming `this` narrows no argument.
+	fn := PinnedFunctionOf(c, callExpr.Expression)
+	position := declaredPredicatePosition(c, callExpr.Expression, fn, predicateNode.ParameterName.Text())
+	if position < 0 || callExpr.Arguments == nil || position >= len(callExpr.Arguments.Nodes) {
+		return BranchNarrowings{}, false
+	}
+	place := dataflowfacts.TrackedPlaceOfWith(c, callExpr.Arguments.Nodes[position], isTracked)
+	if place == nil {
+		return BranchNarrowings{}, false
+	}
+	held, ok := typereading.ReadTypeNode(c, predicateNode.Type, predicateNode.Type, 0)
+	if !ok || held.Kind == abstractdomain.KindUnknown {
+		return BranchNarrowings{}, false
+	}
+	wears := Narrowed{Binding: place.Binding, Path: place.Path, Shape: held, HasShape: true}
+	whenFalse := []Narrowed{}
+	// the REFUTED side sheds the sort only where T pins ONE word — the
+	// same rule typeof's refuted side follows. A T spanning two sorts
+	// (`string | number`) excludes neither on its own.
+	if word := abstractdomain.TypeofWordOfKnown(held); word != "" {
+		whenFalse = append(whenFalse, Narrowed{Binding: place.Binding, Path: place.Path, ExcludesKind: word})
+	}
+	return BranchNarrowings{WhenTrue: []Narrowed{wears}, WhenFalse: whenFalse}, true
+}
+
+// DeclaredTypePredicateOf is the `x is T` return annotation the callee
+// of a call expression declares, or nil. It reads the SIGNATURE, not a
+// body: a pinned local function's own return type node first, and
+// otherwise the declaration the checker resolves the callee name to —
+// so an imported `isString` states its contract the same way a local
+// one does.
+func DeclaredTypePredicateOf(c *checker.Checker, callee *ast.Node) *ast.Node {
+	if fn := PinnedFunctionOf(c, callee); fn != nil {
+		if node := returnTypeNodeOf(fn); node != nil && ast.IsTypePredicateNode(node) {
+			return node
+		}
+	}
+	cursor := callee
+	for ast.IsParenthesizedExpression(cursor) {
+		cursor = cursor.AsParenthesizedExpression().Expression
+	}
+	symbol := c.GetSymbolAtLocation(cursor)
+	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
+		aliased := func() (result *ast.Symbol) {
+			defer func() {
+				if recover() != nil {
+					result = nil
+				}
+			}()
+			return c.GetAliasedSymbol(symbol)
+		}()
+		if aliased != nil {
+			symbol = aliased
+		}
+	}
+	if symbol == nil {
+		return nil
+	}
+	for _, declaration := range symbol.Declarations {
+		if node := signatureReturnTypeNodeOf(declaration); node != nil && ast.IsTypePredicateNode(node) {
+			return node
+		}
+	}
+	return nil
+}
+
+// returnTypeNodeOf is the return type node a function-like node spells,
+// or nil where it spells none.
+func returnTypeNodeOf(fn *ast.Node) *ast.Node {
+	switch {
+	case ast.IsArrowFunction(fn):
+		return fn.AsArrowFunction().Type
+	case ast.IsFunctionExpression(fn):
+		return fn.AsFunctionExpression().Type
+	case ast.IsFunctionDeclaration(fn):
+		return fn.AsFunctionDeclaration().Type
+	case ast.IsMethodDeclaration(fn):
+		return fn.AsMethodDeclaration().Type
+	}
+	return nil
+}
+
+// signatureReturnTypeNodeOf is the return type node a DECLARATION
+// spells — the function-like forms above, plus a `const f: (x) => x is
+// T` variable whose initializer carries the annotation and a method
+// signature in an interface.
+func signatureReturnTypeNodeOf(declaration *ast.Node) *ast.Node {
+	if node := returnTypeNodeOf(declaration); node != nil {
+		return node
+	}
+	switch {
+	case ast.IsMethodSignatureDeclaration(declaration):
+		return declaration.AsMethodSignatureDeclaration().Type
+	case ast.IsFunctionTypeNode(declaration):
+		return declaration.AsFunctionTypeNode().Type
+	case ast.IsVariableDeclaration(declaration):
+		varDecl := declaration.AsVariableDeclaration()
+		if varDecl.Type != nil && ast.IsFunctionTypeNode(varDecl.Type) {
+			return varDecl.Type.AsFunctionTypeNode().Type
+		}
+		if varDecl.Initializer != nil {
+			initializer := varDecl.Initializer
+			for ast.IsParenthesizedExpression(initializer) {
+				initializer = initializer.AsParenthesizedExpression().Expression
+			}
+			return returnTypeNodeOf(initializer)
+		}
+	}
+	return nil
+}
+
+// declaredPredicatePosition is the ARGUMENT position the predicate's
+// named parameter sits at, or -1 where the name matches no parameter
+// (a `this is T` predicate, or a signature this walk cannot read).
+func declaredPredicatePosition(c *checker.Checker, callee *ast.Node, fn *ast.Node, predicateParameter string) int {
+	parametersOf := func(node *ast.Node) []*ast.Node {
+		if node == nil {
+			return nil
+		}
+		return node.Parameters()
+	}
+	candidates := [][]*ast.Node{parametersOf(fn)}
+	cursor := callee
+	for ast.IsParenthesizedExpression(cursor) {
+		cursor = cursor.AsParenthesizedExpression().Expression
+	}
+	if symbol := c.GetSymbolAtLocation(cursor); symbol != nil {
+		for _, declaration := range symbol.Declarations {
+			candidates = append(candidates, parametersOf(declaration))
+		}
+	}
+	for _, parameters := range candidates {
+		for i, parameter := range parameters {
+			name := parameter.Name()
+			if name != nil && ast.IsIdentifier(name) && name.Text() == predicateParameter {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // PredicateBodyBranches is predicateBodyBranches in the TS source: what

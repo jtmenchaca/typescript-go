@@ -59,6 +59,7 @@ package walk
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -378,6 +379,70 @@ func breakTargetOf(node *ast.Node, isContinue bool) bool {
 	return false
 }
 
+// switchRefusals holds, per switch STATEMENT node, the reason
+// LowerSwitch declined it. The refusals that still stand are:
+//
+//   - "switch on an untracked discriminant" — the discriminant names no
+//     slot AND evaluating it moves state, so there is no arm-testing
+//     chain and no tested-nothing chain either;
+//   - "switch with no clauses";
+//   - "switch with a falling-through case" — a run that walks off the
+//     end of the clause list without a break or a return, so nothing
+//     says where it stops;
+//   - "switch with a second default clause" — two arms for one "no label
+//     matched";
+//   - "switch on a case label that is not a literal" — a label that is
+//     no literal, no const chain to one, and no enum member;
+//   - "switch whose default arm did not lower" and "switch whose case
+//     arm did not lower" — the arm's own first blocker is the queue
+//     entry, which its walk already named.
+//
+// The store exists because the two readings happen at different times.
+// LowerSwitch knows exactly which gate it refused on, and then answers a
+// plain false; the statement then falls to the havoc floor, which
+// refuses any `return` inside it and reports "return inside switch" — a
+// name that points at the return rather than at the thing the switch
+// route could not read. A row naming the return is not a work-queue
+// entry, because the return was never the problem. So the route leaves
+// its reason keyed by the node, and the floor's own naming reads it back
+// below.
+//
+// Keyed by node, so a body holding two switches keeps a reason for each,
+// and a re-lowering of the same node overwrites its own earlier reason
+// rather than accumulating. The lock is the same discipline the declined
+// -construct store beside it keeps, for the same reason: several bodies
+// may lower at once.
+var (
+	switchRefusalsLock sync.Mutex
+	switchRefusals     = map[*ast.Node]string{}
+)
+
+// NoteSwitchRefusal records why LowerSwitch declined one switch
+// statement. Last-wins: the route returns immediately after naming, so
+// exactly one name is written per attempt, and a second attempt at the
+// same node is the same walk reaching the same gate.
+func NoteSwitchRefusal(statement *ast.Node, reason string) {
+	if statement == nil || reason == "" {
+		return
+	}
+	switchRefusalsLock.Lock()
+	defer switchRefusalsLock.Unlock()
+	switchRefusals[statement] = reason
+}
+
+// switchRefusalOf reads back the reason LowerSwitch left on a node, and
+// CLEARS it: the floor names the statement once, and a later lowering of
+// the same node writes its own reason first.
+func switchRefusalOf(statement *ast.Node) (string, bool) {
+	switchRefusalsLock.Lock()
+	defer switchRefusalsLock.Unlock()
+	held, refused := switchRefusals[statement]
+	if refused {
+		delete(switchRefusals, statement)
+	}
+	return held, refused
+}
+
 // DeclinedHavocConstruct names WHY the floor refused a statement, in the
 // statement's own syntax rather than as a category. The coverage
 // histogram is the work queue, so a row has to name something a reader
@@ -392,6 +457,15 @@ func breakTargetOf(node *ast.Node, isContinue bool) bool {
 func DeclinedHavocConstruct(statement *ast.Node) string {
 	if statement == nil {
 		return ""
+	}
+	// a SWITCH the chain route already refused names that refusal rather
+	// than whatever the scan below finds first: the route knows which gate
+	// it hit, and the scan only ever finds the `return` that the gate's
+	// failure left stranded at the floor
+	if ast.IsSwitchStatement(statement) {
+		if named, refused := switchRefusalOf(statement); refused {
+			return named
+		}
 	}
 	reason := ""
 	var visit func(node *ast.Node) bool
@@ -937,8 +1011,28 @@ func havocConstructName(statement *ast.Node) string {
 		return OpaqueReturnName(statement)
 	case ast.IsExpressionStatement(statement):
 		return havocExpressionName(Unwrapped(statement.AsExpressionStatement().Expression))
+	case ast.IsBlock(statement):
+		return "block"
+	case ast.IsBreakStatement(statement):
+		return "break"
+	case ast.IsContinueStatement(statement):
+		return "continue"
+	case ast.IsEmptyStatement(statement):
+		return "empty statement"
+	case ast.IsDebuggerStatement(statement):
+		return "debugger statement"
+	case ast.IsFunctionDeclaration(statement):
+		return "function declaration"
+	case ast.IsClassDeclaration(statement):
+		return "class declaration"
+	case ast.IsWithStatement(statement):
+		return "with statement"
 	}
-	return "statement"
+	// no arm matched: carry the syntax KIND's own number rather than the
+	// bare word "statement". The number is not a construct name, but it
+	// separates the rows and points at the exact ast.Kind to add an arm
+	// for above — which is what a reader needs to turn the row into one.
+	return "statement kind " + strconv.Itoa(int(statement.Kind))
 }
 
 // OpaqueReturnName spells a return whose VALUE no reading lowered:
@@ -990,17 +1084,130 @@ func returnedShapeName(e *ast.Node) string {
 	case ast.IsIdentifier(e):
 		return "name " + e.Text()
 	case ast.IsTaggedTemplateExpression(e):
+		// the TAG runs a body over the parts, so the shape a reader must
+		// build is the tag's, not the template's
+		if spelled, ok := calleeSpelling(Unwrapped(e.AsTaggedTemplateExpression().Tag)); ok {
+			return "tagged template " + spelled
+		}
 		return "tagged template"
 	case ast.IsTemplateExpression(e):
-		return "template"
+		// a template whose parts all read lowers through SequenceEffectOf
+		// before ever reaching here, so one that arrives has a part with no
+		// sequence reading. Naming that PART is the work-queue entry; the
+		// word "template" alone is not.
+		return "template over " + templatePartName(e)
 	case ast.IsConditionalExpression(e):
 		return "conditional"
 	case ast.IsBinaryExpression(e):
-		return "binary"
+		return binaryShapeName(e)
 	case ast.IsFunctionLike(e):
 		return "function"
+	case ast.IsVoidExpression(e):
+		// `void e` discards a value and runs `e` — the shape to build a
+		// reading for is the operand's
+		return "void " + returnedShapeName(Unwrapped(e.AsVoidExpression().Expression))
+	case ast.IsSatisfiesExpression(e):
+		// Unwrapped strips parens, `as`, and `!`, but not `satisfies`
+		return returnedShapeName(Unwrapped(e.AsSatisfiesExpression().Expression))
+	case ast.IsTypeOfExpression(e):
+		return "typeof"
+	case ast.IsSpreadElement(e):
+		return "spread"
+	case ast.IsYieldExpression(e):
+		return "yield"
+	case ast.IsPrefixUnaryExpression(e):
+		return prefixShapeName(e)
+	case ast.IsPostfixUnaryExpression(e):
+		return "postfix " + operatorWord(e.AsPostfixUnaryExpression().Operator)
+	case ast.IsClassLike(e):
+		return "class expression"
+	case ast.IsRegularExpressionLiteral(e):
+		return "regular expression"
+	case ast.IsBigIntLiteral(e):
+		return "bigint literal"
+	case e.Kind == ast.KindThisKeyword:
+		return "this"
+	case e.Kind == ast.KindNullKeyword:
+		return "null"
+	case e.Kind == ast.KindTrueKeyword, e.Kind == ast.KindFalseKeyword:
+		return "boolean literal"
+	case ast.IsNumericLiteral(e):
+		return "number literal"
+	case ast.IsStringLiteral(e), ast.IsNoSubstitutionTemplateLiteral(e):
+		return "string literal"
 	}
 	return "expression"
+}
+
+// templatePartName is the FIRST substitution of a template that has no
+// spelled name — the part a reader would go and build a sequence
+// reading for. A template whose every substitution is a plain name or
+// path (and so is only untracked, not unspellable) names the first of
+// those instead, since that IS the missing slot.
+func templatePartName(e *ast.Node) string {
+	spans := e.AsTemplateExpression().TemplateSpans.Nodes
+	for _, span := range spans {
+		part := Unwrapped(span.AsTemplateSpan().Expression)
+		if spelled, ok := SpelledNameOf(part); ok {
+			return "name " + spelled
+		}
+		return returnedShapeName(part)
+	}
+	return "no substitution"
+}
+
+// binaryShapeName spells a binary expression by its OPERATOR, so the row
+// says which operator wants a reading rather than the bare word
+// "binary". An ASSIGNMENT reads as the assignment it is.
+func binaryShapeName(e *ast.Node) string {
+	bin := e.AsBinaryExpression()
+	kind := bin.OperatorToken.Kind
+	if kind >= ast.KindFirstAssignment && kind <= ast.KindLastAssignment {
+		return "assignment"
+	}
+	switch kind {
+	case ast.KindCommaToken:
+		return "comma"
+	case ast.KindAmpersandAmpersandToken:
+		return "binary &&"
+	case ast.KindBarBarToken:
+		return "binary ||"
+	case ast.KindQuestionQuestionToken:
+		return "binary ??"
+	case ast.KindInstanceOfKeyword:
+		return "binary instanceof"
+	case ast.KindInKeyword:
+		return "binary in"
+	case ast.KindPlusToken:
+		return "binary +"
+	}
+	return "binary"
+}
+
+// prefixShapeName spells a prefix unary by its operator and its operand,
+// so `!!(a && b)` says what it is rather than falling to "expression".
+func prefixShapeName(e *ast.Node) string {
+	unary := e.AsPrefixUnaryExpression()
+	return operatorWord(unary.Operator) + " " + returnedShapeName(Unwrapped(unary.Operand))
+}
+
+// operatorWord is a unary operator's own spelling for the report.
+func operatorWord(operator ast.Kind) string {
+	switch operator {
+	case ast.KindExclamationToken:
+		return "!"
+	case ast.KindMinusToken:
+		return "-"
+	case ast.KindPlusToken:
+		return "+"
+	case ast.KindTildeToken:
+		return "~"
+	case ast.KindPlusPlusToken:
+		return "++"
+	case ast.KindMinusMinusToken:
+		return "--"
+	}
+	return "unary"
 }
 
 // havocExpressionName spells the EXPRESSION an unreadable expression
@@ -1012,7 +1219,8 @@ func havocExpressionName(e *ast.Node) string {
 	case ast.IsElementAccessExpression(e):
 		return "computed member"
 	case ast.IsAwaitExpression(e):
-		return "await"
+		// the awaited SHAPE is what wants a reading, not the await
+		return "await " + returnedShapeName(Unwrapped(e.AsAwaitExpression().Expression))
 	case ast.IsNewExpression(e):
 		return "new"
 	case ast.IsDeleteExpression(e):
@@ -1026,7 +1234,14 @@ func havocExpressionName(e *ast.Node) string {
 			}
 			return "assignment"
 		}
-		return "expression"
+		// `a && void a.then(…)` and `(p = f(p)) && …` in statement
+		// position: the operator names the shape, and a short-circuit
+		// whose LEFT side is the thing that ran says so
+		return binaryShapeName(e)
 	}
-	return "expression"
+	// every other expression shares the returned expression's naming: a
+	// `void` chain, a `satisfies` wrapper, a spread, a yield, a prefix
+	// `!`. The two positions ask the same question — what syntax was this
+	// — so they answer through the same reading rather than diverging.
+	return returnedShapeName(e)
 }

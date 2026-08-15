@@ -85,6 +85,18 @@ type LoweredSummary struct {
 	// field, and nothing else in the summary names WHICH slots those are.
 	// A body with no expanded bundle carries no rows.
 	BundleEntries []BundleEntry
+	// RetShape / RetMembers: what the RETURNED VALUE is, where the body
+	// returns a literal whose members ride their own slots
+	// (returnedLiteralShape, ir_summary_body.go). RetShapeObject names one
+	// row per key; RetShapeArray names the ".len"/".elem" pair.
+	//
+	// The apply route rebuilds the value from these exits instead of
+	// reading the scalar #ret alone — a returned object's members are
+	// otherwise lost at the boundary, since no scalar slot can spell an
+	// object. RetShapeNone (the ordinary case) carries no rows and every
+	// route reads #ret exactly as before.
+	RetShape   RetShapeKind
+	RetMembers []RetMemberEntry
 }
 
 // BundleEntry is one expanded bundle entry: where its slot sits and
@@ -434,13 +446,38 @@ func applySummary(
 	if !recorded || outcome != SummaryComplete {
 		return abstractdomain.AbstractValue{}, false
 	}
+	// THE MEMBER-CARRYING RETURN. A body whose returns are object or array
+	// literals wrote each member into its own slot, so the value is
+	// rebuilt from those exits rather than read off the scalar #ret —
+	// which for such a body holds unknown by construction, the object
+	// having no scalar spelling. Everything below (the trust floor, the
+	// async wrapping) applies to the rebuilt value the same way.
+	if summary.RetShape != RetShapeNone && len(summary.RetMembers) > 0 {
+		if rebuilt, rebuiltOk := summaryMemberResult(summary, exits, doneExit); rebuiltOk {
+			tracing.Count("summaryServed", 0)
+			return promiseWrappedIfAsync(declaration,
+				abstractdomain.AtTrustLevel(rebuilt, summaryTrustFloor(ctx, declaration, summary, argKnowns, receiver))), true
+		}
+		return abstractdomain.AbstractValue{}, false
+	}
 	serveTop := retExit.Top
-	// the result slot's own absent flag is the ENTRY state surviving
-	// the joins — path correlation the encoding routes through the
-	// done flag instead: every RETURNED value was written into the
-	// set, and only a fall-off path leaves undefined, which is exactly
-	// the flag-still-down case decided below
-	answer := KnownOfState(kernelbridge.KnownStateWire{Set: retExit.Set, Absent: false, Nan: retExit.Nan})
+	// THE RET ROW SPLIT. The ret slot at the exit stands for every run:
+	// the values the returns wrote, and — on a body that guards with
+	// `if (x) throw` — the thrown exits that never reached a return.
+	// Returned() is the half the runs that COMPLETED left there, which
+	// the kernel proves admits every non-thrown outcome the whole state
+	// admitted (returned_denotes, set_functions/known_state.lean). The
+	// throw arm wrote the THROWN outcome, so the returned half drops it
+	// and `if (x) throw new E(); return v` reads `v` rather than
+	// `v ∪ undefined`.
+	//
+	// The result slot's own absent flag is the ENTRY state surviving the
+	// joins — path correlation the encoding routes through the done flag
+	// instead: every RETURNED value was written into the set, and only a
+	// fall-off path leaves undefined, which is exactly the flag-still-down
+	// case decided below.
+	returned := retExit.Returned()
+	answer := KnownOfState(kernelbridge.KnownStateWire{Set: returned.Set, Absent: false, Nan: returned.Nan})
 	if answer.Kind == abstractdomain.KindUnknown {
 		// a COMPLETE body serving a TOP ret answers SILENCE, which is what
 		// "the return value is unconstrained" spells — and the route still
@@ -459,13 +496,31 @@ func applySummary(
 	if !allReturned {
 		answer = abstractdomain.PossiblyUndefined(answer, "", false, false)
 	}
-	// the claim's grade floors at the standing of everything the entries
-	// were built from — the arguments, and (below) a method's receiver.
-	// The argument walk is indexed by DECLARED PARAMETER, not by entry —
-	// and an EXPANDED parameter's entries were built from the object's
-	// FIELDS, so each read field's own grade joins the floor beside the
-	// object's: an object at proved standing whose lo came from a spec row
-	// states no more than spec.
+	tracing.Count("summaryServed", 0)
+	return promiseWrappedIfAsync(declaration,
+		abstractdomain.AtTrustLevel(answer, summaryTrustFloor(ctx, declaration, summary, argKnowns, receiver))), true
+}
+
+// summaryTrustFloor is the standing a served answer floors at: the
+// standing of everything the entries were built from — the arguments,
+// and a method's receiver.
+//
+// The argument walk is indexed by DECLARED PARAMETER, not by entry — and
+// an EXPANDED parameter's entries were built from the object's FIELDS, so
+// each read field's own grade joins the floor beside the object's: an
+// object at proved standing whose lo came from a spec row states no more
+// than spec.
+//
+// Both result routes read this one function — the scalar #ret and the
+// rebuilt member object — so a value assembled from several exits carries
+// exactly the standing a value read from one exit would.
+func summaryTrustFloor(
+	ctx *FlowContext,
+	declaration *ast.Node,
+	summary LoweredSummary,
+	argKnowns []abstractdomain.AbstractValue,
+	receiver abstractdomain.AbstractValue,
+) abstractdomain.TrustLevel {
 	floor := abstractdomain.TrustProved
 	for index, parameter := range declaration.Parameters() {
 		if index >= len(argKnowns) {
@@ -500,8 +555,86 @@ func applySummary(
 		}
 		floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(receiver))
 	}
-	tracing.Count("summaryServed", 0)
-	return promiseWrappedIfAsync(declaration, abstractdomain.AtTrustLevel(answer, floor)), true
+	return floor
+}
+
+// summaryMemberResult rebuilds the RETURNED VALUE from the member exits
+// the layout allocated for it: an object from one exit per key, or a
+// sequence from the ".len"/".elem" pair.
+//
+// The kernel answers the WHOLE exit row (kernelApplySummary maps
+// encodeState over every state), and summarize_eq proves that row equal
+// to the walk's — for any index, not only #ret — so reading several
+// slots' exits carries exactly the soundness reading one does.
+//
+// A member whose exit says nothing takes SILENCE in its key, not an
+// absence: unknown in one member claims nothing about that member while
+// the readable ones keep their values, which is the partial object this
+// route exists to serve. A member whose exit is ABSENT is a key the
+// returning path did not write — the object genuinely has no such key on
+// that path, so the key carries "possibly undefined" and the object stays
+// honest about it.
+//
+// COMPLETENESS is false. The literal's own key set is complete by
+// construction, but the member slots name only the keys the layout could
+// spell, and a body whose literal held a member this reader passed over
+// has keys not in these rows. Claiming complete would claim the absence
+// of keys the rows never enumerated.
+//
+// (false) where a path may fall off the end without returning: the value
+// is then sometimes the object and sometimes undefined, and an object
+// with an undefined arm is not something these rows spell — the caller's
+// own walk serves that body instead.
+func summaryMemberResult(
+	summary LoweredSummary,
+	exits []kernelbridge.KnownStateWire,
+	doneExit kernelbridge.KnownStateWire,
+) (abstractdomain.AbstractValue, bool) {
+	// every path returned, or the value is sometimes undefined — which
+	// these rows have no arm for
+	if doneExit.Top || doneExit.Absent || mayContainZero(doneExit.Set) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	memberValue := func(index int) (abstractdomain.AbstractValue, bool) {
+		if index < 0 || index >= len(exits) {
+			return abstractdomain.AbstractValue{}, false
+		}
+		return KnownOfState(exits[index]), true
+	}
+	switch summary.RetShape {
+	case RetShapeObject:
+		keys := make([]abstractdomain.ObjectKey, 0, len(summary.RetMembers))
+		for _, member := range summary.RetMembers {
+			value, has := memberValue(member.Index)
+			if !has {
+				return abstractdomain.AbstractValue{}, false
+			}
+			keys = append(keys, abstractdomain.ObjectKey{Name: member.Name, Value: value})
+		}
+		if len(keys) == 0 {
+			return abstractdomain.AbstractValue{}, false
+		}
+		return abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false), true
+	case RetShapeArray:
+		// the array's own knowledge is its LENGTH — the element slot holds
+		// the join of the positions, which no sequence value in this domain
+		// carries as one field, so the length is what rides out. A read of
+		// `.length` on the answer then determines, which is the whole reason
+		// the pair was allocated.
+		for _, member := range summary.RetMembers {
+			if member.Name != "len" {
+				continue
+			}
+			length, has := memberValue(member.Index)
+			if !has || length.Kind != abstractdomain.KindValues {
+				return abstractdomain.AbstractValue{}, false
+			}
+			return abstractdomain.KnownObject(
+				[]abstractdomain.ObjectKey{{Name: "length", Value: length}},
+				nil, false, abstractdomain.TrustProved, false), true
+		}
+	}
+	return abstractdomain.AbstractValue{}, false
 }
 
 // SummaryReceiverEffects answers what a served summary moves in the
@@ -625,6 +758,20 @@ func summaryEntryStates(
 		// undefined
 		if parameter.AsParameterDeclaration().DotDotDotToken != nil {
 			states = append(states, kernelbridge.KnownStateWire{Top: true})
+			continue
+		}
+		// an ARRAY-TYPED parameter carries TWO entries, a length and the
+		// join of the elements — the pair the layout emitted. Both enter
+		// TOP: the direct apply reads an argument's abstract value, which
+		// carries no length and no element join this route can spell, and
+		// TOP is what the entry quantifier already covers. Never absent,
+		// which would claim an array the caller passed is undefined; never
+		// one state, which would slide every later entry by one.
+		if _, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
+			states = append(states,
+				kernelbridge.KnownStateWire{Top: true},
+				kernelbridge.KnownStateWire{Top: true},
+			)
 			continue
 		}
 		// a BINDING-PATTERN parameter: one state per bound entry, each

@@ -79,7 +79,8 @@ func readArrayFrom(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abstr
 		argCount >= 1 && argCount <= 2) {
 		return nil
 	}
-	source := evaluateExpression(ctx, env, call.Arguments.Nodes[0])
+	sourceExpression := call.Arguments.Nodes[0]
+	source := evaluateExpression(ctx, env, sourceExpression)
 	var items []abstractdomain.AbstractValue
 	hasItems := false
 	if source.Kind == abstractdomain.KindList {
@@ -136,6 +137,20 @@ func readArrayFrom(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abstr
 			}
 			result := abstractdomain.KnownList(outputs, abstractdomain.TrustProved)
 			return &result
+		}
+	}
+	// a bare builtin ITERATOR argument — `Array.from(map.values())`. The
+	// walk holds no items for it (a view over a collection it never
+	// tracked), but the iterator's own type argument states what one
+	// element is, and Array.from drains the whole iterator
+	// (sec-array.from step 6: every element the iterator yields, in
+	// order), so the array holds exactly those elements at a count the
+	// collection decides. Only the UNARY form: `Array.from(it, f)` maps
+	// each element through f, and what f answers is a separate walk this
+	// row does not run, so the two-argument form keeps the answer below.
+	if argCount == 1 {
+		if sequence, ok := builtinIteratorSequenceOf(ctx, sourceExpression); ok {
+			return &sequence
 		}
 	}
 	out := silence.Residue()

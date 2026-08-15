@@ -446,7 +446,9 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 					labels["s:"+s] = struct{}{}
 				}
 			} else if t.IsNumberLiteral() {
-				if n, ok := t.AsLiteralType().Value().(float64); ok {
+				// tsgo spells a number literal's value as jsnum.Number, a
+				// NAMED float64 — a bare .(float64) assertion never matches
+				if n, ok := numberLiteralValue(t.AsLiteralType().Value()); ok {
 					labels["n:"+jsnum.Number(n).String()] = struct{}{}
 				}
 			}
@@ -459,7 +461,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 					_, matched = labels["s:"+s]
 				}
 			} else if member.IsNumberLiteral() {
-				if n, ok := member.AsLiteralType().Value().(float64); ok {
+				if n, ok := numberLiteralValue(member.AsLiteralType().Value()); ok {
 					_, matched = labels["n:"+jsnum.Number(n).String()]
 				}
 			}

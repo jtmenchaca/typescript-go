@@ -114,6 +114,13 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 	if answered := readArrayFrom(ctx, env, e); answered != nil {
 		return answered
 	}
+	// `createHash(alg)` / `createHmac(alg, key)` — the value a hashing
+	// chain starts from. Read ahead of the method section because the
+	// factory is reached both bare and through its module namespace,
+	// and neither spelling is a modeled method call.
+	if answered := ReadNodeDigestConstruction(ctx, env, e); answered != nil {
+		return answered
+	}
 	// a method call — the receiver may be a tracked name or any
 	// expression (a literal, a call result). A method WITH a stated
 	// contract falls through to the contract path below instead.
@@ -186,6 +193,16 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 			return web
 		}
 		if answered := readCollectionMethods(site); answered != nil {
+			return answered
+		}
+		// the chain-threading rows: an iterator's own next(), and the
+		// hashing chain's update/digest pair. Each recognizes its
+		// receiver by STATIC type, so a link answers whether or not the
+		// link before it left a value behind.
+		if answered := readIteratorNext(site); answered != nil {
+			return answered
+		}
+		if answered := readNodeDigestMethods(site); answered != nil {
 			return answered
 		}
 		if answered := readStringMatchWithConstRegex(site); answered != nil {

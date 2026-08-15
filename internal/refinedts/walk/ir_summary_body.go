@@ -20,6 +20,7 @@
 package walk
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -395,10 +396,24 @@ func recordParamMembersOf(parameter *ast.Node) ([]recordParamMember, bool) {
 // promises to every entry may become slots.
 func recordParamMembersIn(ctx *FlowContext, parameter *ast.Node) ([]recordParamMember, bool) {
 	pd := parameter.AsParameterDeclaration()
-	if pd.Type == nil || pd.Name() == nil || !ast.IsIdentifier(pd.Name()) {
+	if pd.Type == nil || pd.Name() == nil {
 		return nil, false
 	}
-	holder := pd.Name().Text()
+	// the HOLDER the members are spelled under. An identifier parameter
+	// spells its own; a BINDING-PATTERN parameter (`({ lo }: Bounds)`)
+	// has no name to spell, and its reader — the pattern branch of
+	// SummaryParameterEntriesIn — takes only each member's Key, Sort and
+	// TypeofTag, never the SlotName. The pattern's own bound names become
+	// the entry slots, so the holder here names nothing the body reads.
+	holder := ""
+	switch {
+	case ast.IsIdentifier(pd.Name()):
+		holder = pd.Name().Text()
+	case ast.IsObjectBindingPattern(pd.Name()):
+		holder = "#pattern"
+	default:
+		return nil, false
+	}
 	// (a) the inline literal — answered the same on every path, with or
 	// without a context, so it never touches the memo
 	if ast.IsTypeLiteralNode(pd.Type) {
@@ -544,6 +559,17 @@ func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlo
 		}
 		return out, true
 	}
+	// an ARRAY-TYPED parameter takes the local array's own two slots,
+	// "ids.len" and "ids.elem" — AFTER the record arm, which states the
+	// exclusivity the caller relies on: one name has one slot family, and
+	// a record annotation and an array annotation are disjoint by syntax
+	// so no parameter ever reaches both.
+	if local, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
+		return []bodySlot{
+			{Name: local.LenSlotName, Sort: BindingKindNumber, TypeofTag: TypeofTagNumber},
+			{Name: local.ElemSlotName, Sort: ArrayElementSort(local), TypeofTag: ArrayElementTypeof(local)},
+		}, true
+	}
 	return []bodySlot{{
 		Name:      pd.Name().Text(),
 		Sort:      declaredParamSort(parameter),
@@ -551,22 +577,143 @@ func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlo
 	}}, true
 }
 
-// recordParameterUsesAreDeclaredReads scans a body for every occurrence
-// of an EXPANDED parameter's name and answers whether each one is a
-// READ of a declared member — `p.lo` in value position.
+// resolvedArrayParameters remembers what ONE parameter node flattened to
+// the FIRST time a reading resolved it, for the reason
+// resolvedRecordMembers holds the record expansion: the LAYOUT reads this
+// expansion holding the check's context, while the CALL SITES reach it
+// through the ctx-less spelling, and an element sort answered one way
+// under a checker and another way without one would give the two seams
+// two different slot sorts for one entry.
 //
-// Everything else declines the body:
+// The COUNT never depended on the checker — a parameter the syntax calls
+// an array flattens either way — so only the sort is being pinned. That
+// is still worth pinning: entry k's sort is what the caller's argument
+// effect is built under.
+var (
+	resolvedArrayParametersMu sync.Mutex
+	resolvedArrayParameters   = map[*ast.Node]ArrayLocal{}
+)
+
+// ClearResolvedArrayParameters drops every remembered parameter
+// flattening. Keyed on parameter nodes from one program, so a caller that
+// builds a new program clears it, as it clears the record memo.
+func ClearResolvedArrayParameters() {
+	resolvedArrayParametersMu.Lock()
+	resolvedArrayParameters = map[*ast.Node]ArrayLocal{}
+	resolvedArrayParametersMu.Unlock()
+}
+
+// arrayParamSlotsIn recognizes an array-typed parameter, memoized so the
+// two seams answer one list. The BODY the use scan needs is the
+// parameter's own enclosing declaration — a parameter is never read
+// outside the function it belongs to, so the body reached from the
+// parameter node is the one body its uses live in.
 //
-//   - a whole-name use (`f(p)`, `return p`, `q = p`, `p[e]`, `p?.lo`) —
-//     after the expansion there is no one value for it to denote;
+// A parameter whose function has no body (an overload signature, a
+// declaration-file signature) flattens nothing: there are no uses to
+// scan, and two slots standing for an array nobody reads would only make
+// the vector wider.
+func arrayParamSlotsIn(ctx *FlowContext, parameter *ast.Node) (ArrayLocal, bool) {
+	resolvedArrayParametersMu.Lock()
+	held, remembered := resolvedArrayParameters[parameter]
+	resolvedArrayParametersMu.Unlock()
+	if remembered {
+		return held, held.Name != ""
+	}
+	owner := parameter.Parent
+	if owner == nil {
+		return ArrayLocal{}, false
+	}
+	body := owner.Body()
+	if body == nil {
+		return ArrayLocal{}, false
+	}
+	var c *checker.Checker
+	if ctx != nil && ctx.P != nil {
+		c = ctx.P.Checker
+	}
+	local, flattened := ArrayParameterOf(c, body, parameter)
+	if c == nil {
+		// nothing was resolved against a checker, so nothing is remembered:
+		// a later reading WITH a context must still be free to read the
+		// element sort off the resolved type
+		return local, flattened
+	}
+	if !flattened {
+		local = ArrayLocal{}
+	}
+	resolvedArrayParametersMu.Lock()
+	resolvedArrayParameters[parameter] = local
+	resolvedArrayParametersMu.Unlock()
+	return local, flattened
+}
+
+// recordParameterUse says what a body does with an EXPANDED parameter's
+// own name, apart from reading its declared members.
+type recordParameterUse int
+
+const (
+	// every occurrence is `p.lo` on a declared member — the expansion
+	// spells the whole body and nothing else is needed
+	recordParameterMembersOnly recordParameterUse = iota
+	// the body mentions the WHOLE record somewhere that only READS it:
+	// a spread (`{ ...p }`), a `return p`, an equality test. The leaves
+	// are read out; the object itself is never handed to code that could
+	// store into it, so every slot keeps its value.
+	recordParameterReadWhole
+	// the body hands the WHOLE record to code — a call argument, a `new`,
+	// a store into another name. The callee may write the caller's object
+	// through the reference, so no leaf can be believed past it. The body
+	// still lowers, on the pair of moves the layout makes together: the
+	// leaves havoc at every code-running statement, and the leaf rows go
+	// out Written so the caller takes them back.
+	recordParameterEscapesWhole
+	// the body does something to the record no slot can stand for: a
+	// write through a member, an undeclared member, a computed or
+	// optional step, a deep path.
+	recordParameterUnreadable
+)
+
+// recordParameterUseOf scans a body for every occurrence of an EXPANDED
+// parameter's name and answers what the body does with it.
+//
+// `p.lo` in value position on a DECLARED member is the ordinary reading —
+// it consumes the root and the step, and contributes nothing here.
+//
+// A WHOLE-NAME occurrence is classified by the position it stands in,
+// because after the expansion there is no single slot denoting `p` and
+// what the body may still be served depends on whether that position can
+// MOVE the object:
+//
+//   - a SPREAD element (`{ ...p }`, `f(...p)` is not this — see below) and
+//     a `return p` read the fields and hand out no writable reference the
+//     body itself uses again. Their leaves stay believable, so the body
+//     lowers whole and the whole-name expression takes the opaque floor
+//     its own route already gives it.
+//   - a CALL or NEW ARGUMENT (`f(p)`, `new C(p)`) and a STORE (`q = p`,
+//     `xs.push(p)` — the push argument is a call argument) hand the
+//     object to code that may store into it. Sound only with every leaf
+//     havocked at the hand-over AND the leaf rows carrying the movement
+//     back to whoever filled them, which the layout arranges as one pair
+//     (lowerSummaryBodyWithCaptures' record-parameter branch).
+//
+// These still make the body unreadable, each because no slot stands for
+// what was written:
+//
 //   - a member the annotation never declared (`p.mid`) — no slot holds
 //     it, and reading it would silently answer another slot's state;
 //   - a WRITE to a member (`p.lo = 1`, `p.lo += 1`, `p.lo++`, `delete
 //     p.lo`) — the caller's own object would move, and a summary carries
 //     no effect back out through its entries;
 //   - a deep path (`p.lo.x`) — the members are scalars, so no such leaf
-//     exists.
-func recordParameterUsesAreDeclaredReads(body *ast.Node, name string, members []recordParamMember) bool {
+//     exists;
+//   - a COMPUTED or OPTIONAL step (`p[e]`, `p?.lo`) — the first names no
+//     member, the second reads a record that may be absent.
+//
+// The answer is the WORST use found: one hand-over makes the whole body's
+// leaves movable, and one unreadable use declines it whatever else it
+// does.
+func recordParameterUseOf(body *ast.Node, name string, members []recordParamMember) recordParameterUse {
 	declared := map[string]struct{}{}
 	for _, member := range members {
 		declared[member.Key] = struct{}{}
@@ -604,40 +751,85 @@ func recordParameterUsesAreDeclaredReads(body *ast.Node, name string, members []
 		}
 		return false
 	}
-	ok := true
+	worst := recordParameterMembersOnly
+	// the worst use wins, and an unreadable one ends the walk
+	note := func(use recordParameterUse) {
+		if use > worst {
+			worst = use
+		}
+	}
 	var visit func(node *ast.Node) bool
 	visit = func(node *ast.Node) bool {
-		if !ok {
+		if worst == recordParameterUnreadable {
 			return true
 		}
 		if writesThroughParameter(node) {
-			ok = false
+			note(recordParameterUnreadable)
 			return true
 		}
 		// a declared member READ consumes the root and the step name, so
 		// neither reaches the bare-name test below
 		if root, path, isPath := propertyPathOf(Unwrapped(node)); isPath && root == name {
 			if len(path) != 1 {
-				ok = false
+				note(recordParameterUnreadable)
 				return true
 			}
 			if _, isDeclared := declared[path[0]]; !isDeclared {
-				ok = false
+				note(recordParameterUnreadable)
 				return true
 			}
 			return false
 		}
-		// every other occurrence of the bare name is the WHOLE record in a
-		// position the expansion cannot spell
-		if ast.IsIdentifier(node) && node.Text() == name {
-			ok = false
+		// every other occurrence of the bare name is the WHOLE record, and
+		// the POSITION it stands in decides what the body may still be
+		// served
+		if ast.IsIdentifier(node) && node.Text() == name && !isPropertyStepName(node) {
+			note(wholeRecordUseAt(node))
 			return true
 		}
 		node.ForEachChild(visit)
 		return false
 	}
 	visit(body)
-	return ok
+	return worst
+}
+
+// wholeRecordUseAt classifies ONE whole-name occurrence by the position
+// it stands in — the reading recordParameterUseOf's doc states.
+//
+// READ-WHOLE, the positions that hand out no reference the body could
+// later store through:
+//
+//   - a SPREAD in an object literal (`{ ...p, y: 1 }`) — the fields are
+//     copied out into a fresh object;
+//   - a `return p` — the value leaves; nothing in this body reads it
+//     again, and the caller already holds whatever it passed.
+//
+// ESCAPES-WHOLE, the positions that hand the object to code:
+//
+//   - a CALL or NEW argument, INCLUDING a spread one (`f(...p)` passes
+//     the object's own entries, and `f(p)` the object) — the callee may
+//     store into it;
+//   - anything else a bare mention can be: an initializer, an assignment
+//     right side, an array element, a property value. Each stores the
+//     reference under a name this scan does not follow.
+//
+// The default is the ESCAPING one: a position this reading does not
+// recognize is one whose writes it cannot rule out.
+func wholeRecordUseAt(node *ast.Node) recordParameterUse {
+	parent := node.Parent
+	if parent == nil {
+		return recordParameterEscapesWhole
+	}
+	if ast.IsReturnStatement(parent) {
+		return recordParameterReadWhole
+	}
+	if ast.IsSpreadAssignment(parent) {
+		// `{ ...p }` copies the fields out; `f(...p)` is a SpreadElement,
+		// which is an argument and falls through to the escape below
+		return recordParameterReadWhole
+	}
+	return recordParameterEscapesWhole
 }
 
 /* ── the `this` bundle ───────────────────────────────────────────── */
@@ -781,6 +973,261 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 // the same bodies.
 const summarySlotBudget = 32
 
+/* ── the returned value's members ────────────────────────────────── */
+
+// retMemberSlotName is the slot one member of a RETURNED object literal
+// rides in: "#ret.type" beside the "#ret" the scalar return writes. The
+// "#" prefix is the same one #done and #ret wear — no source name can
+// collide with it, so a member slot never shadows a local.
+func retMemberSlotName(member string) string {
+	return "#ret." + member
+}
+
+// retLenSlotName / retElemSlotName are the pair a RETURNED array literal
+// rides in, spelled the way a flattened local array's pair is spelled
+// (ir_array_slots.go's ".len"/".elem" convention) so the two readings of
+// "an array is a length and a joined element" stay one convention.
+func retLenSlotName() string  { return "#ret.len" }
+func retElemSlotName() string { return "#ret.elem" }
+
+// retMemberNameOfSlot is retMemberSlotName read backwards: the member a
+// "#ret.<member>" slot stands for. The pair's spellings answer "len" and
+// "elem", which is what the array shape's two rows are named.
+func retMemberNameOfSlot(slotName string) string {
+	return strings.TrimPrefix(slotName, "#ret.")
+}
+
+// RetMemberEntry is one slot of a returned value's shape: the member it
+// stands for and the slot index its exit is read from. The layout fills
+// these rows and every consumer reads them — the apply route rebuilding
+// an object, the call statement deciding what its rets carry — so the
+// three seams walk one list rather than each re-deriving which slot is
+// which.
+//
+// Name is the object member's own key ("type", "dynamicMetadata"), or
+// the array pair's spelling ("len", "elem") where Kind says array.
+type RetMemberEntry struct {
+	Name  string
+	Index int
+}
+
+// RetShapeKind says WHAT the returned value's member slots describe.
+type RetShapeKind int
+
+const (
+	// the ret slot alone carries the value — every body that returns a
+	// scalar, and every body whose returns this allocator could not read
+	RetShapeNone RetShapeKind = iota
+	// the members are an OBJECT's keys, one slot per key
+	RetShapeObject
+	// the members are an ARRAY's length and joined element, two slots
+	RetShapeArray
+)
+
+// returnedLiteralShape reads a body's RETURN statements and answers the
+// member slots the returned value needs, or (nil, RetShapeNone) where
+// the ret slot alone is what the value can ride.
+//
+// The rule is one shape for the WHOLE body. A summary has one exit row,
+// so every returning path must agree about what the returned value IS —
+// a body returning `{ a, b }` on one path and `[x]` on another has no
+// single member layout, and one returning `{ a, b }` beside a bare
+// `return` or `return someName` has members on one path and nothing to
+// say on the other. Both keep the scalar ret alone, which is exactly
+// today's answer.
+//
+// What DOES allocate:
+//
+//   - every return in the body carries an OBJECT LITERAL, and the union
+//     of their keys is the member list. A key one arm spells and another
+//     does not still allocates: the arm that does not write it leaves the
+//     slot at its absent entry state, which is what "this path returned
+//     an object without that key" means.
+//   - every return in the body carries an ARRAY LITERAL with no spread,
+//     and the pair is allocated. The lengths need not agree — the exits
+//     join, and a join of two exact lengths is what the caller is owed.
+//
+// A member whose VALUE the effect grammar cannot spell does NOT refuse:
+// its slot takes unknown at the return (the lowering's own arm), and a
+// partial object beats a whole unknown. What refuses here is only a shape
+// question — a spread, a computed key the reader cannot name, an accessor
+// or method member, a shorthand of a name, all of which change WHICH keys
+// exist rather than what one key holds.
+func returnedLiteralShape(body *ast.Node) ([]bodySlot, RetShapeKind) {
+	if body == nil {
+		return nil, RetShapeNone
+	}
+	returns := returnedExpressionsOf(body)
+	if len(returns) == 0 {
+		return nil, RetShapeNone
+	}
+	objects := 0
+	arrays := 0
+	for _, returned := range returns {
+		head := Unwrapped(returned)
+		if head == nil {
+			continue
+		}
+		// A LITERAL THAT RUNS CODE allocates nothing, and this is the rule
+		// the whole shape rests on rather than a precision choice. The
+		// return lowering writes members as EFFECTS, which have no room for
+		// a statement, so a literal whose evaluation calls or writes cannot
+		// write its own members — it falls to the floor and leaves the
+		// member slots holding whatever came before. Were the shape still
+		// allocated, that arm's exits would read as "the returned object has
+		// no such key" for a path that in fact returned every key: a WRONG
+		// answer, not a weak one. Refusing the shape for the whole body
+		// keeps every path's answer the unknown it is today.
+		if !writeAndCallFree(head) {
+			return nil, RetShapeNone
+		}
+		switch {
+		case ast.IsObjectLiteralExpression(head):
+			objects++
+		case ast.IsArrayLiteralExpression(head):
+			arrays++
+		}
+	}
+	// one shape for the whole body, and every path must carry it
+	if objects == len(returns) {
+		return objectRetMembersOf(returns)
+	}
+	if arrays == len(returns) {
+		return arrayRetMembersOf(returns)
+	}
+	return nil, RetShapeNone
+}
+
+// objectRetMembersOf reads every returned object literal's keys as the
+// member slot list — the union, in first-seen order, so the layout is
+// deterministic across the arms.
+//
+// Every property of every returned literal must NAME ONE KEY this reader
+// can spell: a plain identifier or string-literal property assignment, or
+// a shorthand. A spread, a computed key, an accessor and a method each
+// answer none — a spread brings keys from a source this reader cannot
+// enumerate, and the others carry no member value a slot could hold — and
+// the whole body then keeps its scalar ret.
+func objectRetMembersOf(returns []*ast.Node) ([]bodySlot, RetShapeKind) {
+	var order []string
+	seen := map[string]struct{}{}
+	for _, returned := range returns {
+		literal := Unwrapped(returned).AsObjectLiteralExpression()
+		if len(literal.Properties.Nodes) == 0 {
+			// `return {}` names no member, so it says nothing a slot could
+			// carry and nothing that contradicts another arm's keys
+			continue
+		}
+		for _, property := range literal.Properties.Nodes {
+			name, named := retMemberNameOf(property)
+			if !named {
+				return nil, RetShapeNone
+			}
+			if _, already := seen[name]; already {
+				continue
+			}
+			seen[name] = struct{}{}
+			order = append(order, name)
+		}
+	}
+	if len(order) == 0 {
+		return nil, RetShapeNone
+	}
+	// a member's SORT is unknown: the layout runs before any statement
+	// lowers, so the values the arms write are not yet read, and a sort
+	// nothing promises may not be assumed. The return arm writes each
+	// slot through the unknown sort's own reading, and the exit state is
+	// what the value turns out to be.
+	out := make([]bodySlot, 0, len(order))
+	for _, name := range order {
+		out = append(out, bodySlot{
+			Name:      retMemberSlotName(name),
+			Sort:      BindingKindUnknown,
+			TypeofTag: TypeofTagNone,
+		})
+	}
+	return out, RetShapeObject
+}
+
+// retMemberNameOf spells the ONE key a literal property writes, or
+// (false) where the property names no single key this reader can state.
+func retMemberNameOf(property *ast.Node) (string, bool) {
+	if ast.IsShorthandPropertyAssignment(property) {
+		name := property.AsShorthandPropertyAssignment().Name()
+		if name != nil && ast.IsIdentifier(name) {
+			return name.Text(), true
+		}
+		return "", false
+	}
+	if !ast.IsPropertyAssignment(property) {
+		return "", false
+	}
+	name := property.AsPropertyAssignment().Name()
+	if name == nil {
+		return "", false
+	}
+	if ast.IsIdentifier(name) || ast.IsStringLiteral(name) {
+		return name.Text(), true
+	}
+	return "", false
+}
+
+// arrayRetMembersOf answers the ".len"/".elem" pair for a body whose
+// every return carries an array literal.
+//
+// A SPREAD element refuses the whole shape: the length is then whatever
+// the spread source holds, which no literal count states, and a wrong
+// length is a wrong answer rather than a weak one.
+func arrayRetMembersOf(returns []*ast.Node) ([]bodySlot, RetShapeKind) {
+	for _, returned := range returns {
+		literal := Unwrapped(returned).AsArrayLiteralExpression()
+		for _, element := range literal.Elements.Nodes {
+			if ast.IsSpreadElement(element) {
+				return nil, RetShapeNone
+			}
+		}
+	}
+	return []bodySlot{
+		{Name: retLenSlotName(), Sort: BindingKindNumber, TypeofTag: TypeofTagNumber},
+		{Name: retElemSlotName(), Sort: BindingKindUnknown, TypeofTag: TypeofTagNone},
+	}, RetShapeArray
+}
+
+// returnedExpressionsOf collects the expression of every `return e` in a
+// body, skipping NESTED function-likes — an inner function's returns are
+// the inner function's value, not this body's.
+//
+// A bare `return` (no expression) is collected as nil, so the shape
+// reader above sees a path whose value is undefined and keeps the scalar
+// ret: a body that sometimes returns an object and sometimes nothing has
+// no single member layout.
+func returnedExpressionsOf(body *ast.Node) []*ast.Node {
+	var out []*ast.Node
+	var scan func(node *ast.Node)
+	scan = func(node *ast.Node) {
+		if node == nil {
+			return
+		}
+		if node != body && ast.IsFunctionLike(node) {
+			return
+		}
+		if ast.IsReturnStatement(node) {
+			out = append(out, node.AsReturnStatement().Expression)
+			return
+		}
+		node.ForEachChild(func(child *ast.Node) bool {
+			scan(child)
+			return false
+		})
+	}
+	// a CONCISE arrow body is its own single return
+	if !ast.IsBlock(body) {
+		return []*ast.Node{body}
+	}
+	scan(body)
+	return out
+}
+
 // (Parameter sorts and typeof evidence read through kernel_summaries
 // .go's declaredParamSort / declaredParamTypeof: an unannotated or
 // richer-typed parameter is UNKNOWN — a summary quantifies over all
@@ -827,6 +1274,21 @@ type bodySlot struct {
 //     call tier havocs in its own right. The floor also walks INTO the
 //     arrow for rules (a) and (b), so an arrow writing an outer name
 //     havocs that name's slot too (havocSlotsOfStatement's own comment).
+//
+// THE BOUNDARY RULE THIS SKIP DEPENDS ON. Stepping over a nested
+// function is sound only because the two predicates answer the SAME
+// question about it: this collection lays out no slot for the inner
+// body's own names, and the floor havocs every name of THIS body the
+// inner one writes. That agreement holds only while every route
+// admitting a statement that hands over a closure either falls to the
+// floor or asks ClosureEscapesTrackedWrite (effect_expression.go), which
+// is the rule stated once for both sites. The routes that admit WITHOUT
+// the floor's walk — the effect grammar's literal, ternary and
+// short-circuit arms; the branch-shaped return's inert arm; this file's
+// constructor and default preludes — each ask it, and each havoc the
+// closure's write set where the answer is yes. A route added later that
+// believes a slot an arrow writes would break the skip above, not merely
+// lose precision.
 //
 // A FUNCTION DECLARATION statement (`function helper() {…}`) is served
 // the same way, and its HOISTING cannot be observed by anything lowered.
@@ -1201,6 +1663,16 @@ func lowerSummaryBodyWithCaptures(
 	summary, havoc, declined, ok := lowerSummaryBodyReporting(ctx, declaration, parameterSorts, captures)
 	name := summaryBodyName(declaration)
 	if !ok {
+		// A declaration with NO BODY is not a body: an overload signature
+		// stands in front of the implementation that follows it, and an
+		// abstract member stands in front of the subclasses that supply
+		// it. Neither has statements for the lowering to read, so neither
+		// is a body the outcome store should hold a row for — recording
+		// one puts scaffolding in the denominator and then declines it.
+		// The implementation and the subclass bodies record their own.
+		if isBodylessSignature(declaration) {
+			return LoweredSummary{}, false
+		}
 		RecordSummaryOutcome(declaration, name, SummaryDeclined, declined)
 		return LoweredSummary{}, false
 	}
@@ -1210,6 +1682,34 @@ func lowerSummaryBodyWithCaptures(
 	}
 	RecordSummaryOutcome(declaration, name, SummaryComplete, "")
 	return summary, true
+}
+
+// isBodylessSignature answers whether a declaration is a SIGNATURE
+// rather than a body: a function, method, or constructor declaration
+// with no body at all.
+//
+// TypeScript spells two of these. An OVERLOAD signature sits directly in
+// front of the implementation that carries the statements — `create(a):
+// T;` twice, then `create(a, b?, c?): T { … }` — and the implementation
+// is the body every call really runs. An ABSTRACT member (or a member of
+// an ambient class or an interface) has no implementation in this file
+// at all; the bodies live in the subclasses, which are declarations of
+// their own.
+//
+// Either way there are no statements here to read, so the enumeration
+// counts the implementation once instead of counting each signature and
+// then declining it for the thing it never had.
+func isBodylessSignature(declaration *ast.Node) bool {
+	if declaration == nil || declaration.Body() != nil {
+		return false
+	}
+	switch declaration.Kind {
+	case ast.KindFunctionDeclaration, ast.KindMethodDeclaration,
+		ast.KindConstructor, ast.KindMethodSignature,
+		ast.KindGetAccessor, ast.KindSetAccessor:
+		return true
+	}
+	return false
 }
 
 // summaryBodyName spells a lowered body the way the report spells
@@ -1271,6 +1771,10 @@ func lowerSummaryBodyReporting(
 	// leaves and, below, the method's this-fields. Filled in slot order,
 	// which is the order the entries are appended in.
 	var bundleEntries []BundleEntry
+	// the leaf spellings ("parentRect.width") of every record parameter
+	// this body HANDS OVER whole. They join the havoc vector below, so the
+	// statements that run code cannot believe a leaf across the hand-over.
+	var handOverHavocNames []string
 	// the DEFAULTED parameters' slots, remembered on the single-entry
 	// path and read by the prelude below, which applies each default
 	// under a definedness branch — the runtime's own rule: undefined,
@@ -1302,12 +1806,30 @@ func lowerSummaryBodyReporting(
 			continue
 		}
 		if members, expanded := recordParamMembersIn(ctx, parameter); expanded {
-			// an EXPANDED parameter's every use in the body must be a read of
-			// a declared member; a whole-p use, an undeclared member, or a
-			// write through it declines the body outright
-			if !recordParameterUsesAreDeclaredReads(body, parameter.AsParameterDeclaration().Name().Text(), members) {
+			// what an EXPANDED parameter's own name is used for, apart from
+			// reading its declared members.
+			//
+			// A READ of the whole record — a spread (`{ ...p, y: 1 }`), a
+			// `return p` — copies the fields out and hands no reference this
+			// body stores through, so every leaf keeps its value and the
+			// body lowers. The whole-name expression itself takes the opaque
+			// floor its own route gives it.
+			//
+			// A HAND-OVER (`f(p)`, `q = p`) lowers too, on a PAIR of moves
+			// that are only sound together. Inside, every leaf of this
+			// parameter is havocked at each code-running statement
+			// (handOverHavocNames below, which rides the same
+			// CaptureHavocSlots vector a method-calling capture rides), so
+			// nothing here believes a leaf across the hand-over. Outside, each
+			// leaf row goes out Written, and a caller that filled those leaves
+			// from its own flattened record local takes them back through the
+			// call statement's rets (recordParamRets, ir_summary_call.go) — so
+			// nobody, in either body, is left believing a stale slot.
+			use := recordParameterUseOf(body, parameter.AsParameterDeclaration().Name().Text(), members)
+			if use == recordParameterUnreadable {
 				return LoweredSummary{}, "", "a whole-record parameter use", false
 			}
+			handedOver := use == recordParameterEscapesWhole
 			// the arrow route fills ONE entry per declared parameter with a
 			// site sort, which an expanded parameter has no single entry for
 			if index < len(parameterSorts) {
@@ -1315,14 +1837,44 @@ func lowerSummaryBodyReporting(
 			}
 			for _, entry := range entries {
 				// a record parameter's leaf is a bundle entry the call site may
-				// have to map back. Written is FALSE for every one of them: a
-				// write through an expanded parameter declined the body above,
-				// so no leaf of a body that got this far is ever moved.
+				// have to map back. Written is the HAND-OVER bit: a body that
+				// only reads its members, or reads the whole record out, never
+				// moves a leaf (a write through the parameter declined above),
+				// while a body that hands the record to code may have every
+				// leaf moved by that code — and the row's write-back is what
+				// carries the movement into the caller.
 				bundleEntries = append(bundleEntries, BundleEntry{
 					Path:    entry.Name,
 					Index:   len(paramNames),
-					Written: false,
+					Written: handedOver,
 				})
+				if handedOver {
+					handOverHavocNames = append(handOverHavocNames, entry.Name)
+				}
+				paramNames = append(paramNames, entry.Name)
+				paramSorts = append(paramSorts, entry.Sort)
+				paramTypeofs = append(paramTypeofs, entry.TypeofTag)
+			}
+			continue
+		}
+		// an ARRAY-TYPED parameter takes the two slots a flattened array
+		// local takes, "ids.len" and "ids.elem", in the parameter's own slot
+		// position. The pair comes from SummaryParameterEntriesIn — the same
+		// entries list the call sites walk — so the caller's argument vector
+		// and this layout stay one answer about how many entries the
+		// parameter is worth.
+		//
+		// No bundle row rides out: the two slots hold a length and the JOIN
+		// of the elements, not fields of the caller's object, and nothing a
+		// caller spells maps onto them the way "q.lo" maps onto a record
+		// leaf. The values enter from the entry state and go nowhere back.
+		if _, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
+			// the arrow route fills ONE entry per declared parameter with a
+			// site sort, which the two-slot pair has no single entry for
+			if index < len(parameterSorts) {
+				return LoweredSummary{}, "", "an array parameter of an arrow argument", false
+			}
+			for _, entry := range entries {
 				paramNames = append(paramNames, entry.Name)
 				paramSorts = append(paramSorts, entry.Sort)
 				paramTypeofs = append(paramTypeofs, entry.TypeofTag)
@@ -1455,8 +2007,21 @@ func lowerSummaryBodyReporting(
 	// declaration's own `p` is a whole-name occurrence the use scan
 	// refuses — so this only keeps the two readings agreeing.)
 	for _, parameter := range parameters {
+		// a BINDING-PATTERN parameter has no holder name to reserve — its
+		// entries ARE the bound names, already in parameterNames above
+		name := parameter.AsParameterDeclaration().Name()
+		if name == nil || !ast.IsIdentifier(name) {
+			continue
+		}
 		if _, expanded := recordParamMembersIn(ctx, parameter); expanded {
-			parameterNames[parameter.AsParameterDeclaration().Name().Text()] = struct{}{}
+			parameterNames[name.Text()] = struct{}{}
+		}
+		// an ARRAY parameter's entries are spelled "ids.len"/"ids.elem", so
+		// the holder is not among them either — the same reservation, for
+		// the same reason: a local named `ids` would otherwise lay a second
+		// slot family under one name.
+		if _, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
+			parameterNames[name.Text()] = struct{}{}
 		}
 	}
 	var slotChecker *checker.Checker
@@ -1476,11 +2041,33 @@ func lowerSummaryBodyReporting(
 	bindings = append(bindings, "#done", "#ret")
 	sorts = append(sorts, BindingKindNumber, BindingKindUnknown)
 	typeofs = append(typeofs, TypeofTagNumber, TypeofTagNone)
+	doneIndex := len(bindings) - 2
+	retIndex := len(bindings) - 1
+	// THE RETURNED VALUE'S MEMBERS. A body returning an object or array
+	// LITERAL takes one slot per member beside the scalar #ret, the way a
+	// record parameter takes one per member — the return lowering writes
+	// each member's own effect into its own slot, and the call sites
+	// rebuild the value from the several exits. The rows ride out in
+	// RetMembers so the layout's answer about WHICH slot is which member
+	// is the one every consumer reads.
+	//
+	// The slots come after #ret, so #done and #ret keep the indices every
+	// existing reader computes for them and nothing about the scalar route
+	// moves.
+	retMemberSlots, retShape := returnedLiteralShape(body)
+	var retMembers []RetMemberEntry
+	for _, slot := range retMemberSlots {
+		retMembers = append(retMembers, RetMemberEntry{
+			Name:  retMemberNameOfSlot(slot.Name),
+			Index: len(bindings),
+		})
+		bindings = append(bindings, slot.Name)
+		sorts = append(sorts, slot.Sort)
+		typeofs = append(typeofs, slot.TypeofTag)
+	}
 	if len(bindings) > summarySlotBudget {
 		return LoweredSummary{}, "", "a body past the slot budget", false
 	}
-	doneIndex := len(bindings) - 2
-	retIndex := len(bindings) - 1
 	table := &SummaryTableBuilder{}
 	context := &LoweringContext{
 		Bindings: bindings,
@@ -1498,6 +2085,11 @@ func lowerSummaryBodyReporting(
 		Inlining:     map[*ast.Node]struct{}{declaration: {}},
 		Flow:         ctx,
 		SummaryTable: table,
+		// the returned value's member slots, so the return arm writes each
+		// member into its own slot rather than writing the whole literal
+		// off as unknown
+		RetShape:   retShape,
+		RetMembers: retMembers,
 	}
 	// an ESCAPING receiver is the ONE whole decline of the expansion, and
 	// it is POROUS rather than declined: the body still lowers, its
@@ -1513,6 +2105,17 @@ func lowerSummaryBodyReporting(
 	// no slot (a write-only field the layout gave no entry) needs none:
 	// no slot means no belief to invalidate.
 	for _, havocName := range bundle.CaptureHavocNames {
+		if slot, held := slotIndexOfName(context, havocName); held {
+			context.CaptureHavocSlots = append(context.CaptureHavocSlots, slot)
+		}
+	}
+	// a HANDED-OVER record parameter's leaves ride the same vector: the
+	// body passed the whole object to code, so any code-running statement
+	// may have moved every leaf and none of them may be believed across
+	// one. The rows also went out Written, so the caller takes the moved
+	// values back through the call statement's rets rather than keeping
+	// what it sent.
+	for _, havocName := range handOverHavocNames {
 		if slot, held := slotIndexOfName(context, havocName); held {
 			context.CaptureHavocSlots = append(context.CaptureHavocSlots, slot)
 		}
@@ -1559,6 +2162,22 @@ func lowerSummaryBodyReporting(
 				constructorPrelude = append(constructorPrelude, kernelbridge.IrStatement{
 					Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: effect,
 				})
+				// A FIELD HOLDING A CLOSURE — `private handler = () => {
+				// this.count++ }` — is the one initializer whose slot write is
+				// not the end of the story. The prelude ADMITS every field
+				// (an unreadable initializer takes unknown rather than
+				// declining), so unlike an ordinary statement this one never
+				// reaches the havoc floor, and the floor's walk INTO the arrow
+				// is what would otherwise havoc the names it writes. Those
+				// names are havocked here instead, right after the field's own
+				// write: the closure may run at any later time, so nothing
+				// after this may believe them. ClosureEscapesTrackedWrite
+				// states the boundary rule both sites share.
+				if ClosureEscapesTrackedWrite(context, property.Initializer) {
+					if written, enumerable := havocSlotsOfStatement(context, property.Initializer); enumerable {
+						constructorPrelude = append(constructorPrelude, havocAssignments(written)...)
+					}
+				}
 			}
 		}
 		for _, parameter := range parameters {
@@ -1586,33 +2205,76 @@ func lowerSummaryBodyReporting(
 	// exactly where the runtime does — only when the call left the entry
 	// undefined. The branch tests the slot's definedness (the kernel's
 	// IrTest.defined, covered by walk_sound), and the else arm assigns
-	// the lowered default; a supplied argument walks the empty then arm
-	// untouched. A default the effect grammar cannot spell havocs its
-	// OWN slot and names the construct — the body's other statements
-	// keep their knowledge.
+	// the default; a supplied argument walks the empty then arm untouched.
+	//
+	// The default's VALUE is read where the effect grammar can spell it
+	// (`= 0`, `= null`, `= other`), and is UNKNOWN where it cannot —
+	// `= new ApplicationConfig()`, `= createContextId()`,
+	// `= this.container.getModules()`. Unknown is exactly the opaque
+	// call's own admission: the slot's value is unconstrained and the
+	// branch structure around it is still the runtime's own, so a
+	// supplied argument keeps everything the entry state promised and
+	// only the defaulted run loses the value.
+	//
+	// A default that RUNS code — a `new`, a call, an await — also runs
+	// whatever a stored closure of this body can run, so it brackets the
+	// capture-havoc set exactly as a code-running statement in the body
+	// does (lowering_to_kernel_ir.go's bracketing). The bracket goes
+	// OUTSIDE the branch: it must hold on both arms, because the caller
+	// chooses which arm runs and neither may be believed across the
+	// initializer's code. The whole prelude runs before any statement, so
+	// the statement walk's own leading bracket is not enough — nothing
+	// has yet forced those slots to forget.
+	captureHavocPrelude := map[int]struct{}{}
+	for _, slot := range context.CaptureHavocSlots {
+		if slot >= 0 {
+			captureHavocPrelude[slot] = struct{}{}
+		}
+	}
 	var prelude []kernelbridge.IrStatement
 	defaultEffects := map[int]kernelbridge.LoopEffect{}
 	for _, defaulted := range defaultedSlots {
-		if effect, lowered := RhsEffect(context, context.Sorts[defaulted.Slot], defaulted.Initializer); lowered {
+		effect, lowered := RhsEffect(context, context.Sorts[defaulted.Slot], defaulted.Initializer)
+		if lowered {
 			defaultEffects[defaulted.Slot] = effect
-			prelude = append(prelude, kernelbridge.IrStatement{
-				Kind: kernelbridge.IrStatementBranch,
-				On:   defaulted.Slot,
-				Test: kernelbridge.IrTestDefined,
-				Else: []kernelbridge.IrStatement{{
-					Kind:   kernelbridge.IrStatementAssign,
-					Target: defaulted.Slot,
-					Effect: effect,
-				}},
-			})
-			continue
+		} else {
+			// the default is a construct the effect grammar cannot spell.
+			// The slot takes unknown on the arm the default runs on; no
+			// value is claimed, so nothing said here is wrong.
+			effect = kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}
 		}
-		NoteFirstHavoc(context, "a defaulted parameter")
-		prelude = append(prelude, kernelbridge.IrStatement{
+		runsCode := StatementRunsCode(defaulted.Initializer)
+		if runsCode && len(captureHavocPrelude) > 0 {
+			prelude = append(prelude, havocAssignments(captureHavocPrelude)...)
+		}
+		// A DEFAULT HOLDING A CLOSURE — `cb = () => { this.count++ }` —
+		// hands the arrow to whoever the parameter goes on to, and calling
+		// it writes this body's names. StatementRunsCode does not see it
+		// (building an arrow runs nothing), and this prelude admits every
+		// default rather than declining, so the havoc floor's walk into the
+		// arrow never happens for it. The names go unknown here instead —
+		// inside the same else arm, since only the run that took the default
+		// built the closure. ClosureEscapesTrackedWrite states the boundary
+		// rule this shares with the census.
+		defaultArm := []kernelbridge.IrStatement{{
 			Kind:   kernelbridge.IrStatementAssign,
 			Target: defaulted.Slot,
-			Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown},
+			Effect: effect,
+		}}
+		if ClosureEscapesTrackedWrite(context, defaulted.Initializer) {
+			if written, enumerable := havocSlotsOfStatement(context, defaulted.Initializer); enumerable {
+				defaultArm = append(defaultArm, havocAssignments(written)...)
+			}
+		}
+		prelude = append(prelude, kernelbridge.IrStatement{
+			Kind: kernelbridge.IrStatementBranch,
+			On:   defaulted.Slot,
+			Test: kernelbridge.IrTestDefined,
+			Else: defaultArm,
 		})
+		if runsCode && len(captureHavocPrelude) > 0 {
+			prelude = append(prelude, havocAssignments(captureHavocPrelude)...)
+		}
 	}
 	stmts, statementsOk := LowerStatements(context, statements)
 	if !statementsOk {
@@ -1657,6 +2319,8 @@ func lowerSummaryBodyReporting(
 		BundleEntries:   bundleEntries,
 		DefaultEffects:  defaultEffects,
 		ReturnsReceiver: bundle.ReturnsSelf,
+		RetShape:        retShape,
+		RetMembers:      retMembers,
 	}, context.FirstHavoc, "", true
 }
 

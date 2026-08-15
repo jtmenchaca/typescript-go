@@ -73,7 +73,8 @@ func EffectNodes(e kernelbridge.LoopEffect) int {
 	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectConst,
 		kernelbridge.LoopEffectConstState, kernelbridge.LoopEffectUnknown:
 		return 1
-	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent:
+	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent,
+		kernelbridge.LoopEffectSeqUnary, kernelbridge.LoopEffectSeqNum:
 		return 1 + EffectNodes(*e.A)
 	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectConcat,
 		kernelbridge.LoopEffectJoin:
@@ -95,7 +96,8 @@ func SubstituteVars(e kernelbridge.LoopEffect, current []kernelbridge.LoopEffect
 	case kernelbridge.LoopEffectConst, kernelbridge.LoopEffectConstState,
 		kernelbridge.LoopEffectUnknown:
 		return e
-	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent:
+	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent,
+		kernelbridge.LoopEffectSeqUnary, kernelbridge.LoopEffectSeqNum:
 		out := e
 		a := SubstituteVars(*e.A, current)
 		out.A = &a
@@ -185,7 +187,8 @@ func effectsEqual(a, b kernelbridge.LoopEffect) bool {
 		return a.Absent == b.Absent && a.Nan == b.Nan && setsEqualForFold(a.Set, b.Set)
 	case kernelbridge.LoopEffectUnknown:
 		return true
-	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent:
+	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent,
+		kernelbridge.LoopEffectSeqUnary, kernelbridge.LoopEffectSeqNum:
 		return a.Op == b.Op && effectsEqual(*a.A, *b.A)
 	case kernelbridge.LoopEffectBinary, kernelbridge.LoopEffectConcat,
 		kernelbridge.LoopEffectJoin:

@@ -58,7 +58,15 @@ func ReadObjectKeyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain
 			out := receiver.Keys[idx].Value
 			return &out
 		}
-		if receiver.Complete {
+		// the OPEN-MAP gate the element read carries (element_access.go's
+		// OpenMapAt): a receiver whose declared type has an index signature
+		// names no fixed key set, so a missing key is not a definite
+		// absence there. The parameter binding now strips the completeness
+		// an open-map-typed parameter never earned, which makes this
+		// defense in depth — an evaluation-path object can still carry one
+		// call site's completeness through a route that crosses no
+		// parameter binding, and this is where it meets its own type.
+		if receiver.Complete && !openMapReceiver(ctx, pa.Expression) {
 			// a prototype member every plain object inherits IS a
 			// function, never undefined — the collision class the zod
 			// survey catalogued (its #5266/#5098); a bare-prototype

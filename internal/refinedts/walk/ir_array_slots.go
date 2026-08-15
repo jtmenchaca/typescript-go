@@ -48,7 +48,10 @@
 package walk
 
 import (
+	"unicode/utf8"
+
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -85,6 +88,50 @@ type ArrayLocal struct {
 	// ArrayElementTypeof answer for it exactly as they answer for the
 	// sibling.
 	CopiedFrom string
+	// Parameter: this array arrived as a PARAMETER (`function f(ids:
+	// number[])`) rather than as a declaration with an initializer. There
+	// are no element expressions to read a sort from — the caller's values
+	// are what the elements will be — so DeclaredElementSort below carries
+	// the sort read from the declared TYPE instead, and Elements stays
+	// empty.
+	//
+	// Everything else about the local is a literal-built array's: the same
+	// two slot spellings, the same use scan, the same index/length/push
+	// readings. What differs is only where the two slots' values come from
+	// — the ENTRY state rather than a lowered initializer, since a
+	// parameter is already bound when the body starts.
+	Parameter bool
+	// DeclaredElementSort: the element sort read from a parameter's
+	// declared type. Meaningful only when Parameter is set;
+	// ArrayElementSort reads it there instead of scanning Elements.
+	DeclaredElementSort BindingKind
+	// SplitReceiver: the receiver expression of `const parts =
+	// s.split(sep)` — the string this array's pieces were cut out of — or
+	// nil for every other initializer.
+	//
+	// A split array has no element expressions of its own (its pieces are
+	// computed, not spelled), so it reads like a Parameter array for sort
+	// purposes: the pieces are strings, which is what SplitReceiver being
+	// set states.
+	//
+	// The two slots are written UNEVENLY, and that is the honest part of
+	// the row. The ELEM slot takes the kernel's drawn-from claim over the
+	// receiver — a piece is a contiguous stretch of the receiver, so its
+	// scalars all occurred there and it is no longer. The LEN slot takes
+	// unknown: how many pieces there are depends on how many times the
+	// separator occurs, which the receiver's set does not state, and
+	// inventing a count would be a claim with nothing behind it.
+	SplitReceiver *ast.Node
+}
+
+// statesElementSort is whether this local carries its element sort
+// DIRECTLY rather than reading it off spelled elements. Two locals do:
+// a parameter array, whose values come from the caller, and a split
+// array, whose pieces are computed. Both leave Elements empty, so the
+// scan below them would answer for an empty literal instead of for
+// what the slot will actually hold.
+func (local ArrayLocal) statesElementSort() bool {
+	return local.Parameter || local.SplitReceiver != nil
 }
 
 // arrayLenSuffix and arrayElemSuffix are the two slot spellings a
@@ -373,7 +420,15 @@ func indexAccessOf(node *ast.Node, name string) (*ast.Node, bool) {
 // The declaration's own name position and the literal's own elements
 // are not uses.
 func usesAreAllArrayForms(body *ast.Node, declaration *ast.Node, name string) bool {
-	declarationName := declaration.AsVariableDeclaration().Name()
+	return usesAreAllArrayFormsFrom(body, declaration.AsVariableDeclaration().Name(), name)
+}
+
+// usesAreAllArrayFormsFrom is the same scan with the DECLARING NAME NODE
+// handed in rather than read off a variable declaration. A PARAMETER's
+// name node lives on a ParameterDeclaration, which has no
+// AsVariableDeclaration, and the scan itself only ever needs the node so
+// it can tell the declaration's own name position from a use of it.
+func usesAreAllArrayFormsFrom(body *ast.Node, declarationName *ast.Node, name string) bool {
 	ok := true
 	var visit func(node *ast.Node) bool
 	visitIfPresent := func(node *ast.Node) {
@@ -554,6 +609,12 @@ func ArrayLocalOf(body *ast.Node, declaration *ast.Node, sources flattenedSource
 	// which the literal reader below would otherwise decline
 	if bridged, ok := bridgedArrayLocalOf(body, declaration, sources); ok {
 		return bridged, true
+	}
+	// the SPLIT: `const parts = s.split(sep)` at an astral-safe separator.
+	// Its initializer is a CALL, which every reader above and below
+	// declines, so it stands on its own and needs no sibling table
+	if split, ok := splitArrayLocalOf(body, declaration); ok {
+		return split, true
 	}
 	literal := arrayLiteralOfDeclaration(declaration)
 	if literal == nil {
@@ -863,6 +924,131 @@ func copiedArrayLocalOf(body *ast.Node, declaration *ast.Node, sources flattened
 	}, true
 }
 
+// splitSourceOf reads a declaration's initializer as `s.split(sep)`
+// with an ASTRAL-SAFE separator, and answers the receiver expression.
+//
+// Two gates, and both are about surrogate pairs. `String.prototype.
+// split` at a string separator cuts the receiver only where the
+// separator MATCHES, and a match of a well-formed separator begins and
+// ends on a scalar boundary — each of its code units pairs with the
+// same partner inside the receiver as it does in the separator. So no
+// piece can begin or end mid-pair, and the kernel's drawn-from claim
+// holds. The exception is a separator that is ITSELF a lone surrogate:
+// `"𝐀".split("\uD835")` matches the high half of an astral pair and
+// does split it, minting a lone surrogate the receiver never held.
+//
+// The gates are therefore: the separator must be a spelled string
+// literal (so its code units can be read at all), and it must contain
+// no unpaired surrogate. A regular-expression separator, a computed
+// separator, a limit argument, and a missing separator all decline —
+// each would be a claim with nothing behind it.
+func splitSourceOf(declaration *ast.Node) (*ast.Node, bool) {
+	if !ast.IsVariableDeclaration(declaration) {
+		return nil, false
+	}
+	initializer := declaration.AsVariableDeclaration().Initializer
+	if initializer == nil {
+		return nil, false
+	}
+	head := Unwrapped(initializer)
+	if !ast.IsCallExpression(head) {
+		return nil, false
+	}
+	call := head.AsCallExpression()
+	if !ast.IsPropertyAccessExpression(call.Expression) {
+		return nil, false
+	}
+	access := call.Expression.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return nil, false
+	}
+	if !ast.IsIdentifier(access.Name()) || access.Name().Text() != "split" {
+		return nil, false
+	}
+	// exactly one argument: a `limit` second argument truncates the piece
+	// list, which changes no piece's contents but is not a shape this
+	// recognizer has read, so it declines rather than guess
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+		return nil, false
+	}
+	separator := Unwrapped(call.Arguments.Nodes[0])
+	if !ast.IsStringLiteral(separator) && !ast.IsNoSubstitutionTemplateLiteral(separator) {
+		return nil, false
+	}
+	if !astralSafeSeparator(separator.Text()) {
+		return nil, false
+	}
+	return access.Expression, true
+}
+
+// astralSafeSeparator is whether a separator's text contains no
+// UNPAIRED surrogate — the one premise that keeps a split from cutting
+// inside an astral pair.
+//
+// Go strings hold the source text as UTF-8, so a well-formed separator
+// decodes with no errors. A lone surrogate cannot be encoded in UTF-8
+// at all, and the parser's own escape handling turns `"\uD835"` into
+// the replacement rune — so any RuneError in the decoded text is a
+// spelling this reader must not vouch for. Declining on a literal
+// replacement character (U+FFFD spelled outright) costs a claim on a
+// receiver nobody writes, and buys the gate with no engine-specific
+// reasoning.
+func astralSafeSeparator(text string) bool {
+	if text == "" {
+		// the empty separator splits between every UTF-16 CODE UNIT, which
+		// is exactly the slice-shaped cut: it lands inside an astral pair
+		// and mints two lone surrogates
+		return false
+	}
+	for _, r := range text {
+		if r == utf8.RuneError {
+			return false
+		}
+		// the surrogate range itself, if it ever reaches here
+		if r >= 0xD800 && r <= 0xDFFF {
+			return false
+		}
+	}
+	return true
+}
+
+// splitArrayLocalOf is the SPLIT recognizer: `const parts =
+// s.split(sep)` under the astral-safe gate above. The result is an
+// ArrayLocal in every respect — the same two slot spellings, the same
+// use scan — so every downstream reader treats it as it treats any
+// other flattened array. What differs is where the two slots' values
+// come from: the elem slot from the kernel's drawn-from row over the
+// receiver, the len slot from nothing at all.
+func splitArrayLocalOf(body *ast.Node, declaration *ast.Node) (ArrayLocal, bool) {
+	if !ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+		return ArrayLocal{}, false
+	}
+	receiver, isSplit := splitSourceOf(declaration)
+	if !isSplit {
+		return ArrayLocal{}, false
+	}
+	name := declaration.AsVariableDeclaration().Name().Text()
+	// the receiver may not name the array being declared — at the point
+	// the split runs, its own slots have not been written yet
+	if mentionsName(receiver, name) {
+		return ArrayLocal{}, false
+	}
+	if !usesAreAllArrayForms(body, declaration, name) {
+		return ArrayLocal{}, false
+	}
+	return ArrayLocal{
+		Declaration:  declaration,
+		Name:         name,
+		LenSlotName:  name + arrayLenSuffix,
+		ElemSlotName: name + arrayElemSuffix,
+		// no element expressions: the pieces are computed. The sort rides
+		// the stated-sort channel instead, and a split's pieces are
+		// strings whatever the receiver held
+		DeclaredElementSort: BindingKindString,
+		SplitReceiver:       receiver,
+	}, true
+}
+
 // ArrayLocalsOf runs the recognizer over a body's collected locals and
 // answers the ones that flatten, keyed by declaration.
 //
@@ -928,13 +1114,225 @@ func ArrayLocalsOf(body *ast.Node, locals []*ast.Node, collections map[*ast.Node
 	return out
 }
 
+// arrayParameterElementSort is the element sort of a parameter declared
+// as an array, read from its DECLARED TYPE.
+//
+// Two readings, the syntactic one first so a body lowering without a
+// checker still flattens the common annotations:
+//
+//	number[] / readonly number[] / Array<number> → the number sort
+//	string[] / readonly string[] / Array<string> → the string sort
+//
+// Anything else — a union element, an object element, a tuple, an
+// unannotated parameter — goes to the checker, which reads the resolved
+// element type under exactly the masking LocalSortResolved uses: a type
+// wearing only number/boolean flags is the number sort, only string
+// flags the string sort, and a mixture or anything else is unknown.
+//
+// An unknown element sort still FLATTENS: the two slots exist and the
+// length half is exact, while tests on the element slot decline. That
+// loses coverage on the elements and never soundness — the same bargain
+// an empty literal's unknown-until-pushed element already makes.
+func arrayParameterElementSort(c *checker.Checker, parameter *ast.Node) (BindingKind, bool) {
+	typeNode := parameter.AsParameterDeclaration().Type
+	if typeNode != nil {
+		if sort, isArray := arrayTypeNodeElementSort(typeNode); isArray {
+			if sort != BindingKindUnknown || c == nil {
+				return sort, true
+			}
+			// an array by syntax whose ELEMENT the syntax does not spell:
+			// the checker reads the element type
+			return checkedElementSort(c, typeNode), true
+		}
+		return BindingKindUnknown, false
+	}
+	return BindingKindUnknown, false
+}
+
+// arrayTypeNodeElementSort reads an ARRAY type node and answers the sort
+// its element wears by syntax alone. The second answer is whether the
+// node is an array type at all — `number[]`, `readonly number[]`, and
+// `Array<number>` all are; `number` and `{a: number}` are not.
+func arrayTypeNodeElementSort(typeNode *ast.Node) (BindingKind, bool) {
+	node := typeNode
+	// `readonly T[]` wraps the array type; the readonly says nothing about
+	// the element's sort, and the two slots are read-only in the lowering
+	// either way
+	if node.Kind == ast.KindTypeOperator {
+		operator := node.AsTypeOperatorNode()
+		if operator.Operator != ast.KindReadonlyKeyword {
+			return BindingKindUnknown, false
+		}
+		node = operator.Type
+	}
+	if node.Kind == ast.KindParenthesizedType {
+		node = node.AsParenthesizedTypeNode().Type
+	}
+	switch {
+	case node.Kind == ast.KindArrayType:
+		return typeNodeSort(node.AsArrayTypeNode().ElementType), true
+	case node.Kind == ast.KindTypeReference:
+		// `Array<number>` / `ReadonlyArray<number>` — one type argument,
+		// and the name has to be the array constructor's own
+		reference := node.AsTypeReferenceNode()
+		if !ast.IsIdentifier(reference.TypeName) {
+			return BindingKindUnknown, false
+		}
+		switch reference.TypeName.Text() {
+		case "Array", "ReadonlyArray":
+		default:
+			return BindingKindUnknown, false
+		}
+		if reference.TypeArguments == nil || len(reference.TypeArguments.Nodes) != 1 {
+			return BindingKindUnknown, false
+		}
+		return typeNodeSort(reference.TypeArguments.Nodes[0]), true
+	}
+	return BindingKindUnknown, false
+}
+
+// typeNodeSort is a type node's sort by its own syntax: the number and
+// string keywords and their literal types, and nothing else. A union, a
+// reference, an object type — all unknown, and the checker reading above
+// is what resolves those where one is available.
+func typeNodeSort(typeNode *ast.Node) BindingKind {
+	node := typeNode
+	if node.Kind == ast.KindParenthesizedType {
+		node = node.AsParenthesizedTypeNode().Type
+	}
+	switch node.Kind {
+	case ast.KindNumberKeyword, ast.KindBooleanKeyword:
+		return BindingKindNumber
+	case ast.KindStringKeyword:
+		return BindingKindString
+	case ast.KindLiteralType:
+		literal := node.AsLiteralTypeNode().Literal
+		switch {
+		case ast.IsNumericLiteral(literal),
+			literal.Kind == ast.KindTrueKeyword, literal.Kind == ast.KindFalseKeyword:
+			return BindingKindNumber
+		case ast.IsStringLiteral(literal):
+			return BindingKindString
+		}
+	}
+	return BindingKindUnknown
+}
+
+// checkedElementSort reads an array TYPE NODE's element sort through the
+// host checker, under the same flag masking LocalSortResolved uses.
+func checkedElementSort(c *checker.Checker, typeNode *ast.Node) BindingKind {
+	t := c.GetTypeFromTypeNode(typeNode)
+	if t == nil {
+		return BindingKindUnknown
+	}
+	element := c.GetElementTypeOfArrayType(t)
+	if element == nil {
+		return BindingKindUnknown
+	}
+	flags := element.Flags()
+	numOrBool := checker.TypeFlagsNumber | checker.TypeFlagsNumberLiteral |
+		checker.TypeFlagsBoolean | checker.TypeFlagsBooleanLiteral
+	if (flags&numOrBool) != 0 && (flags & ^numOrBool) == 0 {
+		return BindingKindNumber
+	}
+	strOrLit := checker.TypeFlagsString | checker.TypeFlagsStringLiteral
+	if (flags&strOrLit) != 0 && (flags & ^strOrLit) == 0 {
+		return BindingKindString
+	}
+	return BindingKindUnknown
+}
+
+// ArrayParameterOf is the recognizer for an array-typed PARAMETER:
+// `function f(ids: number[]) { … }` becomes the two slots "ids.len" and
+// "ids.elem", exactly as a locally-declared array does.
+//
+// Why a parameter can flatten at all. The two slots are a length and the
+// JOIN of the elements, and a parameter's values arrive from the caller
+// rather than from an initializer — so the slots start at whatever the
+// entry state says and every reading below them (`ids.length`, `ids[i]`,
+// `ids.reduce(cb, seed)`) is the same reading a local array's slots get.
+// Nothing about the recognized forms depends on where the values came
+// from; only the WRITING of the two slots did, and a parameter is
+// already bound when the body starts.
+//
+// The use scan is the local's, unchanged and total-or-decline: an alias,
+// a return of the whole array, a `pop()`, a `length` write, or any other
+// occurrence two scalar slots cannot spell declines the parameter, and
+// the name then stays whole exactly as it does today.
+//
+// A parameter with a BINDING PATTERN name, a rest parameter, or a
+// DEFAULT declines: a pattern binds names one level down that no slot
+// spells, a rest holds the remainder rather than one declared array, and
+// a default is an initializer the entry state does not run.
+func ArrayParameterOf(c *checker.Checker, body *ast.Node, parameter *ast.Node) (ArrayLocal, bool) {
+	if body == nil || parameter == nil || !ast.IsParameterDeclaration(parameter) {
+		return ArrayLocal{}, false
+	}
+	declared := parameter.AsParameterDeclaration()
+	if declared.DotDotDotToken != nil || declared.Initializer != nil {
+		return ArrayLocal{}, false
+	}
+	name := declared.Name()
+	if name == nil || !ast.IsIdentifier(name) {
+		return ArrayLocal{}, false
+	}
+	sort, isArray := arrayParameterElementSort(c, parameter)
+	if !isArray {
+		return ArrayLocal{}, false
+	}
+	spelled := name.Text()
+	if !usesAreAllArrayFormsFrom(body, name, spelled) {
+		return ArrayLocal{}, false
+	}
+	return ArrayLocal{
+		Declaration:         parameter,
+		Name:                spelled,
+		LenSlotName:         spelled + arrayLenSuffix,
+		ElemSlotName:        spelled + arrayElemSuffix,
+		Parameter:           true,
+		DeclaredElementSort: sort,
+	}, true
+}
+
+// ArrayParametersOf runs the parameter recognizer over a body's
+// parameter list and answers the ones that flatten, keyed by the
+// parameter declaration — the same shape ArrayLocalsOf answers in.
+//
+// A name declared as BOTH a parameter and a local keeps the local's
+// reading: the local's own declaration is what the body's statements
+// write, and two flattenings of one spelling would lay out two slot
+// pairs under the same names. The caller holds the local table and
+// passes the names it already flattened.
+func ArrayParametersOf(
+	c *checker.Checker, body *ast.Node, parameters []*ast.Node, takenNames map[string]struct{},
+) map[*ast.Node]ArrayLocal {
+	out := map[*ast.Node]ArrayLocal{}
+	for _, parameter := range parameters {
+		local, ok := ArrayParameterOf(c, body, parameter)
+		if !ok {
+			continue
+		}
+		if _, taken := takenNames[local.Name]; taken {
+			continue
+		}
+		out[parameter] = local
+	}
+	return out
+}
+
 // ArrayElementSort is a flattened array's ELEMENT sort, read from the
 // literal's own elements: every element string-shaped by syntax makes a
 // string element slot; anything else the lowering reads numerically. An
 // EMPTY literal has no element to read, so its sort is unknown until a
 // push writes one — and the number sort is the one the pushes and the
 // index reads speak, so an empty literal takes it too.
+//
+// A PARAMETER array has no elements at all — its values come from the
+// caller — so it answers the sort read from its declared type instead.
 func ArrayElementSort(local ArrayLocal) BindingKind {
+	if local.statesElementSort() {
+		return local.DeclaredElementSort
+	}
 	if len(local.Elements) == 0 {
 		return BindingKindNumber
 	}
@@ -950,7 +1348,21 @@ func ArrayElementSort(local ArrayLocal) BindingKind {
 // from the literal's syntax alone. Only an all-same reading claims
 // anything; a mixed or unreadable literal claims nothing, and typeof
 // tests on the element slot then decline.
+//
+// A PARAMETER array's evidence follows its declared element sort: a
+// number-sorted element type is `typeof x === "number"` for every
+// element the caller can pass, a string-sorted one likewise. An unknown
+// sort claims nothing, which is what a union or an unread type is worth.
 func ArrayElementTypeof(local ArrayLocal) TypeofTag {
+	if local.statesElementSort() {
+		switch local.DeclaredElementSort {
+		case BindingKindNumber:
+			return TypeofTagNumber
+		case BindingKindString:
+			return TypeofTagString
+		}
+		return TypeofTagNone
+	}
 	if len(local.Elements) == 0 {
 		return TypeofTagNone
 	}
@@ -1109,6 +1521,53 @@ func bridgedDeclarationAssignmentsOf(context *LoweringContext, declaration *ast.
 	}, true
 }
 
+// splitDeclarationAssignmentsOf is the SPLIT's lowering: `const parts =
+// s.split(sep)` writes the two slots UNEVENLY, and the unevenness is
+// the honest part.
+//
+// The ELEM slot takes the kernel's drawn-from row over the receiver's
+// sequence reading. A piece is a contiguous stretch of the receiver, so
+// its scalars all occurred there and it is no longer — which is exactly
+// what that row claims, and all of what it claims. The gate on the
+// separator was applied by the recognizer (splitSourceOf): a match of a
+// well-formed separator begins and ends on a scalar boundary, so no
+// piece can be cut mid-surrogate-pair.
+//
+// The LEN slot takes UNKNOWN. How many pieces there are depends on how
+// many times the separator occurs in the receiver, which the receiver's
+// SET does not state — a set-known string can hold zero occurrences or
+// a hundred. Writing any count here, including a floor of one, would be
+// a claim with nothing behind it, so the slot claims nothing and every
+// `parts.length` read answers unknown.
+//
+// A receiver with no sequence reading declines outright: without the
+// receiver's set there is nothing for the row to draw from.
+func splitDeclarationAssignmentsOf(context *LoweringContext, declaration *ast.Node) ([]AssignmentTarget, bool) {
+	receiver, isSplit := splitSourceOf(declaration)
+	if !isSplit {
+		return nil, false
+	}
+	if !ast.IsIdentifier(declaration.AsVariableDeclaration().Name()) {
+		return nil, false
+	}
+	lenSlot, elemSlot, ok := arraySlotsOf(context, declaration.AsVariableDeclaration().Name().Text())
+	if !ok {
+		return nil, false
+	}
+	receiverEffect, receiverOk := sequenceEffectOf(context, receiver, true /*inSequence*/)
+	if !receiverOk {
+		return nil, false
+	}
+	return []AssignmentTarget{
+		{Target: lenSlot, Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}},
+		{Target: elemSlot, Effect: kernelbridge.LoopEffect{
+			Kind: kernelbridge.LoopEffectSeqUnary,
+			Op:   kernelbridge.LoopOpSplitElemSafe,
+			A:    &receiverEffect,
+		}},
+	}, true
+}
+
 // copiedArrayDeclarationAssignmentsOf is the array COPY's lowering:
 // `const b = [...a]` writes `b.len := var a.len` and `b.elem := var
 // a.elem`. Two ordinary slot reads — the copy holds exactly what the
@@ -1175,6 +1634,12 @@ func ArrayDeclarationAssignmentsOf(context *LoweringContext, statement *ast.Node
 	// indistinguishable from a literal's lowering.
 	if bridged, ok := bridgedDeclarationAssignmentsOf(context, declaration); ok {
 		return bridged, true
+	}
+	// the SPLIT: `const parts = s.split(sep)` writes the elem slot from
+	// the kernel's drawn-from row over the receiver and the len slot from
+	// nothing
+	if split, ok := splitDeclarationAssignmentsOf(context, declaration); ok {
+		return split, true
 	}
 	literal := arrayLiteralOfDeclaration(declaration)
 	if literal == nil {

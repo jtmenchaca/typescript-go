@@ -111,6 +111,15 @@ func SummaryCallOrHavoc(context *LoweringContext, call *ast.Node, target int) ([
 		if !ok {
 			return nil, false
 		}
+		// THE INSTANCE'S FIELDS. The constructor's own summary carries one
+		// this-entry per field its body writes, and the exits of those
+		// entries ARE the fresh instance's field values — from the caller's
+		// side a constructor's `this.f = v` writes are indistinguishable
+		// from a `return { f: v }`. Where the caller flattened its target
+		// into per-field slots, each written row maps onto the target's own
+		// slot for that field and the instance's knowledge survives the
+		// call. constructorFieldRets makes exactly those writes.
+		statement = constructorFieldRets(context, call, targetNameOf(context, target), statement)
 		out := []kernelbridge.IrStatement{statement}
 		if target >= 0 {
 			out = append(out, kernelbridge.IrStatement{
@@ -126,6 +135,12 @@ func SummaryCallOrHavoc(context *LoweringContext, call *ast.Node, target int) ([
 	}
 	if cycled, ok := summaryCycleHavoc(context, call, target); ok {
 		return withReceiverBundleHavoc(context, call, cycled)
+	}
+	// `cleanup()` — a call through a name this same body bound to a
+	// closure: the closure's write set lands HERE, at the call, and that
+	// set is what the site havocs.
+	if closed, ok := ClosureCallHavocOf(context, call, target); ok {
+		return withReceiverBundleHavoc(context, call, closed)
 	}
 	havocked, ok := OpaqueCallHavoc(context, call, target)
 	if !ok {
@@ -211,6 +226,131 @@ func summaryCycleHavoc(context *LoweringContext, call *ast.Node, target int) ([]
 		return nil, false
 	}
 	return OpaqueCallHavoc(context, call, target)
+}
+
+// ClosureCallHavocOf serves a call through a BODY-LOCAL CLOSURE —
+// `cleanup()`, `onClose()`, a name this same body bound to an arrow or
+// function expression. The site lowers as
+//
+//	<every tracked slot the closure's body assigns> := unknown
+//	target := unknown
+//
+// and nothing else.
+//
+// WHY NOT THE SERVED SUMMARY. A summary's binding vector is the
+// callee's PARAMETERS, its OWN locals, #done and #ret (lowerSummaryBody's
+// layout) — a captured name is none of those, so a closure writing
+// `settled` has NO ENTRY spelling that write and no row for a ret to map
+// back through. Serving such a summary would splice a compiled program
+// that moves nothing the caller can see, and the caller would go on
+// believing `settled` across a call that assigns it. The write-set havoc
+// is the answer that says what actually happened at the position it
+// happened.
+//
+// The set is the DECLARATION's set (ClosureWriteSlots, ir_assignment.go),
+// read from the closure body the callee name resolves to, so the two
+// positions — the declaration's hand-over havoc and this call's havoc —
+// are computed by one function over one write census. A closure whose
+// declaration the lowering never admitted still serves here: the set is a
+// syntactic reading of the body, independent of which route lowered the
+// declaring statement.
+//
+// WHAT THIS DOES NOT ADD, and does not need to. The closure's own
+// arguments and receiver are havocked by the tier below this one on every
+// site this tier declines, and on the sites it serves they are covered by
+// the same enumerator through OpaqueCallHavoc — which this route runs
+// FIRST and then adds the write set to. A closure calling ANOTHER local
+// closure (`onClose` calling `cleanup()`) needs no transitive walk here:
+// closureAssignedNames descends through nested function literals, so a
+// write inside a callee-closure that `onClose`'s body TEXTUALLY contains
+// is in the set — and a write inside a SIBLING closure `onClose` merely
+// calls is covered because that sibling's own declaration havocked it
+// already, at a position ahead of every call.
+//
+// Declines where the callee is not a plain identifier, where the name
+// resolves to no local closure of a body this lowering holds slots for,
+// or where the opaque enumeration itself cannot bound the site.
+func ClosureCallHavocOf(context *LoweringContext, call *ast.Node, target int) ([]kernelbridge.IrStatement, bool) {
+	if context == nil || call == nil || !ast.IsCallExpression(call) {
+		return nil, false
+	}
+	body, ok := localClosureBodyOf(context, call.AsCallExpression().Expression)
+	if !ok {
+		return nil, false
+	}
+	// the site's own hand-over havoc — the receiver and arguments through
+	// the one enumerator, plus the target's unknown
+	havocked, havocOk := OpaqueCallHavoc(context, call, target)
+	if !havocOk {
+		return nil, false
+	}
+	written := ClosureWriteSlots(context, body)
+	if len(written) == 0 {
+		return havocked, true
+	}
+	already := map[int]struct{}{}
+	for _, statement := range havocked {
+		if statement.Kind == kernelbridge.IrStatementAssign {
+			already[statement.Target] = struct{}{}
+		}
+	}
+	missing := map[int]struct{}{}
+	for slot := range written {
+		if _, held := already[slot]; held {
+			continue
+		}
+		missing[slot] = struct{}{}
+	}
+	if len(missing) == 0 {
+		return havocked, true
+	}
+	// the write set goes out AHEAD of the opaque answer, whose own target
+	// write stays last — the same ordering withReceiverBundleHavoc keeps
+	return append(havocAssignments(missing), havocked...), true
+}
+
+// localClosureBodyOf resolves a call's callee — a plain identifier — to
+// the FUNCTION BODY of a closure the name was declared to hold:
+// `const f = () => { … }` / `const f = function () { … }`, or a `let`
+// bound the same way.
+//
+// The resolution is the checker's symbol, so a name shadowed by an inner
+// scope resolves to the declaration the call actually reaches rather than
+// to the spelling. A symbol whose declaration is not a variable
+// declaration, or whose initializer is not a function literal with a
+// body, answers nothing — the site then takes the opaque tier it always
+// took.
+//
+// The declaration is NOT required to sit in this lowering's own body: an
+// arrow declared in an enclosing scope and called here writes the slots
+// this vector spells under the same names, and havocking them is right
+// wherever the closure was built. A name whose writes touch nothing this
+// vector holds yields an empty set, which costs the site nothing.
+func localClosureBodyOf(context *LoweringContext, callee *ast.Node) (*ast.Node, bool) {
+	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
+		return nil, false
+	}
+	head := Unwrapped(callee)
+	if head == nil || !ast.IsIdentifier(head) {
+		return nil, false
+	}
+	symbol := symbolAt(context.Flow.P.Checker, head)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return nil, false
+	}
+	declaration := symbol.ValueDeclaration
+	if !ast.IsVariableDeclaration(declaration) {
+		return nil, false
+	}
+	initializer := declaration.AsVariableDeclaration().Initializer
+	if initializer == nil {
+		return nil, false
+	}
+	closure := Unwrapped(initializer)
+	if closure == nil || !ast.IsFunctionLike(closure) || closure.Body() == nil {
+		return nil, false
+	}
+	return closure.Body(), true
 }
 
 // summaryCallStatement builds the call statement for a resolved callee
@@ -342,6 +482,26 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 			args = append(args, leafEffects...)
 			continue
 		}
+		// an ARRAY-TYPED parameter's two entries take the caller's own
+		// flattened array slots, "<argument>.len" and "<argument>.elem",
+		// where the argument is a bare name the caller flattened the same
+		// way. Anything else — a literal, a call's result, a name the
+		// caller kept whole — fills both UNKNOWN rather than absent: the
+		// callee is passed a real array, and absent would claim it is
+		// undefined. Two effects go out either way, which is what keeps
+		// this vector the same length the layout laid out.
+		if _, flattened := arrayParamSlotsIn(context.Flow, parameter); flattened {
+			lenEffect, elemEffect := unknownEffect, unknownEffect
+			if index < len(callArguments) {
+				if head := Unwrapped(callArguments[index]); ast.IsIdentifier(head) {
+					if lenSlot, elemSlot, isArray := arraySlotsOf(context, head.Text()); isArray {
+						lenEffect, elemEffect = varEffect(lenSlot), varEffect(elemSlot)
+					}
+				}
+			}
+			args = append(args, lenEffect, elemEffect)
+			continue
+		}
 		members, expanded := recordParamMembersOf(parameter)
 		if expanded {
 			// a missing argument leaves every leaf absent — the same "entered
@@ -395,12 +555,40 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 	// maps where the site has a slot for it, and a WRITTEN this-field
 	// entry maps back into the caller's own slot for that field
 	// (bundleRetsAndArgs below).
-	rets := make([]int, outIndex+1)
+	//
+	// The vector runs to the callee's WHOLE slot count, not to its ret
+	// index: a callee whose returns carry MEMBER slots has those slots
+	// past #ret (returnedLiteralShape's allocation sits after it), and a
+	// vector stopping at #ret would leave rows the kernel answers with no
+	// position to be named at. Every row past #ret stays -1 unless the
+	// member threading below claims it — the statement route's caller has
+	// one scalar slot for the call's value, and a fresh object's members
+	// map onto no caller slot it already holds.
+	retsLength := outIndex + 1
+	if calleeShape.SlotCount > retsLength {
+		retsLength = calleeShape.SlotCount
+	}
+	rets := make([]int, retsLength)
 	for index := range rets {
 		rets[index] = -1
 	}
 	if target >= 0 && !isNew {
 		rets[outIndex] = target
+	}
+	// A MEMBER-CARRYING RETURN at a statement-route call site: the callee
+	// built a fresh object whose members ride their own exits, and the
+	// caller's target is ONE scalar slot. There is nothing to write those
+	// members into — no caller slot spells "the k-th key of the value this
+	// call is about to produce" — so the rows stay -1 and the target keeps
+	// the scalar #ret's unknown, exactly as before this shape existed.
+	//
+	// The value is not lost: the DIRECT APPLY route (applySummary) rebuilds
+	// the object from these same exits, and that is the route every
+	// expression-position call takes. What this seam owes is only that the
+	// two agree about WHICH slot is which member, which they do by reading
+	// one list — the callee's own RetMembers.
+	if !threadRetMemberRets(context, calleeShape, target, rets) {
+		return kernelbridge.IrStatement{}, false
 	}
 	// the RECEIVER decides the this-entry fill: the callee's own
 	// "this.<field>" entries take the caller's "<receiverPath>.<field>"
@@ -422,6 +610,134 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 		Args:   args,
 		Rets:   rets,
 	}, true
+}
+
+/* ── the constructed instance's fields ───────────────────────────── */
+
+// targetNameOf spells the caller slot a call's value lands in, so the
+// field threading below can look for that name's own leaves. A target of
+// -1, or one past the binding vector, spells nothing.
+func targetNameOf(context *LoweringContext, target int) string {
+	if context == nil || target < 0 || target >= len(context.Bindings) {
+		return ""
+	}
+	return context.Bindings[target]
+}
+
+// constructorFieldRets writes the CONSTRUCTOR's this-field exits into the
+// caller's own slots for the fresh instance's fields.
+//
+// A `new X()` runs a constructor whose summary already carries one
+// this-entry per field the body touches, with Written marking the ones it
+// assigns (the same BundleEntries an ordinary method rides with — nothing
+// in the layout special-cases a constructor out of that machinery). Those
+// entries entered ABSENT, which is exactly a field before its initializer
+// runs, and their EXITS hold what the constructor left in them.
+//
+// The caller can read those exits wherever it holds a slot for the same
+// field of the same instance: `const c = new C()` with the caller's own
+// "c.count" flattened is the shape, and the row's out then lands on that
+// slot. Where the caller flattened nothing the rows stay -1 and the
+// instance is the unknown it has always been — dropping them is sound for
+// the reason the receiver threading gives: nothing lowered can read a
+// spelling the caller has no slot for.
+//
+// This is the ONE difference from an ordinary call's write-back, and it
+// is a difference in direction only: an ordinary call maps a written
+// field back onto a slot the caller filled on the way IN, while a fresh
+// instance's fields were never filled by anyone — the entries stayed
+// absent — so these rows carry values OUT of a constructor into slots the
+// caller had no value for. The exits are the constructor's own writes
+// either way, and summarize_eq covers the whole exit row.
+func constructorFieldRets(
+	context *LoweringContext,
+	call *ast.Node,
+	targetName string,
+	statement kernelbridge.IrStatement,
+) kernelbridge.IrStatement {
+	if context == nil || targetName == "" || statement.Rets == nil {
+		return statement
+	}
+	callee := summaryCalleeOf(context, call)
+	if callee == nil {
+		return statement
+	}
+	calleeShape, known := LowerSummaryBody(context.Flow, callee)
+	if !known {
+		return statement
+	}
+	for _, entry := range calleeShape.BundleEntries {
+		if !entry.Written {
+			// a field the constructor only READS holds whatever it entered
+			// with, which for a fresh instance is absent — writing that back
+			// would claim the field IS undefined, and the class's own
+			// initializers may have set it outside this body's sight
+			continue
+		}
+		field, isThis := thisFieldNameOf(entry.Path)
+		if !isThis {
+			continue
+		}
+		slot, held := slotIndexOfName(context, targetName+"."+field)
+		if !held {
+			continue
+		}
+		if entry.Index < 0 || entry.Index >= len(statement.Rets) {
+			continue
+		}
+		statement.Rets[entry.Index] = slot
+	}
+	return statement
+}
+
+/* ── the returned value's members ────────────────────────────────── */
+
+// threadRetMemberRets decides where a member-carrying return's exits
+// land in the CALLER.
+//
+// The callee's RetMembers name one out-slot per member of the value it
+// returns. A caller writing that value into one scalar slot has no place
+// for them — an object is not a scalar, and the target holds the same
+// unknown it always held — so the rows stay -1 and the exits are dropped.
+// Dropping is sound and not weaker than declining: nothing the caller
+// lowered can read a member of a value it has no name for, so no
+// knowledge survives the call for the dropped rows to falsify.
+//
+// The rows become READABLE at the call sites that DO hold names for the
+// members: `const { a, b } = f()`, where the caller flattened `a` and `b`
+// as its own locals. That threading is the destructure route's to make —
+// it knows which local each key binds to — and it reads this same
+// RetMembers list, so the layout's answer about which slot is which
+// member is the one answer all three seams walk.
+//
+// (false) never today: every shape this route meets is either threaded or
+// left at -1, and there is no member layout that makes the call itself
+// unlowerable. The flag rides so the caller's three threadings read the
+// same way.
+func threadRetMemberRets(
+	context *LoweringContext,
+	calleeShape LoweredSummary,
+	target int,
+	rets []int,
+) bool {
+	if calleeShape.RetShape == RetShapeNone || len(calleeShape.RetMembers) == 0 {
+		return true
+	}
+	for _, member := range calleeShape.RetMembers {
+		if member.Index < 0 || member.Index >= len(rets) {
+			// the layout and this vector disagree about how many slots the
+			// callee has — the call declines rather than writing an exit into
+			// a position nothing laid out
+			return false
+		}
+		// a caller slot spelled "<target's name>.<member>" is what a
+		// destructured or flattened target would hold. The statement route's
+		// target is an index, not a name, so nothing is spelled here and the
+		// row is dropped; the direct-apply route serves these sites.
+		_ = target
+		rets[member.Index] = -1
+	}
+	return true
 }
 
 /* ── receiver threading ──────────────────────────────────────────── */
@@ -507,7 +823,8 @@ func bundleRetsAndArgs(
 }
 
 // bundleParamRetsAndArgs is bundleRetsAndArgs' half for the CALLEE'S
-// class-typed PARAMETER bundles. A "this."-rooted row is filled from the
+// PARAMETER bundles — the class-typed ones and the record-expanded ones,
+// which are one rule here. A "this."-rooted row is filled from the
 // call's receiver; a "<holder>."-rooted row is filled from the ARGUMENT
 // passed at that parameter's position, and the rule is the same one step
 // over: the argument's own spelled dotted path prefixes the field name,
@@ -522,6 +839,18 @@ func bundleRetsAndArgs(
 // must say. Unlike the receiver case this does not decline the site —
 // the argument is still passed by value and the rest of the call is
 // exactly as sound.
+//
+// A RECORD-EXPANDED parameter takes the write-back half alone, and this
+// is the difference from the class-typed rows. Its args were already
+// filled by recordArgumentEffects, which reads BOTH shapes the record
+// route admits — an object literal (case (a)) and a flattened record
+// local (case (b)) — and a literal's leaves are effects no dotted path
+// spells. Overwriting them from the path would lose the literal's own
+// values, so only rets moves here. A written leaf maps back exactly where
+// case (b) gave the caller a slot to map into, which is the caller's
+// "q.<member>"; a case-(a) literal has no such slot, the row's ret stays
+// -1, and the write lands nowhere because the object the callee wrote is
+// one the caller kept no name for.
 func bundleParamRetsAndArgs(
 	context *LoweringContext,
 	call *ast.Node,
@@ -541,6 +870,14 @@ func bundleParamRetsAndArgs(
 	for index, parameter := range callee.Parameters() {
 		holder, _, _, isBundle := BundleParamCensus(context.Flow, callee.Body(), parameter)
 		if !isBundle {
+			// a RECORD-EXPANDED parameter is a bundle of another kind: its
+			// leaves are spelled under the parameter's own name, so the holder
+			// is that name and the rows read back by the same field split
+			if recordHolder, expanded := recordParamHolderOf(context.Flow, parameter); expanded {
+				if !recordParamRets(context, calleeShape, recordHolder, index, callArguments, args, rets) {
+					return false
+				}
+			}
 			continue
 		}
 		argumentPath := ""
@@ -569,6 +906,79 @@ func bundleParamRetsAndArgs(
 			if entry.Written && entry.Index < len(rets) {
 				rets[entry.Index] = slot
 			}
+		}
+	}
+	return true
+}
+
+// recordParamHolderOf is the name a record-expanded parameter's leaves
+// are spelled under — the parameter's own identifier. A binding-pattern
+// parameter expands under the placeholder holder recordParamMembersIn
+// uses and owns no name the caller could have flattened, so it answers
+// false and takes no threading.
+func recordParamHolderOf(ctx *FlowContext, parameter *ast.Node) (string, bool) {
+	if _, expanded := recordParamMembersIn(ctx, parameter); !expanded {
+		return "", false
+	}
+	name := parameter.AsParameterDeclaration().Name()
+	if name == nil || !ast.IsIdentifier(name) {
+		return "", false
+	}
+	return name.Text(), true
+}
+
+// recordParamRets threads the WRITE-BACKS for one record-expanded
+// parameter: each leaf row the callee's body moved maps its out back onto
+// the caller slot holding that same leaf.
+//
+// The caller's slot is found the way recordArgumentEffects case (b) found
+// the value it sent — the argument is a bare identifier naming a
+// flattened record local, and the leaf sits at "<argument>.<member>".
+// Every other argument shape (an object literal, a call's result, a
+// dotted path the caller never flattened) leaves the row's ret at -1: no
+// slot of the caller spells that leaf, so no belief of the caller's
+// survives the call for the write to falsify.
+//
+// This never touches args. The record route filled them from the argument
+// itself, and its literal case carries values no path could restate.
+func recordParamRets(
+	context *LoweringContext,
+	calleeShape LoweredSummary,
+	holder string,
+	index int,
+	callArguments []*ast.Node,
+	args []kernelbridge.LoopEffect,
+	rets []int,
+) bool {
+	if index >= len(callArguments) {
+		return true
+	}
+	head := Unwrapped(callArguments[index])
+	if !ast.IsIdentifier(head) {
+		return true
+	}
+	leaves, leavesOk := leafSlotsUnder(context, head.Text())
+	if !leavesOk {
+		return true
+	}
+	slotOfPath := map[string]int{}
+	for _, leaf := range leaves {
+		slotOfPath[leaf.Path] = leaf.Index
+	}
+	for _, entry := range calleeShape.BundleEntries {
+		member, isRow := BundleParamFieldNameOf(entry.Path, holder)
+		if !isRow || !entry.Written {
+			continue
+		}
+		if entry.Index < 0 || entry.Index >= len(args) {
+			return false
+		}
+		slot, held := slotOfPath[member]
+		if !held {
+			continue
+		}
+		if entry.Index < len(rets) {
+			rets[entry.Index] = slot
 		}
 	}
 	return true

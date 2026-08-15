@@ -55,9 +55,11 @@
 // The for's INITIALIZER and INCREMENTOR do move state and are lowered
 // rather than refused: the initializer runs ONCE before the loop, so it
 // rides back as a PRELUDE the caller appends ahead of the loop
-// statement; the incrementor runs at the end of every trip, so it is
-// appended INTO the body statements. That is exactly what a trip is —
-// body, then step.
+// statement — one assignment per declarator, so a clause declaring
+// several names (`for (let i = 0, len = xs.length; …)`) writes all of
+// them in source order; the incrementor runs at the end of every trip,
+// so it is appended INTO the body statements. That is exactly what a
+// trip is — body, then step.
 //
 // A for-of/for-in BINDING (`for (const x of xs)`) assigns its bound
 // names UNKNOWN at the top of the body: the iterated value has no
@@ -176,26 +178,12 @@ func lowerForStatements(
 		return nil, kernelbridge.IrStatement{}, false
 	}
 	// the INITIALIZER runs once, ahead of the loop, through the ordinary
-	// statement machinery — a declaration list by the declaration rule, a
-	// bare expression by the assignment rule
-	var prelude []kernelbridge.IrStatement
-	if forStmt.Initializer != nil {
-		var init AssignmentTarget
-		initOk := false
-		if ast.IsVariableDeclarationList(forStmt.Initializer) {
-			init, initOk = DeclarationAssignment(
-				context, forStmt.Initializer.AsVariableDeclarationList().Declarations.Nodes)
-		} else {
-			init, initOk = AssignmentOfExpression(context, forStmt.Initializer)
-		}
-		if !initOk {
-			return nil, kernelbridge.IrStatement{}, false
-		}
-		prelude = append(prelude, kernelbridge.IrStatement{
-			Kind:   kernelbridge.IrStatementAssign,
-			Target: init.Target,
-			Effect: init.Effect,
-		})
+	// statement machinery — a declaration list by the declaration rule
+	// (one assignment per declarator, in source order), a bare expression
+	// by the assignment rule
+	prelude, preludeOk := forInitializerAssignments(context, forStmt.Initializer)
+	if !preludeOk {
+		return nil, kernelbridge.IrStatement{}, false
 	}
 	body, bodyOk := LowerStatements(context, StatementsOf(forStmt.Statement))
 	if !bodyOk {
@@ -219,6 +207,58 @@ func lowerForStatements(
 	// reads exactly right here. `for (;;)` has no condition and refines
 	// by nothing, as it must.
 	return prelude, loopStmtsWithHead(context, forStmt.Condition, body), true
+}
+
+// forInitializerAssignments is what a for's initializer clause writes,
+// ahead of the loop — one assignment statement per declarator, in
+// source order.
+//
+// `for (let i = 0, len = xs.length; …)` declares TWO names in one
+// clause and both are ordinary declarators the single-declarator rule
+// already reads; nothing about the clause makes the second one
+// different from the first, and the runtime writes them left to right,
+// which is the order they are emitted in. A clause holding no
+// declaration at all (`for (i = 0; …)`) is an assigning expression and
+// goes through the expression rule as before.
+//
+// All-or-nothing: one declarator no rule spells declines the whole
+// route, exactly as a single unreadable declarator always did — the
+// loop then falls to the havoc floor rather than running with an
+// initializer half-written.
+//
+// A nil clause (`for (; i < n; i++)`) writes nothing and is not a
+// refusal.
+func forInitializerAssignments(
+	context *LoweringContext, initializer *ast.Node,
+) ([]kernelbridge.IrStatement, bool) {
+	if initializer == nil {
+		return nil, true
+	}
+	var written []AssignmentTarget
+	if ast.IsVariableDeclarationList(initializer) {
+		for _, declaration := range initializer.AsVariableDeclarationList().Declarations.Nodes {
+			assignments, ok := declaratorAssignments(context, declaration)
+			if !ok {
+				return nil, false
+			}
+			written = append(written, assignments...)
+		}
+	} else {
+		assignment, ok := AssignmentOfExpression(context, initializer)
+		if !ok {
+			return nil, false
+		}
+		written = append(written, assignment)
+	}
+	out := make([]kernelbridge.IrStatement, 0, len(written))
+	for _, assignment := range written {
+		out = append(out, kernelbridge.IrStatement{
+			Kind:   kernelbridge.IrStatementAssign,
+			Target: assignment.Target,
+			Effect: assignment.Effect,
+		})
+	}
+	return out, true
 }
 
 // lowerForInOrOfStatements is `for (x of xs)` and `for (k in o)`: the

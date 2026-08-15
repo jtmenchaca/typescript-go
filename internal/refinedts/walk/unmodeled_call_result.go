@@ -109,5 +109,21 @@ func UnmodeledCallResult(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.
 	if BodilessCallee(ctx, call.Expression) && !CalleeInDefaultLib(ctx, call.Expression) {
 		return abstractdomain.Opaque
 	}
+	// the call that reached HERE has a BODY in reach — no model read it,
+	// no contract held it, no inline replayed it — so its declared
+	// return type is a claim tsc itself checked that body against. That
+	// is the same standing the default-library branch above rests on
+	// ("the claim rests on tsc's checking, the sort layer's own trust"),
+	// and it holds for a constructed sort as much as a scalar one: a
+	// body returning a record is checked to return that record's shape.
+	//
+	// ReturnTypeGround reads the constructed sorts through the resolved-
+	// type reader, so an object return answers an INCOMPLETE object —
+	// the shape is present and no key beyond what that reader read is
+	// claimed. A return type it cannot spell still answers nil here and
+	// the residue below stands.
+	if ground := ReturnTypeGround(ctx, e); ground != nil {
+		return *ground
+	}
 	return silence.Residue()
 }

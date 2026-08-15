@@ -135,6 +135,33 @@ type LoweringContext struct {
 	// (`g(y) + g(y)`) are two different nodes and correctly hoist twice.
 	// Cleared with the accumulation by whoever owns the statement.
 	HoistedTemp map[*ast.Node]int
+	// RetShape / RetMembers: the RETURNED VALUE'S own member slots, where
+	// the layout allocated any (returnedLiteralShape, ir_summary_body.go).
+	// A body whose every return carries an object literal takes one slot
+	// per member beside #ret; one whose every return carries an array
+	// literal takes the ".len"/".elem" pair.
+	//
+	// The return arm reads these to write each member's effect into its
+	// own slot. RetShapeNone — the ordinary case — leaves every route
+	// exactly as it was: the scalar #ret alone carries the value.
+	RetShape   RetShapeKind
+	RetMembers []RetMemberEntry
+}
+
+// RetMemberSlotOf resolves ONE member of the returned value's shape to
+// its slot index, through the layout's own row list — the same list the
+// call sites read, so the writer and the readers never disagree about
+// which slot holds which member.
+func RetMemberSlotOf(context *LoweringContext, member string) (int, bool) {
+	if context == nil {
+		return 0, false
+	}
+	for _, entry := range context.RetMembers {
+		if entry.Name == member {
+			return entry.Index, true
+		}
+	}
+	return 0, false
 }
 
 // NoteFirstHavoc records a havocked construct's spelling, first-wins:

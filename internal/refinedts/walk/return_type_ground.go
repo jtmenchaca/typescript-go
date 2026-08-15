@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 const absentTypeFlags = checker.TypeFlagsUndefined | checker.TypeFlagsNull | checker.TypeFlagsVoid
@@ -195,13 +196,27 @@ func MapValueAnnotation(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractV
 // undefined`/`| null` wrapping the maybe. A union MIXING sorts
 // (`string | number`, a string word beside a boolean) answers the
 // sort union of the parts' own grounds, each arm wearing what its own
-// part states. Nil only where some part names no scalar sort at all.
+// part states.
+//
+// A part naming NO scalar sort — a record, a Date, an array, a
+// collection — is read through the resolved-type reader instead, which
+// is the layer that already spells constructed sorts. An object type
+// answers an INCOMPLETE object there: the shape is present, and no key
+// claim is made beyond the members that reader itself read. So the
+// arms below can mix a scalar ground with a constructed one, the way a
+// `string | Point` return genuinely does. Nil only where a part names
+// no scalar sort AND the type reader cannot spell it either — then
+// that part is the unknown, and a union with the unknown IS the
+// unknown.
 func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
 	t := ctx.P.Checker.GetTypeAtLocation(e)
 	parts := typePartsOf(t)
 	sawAbsent := false
 	var words []string
 	var numberWords []float64
+	// the constructed-sort arms, in the order their parts were read —
+	// each one whatever the resolved-type reader spelled for that part
+	var constructed []abstractdomain.AbstractValue
 	// the GENERAL sorts the parts name, each at most once — a `string |
 	// number` return names two, and both grounds hold
 	generals := map[string]bool{}
@@ -216,7 +231,16 @@ func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractVal
 			continue
 		}
 		if part.IsNumberLiteral() {
-			v, _ := part.AsLiteralType().Value().(float64)
+			// the word is read through numberLiteralValue: tsgo holds a
+			// number literal's value as jsnum.Number, a NAMED float64, so a
+			// bare .(float64) assertion never matches and the word would
+			// read as 0 — an exact number the return type never states. A
+			// value that reader does not spell leaves the whole ground
+			// nothing, the way any unspellable part does.
+			v, ok := numberLiteralValue(part.AsLiteralType().Value())
+			if !ok {
+				return nil
+			}
 			numberWords = append(numberWords, v)
 			continue
 		}
@@ -230,9 +254,17 @@ func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractVal
 			sort = "boolean"
 		}
 		if sort == "" {
-			// one part names no scalar sort — nothing states this call's
-			// ground
-			return nil
+			// one part names no scalar sort — the resolved-type reader is
+			// the layer that spells the constructed ones, so the part is
+			// asked there. A part it cannot spell is the unknown, and the
+			// union of anything with the unknown IS the unknown, so the
+			// whole ground is nothing.
+			shape, ok := typereading.ReadHostType(ctx.P.Checker, part, e, 0)
+			if !ok || shape.Kind == abstractdomain.KindUnknown {
+				return nil
+			}
+			constructed = append(constructed, shape)
+			continue
 		}
 		generals[sort] = true
 	}
@@ -258,6 +290,10 @@ func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractVal
 	if generals["boolean"] {
 		arms = append(arms, abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustProved))
 	}
+	// the constructed arms last — a record or a Date is not a scalar
+	// ground, so it reads after the scalar ones the same way a spelled
+	// union puts `| Point` after `string | number`
+	arms = append(arms, constructed...)
 	if len(arms) == 0 {
 		return nil
 	}

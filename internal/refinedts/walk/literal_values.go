@@ -18,6 +18,19 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
+// numberLiteralValue is the number a checker literal type holds. tsgo
+// spells it as jsnum.Number — a NAMED float64 — so a bare .(float64)
+// assertion never matches; both spellings are accepted here.
+func numberLiteralValue(value any) (float64, bool) {
+	switch n := value.(type) {
+	case jsnum.Number:
+		return float64(n), true
+	case float64:
+		return n, true
+	}
+	return 0, false
+}
+
 // EvaluateLiteral is evaluateLiteral in the TS source: an exact
 // literal, or a template whose spans read as strings. (AbstractValue{},
 // false) when the expression is neither.

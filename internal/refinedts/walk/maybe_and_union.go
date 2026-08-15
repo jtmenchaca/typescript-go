@@ -103,8 +103,13 @@ func CheckKindUnion(
 	probe.Report = func(d assignability.RefinementDiagnostic) {
 		captured = append(captured, d)
 	}
+	// each arm judges as an ARM: the value may take it, so a refutation
+	// it earns is stated as a possibility, not as a verdict on the
+	// whole value (the numeric enum's reverse read is values ∪ names,
+	// and the names arm missing an enum-typed position does not make
+	// the value a name)
 	for _, arm := range known.Arms {
-		CheckAssignabilityAgainst(&probe, arm, target, node, what, positionType)
+		CheckAssignabilityOfArm(&probe, arm, target, node, what, positionType, true)
 	}
 	var refuted *assignability.RefinementDiagnostic
 	for i := range captured {

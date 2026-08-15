@@ -166,6 +166,10 @@ func RefutePlainSort(
 	if demanded == "" {
 		return
 	}
+	// the UNIVERSAL reading: this sentence states what the value wears
+	// on every admitted run, so a union offending on only some arms
+	// must answer nothing here (SortMaybeOutsidePlain holds that
+	// reading for a channel whose wording carries a maybe)
 	offending, ok := SortOutsidePlain(known, demanded)
 	if !ok {
 		return
@@ -173,7 +177,7 @@ func RefutePlainSort(
 	ctx.Report(assignability.At(
 		node,
 		7001,
-		what+" may be a "+offending+", which is not assignable to "+
+		what+" is a "+offending+", which is not assignable to "+
 			"type '"+demanded+"'",
 	))
 }
@@ -237,11 +241,19 @@ const aliasHopLimit = 8
 // a sort-tagged set, an exact word's kindTag, and every kind whose
 // sort is decided by CONSTRUCTION (an object, a list, a collection, a
 // promise, a date, a regex, a host function are each built as what
-// they are and wear that sort on every run) — and a union answers on
-// any offending arm. Wrappers read through: NaN is number-sorted and
-// absence is tsc's own strict check, so neither arm speaks here. The
-// genuinely ambiguous kinds — unknown, a sortless set whose forms
-// speak for two sorts, a refinement variable — stay silent.
+// they are and wear that sort on every run). Wrappers read through:
+// NaN is number-sorted and absence is tsc's own strict check, so
+// neither arm speaks here. The genuinely ambiguous kinds — unknown, a
+// sortless set whose forms speak for two sorts, a refinement variable
+// — stay silent.
+//
+// A kind UNION answers only when EVERY arm offends the demand: the
+// value is one of the arms on each run, so "every arm is outside" is
+// the only reading under which the value provably wears an offending
+// sort. One arm of several offending means the value MAY be outside
+// on some run and inside on another, which refutes nothing — that
+// reading lives in SortMaybeOutsidePlain below, for a caller whose
+// wording can carry a maybe.
 func SortOutsidePlain(known abstractdomain.AbstractValue, demanded string) (string, bool) {
 	switch known.Kind {
 	case abstractdomain.KindSymbol:
@@ -260,12 +272,24 @@ func SortOutsidePlain(known abstractdomain.AbstractValue, demanded string) (stri
 		}
 		return "", false
 	case abstractdomain.KindKindUnion:
+		// EVERY arm must offend, and an armless union states nothing —
+		// the empty product would otherwise answer true vacuously.
+		if len(known.Arms) == 0 {
+			return "", false
+		}
+		firstOutside := ""
 		for _, arm := range known.Arms {
-			if outside, ok := SortOutsidePlain(arm, demanded); ok {
-				return outside, true
+			outside, ok := SortOutsidePlain(arm, demanded)
+			if !ok {
+				// this arm is admitted, or the walk cannot tell — either
+				// way the value may be inside the demand on some run
+				return "", false
+			}
+			if firstOutside == "" {
+				firstOutside = outside
 			}
 		}
-		return "", false
+		return firstOutside, true
 	case abstractdomain.KindPossiblyNaN, abstractdomain.KindPossiblyUndefined:
 		return SortOutsidePlain(*known.Inner, demanded)
 	case abstractdomain.KindObject, abstractdomain.KindList,
@@ -290,5 +314,34 @@ func SortOutsidePlain(known abstractdomain.AbstractValue, demanded string) (stri
 		return "number", true
 	default:
 		return "", false
+	}
+}
+
+// SortMaybeOutsidePlain is the EXISTENTIAL reading of the same
+// question: an offending sort SOME run may hand the demand, or ("",
+// false). It differs from SortOutsidePlain on one kind — a union
+// answers on ANY offending arm, because one arm being outside is
+// exactly what "may be" states. Every other kind carries one sort on
+// every run, so the two readings agree there and this function hands
+// them straight to SortOutsidePlain.
+//
+// Nothing calls this today: RefutePlainSort is SortOutsidePlain's only
+// consumer, and its sentence promises a claim the value wears on every
+// run, so it takes the universal reading. This function holds the
+// existential reading for a channel whose wording carries a maybe —
+// a hover line or an alert that says "may be" and means it.
+func SortMaybeOutsidePlain(known abstractdomain.AbstractValue, demanded string) (string, bool) {
+	switch known.Kind {
+	case abstractdomain.KindKindUnion:
+		for _, arm := range known.Arms {
+			if outside, ok := SortMaybeOutsidePlain(arm, demanded); ok {
+				return outside, true
+			}
+		}
+		return "", false
+	case abstractdomain.KindPossiblyNaN, abstractdomain.KindPossiblyUndefined:
+		return SortMaybeOutsidePlain(*known.Inner, demanded)
+	default:
+		return SortOutsidePlain(known, demanded)
 	}
 }

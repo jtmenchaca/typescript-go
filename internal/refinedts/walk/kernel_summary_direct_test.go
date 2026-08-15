@@ -230,8 +230,9 @@ func TestKernelSummaryDirect_AnObjectArgumentMissingADeclaredMemberDeclines(t *t
 func TestKernelSummaryDirect_AWholeRecordParameterUseDeclinesTheBody(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
-	// `return p` names the WHOLE record, which the expansion does not
-	// build — there is no one value for it to denote
+	// `const q = p` stores the record under another name, which the scan
+	// does not follow — a write through q would move leaves this body
+	// still believes
 	declaration := summaryDeclarationOf(t,
 		"function f(p: { lo: number }) { const q = p; return q.lo; }")
 	contract := &FunctionContract{Declaration: declaration}
@@ -239,6 +240,55 @@ func TestKernelSummaryDirect_AWholeRecordParameterUseDeclinesTheBody(t *testing.
 	argument := recordObject(t, map[string]float64{"lo": 2}, []string{"lo"})
 	if _, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{argument}, contract); ok {
 		t.Errorf("a whole-p use summarized — the expansion holds no such value")
+	}
+}
+
+func TestKernelSummaryDirect_ACallArgumentHandOverDeclinesTheBody(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	// `g(p)` hands the object to code that may store into it, and no
+	// write-back carries that out to the caller's own leaves
+	declaration := summaryDeclarationOf(t,
+		"function f(p: { lo: number }) { g(p); return p.lo; }")
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); ok {
+		t.Fatalf("a record handed whole to a callee lowered")
+	}
+	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	if outcome != SummaryDeclined || construct != "a whole-record parameter use" {
+		t.Errorf("outcome = %q / construct = %q, want declined naming the whole-record use", outcome, construct)
+	}
+}
+
+func TestKernelSummaryDirect_ASpreadOfARecordParameterLowersTheBody(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	// `{ ...p, lo: 1 }` COPIES the fields out into a fresh object — the
+	// record itself reaches no code that could store into it, so every
+	// leaf keeps its value and the body lowers
+	declaration := summaryDeclarationOf(t,
+		"function f(p: { lo: number, hi: number }) { const q = { ...p, lo: 1 }; return p.hi; }")
+	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
+		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("a spread of a record parameter declined (%q / %q) — a spread reads, it does not store", outcome, construct)
+	}
+}
+
+func TestKernelSummaryDirect_AReturnOfARecordParameterLowersTheBody(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	// `return p` hands the value out and reads no leaf again; the caller
+	// already holds whatever it passed, so nothing here goes stale
+	declaration := summaryDeclarationOf(t,
+		"function f(p: { lo: number }) { if (p.lo > 0) { return p; } return p; }")
+	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
+		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("a return of a record parameter declined (%q / %q)", outcome, construct)
 	}
 }
 
@@ -391,9 +441,6 @@ func TestSummaryParameterEntriesIn_TheNamedShapesThatStayWholeName(t *testing.T)
 	// each of these resolves to a declaration whose members are not
 	// promised to every entry, so the parameter keeps its single slot
 	sources := map[string]string{
-		"an interface with extends": "interface Base { lo: number }\n" +
-			"interface Bounds extends Base { hi: number }\n" +
-			"function f(p: Bounds) { return 1; }\n",
 		"a class": "class Point { lo: number = 0; hi: number = 0 }\n" +
 			"function f(p: Point) { return 1; }\n",
 		"a generic interface": "interface Box<T> { lo: number }\n" +
@@ -422,6 +469,28 @@ func TestSummaryParameterEntriesIn_TheNamedShapesThatStayWholeName(t *testing.T)
 		if !ok || len(entries) != 1 || entries[0].Name != "p" {
 			t.Errorf("%s: entries = %v (ok %v), want the single whole-name entry", name, entries, ok)
 		}
+	}
+}
+
+func TestSummaryParameterEntriesIn_AnInterfaceWithExtendsExpandsInheritedMembers(t *testing.T) {
+	// the heritage walk follows the extends chain: Bounds carries its
+	// own hi AND Base's lo, so the parameter expands one entry per
+	// inherited-plus-own member
+	ctx, p := namedTypeCtx(t,
+		"interface Base { lo: number }\n"+
+			"interface Bounds extends Base { hi: number }\n"+
+			"function f(p: Bounds) { return 1; }\n")
+	declaration := namedTypeFunction(t, p, "f")
+	members, expanded := recordParamMembersIn(ctx, declaration.Parameters()[0])
+	if !expanded {
+		t.Fatalf("an interface with extends kept its single slot — the heritage walk did not expand it")
+	}
+	keys := map[string]bool{}
+	for _, member := range members {
+		keys[member.Key] = true
+	}
+	if !keys["lo"] || !keys["hi"] || len(members) != 2 {
+		t.Errorf("members = %v, want exactly the inherited lo and the own hi", members)
 	}
 }
 
@@ -517,14 +586,67 @@ func TestKernelSummaryDirect_ARestParameterLowersAsOneUnknownEntry(t *testing.T)
 	}
 }
 
-func TestKernelSummaryDirect_ABindingPatternParameterNamesItsConstruct(t *testing.T) {
+func TestKernelSummaryDirect_ABindingPatternParameterLowersAsItsBoundNames(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearResolvedRecordMembers()
 	ClearSummaryOutcomes()
+	// `{ lo }` binds ONE local from the argument object's `lo` member: one
+	// ordinary scalar entry under the BOUND name, filled at the call sites
+	// from the member the entry's Key names
 	declaration := summaryDeclarationOf(t, "function f({ lo }: { lo: number }) { return lo; }")
+	lowered, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
+	if !ok {
+		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("a binding-pattern parameter declined (%q / %q) — its bound names are ordinary entries", outcome, construct)
+	}
+	if lowered.ParamCount != 1 {
+		t.Errorf("ParamCount = %d, want 1 — the one bound name", lowered.ParamCount)
+	}
+	entries, entriesOk := SummaryParameterEntries(declaration.Parameters()[0])
+	if !entriesOk || len(entries) != 1 {
+		t.Fatalf("entries = %v (ok %v), want the one bound name", entries, entriesOk)
+	}
+	if entries[0].Name != "lo" || entries[0].Key != "lo" {
+		t.Errorf("entry = %+v, want name lo filled from member lo", entries[0])
+	}
+	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	if outcome != SummaryComplete {
+		t.Errorf("outcome = %q (construct %q), want complete", outcome, construct)
+	}
+}
+
+func TestKernelSummaryDirect_ARenamedBindingPatternElementFillsFromItsOwnMember(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	// `{ lo: low }` binds `low` from the member `lo` — the slot wears the
+	// BOUND name and the Key names the member the call sites read
+	declaration := summaryDeclarationOf(t, "function f({ lo: low }: { lo: number, hi: number }) { return low; }")
+	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
+		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("a renamed binding-pattern element declined (%q / %q)", outcome, construct)
+	}
+	entries, entriesOk := SummaryParameterEntries(declaration.Parameters()[0])
+	if !entriesOk || len(entries) != 1 {
+		t.Fatalf("entries = %v (ok %v), want the one bound name", entries, entriesOk)
+	}
+	if entries[0].Name != "low" || entries[0].Key != "lo" {
+		t.Errorf("entry = %+v, want name low filled from member lo", entries[0])
+	}
+}
+
+func TestKernelSummaryDirect_ABindingPatternOverANonRecordAnnotationStillDeclines(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	// the members must be scalars the entries can wear; an unreadable
+	// member leaves the pattern with nothing to bind from
+	declaration := summaryDeclarationOf(t, "function f({ lo }: { lo: number[] }) { return 1; }")
 	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); ok {
-		t.Fatalf("a binding-pattern parameter lowered")
+		t.Fatalf("a binding pattern over an unreadable member lowered")
 	}
 	outcome, construct, _ := SummaryOutcomeOf(declaration)
 	if outcome != SummaryDeclined || construct != "a binding-pattern parameter" {

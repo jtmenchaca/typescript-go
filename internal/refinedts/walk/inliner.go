@@ -137,6 +137,28 @@ func ParameterKnown(parameter *ast.Node, index int, effective EffectiveArguments
 	return abstractdomain.KnownList(rest, abstractdomain.TrustProved)
 }
 
+// BoundParameterKnown is what an INLINED parameter is actually bound to:
+// ParameterKnown's argument value met with the parameter's own declared
+// type (entryStateMeet, entry_env.go). Every inlining shape binds through
+// this one function — the contract body, the stored closure, the callback
+// node — and every write-back baseline reads it too, so the "did the body
+// change this parameter" comparison is against the value the body really
+// started from.
+//
+// The meet costs no exactness the declaration permits: the annotation is a
+// ceiling and a value inside it passes through whole. It removes one claim
+// the declaration cannot carry — an object literal's COMPLETE key set
+// bound to a parameter whose type is an open map (`Record<K, V>`), where
+// some other call may hand a key this one never wrote.
+func BoundParameterKnown(ctx *FlowContext, parameter *ast.Node, index int, effective EffectiveArguments) abstractdomain.AbstractValue {
+	return entryStateMeet(
+		ctx.P.Checker,
+		parameter,
+		ParameterKnown(parameter, index, effective),
+		InitialStateOfPlainParameter(ctx.P, parameter),
+	)
+}
+
 // InlineStoredClosure is a stored closure invoked directly by name:
 // `const f = (…) => …` called as `f(…)`. The call runs synchronously
 // on this environment, so the body is walked with the arguments
@@ -313,7 +335,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, effective Ef
 		} else {
 			saved[name.Text()] = savedEntry{}
 		}
-		env.Set(name.Text(), ParameterKnown(parameter, i, effective))
+		env.Set(name.Text(), BoundParameterKnown(ctx, parameter, i, effective))
 	}
 	{
 		locals := map[string]struct{}{}
@@ -379,7 +401,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, effective Ef
 		if !ok {
 			continue
 		}
-		entry := ParameterKnown(parameter, i, effective)
+		entry := BoundParameterKnown(ctx, parameter, i, effective)
 		if abstractdomain.SameKnown(post, entry) {
 			continue
 		}
@@ -547,7 +569,7 @@ func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Call
 		} else {
 			saved[name.Text()] = savedEntry{}
 		}
-		env.Set(name.Text(), ParameterKnown(parameter, i, effective))
+		env.Set(name.Text(), BoundParameterKnown(ctx, parameter, i, effective))
 	}
 	body := callback.Body()
 	// the body's own declarations shadow too — see InlineStoredClosure
@@ -617,7 +639,7 @@ func InlineCallbackNode(ctx *FlowContext, env Env, call *ast.Node, callback Call
 		WriteBackParameter(ctx, env, writeBackParameterParams{
 			parameter:     parameter,
 			post:          post,
-			entry:         ParameterKnown(parameter, i, effective),
+			entry:         BoundParameterKnown(ctx, parameter, i, effective),
 			argument:      argument,
 			restArguments: restArguments,
 		})

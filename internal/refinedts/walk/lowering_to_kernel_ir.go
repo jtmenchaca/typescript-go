@@ -23,6 +23,8 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/jsnum"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -203,10 +205,22 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 					return out, true
 				}
 				dropHoists()
+				// `return xs.reduce(cb, seed)` / `.find(cb)` / `.flatMap(cb)`
+				// over a flattened array: the callback converts to its own
+				// summary and the method's result lands straight in this
+				// body's result slot. Ahead of the inlining route, whose
+				// callee resolution has no reading for a collection method.
+				head := Unwrapped(rs.Expression)
+				if viaCallback, ok := SummaryCallbackReturnOf(context, head); ok {
+					out = flush(out)
+					out = append(out, viaCallback...)
+					out = append(out, raise)
+					return out, true
+				}
+				dropHoists()
 				// `return f(…)`: the callee inlines and its result slot is
 				// this return's value — absent where a path fell off, which
 				// the copy carries
-				head := Unwrapped(rs.Expression)
 				if ast.IsCallExpression(head) {
 					if inlined, ok := InlineCall(context, head); ok {
 						out = flush(out)
@@ -216,6 +230,25 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 							Target: context.Result.Ret,
 							Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: inlined.RetIndex},
 						})
+						out = append(out, raise)
+						return out, true
+					}
+					dropHoists()
+				}
+				// `return new C(…)`: the same door `const x = new C(…)` goes
+				// through — SummaryCallOrHavoc's blob tier, which runs the
+				// constructor's compiled summary and then writes the target
+				// unknown, since a constructed instance has no scalar
+				// spelling. The ret slot IS the target here, so the
+				// constructor's effects on this body's tracked state land
+				// before the flag rises, and the returned value reads as
+				// unknown rather than as the absent an unwritten ret would
+				// claim. A constructor with no blob declines back here and
+				// the opaque return below still stands.
+				if ast.IsNewExpression(head) {
+					if constructed, ok := SummaryCallOrHavoc(context, head, context.Result.Ret); ok {
+						out = flush(out)
+						out = append(out, constructed...)
 						out = append(out, raise)
 						return out, true
 					}
@@ -248,6 +281,35 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 						return out, true
 					}
 				}
+				// THE BRANCH-SHAPED RETURN: `return c ? a : b`,
+				// `return a ?? b`, `return a && b`, `return a || b`. The
+				// value is an OPERAND, not a boolean, so the guard route
+				// above cannot spell it and the effect grammar cannot
+				// either — an arm that calls or constructs needs a
+				// STATEMENT, which the effect language has no room for. As
+				// a branch it has room: each arm sinks `#ret := <arm>`
+				// through this same return machinery, and the two arms
+				// become the branch's then and else (returnBranchStatements
+				// below holds the whole argument).
+				if branched, ok := returnBranchStatements(context, rs.Expression, sort, raise); ok {
+					out = flush(out)
+					out = append(out, branched...)
+					return out, true
+				}
+				dropHoists()
+				// THE MEMBER-CARRYING RETURN: `return { type, dynamicMetadata }`
+				// / `return [a, b]`, where the layout allocated one slot per
+				// member (returnedLiteralShape). Each member's own effect goes
+				// into its own slot and #ret takes unknown — the object itself
+				// still has no scalar spelling, and the members are what the
+				// caller reads back. Ahead of the inert return, which would
+				// otherwise write the whole literal off as one unknown.
+				if members, ok := returnMemberStatements(context, rs.Expression, raise); ok {
+					out = flush(out)
+					out = append(out, members...)
+					return out, true
+				}
+				dropHoists()
 				// THE INERT RETURN: a returned FUNCTION LITERAL (creating one
 				// runs nothing, whatever its body holds — the census rules its
 				// captures), and any other returned expression that MOVES
@@ -313,29 +375,42 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 		// NOTHING, so no claim about the returned outcome can be wrong
 		// about it, and the shape that says so is a return of nothing:
 		//
-		//	#ret  := absent
+		//	#ret  := thrown
 		//	#done := {1}
 		//
-		// Absent rather than unknown, and that direction is the honest
-		// one: the run produced no returned value at all, and absent is
-		// the weakest thing the result slot can hold that a later join
-		// will not mistake for a value. The done flag then reads exactly
-		// as it does for a `return` — the block ends here, later
-		// statements are dead, and the apply route's allReturned reading
-		// sees a path that left.
+		// THROWN, not absent. The run produced no returned value at all,
+		// and the kernel has a constructor for exactly that — its fourth
+		// Outcome, distinct from the absent VALUE a bare `return;` writes.
+		// Sending absent here is what made `if (x) throw new E(); return v`
+		// serve `v ∪ undefined`: the throw arm's absent merged into the ret
+		// set, and nothing downstream could tell it from a path that really
+		// returned undefined. Writing thrown keeps the two apart, and the
+		// ret row's returned half (KnownStateWire.Returned) then reads the
+		// real return alone.
 		//
-		// A throw INSIDE a try keeps the decline (ir_opaque_havoc.go's
-		// throwCarryingStatement holds the reasoning: raising the flag
-		// would make the catch's own writes invisible to the walk, which
-		// is a wrong claim, not a weak one). The report names it "throw
-		// inside try" so the histogram row points at the construct.
+		// The done flag reads exactly as it does for a `return` — the block
+		// ends here, later statements are dead, and the apply route's
+		// allReturned reading sees a path that left.
+		//
+		// A throw INSIDE a try no longer declines by default. The old
+		// reasoning — raising the flag would make the catch's writes
+		// invisible — is about a catch that CONTINUES this statement list.
+		// Under the try route's branchBoth the catch is a SIBLING arm,
+		// walked from the state as it stood, so the flag raised in the try
+		// arm cannot reach it. ThrowCoveredByItsTry is the test for
+		// exactly that shape; every other enclosing try keeps the decline.
 		if ast.IsThrowStatement(s) {
 			if context.Result == nil {
 				NoteDeclinedConstruct(context, "throw with no result slot")
 				dropHoists()
 				return nil, false
 			}
-			if ThrowReachesATry(s) {
+			// A throw INSIDE a try is sound too where the enclosing try's
+			// own lowering covers it — ThrowCoveredByItsTry holds the whole
+			// argument. A throw under any OTHER try keeps the decline, and
+			// the report names it "throw inside try" so the row points at
+			// the construct.
+			if ThrowReachesATry(s) && !ThrowCoveredByItsTry(s) {
 				NoteDeclinedConstruct(context, "throw inside try")
 				dropHoists()
 				return nil, false
@@ -356,7 +431,7 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			out = append(out, kernelbridge.IrStatement{
 				Kind:   kernelbridge.IrStatementAssign,
 				Target: context.Result.Ret,
-				Effect: kernelbridge.AbsentConst(),
+				Effect: kernelbridge.ThrownConst(),
 			})
 			out = append(out, kernelbridge.IrStatement{
 				Kind:   kernelbridge.IrStatementAssign,
@@ -473,6 +548,16 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 			continue
 		}
 		dropHoists()
+		// `x1 = x2 = e` — the chain writes every link, innermost first,
+		// each outer one copying the slot inside it. Ahead of the ordinary
+		// assignment rule, whose one-target read takes the outer link and
+		// then declines on a right side no effect grammar spells.
+		if assignments, ok := ChainedAssignmentStatementOf(context, s); ok {
+			out = flush(out)
+			out = append(out, assignsOf(assignments)...)
+			continue
+		}
+		dropHoists()
 		// `x = count + f(y)` / `let x = f(g(y)) + 1`: the RHS reading hoists
 		// each call it met, left to right, and those statements go out ahead
 		// of the assignment that reads their temps
@@ -571,8 +656,14 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 		// to the floor and havocked each leaf the loop so much as MENTIONED.
 		if ast.IsForOfStatement(s) || ast.IsForInStatement(s) {
 			if prelude, loop, stmtsOk := LowerLoopStatements(context, s); stmtsOk {
-				out = append(out, prelude...)
-				out = append(out, loop)
+				appended, consumed, appendOk := appendLoopGatingRest(context, out, prelude, loop, statements, index)
+				if !appendOk {
+					return nil, false
+				}
+				out = appended
+				if consumed {
+					return out, true
+				}
 				continue
 			}
 		}
@@ -707,8 +798,14 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 				// the body's own write set havocked kernel-side while every
 				// other slot keeps its knowledge (ir_loop_stmts.go)
 				if prelude, loop, stmtsOk := LowerLoopStatements(context, s); stmtsOk {
-					out = append(out, prelude...)
-					out = append(out, loop)
+					appended, consumed, appendOk := appendLoopGatingRest(context, out, prelude, loop, statements, index)
+					if !appendOk {
+						return nil, false
+					}
+					out = appended
+					if consumed {
+						return out, true
+					}
 					continue
 				}
 				// and where THAT declines too — a head that moves state, a body
@@ -747,8 +844,14 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 				// trip count including zero, which is weaker than "at least
 				// once" and never wrong about a run that took more
 				if prelude, loop, stmtsOk := LowerLoopStatements(context, s); stmtsOk {
-					out = append(out, prelude...)
-					out = append(out, loop)
+					appended, consumed, appendOk := appendLoopGatingRest(context, out, prelude, loop, statements, index)
+					if !appendOk {
+						return nil, false
+					}
+					out = appended
+					if consumed {
+						return out, true
+					}
 					continue
 				}
 				havoc, havocOk := havocFloor(s)
@@ -774,24 +877,26 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 				body, bodyOk = LoopBodyOf(context, forStmt.Statement, forStmt.Incrementor)
 			}
 			// the init has to lower too, and it is lowered BEFORE the loop
-			// statement is appended so a declining init leaves nothing behind
-			var init AssignmentTarget
-			initOk := forStmt.Initializer == nil
-			if forStmt.Initializer != nil {
-				if ast.IsVariableDeclarationList(forStmt.Initializer) {
-					init, initOk = DeclarationAssignment(context, forStmt.Initializer.AsVariableDeclarationList().Declarations.Nodes)
-				} else {
-					init, initOk = AssignmentOfExpression(context, forStmt.Initializer)
-				}
-			}
+			// statement is appended so a declining init leaves nothing behind.
+			// A clause declaring several names writes one assignment per
+			// declarator, in source order — the same reading the
+			// statement-bodied route uses, so the two cannot disagree about
+			// which initializers lower.
+			init, initOk := forInitializerAssignments(context, forStmt.Initializer)
 			if !headOk || !bodyOk || !initOk {
 				// no condition (`for (;;)`), an unreadable head, or a body the
 				// FOLD's grammar declines: the statement-bodied form takes it —
 				// the init before the loop, the step as the body's last
 				// statement, and no claim about the trip count
 				if prelude, loop, stmtsOk := LowerLoopStatements(context, s); stmtsOk {
-					out = append(out, prelude...)
-					out = append(out, loop)
+					appended, consumed, appendOk := appendLoopGatingRest(context, out, prelude, loop, statements, index)
+					if !appendOk {
+						return nil, false
+					}
+					out = appended
+					if consumed {
+						return out, true
+					}
 					continue
 				}
 				// and where that declines too — an init the assignment grammar
@@ -806,9 +911,7 @@ func lowerStatementList(context *LoweringContext, statements []*ast.Node) ([]ker
 				out = append(out, havoc...)
 				continue
 			}
-			if forStmt.Initializer != nil {
-				out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: init.Target, Effect: init.Effect})
-			}
+			out = append(out, init...)
 			out = append(out, LoopStatement(context, head, body))
 			continue
 		}
@@ -892,6 +995,88 @@ func ThrowReachesATry(throw *ast.Node) bool {
 	return true
 }
 
+// ThrowCoveredByItsTry is whether a `throw` inside a try is one the
+// enclosing try's OWN lowering already covers — the question that turns
+// "throw inside try" from a decline into an ordinary read.
+//
+// THE ARGUMENT. LowerTryStatement builds one statement:
+//
+//	branchBoth
+//	  then: the try block's statements, lowered whole
+//	  else: havoc(every slot the try block could write)
+//	        catch parameter := unknown
+//	        the catch block's statements
+//
+// and branchBoth's contract (kernelbridge/loop_questions.go) is that
+// BOTH arms walk from the state as it stood and their exits join. The
+// arms are siblings, not a sequence. So whatever the then arm writes —
+// including the done flag — is not what the else arm reads. That is the
+// exact hole in the old decline's reasoning: it argued that raising the
+// flag at a throw would gate the catch's own statements behind the
+// flag's falsity, which is true only where the catch CONTINUES the
+// statement list the throw sat in. Under this route it does not.
+//
+// What the two arms cover, run by run:
+//
+//   - a run that completed the try normally IS the then arm, and the
+//     throw statement never executed on it. The then arm lowering the
+//     throw as `ret := absent; done := {1}` and ending the block costs
+//     that run nothing, because the run did not reach the throw.
+//   - a run that threw at statement k ran statements 1..k-1 and then the
+//     catch. Its state at catch entry differs from the entry state only
+//     in slots written by that prefix. The else arm's prefix havoc is
+//     havocSlotsOfStatement over the WHOLE try block, which is a
+//     superset of any prefix's write set, so the catch walks from a
+//     state weaker than the real one — for every k, the explicit throw's
+//     own k included. That is what already made the route sound for an
+//     interrupted run, and an explicit `throw` is only one more value of
+//     k, not a new kind of interruption.
+//
+// So the then arm is right about the runs it stands for and the else arm
+// covers the rest, which is the whole obligation.
+//
+// THE THROW'S OWN EXPRESSION. `throw new E(x)` runs a constructor before
+// control transfers. The then arm's throw route havocs the statement's
+// mention set (havocSlotsOfStatement over the throw) before writing ret
+// and done, so that path carries the effects. The else arm carries them
+// too, by the same superset reasoning: the throw statement is inside the
+// try block, so its mentions are in the block's own enumeration. Nothing
+// the expression could move escapes both arms.
+//
+// THE SHAPE THIS IS TRUE OF. Only the try LowerTryStatement actually
+// serves: a catch clause present and no finally. A `finally` runs on
+// every completion and the route declines it outright, so a throw under
+// one has no branchBoth above it at all; a try with no catch does not
+// catch the throw, which then leaves the body through the enclosing
+// frames — a different question the escaping-throw route is not in a
+// position to answer here. Both keep the decline.
+//
+// The nearest enclosing try is the one that catches, so only that one is
+// consulted; a throw nested in an inner try under an outer one is the
+// inner try's business. The walk stops at a function boundary for the
+// same reason ThrowReachesATry does.
+func ThrowCoveredByItsTry(throw *ast.Node) bool {
+	if throw == nil {
+		return false
+	}
+	for node := throw.Parent; node != nil; node = node.Parent {
+		if ast.IsTryStatement(node) {
+			tryStmt := node.AsTryStatement()
+			// a throw sitting in the CATCH block is not caught by this try
+			// at all — it leaves through the enclosing frames, and the arm
+			// structure above says nothing about it
+			if tryStmt.CatchClause != nil && tryStmt.CatchClause.Contains(throw) {
+				return false
+			}
+			return tryStmt.CatchClause != nil && tryStmt.FinallyBlock == nil
+		}
+		if ast.IsFunctionLike(node) || ast.IsClassLike(node) {
+			return false
+		}
+	}
+	return false
+}
+
 // OpaqueTestableCondition is whether an `if` head no reading lowered may
 // still stand as the branch that tests NOTHING. The walk claims nothing
 // about the condition, so the only thing it must be sure of is that
@@ -944,6 +1129,74 @@ func OpaqueTestableCondition(condition *ast.Node) bool {
 	return admitted
 }
 
+// loopBodyRaisesDone is whether a lowered LOOP statement's own body
+// writes the done flag — a `return` inside `for`, `for-of`, `while` or
+// `do-while`. RaisesDone reads a statement LIST and does not descend
+// into a loop's body, which is right for its callers (an if arm's
+// statements are the arm) and wrong for this question, so the loop's
+// body is unwrapped here and handed to RaisesDone.
+//
+// Both loop forms carry their body in a field of their own: the
+// statement-bodied loop in Stmts, the effect-bodied loop in Body, which
+// is one EFFECT per binding and has no statements to walk — an effect
+// vector cannot spell a return at all, so that form answers false and
+// the reading is complete.
+func loopBodyRaisesDone(loop kernelbridge.IrStatement, done int) bool {
+	if loop.Kind != kernelbridge.IrStatementLoopStmts {
+		return false
+	}
+	return RaisesDone(loop.Stmts, done)
+}
+
+// appendLoopGatingRest appends a lowered loop and, where its body could
+// have RETURNED, gates the block's remainder on the done flag — the same
+// shape a returning if arm, switch arm, and try arm each build.
+//
+// The gate is what makes a return inside a loop READ rather than a wrong
+// claim. Without it the statements after the loop lower unconditionally,
+// so a run that returned on trip 3 would have the kernel walk them
+// anyway and a later `return` would overwrite the result slot the loop's
+// own return wrote. With it, the remainder sits in the else arm of a
+// branch on the flag, and the run that returned walks the empty then arm
+// instead — exactly the continuation gating every other returning
+// construct already gets.
+//
+// The flag itself is one of the slots the loop's own havoc covers, so
+// after a loop whose body may or may not have returned the flag reads
+// unknown and the branch admits both paths. That is the honest reading:
+// the trip count is not claimed, so which of them happened is not known.
+//
+// Answers (out, true) with the remainder consumed, or (out, false)
+// meaning the caller carries on with the next statement itself.
+func appendLoopGatingRest(
+	context *LoweringContext,
+	out []kernelbridge.IrStatement,
+	prelude []kernelbridge.IrStatement,
+	loop kernelbridge.IrStatement,
+	statements []*ast.Node,
+	index int,
+) ([]kernelbridge.IrStatement, bool, bool) {
+	out = append(out, prelude...)
+	out = append(out, loop)
+	if context.Result == nil || !loopBodyRaisesDone(loop, context.Result.Done) {
+		return out, false, true
+	}
+	rest, restOk := LowerStatements(context, statements[index+1:])
+	if !restOk {
+		return nil, false, false
+	}
+	if len(rest) > 0 {
+		out = append(out, kernelbridge.IrStatement{
+			Kind: kernelbridge.IrStatementBranch,
+			On:   context.Result.Done,
+			Test: kernelbridge.IrTestTruthyNum,
+			Then: nil,
+			Else: rest,
+		})
+	}
+	return out, true, true
+}
+
 // assignsOf turns a per-slot assignment list into the IR statements
 // that write them, in order — the one shape every flattening lowering
 // hands back.
@@ -960,19 +1213,35 @@ func assignsOf(assignments []AssignmentTarget) []kernelbridge.IrStatement {
 }
 
 // LowerSwitch is a `switch (x) { case k: … }` as a CHAIN of equality
-// branches: the first case's test with its body as the then-arm and the
-// rest of the chain as the else-arm, down to the default clause, which
-// becomes the final else. Exactly the desugaring the language's own
-// semantics gives a switch whose every case ends in break or return —
-// which is the only shape lowered here.
+// branches: each case's test with its own statements as the then-arm and
+// the rest of the chain as the else-arm, down to the default arm, which
+// becomes the innermost else. Exactly the desugaring the language's own
+// semantics gives a switch whose every reached run ends in break or
+// return.
 //
-// Fallthrough is NOT lowered: a case whose statements run on into the
-// next clause takes two arms at once, which the chain does not spell.
-// A case with NO statements at all is the grouped-label form (`case
-// "a": case "b": …`), which is not fallthrough — nothing runs — so it
-// folds into the next clause's test as a second equality.
+// CLAUSE ORDER IS NOT TEST ORDER. A switch evaluates the discriminant
+// once and then compares it against EVERY case label, in clause order,
+// whatever position the default clause sits in; only when no label
+// matched does the default's statements run. So the chain does not need
+// the default to be the LAST clause — it needs the default to be the
+// innermost ELSE, which is where "no label matched" lands however the
+// clauses were written. `switch (k) { default: d(); break; case 1:
+// a(); break; }` and the same two clauses swapped are the same runs,
+// and both lower to `if k===1 then a() else d()`. The arms are
+// therefore collected by what they TEST — one list of case arms and one
+// default arm — rather than by where their clause sat.
 //
-// Total-or-decline: any clause whose statements or label do not lower
+// FALLTHROUGH IS CONCATENATION. A case that does not end its run
+// continues into the next clause's statements, so the arm a matching
+// run actually executes is its own statements followed by the next
+// clause's, and the next's, until a clause that ends the run. That
+// concatenation is what each arm lowers here: `case 1: case 2: f();
+// break;` gives the empty clause 1 the statements of clause 2, and
+// `case 1: g(); case 2: f(); break;` gives clause 1 `g(); f();`. A
+// chain that reaches the end of the clause list without ever ending its
+// run keeps the refusal — nothing there says where the run stops.
+//
+// Total-or-decline: any arm whose statements or label do not lower
 // declines the whole switch, and the statement then takes its former
 // route (which is nothing — a switch has no other IR lowering).
 func LowerSwitch(context *LoweringContext, statement *ast.Node) ([]kernelbridge.IrStatement, bool) {
@@ -981,94 +1250,73 @@ func LowerSwitch(context *LoweringContext, statement *ast.Node) ([]kernelbridge.
 	}
 	switchStmt := statement.AsSwitchStatement()
 	discriminant := switchStmt.Expression
-	if _, tracked := IndexOf(context, discriminant); !tracked {
+	// EVERY REFUSAL BELOW NAMES ITSELF. A switch that declines here falls
+	// to the havoc floor, which refuses any contained `return` and then
+	// reports "return inside switch" — a row that names the return rather
+	// than the thing the switch route actually could not read. The names
+	// set here are what the floor's DeclinedHavocConstruct reports
+	// instead, so each row points at the construct to go and build a
+	// reading for.
+	_, discriminantTracked := IndexOf(context, discriminant)
+	// an untracked discriminant that EVALUATES effect-free still lowers,
+	// as the tested-nothing chain below; one whose evaluation moves state
+	// has no statement position here and keeps its name
+	if !discriminantTracked && !OpaqueTestableCondition(discriminant) {
+		NoteSwitchRefusal(statement, "switch on an untracked discriminant")
 		return nil, false
 	}
 	clauses := switchStmt.CaseBlock.AsCaseBlock().Clauses.Nodes
 	if len(clauses) == 0 {
+		NoteSwitchRefusal(statement, "switch with no clauses")
 		return nil, false
 	}
-	// arms, in clause order: the labels a clause tests (several where
-	// empty clauses grouped ahead of it) and the statements it runs
-	type switchArm struct {
-		Labels     []*ast.Node // nil for the default clause
-		Statements []*ast.Node
-		IsDefault  bool
-	}
-	var arms []switchArm
-	var pendingLabels []*ast.Node
-	for _, clause := range clauses {
-		body := clause.AsCaseOrDefaultClause().Statements.Nodes
-		if ast.IsDefaultClause(clause) {
-			// a default with grouped labels ahead of it would need those
-			// labels to reach the default's own statements, which the chain
-			// spells only as the final else — decline rather than mis-order
-			if len(pendingLabels) > 0 {
-				return nil, false
-			}
-			arms = append(arms, switchArm{Statements: body, IsDefault: true})
-			continue
-		}
-		label := clause.AsCaseOrDefaultClause().Expression
-		if len(body) == 0 {
-			// a grouped label: nothing runs here, so it joins the next
-			// clause's test
-			pendingLabels = append(pendingLabels, label)
-			continue
-		}
-		labels := append(append([]*ast.Node{}, pendingLabels...), label)
-		pendingLabels = nil
-		arms = append(arms, switchArm{Labels: labels, Statements: body})
-	}
-	// labels left over after the last clause reach nothing
-	if len(pendingLabels) > 0 {
+	arms, armsOk := switchArmsOf(statement, clauses)
+	if !armsOk {
 		return nil, false
 	}
-	// exactly one default, and it must be LAST — a default in the middle
-	// runs before the cases after it only under fallthrough, which is not
-	// lowered here
-	for index, arm := range arms {
-		if arm.IsDefault && index != len(arms)-1 {
-			return nil, false
-		}
-	}
-	// every non-default arm must END its run: break or return. Without
-	// that the clause falls through into the next one, which the chain
-	// does not spell.
-	for _, arm := range arms {
-		if arm.IsDefault {
-			continue
-		}
-		if !armEndsItsRun(arm.Statements) {
-			return nil, false
-		}
-	}
-	// the chain is built from the LAST arm outwards: the default (or the
-	// empty else where there is none) is the innermost else, and each
-	// case's test wraps it
+	// the chain is built from the DEFAULT outwards: the default arm (or
+	// the empty else where there is none — the run that matched no label
+	// and fell past the switch) is the innermost else, and each case's
+	// test wraps it
 	var chain []kernelbridge.IrStatement
-	tail := len(arms)
-	if tail > 0 && arms[tail-1].IsDefault {
-		lowered, ok := LowerStatements(context, stripTrailingBreak(arms[tail-1].Statements))
+	if arms.HasDefault {
+		lowered, ok := LowerStatements(context, stripTrailingBreak(arms.Default))
 		if !ok {
+			// the arm's own walk already named what it refused ON, and that
+			// name is the one worth keeping — it points inside the clause
+			NoteSwitchRefusal(statement, "switch whose default arm did not lower")
 			return nil, false
 		}
 		chain = lowered
-		tail--
 	}
-	for index := tail - 1; index >= 0; index-- {
-		arm := arms[index]
+	for index := len(arms.Cases) - 1; index >= 0; index-- {
+		arm := arms.Cases[index]
 		body, ok := LowerStatements(context, stripTrailingBreak(arm.Statements))
 		if !ok {
+			NoteSwitchRefusal(statement, "switch whose case arm did not lower")
 			return nil, false
 		}
-		// several grouped labels are an `||` of equalities: each label's
-		// test takes the same then-arm, and its else is the next label's
-		// test — the nesting LowerGuard already builds for `a || b`
+		if !discriminantTracked {
+			// no slot to test: the arm and the rest of the chain are
+			// SIBLINGS, both possible, and their exits join. A concrete run
+			// takes exactly one of them and the join admits it either way —
+			// the arm's own effects ride, and no claim is made about which
+			// label matched.
+			chain = []kernelbridge.IrStatement{{
+				Kind: kernelbridge.IrStatementBranchBoth,
+				Then: body,
+				Else: chain,
+			}}
+			continue
+		}
+		// several labels reaching one arm are an `||` of equalities: each
+		// label's test takes the same then-arm, and its else is the next
+		// label's test — the nesting LowerGuard already builds for `a || b`
 		guarded := chain
 		for labelIndex := len(arm.Labels) - 1; labelIndex >= 0; labelIndex-- {
 			test, testOk := switchLabelGuard(context, discriminant, arm.Labels[labelIndex], body, guarded)
 			if !testOk {
+				NoteSwitchRefusal(statement, "switch on a case label that is not a literal")
 				return nil, false
 			}
 			guarded = test
@@ -1076,6 +1324,107 @@ func LowerSwitch(context *LoweringContext, statement *ast.Node) ([]kernelbridge.
 		chain = guarded
 	}
 	return chain, true
+}
+
+// switchCaseArm is one case arm: the labels that reach it and the
+// statements a run reaching it executes — its clause's own statements
+// followed by every clause it falls through into.
+type switchCaseArm struct {
+	Labels     []*ast.Node
+	Statements []*ast.Node
+}
+
+// switchArms is the whole switch read as arms: the case arms in clause
+// order, and the default's statements where a default clause exists.
+type switchArms struct {
+	Cases      []switchCaseArm
+	Default    []*ast.Node
+	HasDefault bool
+}
+
+// switchArmsOf turns the clause list into the arms the chain tests.
+//
+// The two readings the clause list needs:
+//
+//   - each clause's RUN is the concatenation of its own statements and
+//     those of every clause after it, up to and including the first that
+//     ends the run (break or return). An empty clause therefore shares
+//     the following clause's run with no statements of its own, which is
+//     the grouped-label form, and a non-empty falling-through clause
+//     shares it with its own statements in front.
+//   - the DEFAULT clause is not part of any case's run order. It is the
+//     arm reached when no label matched, so it is collected on its own
+//     and its own run is read the same way, from its own clause forward.
+//
+// Refuses, by name: a run that reaches the end of the clause list
+// without ever ending (nothing says where it stops), a second default
+// clause (two arms for one "no label matched"), and an empty trailing
+// clause whose run is therefore empty and unended — except the LAST
+// clause of all, whose empty run is a no-op arm that ends the switch by
+// having nothing left to fall into.
+func switchArmsOf(statement *ast.Node, clauses []*ast.Node) (switchArms, bool) {
+	// the run of clause `start`: its statements and the following
+	// clauses' until one ends the run. (nil, false) where none does.
+	runFrom := func(start int) ([]*ast.Node, bool) {
+		var run []*ast.Node
+		for index := start; index < len(clauses); index++ {
+			body := clauses[index].AsCaseOrDefaultClause().Statements.Nodes
+			run = append(run, body...)
+			if armEndsItsRun(body) {
+				return run, true
+			}
+		}
+		// the run walked off the end of the clause list. An empty run is
+		// the LAST clause with no statements — nothing runs and there is
+		// nothing to fall into, which is an ended run of zero statements.
+		return run, len(run) == 0
+	}
+	out := switchArms{}
+	var pendingLabels []*ast.Node
+	for index, clause := range clauses {
+		if ast.IsDefaultClause(clause) {
+			if out.HasDefault {
+				NoteSwitchRefusal(statement, "switch with a second default clause")
+				return switchArms{}, false
+			}
+			run, ended := runFrom(index)
+			if !ended {
+				NoteSwitchRefusal(statement, "switch with a falling-through case")
+				return switchArms{}, false
+			}
+			// labels grouped ahead of the default reach the default's own
+			// run, which is already the chain's innermost else — every one
+			// of them lands there by matching no OTHER label, so the arm
+			// needs no test of its own and the labels are dropped
+			pendingLabels = nil
+			out.Default = run
+			out.HasDefault = true
+			continue
+		}
+		label := clause.AsCaseOrDefaultClause().Expression
+		body := clause.AsCaseOrDefaultClause().Statements.Nodes
+		if len(body) == 0 {
+			// an empty clause runs nothing of its own: its label joins the
+			// next clause's run, which the following clause will collect
+			pendingLabels = append(pendingLabels, label)
+			continue
+		}
+		run, ended := runFrom(index)
+		if !ended {
+			NoteSwitchRefusal(statement, "switch with a falling-through case")
+			return switchArms{}, false
+		}
+		labels := append(append([]*ast.Node{}, pendingLabels...), label)
+		pendingLabels = nil
+		out.Cases = append(out.Cases, switchCaseArm{Labels: labels, Statements: run})
+	}
+	// labels left over after the last clause: their run is what runFrom
+	// answers from the FIRST of them, which is empty (every clause after
+	// it was empty too, or they would have been collected above)
+	if len(pendingLabels) > 0 {
+		out.Cases = append(out.Cases, switchCaseArm{Labels: pendingLabels})
+	}
+	return out, true
 }
 
 // switchLabelGuard is one `case k:` as its equality branch, built
@@ -1088,10 +1437,10 @@ func switchLabelGuard(
 	thn []kernelbridge.IrStatement,
 	els []kernelbridge.IrStatement,
 ) ([]kernelbridge.IrStatement, bool) {
-	head := Unwrapped(label)
-	// only a literal word or number is a case the chain can test: a
-	// computed label compares two values the equality tests do not speak
-	if _, isNumber := NumberOf(head); !isNumber && !ast.IsStringLiteral(head) {
+	// the label as the literal TOKEN it names: itself where it is already
+	// one, the const it is bound to, or the enum member's own value
+	literal, literalOk := switchLabelLiteral(context, label)
+	if !literalOk {
 		return nil, false
 	}
 	factory := ast.NewNodeFactory(ast.NodeFactoryHooks{})
@@ -1100,14 +1449,101 @@ func switchLabelGuard(
 		discriminant,
 		nil,
 		factory.NewToken(ast.KindEqualsEqualsEqualsToken),
-		label,
+		literal,
 	)
 	return LowerGuard(context, equality, thn, els)
 }
 
+// switchLabelLiteral is the literal token a case label names, which is
+// what the equality test reads: TestOf takes the right operand
+// syntactically, so a label that only NAMES a literal has to hand the
+// token over rather than the name.
+//
+// Three routes, in the order they cost:
+//
+//   - the label is already a literal word or number;
+//   - the label follows const-to-const links to one
+//     (dataflowfacts.ConstChainLiteral — the same resolver the walk side's
+//     SwitchLabelValuesWith reads its labels through, so the two agree
+//     about which labels resolve);
+//   - the label is an enum member, whose value the checker holds as the
+//     member's literal type. tsgo spells a number literal's value as
+//     jsnum.Number, a NAMED float64, so numberLiteralValue reads it; the
+//     token handed back is freshly made from that value, since an enum
+//     member has no literal token of its own to point at.
+//
+// (nil, false) for anything else — a computed label compares two values
+// the equality tests do not speak.
+func switchLabelLiteral(context *LoweringContext, label *ast.Node) (*ast.Node, bool) {
+	head := Unwrapped(label)
+	if _, isNumber := NumberOf(head); isNumber {
+		return head, true
+	}
+	if ast.IsStringLiteral(head) {
+		return head, true
+	}
+	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
+		return nil, false
+	}
+	c := context.Flow.P.Checker
+	if resolved, ok := dataflowfacts.ConstChainLiteral(c, head); ok {
+		if _, isNumber := NumberOf(resolved); isNumber {
+			return resolved, true
+		}
+		if ast.IsStringLiteral(resolved) {
+			return resolved, true
+		}
+	}
+	// an enum member read — `case MyEnum.A:`. The checker's own literal
+	// type for the member IS the value, at the same grade the enum
+	// reader elsewhere takes it at.
+	if !ast.IsPropertyAccessExpression(head) {
+		return nil, false
+	}
+	receiverSymbol := symbolAt(c, head.AsPropertyAccessExpression().Expression)
+	if receiverSymbol == nil {
+		return nil, false
+	}
+	isEnum := false
+	for _, declaration := range receiverSymbol.Declarations {
+		if ast.IsEnumDeclaration(declaration) {
+			isEnum = true
+			break
+		}
+	}
+	if !isEnum {
+		return nil, false
+	}
+	memberType := c.GetTypeAtLocation(head)
+	factory := ast.NewNodeFactory(ast.NodeFactoryHooks{})
+	if memberType.IsNumberLiteral() {
+		// a member the checker never pinned (a computed one) has no value
+		// at all, and no token can be made for it
+		value, ok := numberLiteralValue(memberType.AsLiteralType().Value())
+		if !ok {
+			return nil, false
+		}
+		// a NEGATIVE member spells as a minus over its magnitude, which is
+		// the same shape NumberOf reads for a written `case -1:`
+		if value < 0 {
+			magnitude := factory.NewNumericLiteral(jsnum.Number(-value).String(), ast.TokenFlagsNone)
+			return factory.NewPrefixUnaryExpression(ast.KindMinusToken, magnitude), true
+		}
+		return factory.NewNumericLiteral(jsnum.Number(value).String(), ast.TokenFlagsNone), true
+	}
+	if memberType.IsStringLiteral() {
+		text, ok := memberType.AsLiteralType().Value().(string)
+		if !ok {
+			return nil, false
+		}
+		return factory.NewStringLiteral(text, ast.TokenFlagsNone), true
+	}
+	return nil, false
+}
+
 // armEndsItsRun is whether a case clause's statements END the switch —
 // a trailing `break` or `return`. Anything else falls through into the
-// next clause, and the chain has no arm for that.
+// next clause, whose statements the arm then also runs.
 func armEndsItsRun(statements []*ast.Node) bool {
 	if len(statements) == 0 {
 		return false
@@ -1145,4 +1581,500 @@ func stripTrailingBreak(statements []*ast.Node) []*ast.Node {
 		return append(out, inner...)
 	}
 	return statements
+}
+
+// returnBranchStatements lowers a returned TERNARY or SHORT-CIRCUIT as a
+// BRANCH rather than as an effect.
+//
+// The shapes, and why the effect grammar cannot hold them:
+//
+//	return c ? a : b
+//	return a ?? b        return a && b        return a || b
+//
+// each evaluate to one OPERAND, not to a boolean, so the guard route
+// above — which writes {1} on the true path and {0} on the false one —
+// would be a wrong claim about the value. The effect grammar is the
+// other door, and it is gated on the whole expression moving nothing
+// (effect_expression.go's conditional and short-circuit arms): an arm
+// holding a call, a `new`, or an await needs a STATEMENT to run, and an
+// effect is not a statement. Every nest instance of this shape has such
+// an arm, so both doors are shut and the return falls to the opaque
+// floor with its value unknown AND its arms' effects lost.
+//
+// As a branch there is room for both. Each arm lowers `#ret := <arm>`
+// through returnValueStatements, which is the SAME statement vocabulary
+// the return route walks — an arm that is a served call takes the call
+// route, an arm with no spelling takes unknown plus its own mention
+// havoc — and the raise rides inside each arm, so the flag is up on
+// exactly the paths that returned.
+//
+// Where the condition reads as a test the branch carries it; where it
+// does not, branchBoth carries no test and both arms walk from the state
+// as it stood. Both are sound: a concrete run takes one arm, and the
+// join over the two admits it either way.
+func returnBranchStatements(
+	context *LoweringContext,
+	expression *ast.Node,
+	sort BindingKind,
+	raise kernelbridge.IrStatement,
+) ([]kernelbridge.IrStatement, bool) {
+	if context == nil || context.Result == nil || expression == nil {
+		return nil, false
+	}
+	head := Unwrapped(expression)
+	if ast.IsConditionalExpression(head) {
+		cond := head.AsConditionalExpression()
+		// a CONDITION that writes is the one outright refusal: the branch
+		// puts the condition's evaluation nowhere, so a write inside it
+		// would be a move no statement here accounts for. (The same rule
+		// the effect grammar's ternary arm states.)
+		if ContainsWrite(cond.Condition) {
+			return nil, false
+		}
+		// and a condition that RUNS something has no statement position
+		// either — OpaqueTestableCondition is the branch routes' own test
+		// for exactly that, and the if route reads it for the same reason.
+		if !OpaqueTestableCondition(cond.Condition) {
+			return nil, false
+		}
+		thn, thnOk := returnValueStatements(context, cond.WhenTrue, sort, raise)
+		els, elsOk := returnValueStatements(context, cond.WhenFalse, sort, raise)
+		if !thnOk || !elsOk {
+			return nil, false
+		}
+		if guarded, ok := LowerGuard(context, cond.Condition, thn, els); ok {
+			return guarded, true
+		}
+		return []kernelbridge.IrStatement{{
+			Kind: kernelbridge.IrStatementBranchBoth,
+			Then: thn,
+			Else: els,
+		}}, true
+	}
+	if ast.IsBinaryExpression(head) {
+		return returnShortCircuitStatements(context, head.AsBinaryExpression(), sort, raise)
+	}
+	return nil, false
+}
+
+// returnShortCircuitStatements lowers `return a ?? b`, `return a && b`,
+// and `return a || b` as a branch on the LEFT operand.
+//
+// THE EVALUATION-ORDER ARGUMENT, which is what constrains the left side.
+// A short-circuit evaluates `a` exactly ONCE, and `a` is both the test
+// and one of the two returned values:
+//
+//	a ?? b   →  a where a is DEFINED, b where it is null/undefined
+//	a || b   →  a where a is TRUTHY,  b otherwise
+//	a && b   →  b where a is TRUTHY,  a otherwise
+//
+// The wire has no test-and-reuse: a branch names a slot to test, and an
+// arm names an effect to write, with no way to say "the value already
+// computed for the test". So the only left operands this route admits
+// are ones whose evaluation MOVES NOTHING and can therefore be read
+// twice — the test reads slot `on`, the arm reads slot `on` again, and
+// two reads of a slot are the same value with nothing run between them.
+// That is exactly a TRACKED SLOT read, which is what IndexOf answers,
+// and it is what LowerGuard's own `??` arm already requires of its left
+// side (ir_guard.go's definedness branch).
+//
+// A left operand that RUNS something — `f() ?? b`, `this.get() || b` —
+// is declined here rather than hoisted. Hoisting would put the call
+// before the branch, which is where it belongs for `a`'s single
+// evaluation; but the hoisted temp is unknown-sorted and carries no
+// definedness or truthiness the branch could test, so the test would
+// have nothing to read and the branch would degrade to branchBoth with
+// a call already run — no better than the floor, and with an extra
+// statement standing between the reader and the truth. The plain
+// sentence is the honest answer: this route reads a short circuit whose
+// left side is a tracked slot, and no other.
+//
+// The RIGHT operand rides as an ordinary arm — the full statement
+// vocabulary, calls included — because it sits inside a branch arm,
+// which is a statement position.
+func returnShortCircuitStatements(
+	context *LoweringContext,
+	binary *ast.BinaryExpression,
+	sort BindingKind,
+	raise kernelbridge.IrStatement,
+) ([]kernelbridge.IrStatement, bool) {
+	kind := binary.OperatorToken.Kind
+	if kind != ast.KindQuestionQuestionToken && kind != ast.KindAmpersandAmpersandToken &&
+		kind != ast.KindBarBarToken {
+		return nil, false
+	}
+	left := Unwrapped(binary.Left)
+	// the left side is read TWICE — once as the branch's test, once as an
+	// arm's value — so it must be a slot, whose two reads are one value
+	on, tracked := IndexOf(context, left)
+	if !tracked {
+		return nil, false
+	}
+	// which test picks the side is the operator's own rule: `??` asks
+	// definedness, `&&`/`||` ask truthiness under the slot's sort. A slot
+	// wearing neither the number nor the string sort has no truthiness
+	// test on the wire, so those two operators decline there.
+	test := kernelbridge.IrTestDefined
+	if kind != ast.KindQuestionQuestionToken {
+		switch context.Sorts[on] {
+		case BindingKindNumber:
+			test = kernelbridge.IrTestTruthyNum
+		case BindingKindString:
+			test = kernelbridge.IrTestTruthyStr
+		default:
+			return nil, false
+		}
+	}
+	// the arm holding `a` writes the slot it just tested — the same read,
+	// under the narrowing the test put on that side
+	leftArm := []kernelbridge.IrStatement{
+		{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: varEffect(on)},
+		raise,
+	}
+	rightArm, rightOk := returnValueStatements(context, binary.Right, sort, raise)
+	if !rightOk {
+		return nil, false
+	}
+	// `a && b` returns `b` where the test HOLDS and `a` where it does not;
+	// `a ?? b` and `a || b` are the other way round
+	then, els := leftArm, rightArm
+	if kind == ast.KindAmpersandAmpersandToken {
+		then, els = rightArm, leftArm
+	}
+	return []kernelbridge.IrStatement{{
+		Kind: kernelbridge.IrStatementBranch,
+		On:   on,
+		Test: test,
+		Then: then,
+		Else: els,
+	}}, true
+}
+
+// returnValueStatements lowers ONE branch arm of a returned ternary or
+// short circuit: the statements that write `#ret` from the arm's
+// expression and raise the done flag.
+//
+// This is the return route's own value vocabulary, reached from inside a
+// branch arm rather than from the statement stream — a served call takes
+// the call route, a `new` takes the constructor route, an inert value
+// reads unknown, and an arm with no reading at all takes unknown plus
+// the mention havoc that covers whatever its evaluation could have
+// moved. The raise is appended by every path, so the flag is up on
+// exactly the arms that run to a return.
+//
+// NO HOISTING INSIDE AN ARM. context.CanHoist is lowered for the arm's
+// readers and restored after: a hoisted call statement is emitted BEFORE
+// the statement holding the expression, which for an arm means before
+// the BRANCH — running unconditionally what the arm runs only on its own
+// side. Any hoists an arm's readers did produce are dropped with it.
+func returnValueStatements(
+	context *LoweringContext,
+	arm *ast.Node,
+	sort BindingKind,
+	raise kernelbridge.IrStatement,
+) ([]kernelbridge.IrStatement, bool) {
+	if context == nil || context.Result == nil || arm == nil {
+		return nil, false
+	}
+	priorCanHoist := context.CanHoist
+	context.CanHoist = false
+	mark := HoistedMark(context)
+	defer func() {
+		context.CanHoist = priorCanHoist
+		DropHoistedFrom(context, mark)
+	}()
+	assign := func(effect kernelbridge.LoopEffect) []kernelbridge.IrStatement {
+		return []kernelbridge.IrStatement{
+			{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: effect},
+			raise,
+		}
+	}
+	// the arm's value where the effect grammar spells it — `0`, `'unknown'`,
+	// a tracked name, an arithmetic or concatenation of them
+	if effect, ok := RhsEffect(context, sort, arm); ok {
+		return assign(effect), true
+	}
+	head := Unwrapped(arm)
+	// a NESTED ternary or short circuit — nest's `result instanceof Promise
+	// ? … : result instanceof NestApplication ? proxy : result` — is the
+	// same shape one level down, and lowers as the branch inside this arm
+	if branched, ok := returnBranchStatements(context, arm, sort, raise); ok {
+		return branched, true
+	}
+	// `xs.reduce(cb, seed)` and its siblings: the callback converts to its
+	// own summary and the method's result lands in the ret slot
+	if viaCallback, ok := SummaryCallbackReturnOf(context, head); ok {
+		return append(viaCallback, raise), true
+	}
+	// `f(…)` / `await f(…)`: the callee inlines and its result slot is the
+	// arm's value. The await peels off first — the ret-as-inner convention
+	// means the callee's ret slot already holds the settled value.
+	callHead := head
+	if operand, isAwait := AwaitedOperandOf(head); isAwait {
+		callHead = Unwrapped(operand)
+	}
+	if ast.IsCallExpression(callHead) {
+		if inlined, ok := InlineCall(context, callHead); ok {
+			out := append([]kernelbridge.IrStatement{}, inlined.Stmts...)
+			out = append(out, kernelbridge.IrStatement{
+				Kind:   kernelbridge.IrStatementAssign,
+				Target: context.Result.Ret,
+				Effect: varEffect(inlined.RetIndex),
+			})
+			return append(out, raise), true
+		}
+	}
+	// `new C(…)`: the constructor's compiled summary runs and the ret slot
+	// takes unknown, a constructed instance having no scalar spelling
+	if ast.IsNewExpression(callHead) {
+		if constructed, ok := SummaryCallOrHavoc(context, callHead, context.Result.Ret); ok {
+			return append(constructed, raise), true
+		}
+	}
+	// AN INERT ARM: a function literal (creating one runs nothing) or any
+	// expression that moves nothing. Unknown is what the ret slot can say
+	// about a value with no scalar spelling, and nothing moved.
+	//
+	// A function literal is inert to EVALUATE and not inert to HAND OVER:
+	// the caller receives it and may call it at a time no statement here
+	// places, and every tracked name it writes is a name nothing after
+	// this may believe. So the arm asks the census gate and keeps its
+	// decline where the answer is yes — the havoc route below then covers
+	// exactly those names. (writeAndCallFree descends THROUGH a function
+	// literal, so the second disjunct already refuses a writing closure
+	// nested in a larger expression; the gate is what the first disjunct
+	// needs, which admits the literal whole.)
+	if ast.IsFunctionLike(head) || writeAndCallFree(head) {
+		if !ClosureEscapesTrackedWrite(context, head) {
+			return assign(unknownEffect), true
+		}
+	}
+	// AN ARM WITH NO READING. Its value is unknown, and whatever its
+	// evaluation could have moved is havocked at the arm's own position —
+	// the havoc floor's rule, applied inside the branch rather than in
+	// place of it. An expression whose write set is not enumerable keeps
+	// the decline: there would be nothing to stand in for what it moved.
+	slots, enumerable := havocSlotsOfStatement(context, arm)
+	if !enumerable {
+		return nil, false
+	}
+	out := havocAssignments(slots)
+	return append(out, assign(unknownEffect)...), true
+}
+
+/* ── the returned value's members ────────────────────────────────── */
+
+// returnMemberStatements lowers a return whose value is the LITERAL the
+// layout allocated member slots for: each member's own effect written
+// into its own slot, then the scalar #ret written unknown and the flag
+// raised.
+//
+// #ret stays UNKNOWN, and that is not a loss here. The object itself has
+// no scalar spelling — it never had one — and the members now carry what
+// the caller actually reads. A caller taking the direct apply route
+// rebuilds the object from the member exits (applySummary); one taking
+// the statement route keeps reading #ret and gets the same unknown it
+// always got, so nothing that worked before reads differently.
+//
+// A MEMBER the effect grammar cannot spell takes unknown in ITS OWN slot
+// rather than refusing the whole return — a partial object beats a whole
+// unknown, and unknown in one member claims nothing about that member
+// while the readable ones keep their values.
+//
+// What this does NOT do is run code. A member whose value expression
+// would MOVE something — a call, a `new`, a write — is not lowered as an
+// effect at all: the effect grammar has no statement position inside it,
+// so those members take unknown and the statement's own mention havoc is
+// what covers what they moved. A literal whose evaluation is not
+// write-and-call free therefore declines back to the caller's routes,
+// where the opaque return's havoc floor serves it exactly as before.
+func returnMemberStatements(
+	context *LoweringContext,
+	returned *ast.Node,
+	raise kernelbridge.IrStatement,
+) ([]kernelbridge.IrStatement, bool) {
+	if context == nil || context.Result == nil || returned == nil {
+		return nil, false
+	}
+	if context.RetShape == RetShapeNone || len(context.RetMembers) == 0 {
+		return nil, false
+	}
+	head := Unwrapped(returned)
+	if head == nil {
+		return nil, false
+	}
+	// the members' values are read as EFFECTS, which have no room for a
+	// statement — so a literal that runs code keeps the floor that covers
+	// what it ran
+	if !writeAndCallFree(head) {
+		return nil, false
+	}
+	switch context.RetShape {
+	case RetShapeObject:
+		if !ast.IsObjectLiteralExpression(head) {
+			return nil, false
+		}
+		return objectReturnMemberStatements(context, head, raise), true
+	case RetShapeArray:
+		if !ast.IsArrayLiteralExpression(head) {
+			return nil, false
+		}
+		return arrayReturnMemberStatements(context, head, raise), true
+	}
+	return nil, false
+}
+
+// objectReturnMemberStatements writes each key of a returned object
+// literal into the slot the layout gave it.
+//
+// A key this literal does NOT spell is left alone: its slot keeps
+// whatever the path it is on left there, which for a body's single return
+// is the absent entry state — "this returned object has no such key" —
+// and for one arm of a several-arm body is the join the exits carry.
+// Writing absent here would say the same thing on the arms that omit the
+// key; leaving it says it without an extra statement.
+func objectReturnMemberStatements(
+	context *LoweringContext,
+	literal *ast.Node,
+	raise kernelbridge.IrStatement,
+) []kernelbridge.IrStatement {
+	var out []kernelbridge.IrStatement
+	written := map[int]struct{}{}
+	for _, property := range literal.AsObjectLiteralExpression().Properties.Nodes {
+		name, named := retMemberNameOf(property)
+		if !named {
+			continue
+		}
+		slot, held := RetMemberSlotOf(context, name)
+		if !held {
+			continue
+		}
+		value := retMemberValueOf(property)
+		effect := unknownEffect
+		if value != nil {
+			// the member's own slot sort decides the reading, the way the
+			// scalar ret's sort decides the whole-value one
+			if read, ok := RhsEffect(context, context.Sorts[slot], value); ok {
+				effect = read
+			}
+		}
+		out = append(out, kernelbridge.IrStatement{
+			Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: effect,
+		})
+		written[slot] = struct{}{}
+	}
+	// a member slot ANOTHER arm spells and this one does not must not keep
+	// a value this path never wrote — the slot is one binding across the
+	// whole body, so a write on an earlier statement would otherwise be
+	// read as this return's member. Absent is what this path says about a
+	// key its literal has no property for.
+	for _, entry := range context.RetMembers {
+		if _, already := written[entry.Index]; already {
+			continue
+		}
+		out = append(out, kernelbridge.IrStatement{
+			Kind: kernelbridge.IrStatementAssign, Target: entry.Index, Effect: kernelbridge.AbsentConst(),
+		})
+	}
+	// the object value itself has no scalar spelling; the members carry it
+	out = append(out, kernelbridge.IrStatement{
+		Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: unknownEffect,
+	})
+	return append(out, raise)
+}
+
+// retMemberValueOf is the expression one literal property holds: the
+// property assignment's initializer, or — for a shorthand — the name
+// itself, which reads as the local of that name.
+func retMemberValueOf(property *ast.Node) *ast.Node {
+	if ast.IsPropertyAssignment(property) {
+		return property.AsPropertyAssignment().Initializer
+	}
+	if ast.IsShorthandPropertyAssignment(property) {
+		return property.AsShorthandPropertyAssignment().Name()
+	}
+	return nil
+}
+
+// arrayReturnMemberStatements writes the returned array literal's LENGTH
+// — exact, the element count, since the shape reader refused every
+// spread — and the JOIN of its elements into the ".elem" slot.
+//
+// The element slot takes the same WEAK UPDATE a flattened local array's
+// element slot takes (ir_array_slots.go's convention): one slot stands
+// for every position, so it must hold something true of them all. The
+// join is built as a branch over the elements — each arm writing one
+// element's effect — which is exactly how the exits join, so `[a, b]`
+// leaves ".elem" holding a value true of both. An element the effect
+// grammar cannot spell makes the whole join unknown: an arm claiming
+// nothing joins to nothing.
+func arrayReturnMemberStatements(
+	context *LoweringContext,
+	literal *ast.Node,
+	raise kernelbridge.IrStatement,
+) []kernelbridge.IrStatement {
+	elements := literal.AsArrayLiteralExpression().Elements.Nodes
+	var out []kernelbridge.IrStatement
+	if lenSlot, held := RetMemberSlotOf(context, "len"); held {
+		out = append(out, kernelbridge.IrStatement{
+			Kind:   kernelbridge.IrStatementAssign,
+			Target: lenSlot,
+			Effect: kernelbridge.LoopEffect{
+				Kind: kernelbridge.LoopEffectConst,
+				Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{float64(len(elements))})),
+			},
+		})
+	}
+	if elemSlot, held := RetMemberSlotOf(context, "elem"); held {
+		out = append(out, elementJoinAssignments(context, elemSlot, elements)...)
+	}
+	out = append(out, kernelbridge.IrStatement{
+		Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: unknownEffect,
+	})
+	return append(out, raise)
+}
+
+// elementJoinAssignments writes the JOIN of a literal's elements into one
+// slot, as nested branches whose arms each write one element. The kernel
+// joins branch arms by the proved exact join, so the slot ends holding a
+// value true of every element — the weak update an array's one element
+// slot needs.
+//
+// The branch is the BRANCH-BOTH shape (IrStatementBranchBoth): it tests
+// nothing, walks both arms and joins them. An EMPTY literal writes
+// absent — `[]` has no element, and absent is what a read of one would
+// find.
+func elementJoinAssignments(
+	context *LoweringContext,
+	elemSlot int,
+	elements []*ast.Node,
+) []kernelbridge.IrStatement {
+	assign := func(effect kernelbridge.LoopEffect) kernelbridge.IrStatement {
+		return kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: elemSlot, Effect: effect}
+	}
+	if len(elements) == 0 {
+		return []kernelbridge.IrStatement{assign(kernelbridge.AbsentConst())}
+	}
+	effectOf := func(element *ast.Node) kernelbridge.LoopEffect {
+		if ast.IsOmittedExpression(element) {
+			return kernelbridge.AbsentConst()
+		}
+		if read, ok := RhsEffect(context, context.Sorts[elemSlot], element); ok {
+			return read
+		}
+		return unknownEffect
+	}
+	// one element: no join to build, the slot simply holds it
+	out := []kernelbridge.IrStatement{assign(effectOf(elements[0]))}
+	for _, element := range elements[1:] {
+		// each further element joins in as the other arm of a condition
+		// nothing reads — the kernel walks both and joins them, which is
+		// the weak update this slot needs
+		out = []kernelbridge.IrStatement{{
+			Kind: kernelbridge.IrStatementBranchBoth,
+			Then: out,
+			Else: []kernelbridge.IrStatement{assign(effectOf(element))},
+		}}
+	}
+	return out
 }

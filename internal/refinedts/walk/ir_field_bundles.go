@@ -26,6 +26,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 )
 
 /* ── the declared field set ──────────────────────────────────────── */
@@ -68,6 +69,163 @@ func annotationSort(typeNode *ast.Node) (BindingKind, TypeofTag) {
 	}
 }
 
+/* ── the stable symbol key ───────────────────────────────────────── */
+
+// symbolFieldPrefix opens the name a SYMBOL-KEYED field is spelled
+// under. `#` is the same character the base layout's own "#done"/"#ret"
+// and the accessor temps' "#get." wear, and the `:` after the tag is
+// what keeps this apart from a PRIVATE IDENTIFIER: `this.#id` spells its
+// field "#id", with no separator, and no JavaScript private name may
+// hold a colon. So "#sym:INSTANCE_ID_SYMBOL" collides with neither a
+// plain property name nor a `#`-named one.
+const symbolFieldPrefix = "#sym:"
+
+// StableSymbolKeyName is the field name behind a SYMBOL-KEYED member
+// access — `this[INSTANCE_ID_SYMBOL]`, `originalRef[K_MODULE_ID]` — or
+// (false) where the key is not one this reading calls stable.
+//
+// THE KEY IDENTITY. A key qualifies when it is a plain identifier whose
+// binding is a MODULE-LEVEL `const` initialized by a `Symbol(...)` or
+// `Symbol.for(...)` call on the default library's Symbol. Two things
+// follow from that shape, and both are what a field name needs:
+//
+//   - the const cannot be rebound, and its declaration runs ONCE per
+//     module, so every evaluation of the name in the program reads the
+//     one symbol value the module built. `Symbol.for` is stable for a
+//     second reason on top (the registry hands the same symbol back per
+//     key, sec-symbol.for), but `Symbol()` needs no second reason: the
+//     single evaluation is the whole argument.
+//   - two accesses spelled with the SAME const are the same field, and
+//     accesses spelled with different consts are different fields —
+//     because the symbol is the property key at runtime, and distinct
+//     symbols are distinct keys however they are described.
+//
+// The identity carried is the const's own SYMBOL (the checker's, through
+// import aliases), so an imported `INSTANCE_ID_SYMBOL` and the exporting
+// file's own spelling of it name one field. The NAME is derived from the
+// const's declared identifier, which is unique within any one scope, so
+// no two distinct consts a class body can both see spell one field name.
+//
+// WHAT STAYS OUT, each because the shape does not hold the value fixed:
+// a `let`/`var`/parameter binding (rebindable), a const initialized by
+// anything but a Symbol construction (an imported value the reading has
+// not followed, a call whose result varies), a const declared inside a
+// function or block (a fresh symbol per entry, so two accesses in two
+// activations are two different keys), a qualified or computed key
+// expression, and a WELL-KNOWN symbol (`Symbol.iterator`), which is a
+// property access rather than an identifier and never reaches here.
+//
+// A nil checker declines everything — the census's ctx-less callers get
+// exactly the behaviour they had before this reading existed.
+func StableSymbolKeyName(c *checker.Checker, key *ast.Node) (string, bool) {
+	if c == nil || key == nil {
+		return "", false
+	}
+	key = Unwrapped(key)
+	if key == nil || !ast.IsIdentifier(key) {
+		return "", false
+	}
+	symbol := symbolAt(c, key)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return "", false
+	}
+	declaration := symbol.ValueDeclaration
+	if !ast.IsVariableDeclaration(declaration) {
+		return "", false
+	}
+	name := declaration.AsVariableDeclaration().Name()
+	if name == nil || !ast.IsIdentifier(name) {
+		// a binding pattern spells no single const name to derive from
+		return "", false
+	}
+	list := declaration.Parent
+	if list == nil || !ast.IsVariableDeclarationList(list) {
+		return "", false
+	}
+	if (list.Flags & ast.NodeFlagsConst) == 0 {
+		return "", false
+	}
+	// MODULE LEVEL: the declaration statement's own parent is the source
+	// file. A const inside a function or a block re-runs its initializer
+	// per entry, so `Symbol('x')` there is a fresh key each time and two
+	// accesses need not name one field.
+	statement := list.Parent
+	if statement == nil || !ast.IsVariableStatement(statement) {
+		return "", false
+	}
+	if statement.Parent == nil || !ast.IsSourceFile(statement.Parent) {
+		return "", false
+	}
+	initializer := Unwrapped(declaration.AsVariableDeclaration().Initializer)
+	if initializer == nil || !symbolConstructionCall(c, initializer) {
+		return "", false
+	}
+	return symbolFieldPrefix + name.Text(), true
+}
+
+// symbolConstructionCall is whether an expression BUILDS a symbol:
+// `Symbol()`, `Symbol(description)`, or `Symbol.for(key)`, with the
+// `Symbol` name resolving to the default library so a local shadow named
+// Symbol is not mistaken for the builtin. It is readSymbolBuiltin's
+// recognition (symbol_builtin_models.go) without the value reading — the
+// key identity needs to know a symbol was constructed, not which one.
+func symbolConstructionCall(c *checker.Checker, e *ast.Node) bool {
+	if !ast.IsCallExpression(e) {
+		return false
+	}
+	call := e.AsCallExpression()
+	if call.QuestionDotToken != nil {
+		return false
+	}
+	if ast.IsPropertyAccessExpression(call.Expression) {
+		access := call.Expression.AsPropertyAccessExpression()
+		return access.QuestionDotToken == nil &&
+			ast.IsIdentifier(access.Expression) && access.Expression.Text() == "Symbol" &&
+			ast.IsIdentifier(access.Name()) && access.Name().Text() == "for" &&
+			c.SymbolInDefaultLib(c.GetSymbolAtLocation(access.Expression))
+	}
+	return ast.IsIdentifier(call.Expression) && call.Expression.Text() == "Symbol" &&
+		c.SymbolInDefaultLib(c.GetSymbolAtLocation(call.Expression))
+}
+
+// SymbolKeyedFieldName reads the field name behind a whole ELEMENT
+// ACCESS whose receiver is the given object — `this[S]`, `wrapper[S]` —
+// answering the derived `#sym:` name. An optional step declines: `this?.[S]`
+// admits an absent receiver, which no slot spells.
+func SymbolKeyedFieldName(c *checker.Checker, access *ast.Node) (string, bool) {
+	if access == nil || !ast.IsElementAccessExpression(access) {
+		return "", false
+	}
+	element := access.AsElementAccessExpression()
+	if element.QuestionDotToken != nil {
+		return "", false
+	}
+	return StableSymbolKeyName(c, element.ArgumentExpression)
+}
+
+// symbolMemberFieldName reads the field name behind a class MEMBER's
+// computed name — the `[INSTANCE_ID_SYMBOL]` of
+// `private readonly [INSTANCE_ID_SYMBOL]: string`. Same key identity,
+// read off a declaration rather than an access, so the declaration and
+// every access spell one field.
+func symbolMemberFieldName(c *checker.Checker, name *ast.Node) (string, bool) {
+	if name == nil || !ast.IsComputedPropertyName(name) {
+		return "", false
+	}
+	return StableSymbolKeyName(c, name.AsComputedPropertyName().Expression)
+}
+
+// checkerOf is the census's nil-tolerant reach for the checker: the
+// field readings run under ctx-less callers (a lowering with no program,
+// the syntax-only tests), and those decline every symbol key rather than
+// crashing.
+func checkerOf(ctx *FlowContext) *checker.Checker {
+	if ctx == nil || ctx.P == nil {
+		return nil
+	}
+	return ctx.P.Checker
+}
+
 // ClassFieldsOf is the declared INSTANCE FIELDS of a class declaration
 // or class expression, in declaration order, spelled under the given
 // receiver by the caller (the slot name is filled in by BundleFieldsAs;
@@ -83,8 +241,11 @@ func annotationSort(typeNode *ast.Node) (BindingKind, TypeofTag) {
 //     own summary), never as a slot, and an accessor with a body runs
 //     code the slot could not stand for;
 //   - a member whose name is COMPUTED (`[key]: number`) — nothing spells
-//     the slot. Note this is the DECLARATION being computed; a computed
-//     ACCESS in a body is FieldCensus.Computed's business.
+//     the slot, UNLESS the key is a STABLE SYMBOL const
+//     (`private readonly [INSTANCE_ID_SYMBOL]: string`), which spells the
+//     derived `#sym:INSTANCE_ID_SYMBOL` name and contributes like any
+//     other field. Note this is the DECLARATION being computed; a
+//     computed ACCESS in a body is FieldCensus.Computed's business.
 //
 // A field whose annotation this reading cannot sort still CONTRIBUTES,
 // wearing an unknown sort — the census reports the shape it found, and
@@ -111,10 +272,38 @@ func ClassFieldsOf(ctx *FlowContext, classLike *ast.Node) ([]BundleField, bool) 
 		}
 		declaration := member.AsPropertyDeclaration()
 		name := declaration.Name()
-		if name == nil || (!ast.IsIdentifier(name) && !ast.IsPrivateIdentifier(name)) {
-			continue
+		var text string
+		switch {
+		case name != nil && (ast.IsIdentifier(name) || ast.IsPrivateIdentifier(name)):
+			text = name.Text()
+		default:
+			// A computed name spells a slot only through a stable symbol
+			// const; every other computed key names nothing the vector holds.
+			//
+			// THE PRIVACY SPLIT, and why it does not gate the slot. A symbol
+			// property is reachable only by code holding the symbol VALUE,
+			// so an UNEXPORTED module-level const keeps the field inside the
+			// module's own text — runtime privacy the `private` modifier
+			// never had, since the modifier is erased. An EXPORTED const
+			// (nest exports INSTANCE_ID_SYMBOL and INSTANCE_METADATA_SYMBOL)
+			// hands the key to every importer, and any of them can write the
+			// field. ExportedSymbolConst (class_field_invariants.go) is the
+			// reading of that.
+			//
+			// Both sides get a slot here, because that is what the escape
+			// rules already do for a PUBLIC field: a public field is
+			// writable by every holder of the instance and still takes an
+			// entry, with the census's own escape and havoc reports — not
+			// the field's declared visibility — deciding when the slot stops
+			// being believed. An exported symbol field is open in exactly
+			// that way and takes exactly that treatment; an unexported one
+			// is strictly tighter. Nothing here claims more for either.
+			symbolName, isSymbolKey := symbolMemberFieldName(checkerOf(ctx), name)
+			if !isSymbolKey {
+				continue
+			}
+			text = symbolName
 		}
-		text := name.Text()
 		// a name declared twice (a class body tsc would refuse, or two
 		// spellings colliding) contributes once — the slot vector must not
 		// hold the same spelling twice
@@ -508,9 +697,15 @@ type FieldCensus struct {
 //     compound), the operand of `++`/`--`, or the operand of `delete`. A
 //     compound write and an update also READ, so both lists get the field.
 //   - COMPUTED is `<receiver>[e]` — an element access whose own receiver
-//     is this receiver. When that access is a STORE position rather than
-//     a read, ComputedWrite is set too: a read names no field and moves
-//     nothing, while a store moves a slot nothing names.
+//     is this receiver AND whose key is not a stable symbol const. When
+//     that access is a STORE position rather than a read, ComputedWrite
+//     is set too: a read names no field and moves nothing, while a store
+//     moves a slot nothing names.
+//   - a SYMBOL-KEYED access (`this[INSTANCE_ID_SYMBOL]`) is NOT computed:
+//     the key identity names one field, so the access reads or writes the
+//     `#sym:` field exactly as a dotted step reads or writes its own. It
+//     needs a checker to resolve the const, so it is FieldCensusWith's
+//     arm and the checker-less FieldCensusOf keeps reporting Computed.
 //   - an ESCAPE is every other occurrence of the receiver: a bare
 //     identifier or `this` that is not the receiver of one of the above,
 //     an optional chain (`this?.x` — its receiver may be absent, which no
@@ -526,6 +721,16 @@ type FieldCensus struct {
 // into it reports both flags with whatever reads and writes it also did;
 // the consumer rules on what that is worth.
 func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) FieldCensus {
+	return FieldCensusWith(nil, body, receiverName, fields)
+}
+
+// FieldCensusWith is FieldCensusOf carrying the checker the STABLE
+// SYMBOL KEY needs. With a checker, `<receiver>[S]` where S resolves to
+// a module-level Symbol const reads and writes the `#sym:S` field rather
+// than reporting a computed move; with a nil checker every element
+// access on the receiver is computed, which is the reading every caller
+// had before the symbol key existed.
+func FieldCensusWith(c *checker.Checker, body *ast.Node, receiverName string, fields []BundleField) FieldCensus {
 	census := FieldCensus{}
 	if body == nil {
 		return census
@@ -572,11 +777,26 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 		return true
 	}
 
-	// fieldAccessOf: is this a plain `<receiver>.<name>` property access?
-	// An optional step is not — `this?.x` admits an absent receiver, which
-	// no slot spells, so it falls through to the escape rule.
+	// fieldAccessOf: is this a plain `<receiver>.<name>` property access,
+	// or a `<receiver>[S]` access under a STABLE SYMBOL const? Both name
+	// exactly one field, so both answer here and every read, write, and
+	// callee rule below treats them alike.
+	//
+	// An optional step is neither — `this?.x` admits an absent receiver,
+	// which no slot spells, so it falls through to the escape rule.
 	fieldAccessOf := func(node *ast.Node) (string, bool) {
-		if node == nil || !ast.IsPropertyAccessExpression(node) {
+		if node == nil {
+			return "", false
+		}
+		if ast.IsElementAccessExpression(node) {
+			if !isReceiver(Unwrapped(node.AsElementAccessExpression().Expression)) {
+				return "", false
+			}
+			// the symbol const IS the property key at runtime, so the access
+			// names one field the way a dotted step does
+			return SymbolKeyedFieldName(c, node)
+		}
+		if !ast.IsPropertyAccessExpression(node) {
 			return "", false
 		}
 		access := node.AsPropertyAccessExpression()
@@ -642,11 +862,21 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 			return false
 		}
 		if name, isField := fieldAccessOf(target); isField {
-			if noteWrite(name) {
+			switch {
+			case noteWrite(name):
 				if alsoReads {
 					noteRead(name)
 				}
-			} else {
+			case ast.IsElementAccessExpression(target):
+				// a SYMBOL-KEYED store whose field the set never declared —
+				// the class stores under a symbol it declares no member for.
+				// The key names ONE field, so nothing outside this receiver
+				// moves, and the declaration still bounds the slots: the
+				// bounded havoc ComputedWrite already stands for is the honest
+				// report, not the whole-body escape an unnamed member gets.
+				census.Computed = true
+				census.ComputedWrite = true
+			default:
 				// a member the field set never declared: no slot holds it, and
 				// writing it moves state the census cannot name
 				census.Escapes = true
@@ -773,7 +1003,7 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 			if !mentionsReceiver(node, receiverName) {
 				return false
 			}
-			if reads, called, admissible := captureMentions(node, isReceiver, byName); admissible {
+			if reads, called, admissible := captureMentions(c, node, isReceiver, byName); admissible {
 				for _, name := range reads {
 					noteRead(name)
 				}
@@ -870,11 +1100,22 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 			node.ForEachChild(visit)
 			return false
 		}
-		// a COMPUTED member read on the receiver
+		// a member read on the receiver spelled with brackets. A STABLE
+		// SYMBOL const names one field, so it is the read of that field;
+		// every other key names none, and the access is computed.
 		if ast.IsElementAccessExpression(node) {
 			access := node.AsElementAccessExpression()
 			if isReceiver(Unwrapped(access.Expression)) {
-				census.Computed = true
+				if name, isField := fieldAccessOf(node); isField {
+					if !noteRead(name) {
+						// the class stores under this symbol without declaring a
+						// member for it — the key still names ONE field, so the
+						// bounded computed reading is what the access is worth
+						census.Computed = true
+					}
+				} else {
+					census.Computed = true
+				}
 				consumeReceiver(consumed, node)
 				// the index expression still walks — it may mention the receiver
 				// itself (`this[this.key]`), which is its own occurrence
@@ -955,8 +1196,19 @@ func FieldCensusOf(body *ast.Node, receiverName string, fields []BundleField) Fi
 		if ast.IsCallExpression(node) {
 			call := node.AsCallExpression()
 			if call.QuestionDotToken == nil {
-				if name, isField := fieldAccessOf(Unwrapped(call.Expression)); isField {
-					if !noteRead(name) {
+				callee := Unwrapped(call.Expression)
+				if name, isField := fieldAccessOf(callee); isField {
+					switch {
+					case noteRead(name):
+					case ast.IsElementAccessExpression(callee):
+						// `this[S]()` where the class declares no member for S.
+						// The name is a `#sym:` spelling no method declaration
+						// can carry, so it would make CaptureWriteSet's closure
+						// incomputable rather than name a method to walk. It is
+						// a call through a slot nothing holds — the same worth a
+						// computed read has, and no more.
+						census.Computed = true
+					default:
 						// the callee is a METHOD name, not a field — recorded
 						// for CaptureWriteSet's closure, nothing else
 						already := false
@@ -1058,6 +1310,14 @@ func (census FieldCensus) Believable() bool {
 // signature, a computed name) makes the whole set incomputable and the
 // answer is (nil, false) — the caller then keeps the escape.
 func CaptureWriteSet(classLike *ast.Node, fields []BundleField, methods []string) ([]BundleField, bool) {
+	return CaptureWriteSetWith(nil, classLike, fields, methods)
+}
+
+// CaptureWriteSetWith is CaptureWriteSet carrying the checker the stable
+// symbol key needs, so a captured method writing `this[S]` contributes
+// that field to the havoc set instead of making the whole set
+// incomputable through a computed write.
+func CaptureWriteSetWith(c *checker.Checker, classLike *ast.Node, fields []BundleField, methods []string) ([]BundleField, bool) {
 	if classLike == nil || !ast.IsClassLike(classLike) {
 		return nil, false
 	}
@@ -1089,7 +1349,7 @@ func CaptureWriteSet(classLike *ast.Node, fields []BundleField, methods []string
 			// bodyless overload — its writes are unenumerable
 			return nil, false
 		}
-		census := FieldCensusOf(body, "this", spelled)
+		census := FieldCensusWith(c, body, "this", spelled)
 		if census.Escapes || census.ComputedWrite {
 			return nil, false
 		}
@@ -1213,6 +1473,7 @@ func isPropertyStepName(node *ast.Node) bool {
 // every collected method and treat those fields as movable at every
 // call statement — captureMentions only collects the names.
 func captureMentions(
+	c *checker.Checker,
 	node *ast.Node,
 	isReceiver func(*ast.Node) bool,
 	byName map[string]BundleField,
@@ -1312,6 +1573,34 @@ func captureMentions(
 					return true
 				}
 				name := access.Name().Text()
+				if _, declared := byName[name]; !declared {
+					readOnly = false
+					return true
+				}
+				reads = append(reads, name)
+				return false
+			}
+		}
+		// a SYMBOL-KEYED read: `this[S]` under a stable symbol const names
+		// one declared field, so it is admissible on the same ground the
+		// dotted read is — reading moves nothing. Every other bracketed
+		// key names no field and fails below.
+		//
+		// `this[S](…)` is NOT that read. It CALLS whatever the slot holds,
+		// and the called function may write any field at a time this scan
+		// cannot place — while the `#sym:` spelling names no method
+		// declaration the write-set closure could walk. It fails the
+		// admission, and the caller keeps the escape.
+		if ast.IsElementAccessExpression(child) {
+			element := child.AsElementAccessExpression()
+			if isReceiver(Unwrapped(element.Expression)) {
+				name, isSymbolKey := SymbolKeyedFieldName(c, child)
+				calledDirectly := child.Parent != nil && ast.IsCallExpression(child.Parent) &&
+					Unwrapped(child.Parent.AsCallExpression().Expression) == child
+				if !isSymbolKey || calledDirectly {
+					readOnly = false
+					return true
+				}
 				if _, declared := byName[name]; !declared {
 					readOnly = false
 					return true

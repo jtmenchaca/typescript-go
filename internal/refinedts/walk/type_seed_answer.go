@@ -126,12 +126,40 @@ func anyWriteReachesToken(p *program.CheckerProgram, token *ast.Node) bool {
 	if len(writes) == 0 {
 		return false
 	}
+	// which BINDING the read names — the write only reaches a read of
+	// the same one. A write whose left side resolves to a different
+	// symbol writes a different slot: an `any` assigned to a `value`
+	// declared in one scope cannot be what a `value` declared in
+	// another holds, whatever the ordering. This is the cannot-reach
+	// argument at the granularity the name text alone cannot make, and
+	// it is why it applies to every write below, including the two the
+	// ordering rules deliberately keep (module top level, another
+	// function): those refusals answer "not orderable", and a write to
+	// another binding needs no ordering at all.
+	//
+	// A read the checker does not place answers no symbol; then nothing
+	// is proved and every write stays in the ordering rules below.
+	readSymbol := p.Checker.GetSymbolAtLocation(token)
+	reaching := writes
+	if readSymbol != nil {
+		reaching = nil
+		for _, write := range writes {
+			writeSymbol := p.Checker.GetSymbolAtLocation(write)
+			if writeSymbol != nil && writeSymbol != readSymbol {
+				continue // another binding's slot — this write cannot reach
+			}
+			reaching = append(reaching, write)
+		}
+		if len(reaching) == 0 {
+			return false
+		}
+	}
 	readHolder := enclosingFunctionOf(token)
 	if readHolder == nil {
 		return true // module top level: nothing to order the writes against
 	}
 	tokenStart := nodeStart(token)
-	for _, write := range writes {
+	for _, write := range reaching {
 		if enclosingFunctionOf(write) != readHolder {
 			return true // another function's write runs at its caller's pleasure
 		}

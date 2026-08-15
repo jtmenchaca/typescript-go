@@ -8,11 +8,28 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
+
+// numberLiteralValueOf reads a number-literal type's own value. tsgo
+// stores it as jsnum.Number (checker/types.go's `value any // string |
+// jsnum.Number | bool | PseudoBigInt`), a NAMED float64 type -- a
+// plain `.(float64)` assertion never matches it. False where the
+// checker pinned no value (a computed enum member).
+func numberLiteralValueOf(t *checker.Type) (float64, bool) {
+	switch value := t.AsLiteralType().Value().(type) {
+	case jsnum.Number:
+		return float64(value), true
+	case float64:
+		return value, true
+	}
+	return 0, false
+}
 
 // ReadEnumMemberAccess is readEnumMemberAccess in the TS source.
 func ReadEnumMemberAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.AbstractValue {
@@ -39,7 +56,16 @@ func ReadEnumMemberAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomai
 		if isEnum {
 			memberType := ctx.P.Checker.GetTypeAtLocation(e)
 			if memberType.IsNumberLiteral() {
-				v, _ := memberType.AsLiteralType().Value().(float64)
+				// tsgo stores a number literal's value as jsnum.Number, a
+				// NAMED float64 -- a plain float64 assertion never matched
+				// it, so every numeric enum member read 0 instead of its
+				// own value. A member the checker never pinned (a computed
+				// one) has no value at all and stays residue below.
+				v, ok := numberLiteralValueOf(memberType)
+				if !ok {
+					out := silence.Residue()
+					return &out
+				}
 				out := abstractdomain.KnownValues([]float64{v}, abstractdomain.PrimitiveNumber, abstractdomain.TrustSpec)
 				return &out
 			}

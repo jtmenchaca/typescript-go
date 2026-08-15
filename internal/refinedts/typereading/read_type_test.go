@@ -179,6 +179,83 @@ func TestReadHostType_AnUnconstrainedTypeParameterClaimsNothing(t *testing.T) {
 	}
 }
 
+func TestReadHostType_ANumberLiteralTypeReadsItsOwnValue(t *testing.T) {
+	// tsgo stores a literal's value as jsnum.Number, a NAMED float64:
+	// the plain float64 assertion this used to make never matched, so
+	// every number literal type -- enum members included -- read
+	// nothing.
+	p := programFromSource(t, "export function f(n: 7): void { console.log(n); }\n")
+	worn, ok := hostAt(p, identifierIn(t, p, "n", 1))
+	if !ok {
+		t.Fatalf("expected a value")
+	}
+	if worn.Kind != abstractdomain.KindValues || len(worn.Values) != 1 || worn.Values[0] != 7 {
+		t.Errorf("Kind = %v, Values = %v, want values [7]", worn.Kind, worn.Values)
+	}
+}
+
+func TestReadHostType_AnEnumTypedPositionReadsItsMemberValues(t *testing.T) {
+	p := programFromSource(t, "export enum M { GET = 0, POST, PUT }\nexport function f(m: M): void { console.log(m); }\n")
+	worn, ok := hostAt(p, identifierIn(t, p, "m", 1))
+	if !ok {
+		t.Fatalf("expected a value")
+	}
+	words, hasWords := abstractdomain.FormatAbstractValue(worn)
+	if !hasWords || words != "{(0, 1, 2)}" {
+		t.Errorf("FormatAbstractValue = %q, %v, want %q, true", words, hasWords, "{(0, 1, 2)}")
+	}
+}
+
+func TestReadHostType_AStringEnumTypedPositionReadsItsMemberWords(t *testing.T) {
+	p := programFromSource(t, "export enum S { A = 'a', B = 'b' }\nexport function f(s: S): void { console.log(s); }\n")
+	worn, ok := hostAt(p, identifierIn(t, p, "s", 1))
+	if !ok {
+		t.Fatalf("expected a value")
+	}
+	if worn.Kind != abstractdomain.KindSet {
+		t.Errorf("Kind = %v, want set", worn.Kind)
+	}
+}
+
+func TestReadHostType_ADepthCutUnionArmJoinsAtItsSortGround(t *testing.T) {
+	// the inner arms sit past the union branch's depth: each still
+	// names a sort, so the union answers its arms rather than nothing
+	p := programFromSource(t, "type A = 'a' | 'b';\ntype B = A | 'c';\ntype C = B | 'd';\ntype D = C | 'e';\nexport function g(v: number | D): void { console.log(v); }\n")
+	if _, ok := hostAt(p, identifierIn(t, p, "v", 1)); !ok {
+		t.Errorf("expected a value")
+	}
+}
+
+func TestReadHostType_AnArmNamingNoSortStillDissolvesItsUnion(t *testing.T) {
+	// a record arm has no widest sort reading, and the union of a
+	// stated set with the unknown IS the unknown
+	p := programFromSource(t, "type Odd = { a: { b: { c: { d: { e: string } } } } };\nexport function f(v: string | Odd): void { console.log(v); }\n")
+	if _, ok := hostAt(p, identifierIn(t, p, "v", 1)); ok {
+		t.Errorf("expected no value")
+	}
+}
+
+func TestReadHostType_ALibDeclaredRecordSeedsItsReadableKeys(t *testing.T) {
+	p := programFromSource(t, "export function f(e: Error): void { console.log(e); }\n")
+	worn, ok := hostAt(p, identifierIn(t, p, "e", 1))
+	if !ok {
+		t.Fatalf("expected a value")
+	}
+	if worn.Kind != abstractdomain.KindObject {
+		t.Fatalf("Kind = %v, want object", worn.Kind)
+	}
+	if worn.Complete {
+		t.Errorf("Complete = true, want false — a host record names keys it does not spell")
+	}
+	seen := map[string]bool{}
+	for _, k := range worn.Keys {
+		seen[k.Name] = true
+	}
+	if !seen["message"] || !seen["name"] {
+		t.Errorf("Keys = %v, want message and name among them", worn.Keys)
+	}
+}
+
 func TestReadTypeNode_BooleanArrayIsAStarOfTheTwoCodes(t *testing.T) {
 	p := programFromSource(t, "export function f(xs: boolean[]): void { console.log(xs); }\n")
 	parameter := parameterNamed(t, p, "xs")

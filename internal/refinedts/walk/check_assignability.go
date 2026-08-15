@@ -75,6 +75,24 @@ func CheckAssignabilityAgainst(
 	what string,
 	positionType *checker.Type,
 ) {
+	CheckAssignabilityOfArm(ctx, known, target, node, what, positionType, false)
+}
+
+// CheckAssignabilityOfArm is checkAssignabilityAgainst carrying the
+// one extra fact the union dispatcher holds: this known is ONE ARM of
+// a wider union the value may take, so a refutation below is a
+// possibility about the value rather than a verdict on it. No TS twin
+// — the TS source has no arm channel, which is what lets one arm's
+// definite sentence surface at a union position.
+func CheckAssignabilityOfArm(
+	ctx *FlowContext,
+	known abstractdomain.AbstractValue,
+	target annotations.DeclaredRefinement,
+	node *ast.Node,
+	what string,
+	positionType *checker.Type,
+	oneArmOf bool,
+) {
 	tracing.Count("checkAssignability", 0)
 	// an UNREAD refine rides the statement: the parse checks more
 	// than the set says, so the position stays undetermined even
@@ -189,5 +207,5 @@ func CheckAssignabilityAgainst(
 	if CheckAdmittedSort(ctx, known, node, what, positionType) {
 		return
 	}
-	CheckSetMembership(ctx, known, target, node, what)
+	checkSetMembershipOfArm(ctx, known, target, node, what, oneArmOf)
 }

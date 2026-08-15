@@ -482,7 +482,9 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 		if !ast.IsIdentifier(name) {
 			continue
 		}
-		callEnv.Set(name.Text(), ParameterKnown(parameter, i, effective))
+		// the same declared-type meet the inline route binds through: one
+		// call site's complete key set is not an open-map parameter's
+		callEnv.Set(name.Text(), BoundParameterKnown(ctx, parameter, i, effective))
 	}
 	var sink []abstractdomain.AbstractValue
 	silent := *ctx

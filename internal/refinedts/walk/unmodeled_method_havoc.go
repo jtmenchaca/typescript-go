@@ -93,10 +93,21 @@ func scalarGroundOfType(t *checker.Type) *abstractdomain.AbstractValue {
 		if allLiteral {
 			values := make([]float64, len(present))
 			for i, m := range present {
-				values[i], _ = m.AsLiteralType().Value().(float64)
+				// the value is jsnum.Number, a named float64 — a bare
+				// .(float64) assertion would silently read 0
+				if n, ok := numberLiteralValue(m.AsLiteralType().Value()); ok {
+					values[i] = n
+				} else {
+					allLiteral = false
+					break
+				}
 			}
-			v := abstractdomain.KnownValues(values, abstractdomain.PrimitiveNumber, abstractdomain.TrustSpec)
-			exact = &v
+			// a member whose value did not read keeps the sort ground
+			// below — an exact set missing a member would claim too much
+			if allLiteral {
+				v := abstractdomain.KnownValues(values, abstractdomain.PrimitiveNumber, abstractdomain.TrustSpec)
+				exact = &v
+			}
 		}
 	}
 	var ground abstractdomain.AbstractValue

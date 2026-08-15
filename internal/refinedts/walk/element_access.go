@@ -9,6 +9,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
@@ -17,8 +18,72 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
+// OpenMapAt is whether the type at a node is an open map — a
+// `Record<K, V>` or anything with an index signature, `{[k: string]: V}`.
+// Such a type names no fixed key set: any key may be present at runtime and
+// any key may be missing, and the checker never witnessed which.
+//
+// One rule, three readers. It is the SOURCE test at the inline parameter
+// binding (entry_env.go's entryStateMeet, reached from
+// inline_contract_body.go and inliner.go), where a parameter node is the
+// node handed in; and the read-side gate under a missing-key read here,
+// under the dotted read (object_key_access.go), and under the `in`
+// operator's absence half (binary_comparison.go), where a receiver
+// expression is the node handed in.
+//
+// What it gates is the Complete arm of a missing-key read. Completeness is
+// only ever earned by CONSTRUCTION — an object literal the walk itself built
+// (object_literal.go), keys it enumerated (Object.fromEntries of a readable
+// iterable, JSON.parse of a known document). It is never read off a type:
+// every typereading path passes complete=false (recipes.go:115,
+// host_type.go:253, type_node.go:135), so an open-map TYPE cannot mint the
+// flag on its own.
+//
+// The flag arrives on an open-map value through a parameter binding: an
+// inlined callee binds each parameter to the CALLER's argument value, so a
+// caller passing an object literal hands the callee a Complete=true object
+// even where the parameter is declared `Record<K, V>` — the callee's body
+// then reads one call site's key set as if it were every call's. On recharts
+// that made `errorBars[item.id]` answer an exact Undef, `?.filter` yield
+// undefined, the callee's guards decide, and `errorDomain.length >= 2` fire
+// as provably false at axisSelectors.ts:871 against a live ErrorBar path.
+//
+// The honest reading is that completeness proved at ONE call site is not
+// completeness of the parameter, so a missing key on an open-map receiver
+// answers the residue — not-known — rather than a definite absence.
+func OpenMapAt(c *checker.Checker, at *ast.Node) bool {
+	if at == nil {
+		return false
+	}
+	atType := c.GetTypeAtLocation(at)
+	if atType == nil {
+		return false
+	}
+	return len(c.GetIndexInfosOfType(atType)) > 0
+}
+
+// openMapReceiver reads OpenMapAt for a receiver expression. The parameter
+// binding now strips the completeness this once had to catch downstream, so
+// the read-side gates are defense in depth: an evaluation-path object can
+// still carry one-site completeness through routes that never cross a
+// parameter binding (a literal assigned to a local whose declared type is a
+// Record, a field seeded from an object literal), and the read is where that
+// value meets its open-map type.
+func openMapReceiver(ctx *FlowContext, receiver *ast.Node) bool {
+	return OpenMapAt(ctx.P.Checker, receiver)
+}
+
 // ElementAccessOf is elementAccessOf in the TS source.
 func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.AbstractValue {
+	// `this[INSTANCE_ID_SYMBOL]` — a field spelled with a STABLE SYMBOL
+	// const rather than a dot. The key names one field, so the read is
+	// the dotted read's: the class's own invariant for that field, or the
+	// opaque floor. It sits first because every reading below is about a
+	// key that names a POSITION in a sequence or a string key in a map,
+	// and a symbol key is neither.
+	if symbolKeyed := ReadThisSymbolKeyedAccess(ctx, env, e); symbolKeyed != nil {
+		return symbolKeyed
+	}
 	// an element read through a CAST of an opaque binding: the
 	// assertion changes no runtime value, so the read stays opaque —
 	// whatever the key's spelling (a symbol key included)
@@ -151,7 +216,7 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 							out := receiver.Keys[idx].Value
 							return &out
 						}
-						if receiver.Complete {
+						if receiver.Complete && !openMapReceiver(ctx, elem.Expression) {
 							// the same prototype-collision rule as the dotted read:
 							// `errors["toString"]` on a complete plain object answers
 							// the inherited FUNCTION, and any other missing key is
@@ -172,7 +237,21 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 						return &out
 					}
 				}
-				// a list element read is that slot's own knowledge
+				// a list element read is that slot's own knowledge.
+				//
+				// No absence wrapper rides along, and the in-bounds index is
+				// the whole proof, because a KindList is HOLE-FREE by
+				// construction: every KnownList in the tree is built
+				// element-by-element from a source the walk already walked —
+				// an array literal (array_literal.go, where an elision writes
+				// Undef into its own slot), a split/entries/map/filter result,
+				// a destructuring rest. Nothing grows a KindList by scattered
+				// index write: an element-access write marks its whole
+				// receiver (dataflowfacts/observed_paths.go markWriteTarget),
+				// so `t[3] = x` retires the list rather than punching a hole
+				// in it. A sequence that ARRIVES unproved — a parameter, a
+				// summary read — is not a KindList at all; it reaches the
+				// set-shaped arm above, which is where the absence is worn.
 				if receiver.Kind == abstractdomain.KindList && index.Kind == abstractdomain.KindValues &&
 					len(index.Values) == 1 && isInteger(index.Values[0]) {
 					i := index.Values[0]
