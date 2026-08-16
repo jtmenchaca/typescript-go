@@ -46,6 +46,15 @@ func analyzeFunctionBody(outer *FlowContext, contract *FunctionContract, callSit
 	// this IS the declaration's dedicated walk: its call sites
 	// record their environments as read-once snapshots
 	ctx.SnapshotOwner = contract.Declaration
+	// a generator's stated yield position judges every `yield e` in
+	// THIS body (yield_contract.go) — set per body, nil for every
+	// non-generator, so a nested walk never wears an outer
+	// generator's claim; an ungrounded contract judges nothing here,
+	// the same as its result
+	ctx.YieldStated = nil
+	if contract.Grounded {
+		ctx.YieldStated = contract.Yield
+	}
 
 	env := NewEnv()
 	parameters := contract.Declaration.Parameters()

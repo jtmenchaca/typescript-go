@@ -44,11 +44,16 @@ func ContractOf(ctx *FlowContext, callee *ast.Node) *FunctionContract {
 	}
 	// a METHOD overridden anywhere in view dispatches virtually: the
 	// resolved base body must not stand for every instance, so no
-	// contract stands for the call
+	// contract stands for the call. A receiver spelled `new C(…)` is
+	// the one shape whose runtime class the callee expression itself
+	// pins — the dispatch is static, the resolved member IS the body
+	// that runs, and the contract stands (NewExpressionDispatchTarget,
+	// super_binding.go).
 	if ast.IsMethodDeclaration(declaration) {
 		md := declaration.AsMethodDeclaration()
 		if ast.IsIdentifier(md.Name()) {
-			if _, overridden := OverriddenMethodNames(&ctx.Contracts)[md.Name().Text()]; overridden {
+			if _, overridden := OverriddenMethodNames(&ctx.Contracts)[md.Name().Text()]; overridden &&
+				!NewExpressionDispatchTarget(ctx, callee, declaration) {
 				return nil
 			}
 		}

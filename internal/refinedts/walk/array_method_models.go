@@ -7,8 +7,11 @@
 package walk
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -107,6 +110,22 @@ func readArrayFrom(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abstr
 			for i := range items {
 				items[i] = abstractdomain.Undef
 			}
+			hasItems = true
+		}
+	} else if collectionItems, ok := collectionSpreadItems(source); ok {
+		// a BUILT collection drains exactly: a Set's members, a Map's
+		// [key, value] pairs, in entry order (sec-array.from step 6 over
+		// the collection's own iterator)
+		items = append(items, collectionItems...)
+		hasItems = true
+	}
+	if !hasItems {
+		// a values()/keys()/entries() view over a receiver the walk
+		// holds exactly drains those same exact items — read off the
+		// environment, which the view call's evaluation above left
+		// intact
+		if viewItems, ok := drainedViewItems(ctx, env, sourceExpression); ok {
+			items = append(items, viewItems...)
 			hasItems = true
 		}
 	}
@@ -269,6 +288,25 @@ func readArrayReadMethods(site MethodCallSite, argKnowns []abstractdomain.Abstra
 				return &out
 			}
 		}
+		// `join` — sec-array.prototype.join: an undefined separator reads
+		// as "," (step 3), else ToString of the exact separator; each
+		// element converts through ToString (step 7.c.ii) — a Number
+		// spells its decimal form (sec-numeric-types-number-tostring,
+		// through the kernel's proved speller) — and the pieces
+		// concatenate with the separator between them. The undef marker
+		// declines the separator: it conflates undefined (the ","
+		// default) with null, whose ToString is the word "null".
+		if method == "join" && len(argKnowns) <= 1 {
+			separator, separatorOk := ",", true
+			if len(argKnowns) == 1 {
+				separator, separatorOk = exactStringOf(argKnowns[0])
+			}
+			if separatorOk {
+				text, grade := jsNumericJoin(site.Ctx.Kernel.Decimal, receiver.Values, separator)
+				out := abstractdomain.KnownValues(refinementsets.CodepointsOf(text), abstractdomain.PrimitiveString, abstractdomain.MinTrustLevel(oracleGrade, grade))
+				return &out
+			}
+		}
 		if method == "toReversed" && len(argKnowns) == 0 {
 			reversed := make([]float64, len(receiver.Values))
 			for i, v := range receiver.Values {
@@ -312,7 +350,58 @@ func readArrayReadMethods(site MethodCallSite, argKnowns []abstractdomain.Abstra
 			}
 		}
 	}
+	// `join` over an exact LIST: each item's own text reading joins
+	// through the one text model (sec-array.prototype.join step 7.c.ii
+	// reads ToString of each element); an undefined item contributes
+	// the empty string — step 7.c skips ToString for undefined AND
+	// null, so the undef marker's conflation costs nothing here. Exact
+	// only when every piece is.
+	if !receiverStringy && receiver.Kind == abstractdomain.KindList && method == "join" && len(argKnowns) <= 1 {
+		separator, separatorOk := ",", true
+		if len(argKnowns) == 1 {
+			separator, separatorOk = exactStringOf(argKnowns[0])
+		}
+		if separatorOk {
+			grade := oracleGrade
+			pieces := make([]string, len(receiver.Items))
+			every := true
+			for i, item := range receiver.Items {
+				if item.Kind == abstractdomain.KindUndef {
+					pieces[i] = ""
+					continue
+				}
+				reading, ok := TextOfKnown(site.Ctx.Kernel.Decimal, item)
+				if !ok || !reading.HasExact {
+					every = false
+					break
+				}
+				grade = abstractdomain.MinTrustLevel(grade, reading.Grade)
+				pieces[i] = stringOf(reading.Exact)
+			}
+			if every {
+				out := abstractdomain.KnownValues(refinementsets.CodepointsOf(strings.Join(pieces, separator)), abstractdomain.PrimitiveString, grade)
+				return &out
+			}
+		}
+	}
 	return nil
+}
+
+// jsNumericJoin joins an exact numeric tuple's elements through the
+// ONE number-text model (TextOfKnown's decimal spelling, text_of_value.go),
+// separated by an exact separator — sec-array.prototype.join's loop
+// with every element a Number, each spelled by
+// sec-numeric-types-number-tostring. Returns the joined text and the
+// trust floor of the spellings used.
+func jsNumericJoin(decimal func(v float64) (string, bool), values []float64, separator string) (string, abstractdomain.TrustLevel) {
+	grade := abstractdomain.TrustProved
+	pieces := make([]string, len(values))
+	for i, v := range values {
+		reading, _ := TextOfKnown(decimal, abstractdomain.KnownValues([]float64{v}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved))
+		grade = abstractdomain.MinTrustLevel(grade, reading.Grade)
+		pieces[i] = stringOf(reading.Exact)
+	}
+	return strings.Join(pieces, separator), grade
 }
 
 // sliceFloat64 mirrors Array.prototype.slice's argument reading over

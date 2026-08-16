@@ -32,6 +32,7 @@ func usesAreAllDeclaredKeySteps(
 	declaration *ast.Node,
 	name string,
 	keys []ObjectLocalKey,
+	methods map[string]*ast.Node,
 	sameShapeName func(other string) bool,
 ) bool {
 	declared := declaredLeafPaths(keys)
@@ -66,10 +67,25 @@ func usesAreAllDeclaredKeySteps(
 				right := Unwrapped(bin.Right)
 				// this record is the TARGET
 				if ast.IsIdentifier(left) && left.Text() == name {
+					// a record with METHOD rows never assigns whole, in
+					// either direction: its method calls resolve to THIS
+					// literal's declarations, and a rebound record would run
+					// other bodies under the same spellings
+					if len(methods) > 0 {
+						ok = false
+						return true
+					}
 					if ast.IsIdentifier(right) && sameShapeName(right.Text()) {
 						return false
 					}
 					if ast.IsObjectLiteralExpression(right) {
+						// a method-bearing RHS literal leaf-copies its scalar
+						// rows but replaces the method identities — no leaf
+						// rewrite spells that
+						if len(literalMethodPaths(right, nil)) > 0 {
+							ok = false
+							return true
+						}
 						if rows, rowsOk := flatKeysOfLiteralWith(c, right, name, nil); rowsOk && recordShapeOf(rows) == shape {
 							// the rows' own initializers still have to be scanned —
 							// one of them could mention this record
@@ -84,9 +100,15 @@ func usesAreAllDeclaredKeySteps(
 				}
 				// this record is the SOURCE: `q = p` where q is a flattened
 				// record of the same leaf shape reads p leaf by leaf, never
-				// as one value
+				// as one value. A method-bearing record refuses this too —
+				// the copy would hand q an object whose methods q's own
+				// vocabulary never spelled.
 				if ast.IsIdentifier(right) && right.Text() == name &&
 					ast.IsIdentifier(left) && sameShapeName(left.Text()) {
+					if len(methods) > 0 {
+						ok = false
+						return true
+					}
 					return false
 				}
 			}
@@ -103,6 +125,29 @@ func usesAreAllDeclaredKeySteps(
 					}
 					ok = false
 					return true
+				}
+			}
+		}
+		// `p.m(…)` — a METHOD row called through the record. The callee
+		// spells no leaf: the summary door threads the method's `this`
+		// entries onto the record's own slots and the write-backs land
+		// there (method_this_writes.go). Only the CALLEE position admits
+		// the spelling — the method handed out bare (`const f = p.m`)
+		// still falls to the whole-name refusal below, because an unbound
+		// call would run with the wrong `this`.
+		if ast.IsCallExpression(node) {
+			callExpression := node.AsCallExpression()
+			callee := Unwrapped(callExpression.Expression)
+			if root, path, isPath := propertyPathOf(callee); isPath && root == name {
+				if _, isMethod := methods[strings.Join(path, ".")]; isMethod {
+					// the arguments are still ordinary uses; the callee is
+					// consumed here
+					if callExpression.Arguments != nil {
+						for _, argument := range callExpression.Arguments.Nodes {
+							visit(argument)
+						}
+					}
+					return false
 				}
 			}
 		}

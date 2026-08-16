@@ -138,7 +138,10 @@ func constructedInstanceInner(
 			for _, member := range baseDeclaration.ClassLikeData().Members.Nodes {
 				if ast.IsPropertyDeclaration(member) {
 					pd := member.AsPropertyDeclaration()
-					if pd.Initializer != nil && ast.IsIdentifier(pd.Name()) {
+					// a `#name` field is a key like any other — the private
+					// brand narrows who may SPELL the access, not what the
+					// instance holds
+					if pd.Initializer != nil && (ast.IsIdentifier(pd.Name()) || ast.IsPrivateIdentifier(pd.Name())) {
 						silent := *ctx
 						silent.Report = func(assignability.RefinementDiagnostic) {}
 						addCandidate(pd.Name().Text(), evaluateExpression(&silent, NewEnv(), pd.Initializer))
@@ -152,7 +155,7 @@ func constructedInstanceInner(
 	for _, member := range classDecl.Members.Nodes {
 		if ast.IsPropertyDeclaration(member) {
 			pd := member.AsPropertyDeclaration()
-			if pd.Initializer != nil && ast.IsIdentifier(pd.Name()) {
+			if pd.Initializer != nil && (ast.IsIdentifier(pd.Name()) || ast.IsPrivateIdentifier(pd.Name())) {
 				silent := *ctx
 				silent.Report = func(assignability.RefinementDiagnostic) {}
 				addCandidate(pd.Name().Text(), evaluateExpression(&silent, NewEnv(), pd.Initializer))
@@ -209,6 +212,31 @@ func constructedInstanceInner(
 					callEnv.Set(pd.Name().Text(), argKnowns[i])
 				} else {
 					callEnv.Set(pd.Name().Text(), abstractdomain.Undef)
+				}
+				// a PARAMETER PROPERTY (`constructor(readonly age: number)`)
+				// declares a field and fills it with the argument before the
+				// body's first statement — the runtime's own prelude. The
+				// argument joins the candidates the way an initializer does;
+				// a body write to the same key joins beside it, so whichever
+				// ran last is covered. A missing argument lands the default
+				// where one is written, undefined otherwise.
+				if !isParameterPropertyDeclaration(parameter) {
+					continue
+				}
+				if i < len(argKnowns) && argKnowns[i].Kind != abstractdomain.KindUndef {
+					addCandidate(pd.Name().Text(), argKnowns[i])
+					// an argument that MAY be undefined takes the default at
+					// runtime; the default joins so both outcomes are covered
+					if argKnowns[i].Kind != abstractdomain.KindPossiblyUndefined || pd.Initializer == nil {
+						continue
+					}
+				}
+				if pd.Initializer != nil {
+					silent := *ctx
+					silent.Report = func(assignability.RefinementDiagnostic) {}
+					addCandidate(pd.Name().Text(), evaluateExpression(&silent, NewEnv(), pd.Initializer))
+				} else if i >= len(argKnowns) || argKnowns[i].Kind == abstractdomain.KindUndef {
+					addCandidate(pd.Name().Text(), abstractdomain.Undef)
 				}
 			}
 		}

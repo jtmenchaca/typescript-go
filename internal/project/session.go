@@ -288,6 +288,10 @@ func NewSession(init *SessionInit) *Session {
 		watches:                  newWatchRegistry(),
 	}
 
+	// one refinement cache for the whole session; every snapshot
+	// (this first one and each Clone) hands out the same pointer
+	session.snapshot.refinementCache = ls.NewRefinementCache()
+
 	if init.Options.TypingsLocation != "" && init.NpmExecutor != nil {
 		session.typingsInstaller = ata.NewTypingsInstaller(&ata.TypingsInstallerOptions{
 			TypingsLocation: init.Options.TypingsLocation,

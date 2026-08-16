@@ -264,6 +264,14 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	if ast.IsAwaitExpression(e) {
 		return EvaluateAwait(ctx, env, e)
 	}
+	// a yield's OPERAND is this body's own claim: it runs here and
+	// judges against the enclosing generator's stated yield position
+	// (yield_contract.go). No return — what the yield RESUMES with
+	// comes from the caller's next(v), and the one syntax table at
+	// the end speaks that decline.
+	if ast.IsYieldExpression(e) {
+		CheckYieldedValue(ctx, env, e)
+	}
 	if ast.IsSatisfiesExpression(e) {
 		return EvaluateSatisfies(ctx, env, e)
 	}

@@ -186,12 +186,82 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 			collectionReceiver = held
 		}
 	}
+	// the set-algebra producers build a NEW set from two built ones,
+	// and Map.groupBy builds a grouped map from exact items — answered
+	// before the write rows because neither writes its operands
+	// (iterator_spread_values.go)
+	if answered := readSetAlgebraProducers(site, collectionReceiver); answered != nil {
+		return answered
+	}
+	if answered := readMapGroupBy(site); answered != nil {
+		return answered
+	}
 	call := e.AsCallExpression()
 	var arguments []*ast.Node
 	if call.Arguments != nil {
 		arguments = call.Arguments.Nodes
 	}
 	trackedName := site.TrackedName
+	// `m.getOrInsert(k, v)` — Map.prototype.getOrInsert
+	// (lib.esnext.collection.d.ts): the held value where k is present,
+	// else v inserted under k and answered. The receiver may stand
+	// behind parens and casts — `(m as unknown as { getOrInsert… })` —
+	// which erase at runtime (Unwrapped, tracked_bindings.go), so the
+	// call still reads and writes the tracked collection at the
+	// collection's own grade. getOrInsertComputed stays unmodeled: its
+	// second argument is a callback whose run needs the callback-summary
+	// machinery, not a plain value.
+	if method == "getOrInsert" && len(arguments) == 2 {
+		insertName, hasInsertName := trackedName, site.HasTrackedName
+		held := collectionReceiver
+		if !hasInsertName {
+			if root := Unwrapped(site.ReceiverExpression); root != nil && ast.IsIdentifier(root) {
+				if tracked, ok := env.Get(root.Text()); ok && tracked.Kind == abstractdomain.KindCollection {
+					insertName, hasInsertName = root.Text(), true
+					held = tracked
+				}
+			}
+		}
+		if hasInsertName && held.Kind == abstractdomain.KindCollection &&
+			held.CollectionFlavor == abstractdomain.FlavorMap {
+			c := held
+			grade := abstractdomain.TrustLevelOf(c)
+			key := evaluateExpression(ctx, env, arguments[0])
+			value := evaluateExpression(ctx, env, arguments[1])
+			refresh := func(entries []abstractdomain.CollectionEntry, complete bool) {
+				next := abstractdomain.AbstractValue{Kind: abstractdomain.KindCollection, CollectionFlavor: c.CollectionFlavor, Entries: entries, Complete: complete}
+				if grade != abstractdomain.TrustProved {
+					next.Grade = grade
+				}
+				UpdateTrackedEnv(ctx.Aliases, env, insertName, next)
+			}
+			if collectionKey(key) {
+				grade = abstractdomain.MinTrustLevel(grade, abstractdomain.TrustLevelOf(key))
+				if present := findCollectionEntry(c.Entries, key); present != nil {
+					// the present value wins; the map is unchanged
+					out := abstractdomain.AtTrustLevel(present.Value, grade)
+					return &out
+				}
+				if c.Complete {
+					// the key is provably absent: v is inserted and answered
+					refresh(append(append([]abstractdomain.CollectionEntry{}, c.Entries...), abstractdomain.CollectionEntry{Key: key, Value: value}), true)
+					out := abstractdomain.AtTrustLevel(value, grade)
+					return &out
+				}
+				// maybe-present: after the call the key holds its OLD value
+				// or v, and the old value is not named — the entry stays
+				// unstated and the answer with it
+				refresh(c.Entries, false)
+				out := silence.Residue()
+				return &out
+			}
+			// an unreadable key still writes the COLLECTION, not the walk's
+			// knowledge of its class — the entries drop, the record stays
+			refresh(nil, false)
+			out := silence.Residue()
+			return &out
+		}
+	}
 	// a collection WRITE on a tracked name updates the record in
 	// place, class-aware — the same discipline array pushes use; an
 	// unreadable key forgets instead

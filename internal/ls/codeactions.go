@@ -72,6 +72,7 @@ var codeFixProviders = []*CodeFixProvider{
 	ImportFixProvider,
 	IsolatedDeclarationsFixProvider,
 	FixClassIncorrectlyImplementsInterfaceProvider,
+	RefinedTSFixProvider,
 	// Add more code fix providers here as they are implemented
 }
 
@@ -153,6 +154,16 @@ func (l *LanguageService) ProvideCodeActions(ctx context.Context, params *lsprot
 			return lsproto.CodeActionResponse{}, err
 		}
 		actions = append(actions, fixAllActions...)
+	}
+
+	// the annotate-from-inference quickfix is POSITION-based, not
+	// diagnostic-based — offered whenever quickfixes are wanted at a
+	// position that is an unannotated parameter wearing an inferred
+	// set (codeactions_refinedts.go)
+	if params.Context == nil || wantsQuickFixes(params.Context.Only) {
+		if annotate, ok := l.refinedtsAnnotateAction(ctx, program, file, params); ok {
+			actions = append(actions, annotate)
+		}
 	}
 
 	return lsproto.CommandOrCodeActionArrayOrNull{CommandOrCodeActionArray: &actions}, nil

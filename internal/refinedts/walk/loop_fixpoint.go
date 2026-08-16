@@ -229,6 +229,12 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	if condition != nil {
 		analyzers.EvaluateExpression(ctx, env.Clone(), condition)
 	}
+	// a literal-bounded loop runs an exactly known number of times over
+	// exactly known values: step it that many times, precisely — no
+	// widening, no invariant question (loop_unroll.go)
+	if UnrollLiteralBoundedLoop(ctx, env, loop, result, analyzers, bodyEntry) {
+		return
+	}
 	// names the LOOP writes anywhere — a comparison side rooted in one
 	// is not loop-invariant, and its entry window would go stale
 	loopWrites := map[string]struct{}{}

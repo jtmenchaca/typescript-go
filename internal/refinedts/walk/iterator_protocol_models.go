@@ -168,6 +168,21 @@ func readIteratorNext(site MethodCallSite) *abstractdomain.AbstractValue {
 	// name, and for every collection view.
 	if yielded, ok := GeneratorElementOf(ctx, receiverExpression); ok {
 		value = yielded
+		// `g().next()` — the generator was built by this very expression,
+		// so this call is its FIRST next(): the body resumes from its top
+		// (sec-generator.prototype.next, sec-generatorresume), and when
+		// its first statement is a plain yield it suspends right there
+		// with CreateIteratorResultObject(value, false) (sec-yield). That
+		// record holds the first yield's value with NO absence arm and
+		// done exactly false — this call cannot be the finishing one.
+		if first, isFirst := generatorFirstNextValue(ctx, receiverExpression); isFirst {
+			done := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec)
+			out := abstractdomain.KnownObject([]abstractdomain.ObjectKey{
+				{Name: "value", Value: first},
+				{Name: "done", Value: done},
+			}, nil, true, abstractdomain.TrustSpec, false)
+			return &out
+		}
 	} else {
 		element, ok := builtinIteratorElementOf(ctx, receiverExpression)
 		if !ok {

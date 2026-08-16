@@ -375,6 +375,148 @@ func findOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.Ab
 	return finish(silence.Residue())
 }
 
+// forEachExactFold runs a forEach over an exactly known sequence —
+// an exact array, or a complete literal-built Map/Set — element by
+// element, the way reduceOutcome's exact fold does: each step is a
+// sound abstraction of the concrete step, run in ORDER against one
+// carried environment, so an outer accumulation (`sum = sum + age`)
+// ends exact instead of havocked. One reporting pass walks the body
+// under the JOIN of every step's entry state — the join admits each
+// step's values and every transfer is monotone, so anything a step
+// would have reported fires there too — and the carried finals
+// replace the written names; no forget runs. (false, not handled)
+// declines to the paths below untouched.
+func forEachExactFold(walk *CallbackWalk, call *ast.CallExpression) (abstractdomain.AbstractValue, bool) {
+	ctx, env, receiver, body, silent := walk.Ctx, walk.Env, walk.Receiver, walk.Body, walk.Silent
+	analyzers := walk.Analyzers
+	ownerParameter, hasOwnerParameter := walk.OwnerParameter, walk.HasOwnerParameter
+	parameterAt := walk.ParameterAt
+
+	declined := abstractdomain.AbstractValue{}
+	// a second argument (thisArg) is not modeled here
+	if len(call.Arguments.Nodes) != 1 {
+		return declined, false
+	}
+	// the fold's per-step (value, key/index) pairs, in iteration order:
+	// an array hands (element, index); a Map hands (value, key); a Set
+	// hands its value twice (sec-set.prototype.foreach)
+	var values []abstractdomain.AbstractValue
+	var keys []abstractdomain.AbstractValue
+	if receiver.Kind == abstractdomain.KindCollection && receiver.Complete {
+		for _, entry := range receiver.Entries {
+			if receiver.CollectionFlavor == abstractdomain.FlavorMap {
+				values = append(values, entry.Value)
+			} else {
+				values = append(values, entry.Key)
+			}
+			keys = append(keys, entry.Key)
+		}
+	} else {
+		items := ItemsOf(receiver)
+		if items == nil {
+			return declined, false
+		}
+		for i, item := range items {
+			values = append(values, item)
+			keys = append(keys, abstractdomain.KnownValues([]float64{float64(i)}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved))
+		}
+	}
+	// a body that writes THROUGH the owner parameter rewrites the
+	// receiver mid-iteration — the exact-tuple path below models that
+	if hasOwnerParameter && WritesThrough(body, ownerParameter) {
+		return declined, false
+	}
+	// a body that writes the receiver's own name (or an alias) moves
+	// elements the cursor has not reached — the havoc path takes those
+	if walk.HasTrackedName {
+		bodyWritten := map[string]struct{}{}
+		AssignedNames(ctx.P.Checker, body, bodyWritten)
+		for member := range ctx.Aliases.ClassOf(walk.TrackedName) {
+			if _, isWritten := bodyWritten[member]; isWritten {
+				return declined, false
+			}
+		}
+	}
+
+	parameterValue := parameterAt(0)
+	parameterKey := parameterAt(1)
+	// the names the call convention binds — parameters and prebounds —
+	// shadow same-named outer bindings, so the commit skips them and
+	// their entry values stand
+	shadowed := map[string]abstractdomain.AbstractValue{}
+	for name, known := range walk.PreboundBindings {
+		shadowed[name] = known
+	}
+	BindParameter(ctx.P.Checker, parameterValue, silence.Residue(), shadowed)
+	BindParameter(ctx.P.Checker, parameterKey, silence.Residue(), shadowed)
+	if hasOwnerParameter {
+		shadowed[ownerParameter] = silence.Residue()
+	}
+
+	runOne := func(reporting *FlowContext, into Env, value, key abstractdomain.AbstractValue) {
+		// every body evaluation owns snapshots for calls inside this
+		// arrow — including the reporting pass (evalBody's own rule)
+		owned := *reporting
+		owned.SnapshotOwner = walk.Arrow
+		bindings := map[string]abstractdomain.AbstractValue{}
+		for name, known := range walk.PreboundBindings {
+			bindings[name] = known
+		}
+		BindParameter(ctx.P.Checker, parameterValue, value, bindings)
+		BindParameter(ctx.P.Checker, parameterKey, key, bindings)
+		if hasOwnerParameter {
+			bindings[ownerParameter] = receiver
+		}
+		for name, known := range bindings {
+			into.Set(name, known)
+		}
+		if ast.IsBlock(body) {
+			var sink []abstractdomain.AbstractValue
+			owned.ReturnSink = &sink
+			analyzers.AnalyzeStatement(&owned, into, body, nil)
+			return
+		}
+		analyzers.EvaluateExpression(&owned, into, body)
+	}
+
+	carried := env.Clone()
+	joined := env.Clone()
+	for i := range values {
+		joined.Range(func(name string, held abstractdomain.AbstractValue) bool {
+			if v, ok := carried.Get(name); ok {
+				joined.Set(name, abstractdomain.JoinKnown(held, v))
+			}
+			return true
+		})
+		runOne(silent, carried, values[i], keys[i])
+	}
+
+	// one reporting pass under the joins; a zero-element forEach never
+	// runs its body, so nothing in it reports
+	if len(values) > 0 {
+		valueJoin := values[0]
+		keyJoin := keys[0]
+		for i := 1; i < len(values); i++ {
+			valueJoin = abstractdomain.JoinKnown(valueJoin, values[i])
+			keyJoin = abstractdomain.JoinKnown(keyJoin, keys[i])
+		}
+		report := joined.Clone()
+		runOne(ctx, report, valueJoin, keyJoin)
+	}
+
+	// the exact finals replace the walk's own names — no forget
+	env.Range(func(name string, _ abstractdomain.AbstractValue) bool {
+		if _, isShadowed := shadowed[name]; isShadowed {
+			return true
+		}
+		if v, ok := carried.Get(name); ok {
+			env.Set(name, v)
+		}
+		return true
+	})
+	return silence.Residue(), true
+}
+
 // forEachOutcome is the "forEach" case of callbackOutcome's method
 // switch.
 func forEachOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.AbstractValue {
@@ -384,6 +526,12 @@ func forEachOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain
 	ownerParameter, hasOwnerParameter := walk.OwnerParameter, walk.HasOwnerParameter
 	preboundBindings, analyzers := walk.PreboundBindings, walk.Analyzers
 	nameAt, evalBody, reportPins, forgetWrites, finish := walk.NameAt, walk.EvalBody, walk.ReportPins, walk.ForgetWrites, walk.Finish
+
+	// an exactly known sequence with no owner writes runs the exact
+	// fold: outer accumulation lands, element by element, no havoc
+	if answered, handled := forEachExactFold(walk, call); handled {
+		return answered
+	}
 
 	// an exact tuple with a bound owner runs element by element:
 	// writes through the owner land, and the FINAL tuple replaces

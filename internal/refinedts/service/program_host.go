@@ -16,8 +16,12 @@
 // replaces the TS CheckerHost entirely, per PORT.md's adapter rule.
 // The TsgoOracle/hostFor/parseOnlyBitsOf machinery program_host.ts
 // itself calls through has no Go twin (program_disk_host.go's header
-// explains why) — programFromExisting and the tsgo-oracle branch of
-// hostFor are skipped for the same reason.
+// explains why). ProgramFromExisting, by contrast, DOES port: the TS
+// programFromExisting is the language-service wrapper — reuse a live
+// Program someone else holds so unsaved buffers are judged and no
+// Program is rebuilt per call — and hostFor's oracle branch collapses
+// into the in-process checker lease the same way every other seam's
+// did (GO-LSP-EDITOR-PATH.md §5.1, §8).
 
 package service
 
@@ -25,6 +29,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/bundled"
@@ -135,6 +140,67 @@ func ProgramFromDisk(entryFilePath string, surfacePath string) (*program.Checker
 	}
 	RememberProgram(resolved, &HeldProgram{Built: built, Stamps: StampsOf(p)})
 	return built, nil
+}
+
+// ProgramFromExisting is programFromExisting in the TS source
+// (program_host.ts): wrap a Program the caller already holds — the
+// language-service / live-overlay seam. It must NOT RememberProgram
+// and must NOT build a new compiler.Program.
+//
+// The checker comes from GetTypeCheckerForFile with the REQUEST
+// context — never GetTypeChecker(context.Background()) — because a
+// language service leases from the project checker pool, where the
+// per-file lease and the ctx's checker lifetime are load-bearing
+// (compiler/program.go's GetTypeCheckerForFile comment; the locked
+// Pattern 1 of GO-LSP-EDITOR-PATH.md §15.2). Done carries the real
+// release; the caller must call it when the check is over.
+//
+// Surface recognition: the caller's paths verbatim when given, else
+// discovery over the program (SurfacePathsOf) — the plugin's own
+// order (plugin/index.cjs ~62–78).
+func ProgramFromExisting(
+	ctx context.Context,
+	prog *compiler.Program,
+	entryPath string,
+	surfacePaths []string,
+) (*program.CheckerProgram, error) {
+	entry := prog.GetSourceFile(entryPath)
+	if entry == nil {
+		return nil, errEntryDidNotParse("the entry file is not in the program: " + entryPath)
+	}
+	if len(surfacePaths) == 0 {
+		surfacePaths = SurfacePathsOf(prog)
+	}
+	surface := make(map[string]bool, len(surfacePaths))
+	for _, path := range surfacePaths {
+		surface[path] = true
+	}
+	c, done := prog.GetTypeCheckerForFile(ctx, entry)
+	return &program.CheckerProgram{
+		Program:      prog,
+		Checker:      c,
+		Entry:        entry.AsSourceFile(),
+		SurfacePaths: surface,
+		Done:         done,
+	}, nil
+}
+
+// SurfacePathsOf is the plugin's surfacePathsOf discovery half
+// (plugin/index.cjs ~70–78): every source file in the program whose
+// path ends in /surface/z.ts, inserted VERBATIM as its own
+// FileName() — SurfacePaths membership is an exact string test on
+// declaration file names (annotations/chain_roots.go), so nothing is
+// re-spelled here. The tsconfig plugins[].surfacePaths config channel
+// is the follow-on production parser (GO-LSP-EDITOR-PATH.md §15.9,
+// §16.3 item 2) — not read here.
+func SurfacePathsOf(prog *compiler.Program) []string {
+	var found []string
+	for _, sourceFile := range prog.SourceFiles() {
+		if strings.HasSuffix(sourceFile.FileName(), "/surface/z.ts") {
+			found = append(found, sourceFile.FileName())
+		}
+	}
+	return found
 }
 
 // ProgramFromDiskMany is programFromDiskMany in the TS source: one

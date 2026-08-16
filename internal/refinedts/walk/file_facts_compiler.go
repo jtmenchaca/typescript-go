@@ -50,7 +50,14 @@ func InterfaceHashOf(
 		if contract.Result != nil {
 			resultSpelling = annotations.FormatStated(contract.Result)
 		}
-		parts = append(parts, "c:"+symbol.Name+"="+strings.Join(paramSpellings, ",")+"->"+resultSpelling+":"+strconv.FormatBool(contract.Grounded))
+		line := "c:" + symbol.Name + "=" + strings.Join(paramSpellings, ",") + "->" + resultSpelling
+		// a generator contract's yield position is part of what
+		// dependents see — only generator contracts spell it, so
+		// every other line's hash stays what it was
+		if contract.Yield != nil {
+			line += " yields " + annotations.FormatStated(contract.Yield)
+		}
+		parts = append(parts, line+":"+strconv.FormatBool(contract.Grounded))
 	}
 	annotations.SortStrings(parts)
 	return annotations.HashOf(strings.Join(parts, "\n"))

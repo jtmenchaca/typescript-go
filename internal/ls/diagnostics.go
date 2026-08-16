@@ -43,9 +43,13 @@ func (l *LanguageService) ProvideDiagnostics(ctx context.Context, uri lsproto.Do
 
 	diagnostics := getAllDiagnostics(ctx, program, file)
 
+	// the refinement judgments ride the same pull, appended after
+	// tsc's own shape/suggestion rows (refinedts_diagnostics.go)
+	refinements := l.refinementDiagnostics(ctx, program, file)
+
 	return lsproto.RelatedFullDocumentDiagnosticReportOrUnchangedDocumentDiagnosticReport{
 		FullDocumentDiagnosticReport: &lsproto.RelatedFullDocumentDiagnosticReport{
-			Items: l.toLSPDiagnostics(ctx, diagnostics),
+			Items: l.toLSPDiagnostics(ctx, diagnostics, refinements),
 		},
 	}, nil
 }

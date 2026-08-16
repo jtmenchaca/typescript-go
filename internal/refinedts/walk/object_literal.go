@@ -42,6 +42,10 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 		keys[name] = v
 	}
 	complete := true
+	// the SYMBOL slots this literal wrote, with each key's construction —
+	// what the aliasing discipline below reads to decide whether a later
+	// symbol member may overwrite an earlier slot at runtime
+	symbolSlots := map[string]symbolKeyConstruction{}
 	// a member whose KEY is not known costs the literal its completeness
 	// and every key written before it — the unknown name may land on any
 	// of them. The keys stay OBJECT keys, unstated where they were
@@ -65,9 +69,38 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 			if !hasName {
 				// a SYMBOL-keyed computed property collides with no
 				// string key — every string-key claim survives it
-				// untouched
+				// untouched. Under a STABLE symbol const it also names
+				// ONE slot, stored under the derived #sym: name the
+				// element read derives (keyed_slot_reads.go), so the
+				// value reads back.
 				if ast.IsComputedPropertyName(pa.Name()) &&
 					(ctx.P.Checker.GetTypeAtLocation(pa.Name().AsComputedPropertyName().Expression).Flags()&checker.TypeFlagsESSymbolLike) != 0 {
+					keyExpression := pa.Name().AsComputedPropertyName().Expression
+					if slot, construction, stable := stableSymbolSlotOf(ctx.P.Checker, keyExpression); stable {
+						// an earlier symbol slot this key is not provably
+						// distinct from may be the SAME runtime key
+						// (Symbol.for twice) — this write would overwrite
+						// it, so the earlier slot's claim drops. A slot
+						// that arrived through a spread carries no
+						// construction to compare, so only a FRESH key is
+						// provably apart from it.
+						for _, heldName := range keyOrder {
+							if heldName == slot || !symbolSlotKey(heldName) {
+								continue
+							}
+							heldConstruction, spelledHere := symbolSlots[heldName]
+							if spelledHere && provablyDistinctSymbolKeys(heldConstruction, construction) {
+								continue
+							}
+							if !spelledHere && !construction.Registry {
+								continue
+							}
+							keys[heldName] = abstractdomain.Opaque
+						}
+						symbolSlots[slot] = construction
+						setKey(slot, evaluateExpression(ctx, env, pa.Initializer))
+						continue
+					}
 					evaluateExpression(ctx, env, pa.Initializer)
 					continue
 				}
@@ -78,7 +111,7 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 				// written exactly as if it had been spelled
 				if ast.IsComputedPropertyName(pa.Name()) {
 					keyValue := evaluateExpression(ctx, env, pa.Name().AsComputedPropertyName().Expression)
-					if exact, ok := exactStringName(keyValue); ok {
+					if exact, ok := exactStringName(keyValue); ok && !symbolSlotKey(exact) {
 						setKey(exact, evaluateExpression(ctx, env, pa.Initializer))
 						continue
 					}
@@ -86,6 +119,15 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 				// a computed key lands anywhere: the initializer still
 				// runs, and the literal keeps its named keys with
 				// completeness spent
+				evaluateExpression(ctx, env, pa.Initializer)
+				openOnUnknownKey()
+				continue
+			}
+			// a SOURCE-SPELLED string key wearing the #sym: prefix would
+			// collide with the symbol-slot vocabulary
+			// (keyed_slot_reads.go) — the literal keeps its other keys
+			// and spends completeness instead of entering it
+			if symbolSlotKey(name) {
 				evaluateExpression(ctx, env, pa.Initializer)
 				openOnUnknownKey()
 				continue
@@ -251,8 +293,10 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 		if ast.IsGetAccessorDeclaration(property) || ast.IsSetAccessorDeclaration(property) || ast.IsMethodDeclaration(property) {
 			nameNode := property.Name()
 			// a STRING-literal name spells its key exactly the way an
-			// identifier does — `{ "a"() {} }` writes "a"
-			if nameNode != nil && (ast.IsIdentifier(nameNode) || ast.IsStringLiteral(nameNode)) {
+			// identifier does — `{ "a"() {} }` writes "a". A spelled
+			// #sym: prefix collides with the symbol-slot vocabulary and
+			// falls to the unknown-key rule below instead.
+			if nameNode != nil && (ast.IsIdentifier(nameNode) || ast.IsStringLiteral(nameNode)) && !symbolSlotKey(nameNode.Text()) {
 				name, hasName = nameNode.Text(), true
 			}
 		}
@@ -270,7 +314,7 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 				if (ctx.P.Checker.GetTypeAtLocation(keyExpression).Flags() & checker.TypeFlagsESSymbolLike) != 0 {
 					continue
 				}
-				if exact, ok := exactStringName(evaluateExpression(ctx, env, keyExpression)); ok {
+				if exact, ok := exactStringName(evaluateExpression(ctx, env, keyExpression)); ok && !symbolSlotKey(exact) {
 					setKey(exact, silence.Residue())
 					continue
 				}

@@ -66,10 +66,11 @@ func SpelledNameOf(e *ast.Node) (string, bool) {
 // peeking. `<T>e`, `e as T`, and `e satisfies T` all erase to `e` at
 // runtime exactly like a plain cast does — TypeScript emits no
 // runtime check for any of the three — so all three peel here
-// alongside `e!`.
+// alongside `e!`. A nil node (a return slot the walker could not
+// name) peels to nil — callers already treat that as "no head".
 func Unwrapped(e *ast.Node) *ast.Node {
-	for ast.IsParenthesizedExpression(e) || ast.IsAsExpression(e) || ast.IsNonNullExpression(e) ||
-		ast.IsTypeAssertion(e) || ast.IsSatisfiesExpression(e) {
+	for e != nil && (ast.IsParenthesizedExpression(e) || ast.IsAsExpression(e) || ast.IsNonNullExpression(e) ||
+		ast.IsTypeAssertion(e) || ast.IsSatisfiesExpression(e)) {
 		switch {
 		case ast.IsParenthesizedExpression(e):
 			e = e.AsParenthesizedExpression().Expression

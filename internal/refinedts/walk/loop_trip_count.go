@@ -8,8 +8,14 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 )
+
+// literalOne is a numeric literal token spelling exactly 1.
+func literalOne(e *ast.Node) bool {
+	return ast.IsNumericLiteral(e) && float64(jsnum.FromString(e.Text())) == 1
+}
 
 // LiteralTripCount is literalTripCount in the TS source: the exact
 // iteration count of `for (let i = A; i < B; i++)` with numeric
@@ -71,6 +77,22 @@ func LiteralTripCountWith(c *checker.Checker, loop *ast.Node) (int, bool) {
 		} else if ast.IsPrefixUnaryExpression(incrementor) {
 			unary := incrementor.AsPrefixUnaryExpression()
 			unitStep = unary.Operator == ast.KindPlusPlusToken && ast.IsIdentifier(unary.Operand) && unary.Operand.Text() == index
+		} else if ast.IsBinaryExpression(incrementor) {
+			// the same unit step spelled as an assignment: `i = i + 1`,
+			// `i = 1 + i`, `i += 1`
+			step := incrementor.AsBinaryExpression()
+			if ast.IsIdentifier(step.Left) && step.Left.Text() == index {
+				if step.OperatorToken.Kind == ast.KindPlusEqualsToken {
+					unitStep = literalOne(step.Right)
+				}
+				if step.OperatorToken.Kind == ast.KindEqualsToken && ast.IsBinaryExpression(step.Right) {
+					add := step.Right.AsBinaryExpression()
+					if add.OperatorToken.Kind == ast.KindPlusToken {
+						unitStep = (ast.IsIdentifier(add.Left) && add.Left.Text() == index && literalOne(add.Right)) ||
+							(ast.IsIdentifier(add.Right) && add.Right.Text() == index && literalOne(add.Left))
+					}
+				}
+			}
 		}
 	}
 	if !unitStep {

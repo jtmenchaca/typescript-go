@@ -270,6 +270,9 @@ func walkStatementForm(ctx *FlowContext, env Env, statement *ast.Node, result *a
 	if ast.IsTryStatement(statement) {
 		return AnalyzeTryStatement(ctx, env, statement, result)
 	}
+	if ast.IsWithStatement(statement) {
+		return AnalyzeWithStatement(ctx, env, statement, result)
+	}
 	// any statement kind the walker does not model: whatever it may
 	// write is forgotten — unmodeled control flow can HIDE nothing
 	havocAssigned(ctx, env, statement)

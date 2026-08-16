@@ -307,6 +307,13 @@ type kernelSimplificationAdapter struct {
 	kernel *kernelbridge.RefinedTSKernel
 }
 
+// SimplificationKernelOf hands the same adapter to callers outside
+// this package (the hover rendering in service simplifies the sets it
+// spells the same way the loop candidate does).
+func SimplificationKernelOf(kernel *kernelbridge.RefinedTSKernel) refinementsets.SimplificationKernel {
+	return kernelSimplificationAdapter{kernel: kernel}
+}
+
 func (k kernelSimplificationAdapter) ScalarSubset(a, b refinementsets.RefinedSet) bool {
 	return k.kernel.ScalarSubset(a, b)
 }

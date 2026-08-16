@@ -41,10 +41,18 @@ import (
 // ObjectLocal is one flattened record local: the declaration it came
 // from, the name it was spelled under, and its LEAF paths in literal
 // order paired with the initializer each leaf was given.
+//
+// Methods holds the literal's shorthand METHOD rows by dotted path
+// ("bump", "a.m"), each mapping to its declaration node. A method spells
+// no leaf; the use scan admits its path in CALLEE position only, and the
+// call site lands its `this` writes on the record's own leaf slots
+// (method_this_writes.go). Empty for the families whose leaves come from
+// a declaration rather than a literal.
 type ObjectLocal struct {
 	Declaration *ast.Node // VariableDeclaration
 	Name        string
 	Keys        []ObjectLocalKey
+	Methods     map[string]*ast.Node
 }
 
 // ObjectLocalKey is one leaf of a flattened record: the leaf's path
@@ -161,6 +169,24 @@ func flatKeysOfLiteralWith(
 			}
 			keyName = name
 			initializer = name
+		case ast.IsMethodDeclaration(property):
+			// a shorthand METHOD row (`bump() { … }`) spells no leaf —
+			// calling it through the record is the one admitted use
+			// (usesAreAllDeclaredKeySteps' callee arm), and its `this`
+			// writes land at each call site through the method's own
+			// summary (literalThisBundleOf). A row that treatment cannot
+			// serve — a generator, an async body, a computed name — and a
+			// body mentioning the record's own name (a write the census
+			// would spell under the OUTER name, which no summary entry
+			// carries) both decline the literal whole, exactly as every
+			// method row did before.
+			if !isServableLiteralMethodRow(property) {
+				return nil, false
+			}
+			if holder != "" && mentionsName(property.Body(), holder) {
+				return nil, false
+			}
+			continue
 		default:
 			return nil, false
 		}

@@ -63,6 +63,23 @@ func EvaluateArrayLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomain
 			if len(lit.Elements.Nodes) == 1 && spread.Kind == abstractdomain.KindSet && spread.SetKindTag == abstractdomain.SetKindTagNone {
 				return spread
 			}
+			// a spread of a BUILT collection materializes its entries in
+			// place, in entry order — a Set's members one apiece, a Map's
+			// [key, value] pairs (collectionSpreadItems and its clauses)
+			if collectionItems, ok := collectionSpreadItems(spread); ok {
+				items = append(items, collectionItems...)
+				elements = append(elements, collectionItems...)
+				continue
+			}
+			// a values()/keys()/entries() view over a receiver the walk
+			// holds exactly drains those same exact items — read off the
+			// environment, which the view call's own evaluation above
+			// left intact (the views are on the read-only list)
+			if viewItems, ok := drainedViewItems(ctx, env, element.AsSpreadElement().Expression); ok {
+				items = append(items, viewItems...)
+				elements = append(elements, viewItems...)
+				continue
+			}
 			// an unpinned spread loses the LENGTH — its own elements are
 			// what it admits, and the walk keeps building past it
 			lengthKnown = false

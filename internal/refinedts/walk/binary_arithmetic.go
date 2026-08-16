@@ -67,6 +67,67 @@ func ReadBitwise(left, right abstractdomain.AbstractValue, kind ast.Kind) (abstr
 	return shifted, true
 }
 
+// readStringConcatenation is the string arm of `+` — and of `+=`,
+// which applies the SAME operation: both forms run
+// ApplyStringOrNumericBinaryOperator, whose first step returns the
+// string-concatenation when either primitive is a String
+// (sec-applystringornumericbinaryoperator;
+// sec-assignment-operators-runtime-semantics-evaluation hands the
+// compound operator's text to the same abstract operation). Nil where
+// neither side is string-sorted; otherwise the exact tuple
+// concatenation, the kernel's concatenation form over a set side, or
+// the honest unknown for the coercing mix.
+func readStringConcatenation(ctx *FlowContext, leftNode *ast.Node, rightNode *ast.Node, left abstractdomain.AbstractValue, right abstractdomain.AbstractValue) *abstractdomain.AbstractValue {
+	stringSide := func(side *ast.Node) bool {
+		return side != nil && primitives.StringLikeSide(ctx.P.Checker, side)
+	}
+	leftStringKnown := left.Kind == abstractdomain.KindValues && left.KindTag == abstractdomain.PrimitiveString
+	rightStringKnown := right.Kind == abstractdomain.KindValues && right.KindTag == abstractdomain.PrimitiveString
+	if !leftStringKnown && !rightStringKnown && !stringSide(leftNode) && !stringSide(rightNode) {
+		return nil
+	}
+	// exact only when BOTH sides are string words — a mixed sum
+	// coerces the number to its decimal text, which the numeric
+	// reading cannot say
+	if leftStringKnown && rightStringKnown {
+		out := abstractdomain.KnownValues(
+			append(append([]float64{}, left.Values...), right.Values...),
+			abstractdomain.PrimitiveString,
+			abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(left), abstractdomain.TrustLevelOf(right)),
+		)
+		return &out
+	}
+	// a string sum with SET knowledge on a side is the kernel's own
+	// concatenation form: `"/" + rest` provably starts with "/" —
+	// the string branch of `+` is the string-concatenation of its
+	// operands (sec-applystringornumericbinaryoperator), and the
+	// concatenation of two string languages is their concat set
+	seqSideOf := func(k abstractdomain.AbstractValue, side *ast.Node) (refinementsets.RefinedSet, bool) {
+		if k.Kind == abstractdomain.KindValues && k.KindTag == abstractdomain.PrimitiveString {
+			return refinementsets.StringTuple(stringOf(k.Values)), true
+		}
+		if k.Kind == abstractdomain.KindSet && k.SetKindTag == abstractdomain.SetKindTagNone && stringSide(side) {
+			return k.Set, true
+		}
+		return refinementsets.RefinedSet{}, false
+	}
+	A, aOk := seqSideOf(left, leftNode)
+	if aOk {
+		B, bOk := seqSideOf(right, rightNode)
+		if bOk {
+			out := abstractdomain.KnownSet(
+				refinementsets.MakeRefinedSet(refinementsets.Concatenation(A, B)),
+				nil,
+				abstractdomain.MinTrustLevel(abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(left), abstractdomain.TrustLevelOf(right)), abstractdomain.TrustSpec),
+				abstractdomain.SetKindTagNone,
+			)
+			return &out
+		}
+	}
+	out := abstractdomain.UnknownOver([]abstractdomain.AbstractValue{left, right})
+	return &out
+}
+
 // ReadBinaryArithmetic is readBinaryArithmetic in the TS source:
 // numeric `+`/`-`/`*`/`/`/`%`/`**` and string concatenation — left
 // and right already evaluated.
@@ -75,49 +136,8 @@ func ReadBinaryArithmetic(ctx *FlowContext, env Env, e *ast.Node, left, right ab
 	// string + is tuple concatenation, exact when both sides are
 	// exact; a string/number mix coerces and stays unknown
 	if bin.OperatorToken.Kind == ast.KindPlusToken {
-		stringSide := func(side *ast.Node) bool {
-			return primitives.StringLikeSide(ctx.P.Checker, side)
-		}
-		leftStringKnown := left.Kind == abstractdomain.KindValues && left.KindTag == abstractdomain.PrimitiveString
-		rightStringKnown := right.Kind == abstractdomain.KindValues && right.KindTag == abstractdomain.PrimitiveString
-		if stringSide(bin.Left) || stringSide(bin.Right) || leftStringKnown || rightStringKnown {
-			// exact only when BOTH sides are string words — a mixed sum
-			// coerces the number to its decimal text, which the numeric
-			// reading cannot say
-			if leftStringKnown && rightStringKnown {
-				return abstractdomain.KnownValues(
-					append(append([]float64{}, left.Values...), right.Values...),
-					abstractdomain.PrimitiveString,
-					abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(left), abstractdomain.TrustLevelOf(right)),
-				)
-			}
-			// a string sum with SET knowledge on a side is the kernel's own
-			// concatenation form: `"/" + rest` provably starts with "/" —
-			// the string branch of `+` is the string-concatenation of its
-			// operands (sec-applystringornumericbinaryoperator), and the
-			// concatenation of two string languages is their concat set
-			seqSideOf := func(k abstractdomain.AbstractValue, side *ast.Node) (refinementsets.RefinedSet, bool) {
-				if k.Kind == abstractdomain.KindValues && k.KindTag == abstractdomain.PrimitiveString {
-					return refinementsets.StringTuple(stringOf(k.Values)), true
-				}
-				if k.Kind == abstractdomain.KindSet && k.SetKindTag == abstractdomain.SetKindTagNone && stringSide(side) {
-					return k.Set, true
-				}
-				return refinementsets.RefinedSet{}, false
-			}
-			A, aOk := seqSideOf(left, bin.Left)
-			if aOk {
-				B, bOk := seqSideOf(right, bin.Right)
-				if bOk {
-					return abstractdomain.KnownSet(
-						refinementsets.MakeRefinedSet(refinementsets.Concatenation(A, B)),
-						nil,
-						abstractdomain.MinTrustLevel(abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(left), abstractdomain.TrustLevelOf(right)), abstractdomain.TrustSpec),
-						abstractdomain.SetKindTagNone,
-					)
-				}
-			}
-			return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{left, right})
+		if concatenated := readStringConcatenation(ctx, bin.Left, bin.Right, left, right); concatenated != nil {
+			return *concatenated
 		}
 	}
 	// `**` transfers exactly on the pinned branches of

@@ -14,6 +14,13 @@ type Host interface {
 	GetPreferences(activeFile string) lsutil.UserPreferences
 	GetECMALineInfo(fileName string) *sourcemap.ECMALineInfo
 	AutoImportRegistry() *autoimport.Registry
+	// RefinementCache is the Session-owned refinement result store —
+	// the SAME pointer from every Snapshot, so Fix payloads survive
+	// the per-request LanguageService (refinement_cache.go).
+	RefinementCache() *RefinementCache
+	// ScriptVersion is the overlay version of an open file, 0 for a
+	// disk file — the RefinementCache's freshness key.
+	ScriptVersion(fileName string) int32
 
 	// Used for module specifier completions.
 	// ! Do not use for anything else, as this violates the principle that

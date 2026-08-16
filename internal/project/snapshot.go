@@ -35,6 +35,13 @@ type Snapshot struct {
 	toPath         func(fileName string) tspath.Path
 	converters     *lsconv.Converters
 
+	// refinementCache is the Session's refinement result store — the
+	// SAME pointer in every snapshot (like sessionOptions, unlike the
+	// cloned AutoImports), so RefinementFix payloads survive the
+	// per-request LanguageService. Set by NewSession and carried
+	// forward by Clone.
+	refinementCache *ls.RefinementCache
+
 	// Immutable state, cloned between snapshots
 	fs                                     *SnapshotFS
 	ProjectCollection                      *ProjectCollection
@@ -125,6 +132,21 @@ func (s *Snapshot) Converters() *lsconv.Converters {
 
 func (s *Snapshot) AutoImportRegistry() *autoimport.Registry {
 	return s.AutoImports
+}
+
+// RefinementCache implements ls.Host: the Session-owned refinement
+// result store, one pointer for the whole session.
+func (s *Snapshot) RefinementCache() *ls.RefinementCache {
+	return s.refinementCache
+}
+
+// ScriptVersion implements ls.Host: the overlay version of an open
+// file, 0 for a disk file — the refinement cache's freshness key.
+func (s *Snapshot) ScriptVersion(fileName string) int32 {
+	if file := s.fs.GetFile(fileName); file != nil {
+		return file.Version()
+	}
+	return 0
 }
 
 func (s *Snapshot) ID() uint64 {
@@ -493,6 +515,7 @@ func (s *Snapshot) Clone(
 		s.toPath,
 	)
 	newSnapshot.parentId = s.id
+	newSnapshot.refinementCache = s.refinementCache
 	newSnapshot.ProjectCollection = projectCollection
 	newSnapshot.ConfigFileRegistry = configFileRegistry
 	newSnapshot.inferredProjectContentMappers = inferredContentMappers

@@ -111,7 +111,16 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 	if answered := readPromiseResolve(ctx, env, e); answered != nil {
 		return answered
 	}
+	if answered := readPromiseStatics(ctx, env, e); answered != nil {
+		return answered
+	}
 	if answered := readArrayFrom(ctx, env, e); answered != nil {
+		return answered
+	}
+	// `Array(…)` called as a function builds the same array the
+	// construction does — sec-array runs one algorithm for both
+	// spellings (array_construction.go)
+	if answered := ReadArrayConstruction(ctx, env, e); answered != nil {
 		return answered
 	}
 	// `createHash(alg)` / `createHmac(alg, key)` — the value a hashing
@@ -166,6 +175,9 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 			return answered
 		}
 		if answered := readCallbackMethod(site); answered != nil {
+			return answered
+		}
+		if answered := readPromiseInstanceMethod(site); answered != nil {
 			return answered
 		}
 		if answered := readArrayOf(site); answered != nil {

@@ -46,6 +46,11 @@ func (l *LanguageService) ProvideHover(ctx context.Context, params *lsproto.Hove
 		// Avoid giving quickInfo for the sourceFile as a whole or inside the comment of a/**/.b
 		return lsproto.HoverOrNull{}, nil
 	}
+	// the refinement spelling is computed FIRST, on its own checker
+	// lease (acquired and released inside the service seam), so it
+	// never overlaps the quickInfo lease below on the same pool
+	// (hover_refinedts.go)
+	refinementSpelling := l.refinementSpellingAt(ctx, program, file, position)
 	c, done := program.GetTypeCheckerForFile(ctx, file)
 	defer done()
 	rangeNode := getNodeForQuickInfo(node)
@@ -68,6 +73,11 @@ func (l *LanguageService) ProvideHover(ctx context.Context, params *lsproto.Hove
 	if quickInfo == "" {
 		return lsproto.HoverOrNull{}, nil
 	}
+	// the refinement rides INSIDE the type line — appended after the
+	// host type, or replacing the right-hand side; which one is the
+	// rendering vocabulary's own decision (ReplacesHostType), never
+	// this file's (hover_refinedts.go)
+	quickInfo = spliceRefinementSpelling(quickInfo, refinementSpelling)
 	rangeFile := ast.GetSourceFileOfNode(rangeNode)
 	textRange := getRangeOfNode(rangeNode, rangeFile, nil /*endNode*/)
 	hoverRange, hoverFidelity := l.converters.ToLSPRangeForFeature(rangeFile, textRange, spanmap.FeatureHover)

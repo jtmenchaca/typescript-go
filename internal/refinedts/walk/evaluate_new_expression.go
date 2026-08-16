@@ -19,11 +19,21 @@ func EvaluateNewExpression(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 	// the built-ins' own argument contracts — `new Array(len)` and
 	// kin (builtin_contracts.ts)
 	CheckBuiltinContracts(ctx, env, e)
+	// what `new Array(…)` BUILDS — the one-length hole array, the
+	// items array (array_construction.go)
+	if array := ReadArrayConstruction(ctx, env, e); array != nil {
+		return array
+	}
 	if collection := ReadCollectionConstruction(ctx, env, e); collection != nil {
 		return collection
 	}
 	if date := ReadDateConstruction(ctx, env, e); date != nil {
 		return date
+	}
+	// `new Promise(executor)` with the resolve calls in view: the
+	// promise wraps the join of what the executor resolves
+	if promise := ReadPromiseConstruction(ctx, env, e); promise != nil {
+		return promise
 	}
 	// the Error family: an OWN message property from the argument
 	// (sec-error-message — installed when the argument is not
@@ -136,6 +146,21 @@ func EvaluateNewExpression(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 		symbol := ctx.P.Checker.GetSymbolAtLocation(calleeCore)
 		if symbol != nil && symbol.ValueDeclaration != nil {
 			declaration := symbol.ValueDeclaration
+			// `const C = class { … }` binds the NAME to a variable, so the
+			// symbol's value declaration is the VariableDeclaration — the
+			// class expression sits in its initializer. A `const` binding
+			// holds that one class for its whole life, so the expression
+			// reads exactly as a declaration does; a `let`/`var` may hold a
+			// different constructor by the time the `new` runs, and stays
+			// unresolved here.
+			if !ast.IsClassLike(declaration) && ast.IsVariableDeclaration(declaration) &&
+				declaration.Parent != nil && (declaration.Parent.Flags&ast.NodeFlagsConst) != 0 {
+				if initializer := declaration.AsVariableDeclaration().Initializer; initializer != nil {
+					if unwrapped := Unwrapped(initializer); unwrapped != nil && ast.IsClassExpression(unwrapped) {
+						declaration = unwrapped
+					}
+				}
+			}
 			if ast.IsClassLike(declaration) && !ast.GetSourceFileOfNode(declaration).IsDeclarationFile {
 				var argKnowns []abstractdomain.AbstractValue
 				if newExpr.Arguments != nil {

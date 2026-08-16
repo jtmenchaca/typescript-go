@@ -139,11 +139,27 @@ func SummaryCallOrHavocNamed(context *LoweringContext, call *ast.Node, target in
 		}
 		return out, true
 	}
-	if statement, ok := summaryCallStatement(context, call, target); ok {
-		return []kernelbridge.IrStatement{statement}, true
+	// an OBJECT-LITERAL METHOD called through its record: methodServes
+	// gates the summary tier — a body whose receiver bundle did not
+	// expand, or that moves a capture the write census cannot spell, must
+	// not serve a summary its this-writes are invisible to — and
+	// methodWrites is the capture-write havoc prepended to whichever tier
+	// answers the site (LiteralMethodWriteStatements). (nil, true) for
+	// every other callee, which keeps every tier exactly as it was.
+	methodWrites, methodServes := LiteralMethodWriteStatements(context, call)
+	withMethodWrites := func(statements []kernelbridge.IrStatement, ok bool) ([]kernelbridge.IrStatement, bool) {
+		if !ok || len(methodWrites) == 0 {
+			return statements, ok
+		}
+		return append(append([]kernelbridge.IrStatement{}, methodWrites...), statements...), true
+	}
+	if methodServes {
+		if statement, ok := summaryCallStatement(context, call, target); ok {
+			return withMethodWrites([]kernelbridge.IrStatement{statement}, true)
+		}
 	}
 	if cycled, ok := summaryCycleHavocNamed(context, call, target, construct); ok {
-		return withReceiverBundleHavoc(context, call, cycled)
+		return withMethodWrites(withReceiverBundleHavoc(context, call, cycled))
 	}
 	// `cleanup()` — a call through a name this same body bound to a
 	// closure. The SERVED route comes first: a closure whose every
@@ -155,20 +171,20 @@ func SummaryCallOrHavocNamed(context *LoweringContext, call *ast.Node, target in
 		return served, true
 	}
 	if closed, ok := closureCallHavocNamed(context, call, target, construct); ok {
-		return withReceiverBundleHavoc(context, call, closed)
+		return withMethodWrites(withReceiverBundleHavoc(context, call, closed))
 	}
 	if construct == "" {
 		havocked, ok := OpaqueCallHavoc(context, call, target)
 		if !ok {
 			return nil, false
 		}
-		return withReceiverBundleHavoc(context, call, havocked)
+		return withMethodWrites(withReceiverBundleHavoc(context, call, havocked))
 	}
 	havocked, ok := OpaqueCallHavocNamed(context, call, target, construct)
 	if !ok {
 		return nil, false
 	}
-	return withReceiverBundleHavoc(context, call, havocked)
+	return withMethodWrites(withReceiverBundleHavoc(context, call, havocked))
 }
 
 // withReceiverBundleHavoc adds the RECEIVER BUNDLE's slots to a havoc

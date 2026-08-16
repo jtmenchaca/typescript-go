@@ -43,6 +43,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/compiler"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
@@ -223,6 +224,71 @@ func CheckFiles(entryPaths []string, surfacePath string) map[string]CheckResult 
 		})
 	}
 	return results
+}
+
+// liveCheckMu serializes the whole live-program refinement seam.
+// GO-LSP-EDITOR-PATH.md §16.3 item 1: document-diagnostic handlers run
+// on a goroutine per request, and two overlapping walks would (a) race
+// setupKernel's package-level hook writes ("never inside a concurrent
+// per-entry path" — setupKernel's own contract) and (b) run
+// kernelbridge.FlushQuestionStore concurrently at the end of both
+// walks, which the store is not designed for. One editor buffer's walk
+// is milliseconds-to-tens-of-milliseconds; serializing the seam is the
+// listed resolution ("serialize refinement checks"), chosen over a
+// per-request question store.
+var liveCheckMu sync.Mutex
+
+// CheckWithProgram is checkWithProgram in the TS source (check.ts):
+// the language-service seam — judge ONE file of a LIVE program the
+// caller already holds (the LSP session's own), so unsaved buffer
+// contents are what is checked and no Program is rebuilt per call.
+//
+// This seam answers the EDITOR'S view: a fire covered by a
+// @refinedts-expect-error marker is suppressed, and a stale marker is
+// its own 7005 diagnostic (EditorView) — the CLI's raw comparator
+// keeps its own presentation over the same reader.
+//
+// Shape policy (locked, GO-LSP-EDITOR-PATH.md §15.3): shape
+// diagnostics are never collected here — the LS's own
+// getAllDiagnostics already gathers them, and the plugin appends only
+// refinements. runRefinements is called directly with a nil shape
+// slice (which the walk never reads), so no process-global flag is
+// touched and the CLI's own shape behavior is unaffected.
+//
+// A panic inside the walk is recovered into an error: an editor pull
+// must degrade to shape-only, never take the request down
+// (plugin/index.cjs logs and keeps prior on the same failure).
+func CheckWithProgram(
+	ctx context.Context,
+	prog *compiler.Program,
+	entryPath string,
+	surfacePaths []string,
+) (result CheckResult, err error) {
+	p, buildErr := ProgramFromExisting(ctx, prog, entryPath, surfacePaths)
+	if buildErr != nil {
+		return CheckResult{}, buildErr
+	}
+	// Pattern 1 (locked §15.2): the lease opened inside
+	// ProgramFromExisting is a REAL release on the project checker
+	// pool — never decorative — and this seam owns it.
+	if p.Done != nil {
+		defer p.Done()
+	}
+	liveCheckMu.Lock()
+	defer liveCheckMu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			if recoveredErr, ok := r.(error); ok {
+				err = recoveredErr
+			} else {
+				err = fmt.Errorf("refinement walk failed: %v", r)
+			}
+			result = CheckResult{}
+		}
+	}()
+	result = runRefinements(p, nil, setupKernel(), nil)
+	result.Refinements = EditorView(p.Entry.Text(), result.Refinements)
+	return result, nil
 }
 
 // shapeDiagnosticsIncluded is the TS source's shapeDiagnosticsIncluded

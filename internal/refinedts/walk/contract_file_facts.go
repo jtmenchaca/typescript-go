@@ -22,9 +22,12 @@ import (
 )
 
 // contractSignature is readSignature's return shape in the TS source.
+// Yield is the Go tree's own addition: a generator declaration's
+// stated yield position (yield_contract.go), nil everywhere else.
 type contractSignature struct {
 	Params   []*annotations.DeclaredRefinement
 	Result   *annotations.DeclaredRefinement
+	Yield    *annotations.DeclaredRefinement
 	Grounded bool
 }
 
@@ -85,13 +88,21 @@ func CompileContractFileFacts(
 			params[i] = read.Stated
 		}
 		var result *annotations.DeclaredRefinement
+		var yieldStated *annotations.DeclaredRefinement
 		returnType := fn.Type()
 		if returnType != nil {
-			read := annotations.AnnotationOfType(p, returnType, registry, objects)
-			if read.Stated != nil {
-				result = read.Stated
-			} else if read.Unsupported != "" && reporting {
-				report(assignability.At(returnType, 7004, read.Unsupported))
+			if IsGeneratorDeclaration(fn) {
+				// a generator's written return type names Generator<Y, R, N>:
+				// Y is the yield position, R is what the return statements
+				// judge against — the whole reference states no VALUE position
+				yieldStated, result = generatorStatedPositions(p, returnType, registry, objects, reporting, report)
+			} else {
+				read := annotations.AnnotationOfType(p, returnType, registry, objects)
+				if read.Stated != nil {
+					result = read.Stated
+				} else if read.Unsupported != "" && reporting {
+					report(assignability.At(returnType, 7004, read.Unsupported))
+				}
 			}
 		}
 		grounded := false
@@ -104,7 +115,10 @@ func CompileContractFileFacts(
 		if !grounded {
 			grounded = positionGrounds(result)
 		}
-		return contractSignature{Params: params, Result: result, Grounded: grounded}
+		if !grounded {
+			grounded = positionGrounds(yieldStated)
+		}
+		return contractSignature{Params: params, Result: result, Yield: yieldStated, Grounded: grounded}
 	}
 
 	register := func(nameNode *ast.Node, declaration *ast.Node, signature contractSignature) {
@@ -116,6 +130,7 @@ func CompileContractFileFacts(
 			Declaration: declaration,
 			Params:      signature.Params,
 			Result:      signature.Result,
+			Yield:       signature.Yield,
 			Grounded:    signature.Grounded,
 		}
 		contracts[symbol] = contract

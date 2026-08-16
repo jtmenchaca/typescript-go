@@ -41,13 +41,18 @@ func readObjectStaticValues(site MethodCallSite) *abstractdomain.AbstractValue {
 		argument := evaluateExpression(ctx, env, arguments[0])
 		if argument.Kind == abstractdomain.KindObject && argument.Complete {
 			grade := abstractdomain.MinTrustLevel(abstractdomain.TrustSpec, abstractdomain.TrustLevelOf(argument))
-			items := make([]abstractdomain.AbstractValue, len(argument.Keys))
-			for i, key := range argument.Keys {
+			items := make([]abstractdomain.AbstractValue, 0, len(argument.Keys))
+			for _, key := range argument.Keys {
+				// a SYMBOL slot (#sym:…) is not a String-valued key —
+				// EnumerableOwnProperties never yields it
+				if symbolSlotKey(key.Name) {
+					continue
+				}
 				pair := abstractdomain.KnownList([]abstractdomain.AbstractValue{
 					abstractdomain.KnownValues(refinementsets.CodepointsOf(key.Name), abstractdomain.PrimitiveString, grade),
 					key.Value,
 				}, grade)
-				items[i] = pair
+				items = append(items, pair)
 			}
 			out := abstractdomain.KnownList(items, grade)
 			return &out
@@ -69,7 +74,11 @@ func readObjectStaticValues(site MethodCallSite) *abstractdomain.AbstractValue {
 			for _, item := range argument.Items {
 				if item.Kind == abstractdomain.KindList && len(item.Items) == 2 {
 					key := item.Items[0]
-					if key.Kind == abstractdomain.KindValues && key.KindTag == abstractdomain.PrimitiveString {
+					// a runtime string spelling the #sym: prefix would
+					// collide with the symbol-slot vocabulary
+					// (keyed_slot_reads.go) — the build declines instead
+					if key.Kind == abstractdomain.KindValues && key.KindTag == abstractdomain.PrimitiveString &&
+						!symbolSlotKey(stringOf(key.Values)) {
 						keys = setObjectKey(keys, stringOf(key.Values), item.Items[1])
 						continue
 					}
@@ -147,10 +156,24 @@ func readObjectStaticMethods(site MethodCallSite) *abstractdomain.AbstractValue 
 		// structured value set is the exact LIST. Object.keys is the
 		// list of key strings, entries the list of [key, value] pairs —
 		// all requiring the COMPLETE key set.
+		// SYMBOL slots (#sym:…, keyed_slot_reads.go) are not String-valued
+		// keys — Object.values / keys / entries never yield them
+		// (sec-object.keys and siblings read EnumerableOwnProperties over
+		// String-valued keys only)
+		stringKeysOf := func(o abstractdomain.AbstractValue) []abstractdomain.ObjectKey {
+			out := make([]abstractdomain.ObjectKey, 0, len(o.Keys))
+			for _, key := range o.Keys {
+				if !symbolSlotKey(key.Name) {
+					out = append(out, key)
+				}
+			}
+			return out
+		}
 		if method == "values" && hasFirst && first.Kind == abstractdomain.KindObject && first.Complete {
-			values := make([]float64, 0, len(first.Keys))
+			stringKeys := stringKeysOf(first)
+			values := make([]float64, 0, len(stringKeys))
 			exact := true
-			for _, key := range first.Keys {
+			for _, key := range stringKeys {
 				if key.Value.Kind == abstractdomain.KindValues && len(key.Value.Values) == 1 && key.Value.KindTag == abstractdomain.PrimitiveNumber {
 					values = append(values, key.Value.Values[0])
 				} else {
@@ -161,24 +184,26 @@ func readObjectStaticMethods(site MethodCallSite) *abstractdomain.AbstractValue 
 				out := abstractdomain.KnownValues(values, abstractdomain.PrimitiveArray, abstractdomain.TrustProved)
 				return &out
 			}
-			items := make([]abstractdomain.AbstractValue, len(first.Keys))
-			for i, key := range first.Keys {
+			items := make([]abstractdomain.AbstractValue, len(stringKeys))
+			for i, key := range stringKeys {
 				items[i] = key.Value
 			}
 			out := abstractdomain.KnownList(items, abstractdomain.TrustProved)
 			return &out
 		}
 		if method == "keys" && hasFirst && first.Kind == abstractdomain.KindObject && first.Complete {
-			items := make([]abstractdomain.AbstractValue, len(first.Keys))
-			for i, key := range first.Keys {
+			stringKeys := stringKeysOf(first)
+			items := make([]abstractdomain.AbstractValue, len(stringKeys))
+			for i, key := range stringKeys {
 				items[i] = abstractdomain.KnownValues(refinementsets.CodepointsOf(key.Name), abstractdomain.PrimitiveString, abstractdomain.TrustProved)
 			}
 			out := abstractdomain.KnownList(items, abstractdomain.TrustProved)
 			return &out
 		}
 		if method == "entries" && hasFirst && first.Kind == abstractdomain.KindObject && first.Complete {
-			items := make([]abstractdomain.AbstractValue, len(first.Keys))
-			for i, key := range first.Keys {
+			stringKeys := stringKeysOf(first)
+			items := make([]abstractdomain.AbstractValue, len(stringKeys))
+			for i, key := range stringKeys {
 				items[i] = abstractdomain.KnownList([]abstractdomain.AbstractValue{
 					abstractdomain.KnownValues(refinementsets.CodepointsOf(key.Name), abstractdomain.PrimitiveString, abstractdomain.TrustProved),
 					key.Value,

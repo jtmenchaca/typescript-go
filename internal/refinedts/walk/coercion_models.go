@@ -72,6 +72,53 @@ func readCoercionGlobals(ctx *FlowContext, env Env, e *ast.Node, spreadArguments
 		out := abstractdomain.KnownSet(refinementsets.Strings, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
 		return &out
 	}
+	// String.fromCharCode — each argument maps to the code unit whose
+	// numeric value is ℝ(? ToUint16(_next_)), and the result is the
+	// string-concatenation of those units (sec-string.fromcharcode).
+	// Exact where every argument is one exact number and the units are
+	// well-formed UTF-16; every call returns a STRING regardless (the
+	// algorithm only builds code units), so the widest answer keeps the
+	// sort.
+	if ast.IsPropertyAccessExpression(call.Expression) {
+		pa := call.Expression.AsPropertyAccessExpression()
+		if ast.IsIdentifier(pa.Expression) && pa.Expression.Text() == "String" &&
+			resolvesToDefaultLib(ctx, pa.Expression) && pa.Name().Text() == "fromCharCode" {
+			exact := true
+			values := make([]float64, 0, len(arguments))
+			grade := abstractdomain.TrustSpec
+			for _, argument := range arguments {
+				if ast.IsSpreadElement(argument) {
+					// a spread's element count is not pinned here; its
+					// inner expression still evaluates (writes ride), and
+					// the sort answer below still holds
+					evaluateExpression(ctx, env, argument.AsSpreadElement().Expression)
+					exact = false
+					continue
+				}
+				argKnown := evaluateExpression(ctx, env, argument)
+				grade = abstractdomain.MinTrustLevel(grade, abstractdomain.TrustLevelOf(argKnown))
+				if argKnown.Kind == abstractdomain.KindNaN {
+					// ToUint16(NaN) is +0 — ToIntegerOrInfinity reads NaN
+					// as 0 (sec-touint16)
+					values = append(values, math.NaN())
+					continue
+				}
+				if argKnown.Kind == abstractdomain.KindValues && argKnown.KindTag == abstractdomain.PrimitiveNumber && len(argKnown.Values) == 1 {
+					values = append(values, argKnown.Values[0])
+					continue
+				}
+				exact = false
+			}
+			if exact {
+				if text, ok := jsFromCharCode(values); ok {
+					out := abstractdomain.KnownValues(refinementsets.CodepointsOf(text), abstractdomain.PrimitiveString, grade)
+					return &out
+				}
+			}
+			out := abstractdomain.KnownSet(refinementsets.Strings, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+			return &out
+		}
+	}
 	// Number(value): +0 with no argument, ToNumber of the argument
 	// otherwise (sec-number-constructor-number-value). The non-string
 	// ToNumber rows are the transcribed table
@@ -314,6 +361,48 @@ func readCoercionGlobals(ctx *FlowContext, env Env, e *ast.Node, spreadArguments
 		}
 	}
 	return nil
+}
+
+// jsFromCharCode is String.fromCharCode (sec-string.fromcharcode):
+// each argument becomes the code unit whose numeric value is
+// ℝ(? ToUint16(_next_)) and the result is their concatenation. False
+// where the units spell a LONE surrogate — the code-point encoding
+// cannot carry half a pair, so that shape keeps the sort-level answer
+// instead of a silently wrong tuple.
+func jsFromCharCode(values []float64) (string, bool) {
+	units := make([]uint16, len(values))
+	for i, v := range values {
+		units[i] = jsToUint16(v)
+	}
+	for i := 0; i < len(units); i++ {
+		u := units[i]
+		if u >= 0xD800 && u <= 0xDBFF {
+			if i+1 < len(units) && units[i+1] >= 0xDC00 && units[i+1] <= 0xDFFF {
+				i++
+				continue
+			}
+			return "", false
+		}
+		if u >= 0xDC00 && u <= 0xDFFF {
+			return "", false
+		}
+	}
+	return utf16ToString(units), true
+}
+
+// jsToUint16 is ToUint16 (sec-touint16): ToIntegerOrInfinity — NaN
+// reads 0, the rest truncate — then ToFixedSizeInteger(int, ~unsigned~,
+// 16): ±∞ read 0, the rest take modulo 2^16 (sec-tofixedsizeinteger).
+func jsToUint16(v float64) uint16 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	truncated := math.Trunc(v)
+	m := math.Mod(truncated, 65536)
+	if m < 0 {
+		m += 65536
+	}
+	return uint16(m)
 }
 
 // jsStringToNumber mirrors StringToNumber
@@ -649,6 +738,11 @@ func jsonStringifyOf(known abstractdomain.AbstractValue, noteGrade func(grade ab
 		b.WriteByte('{')
 		wroteAny := false
 		for _, key := range known.Keys {
+			// a SYMBOL slot (#sym:…, keyed_slot_reads.go) is not a
+			// String-valued key — SerializeJSONObject never writes it
+			if symbolSlotKey(key.Name) {
+				continue
+			}
 			value, ok := jsonStringifyOf(key.Value, noteGrade)
 			if !ok {
 				return "", false

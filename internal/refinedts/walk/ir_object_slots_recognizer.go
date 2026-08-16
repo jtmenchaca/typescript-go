@@ -64,10 +64,14 @@ func ObjectLocalIn(
 	if sameShapeName == nil {
 		sameShapeName = func(string) bool { return false }
 	}
-	if !usesAreAllDeclaredKeySteps(checkerOf(ctx), body, declaration, name, keys, sameShapeName) {
+	// the literal's method rows, by dotted path — the use scan admits
+	// exactly these spellings in callee position; a declaration-sourced
+	// family (a constructor's exits, a declared type) carries none
+	methods := literalMethodPaths(objectLiteralOfDeclaration(declaration), nil)
+	if !usesAreAllDeclaredKeySteps(checkerOf(ctx), body, declaration, name, keys, methods, sameShapeName) {
 		return ObjectLocal{}, false
 	}
-	return ObjectLocal{Declaration: declaration, Name: name, Keys: keys}, true
+	return ObjectLocal{Declaration: declaration, Name: name, Keys: keys, Methods: methods}, true
 }
 
 // declarationLeavesOf is the one place the four family sources are

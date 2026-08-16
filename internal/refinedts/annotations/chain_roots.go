@@ -108,6 +108,21 @@ func rootsInLibraryAdapter(p *program.CheckerProgram, expr *ast.Node) bool {
 	return root != nil && libraryAdapterOfNode(p, root) != nil
 }
 
+// RootsInLibraryAdapter is the exported spelling of
+// rootsInLibraryAdapter — the hover answer path (service) asks it to
+// choose the schema-type-name prefix and the library grade.
+func RootsInLibraryAdapter(p *program.CheckerProgram, expr *ast.Node) bool {
+	return rootsInLibraryAdapter(p, expr)
+}
+
+// ResolvesToAnnotationRoot is the exported spelling of
+// resolvesToAnnotationRoot — the hover answer path (service) asks it
+// for unread-chain detection (a chain rooted in an annotation module
+// that neither registry compiled).
+func ResolvesToAnnotationRoot(p *program.CheckerProgram, node *ast.Node) bool {
+	return resolvesToAnnotationRoot(p, node)
+}
+
 // libraryAdapterNameOfChain is libraryAdapterNameOfChain in the TS
 // source: the library adapter a chain roots in, by name -- "" for the
 // surface.
@@ -190,6 +205,13 @@ func shapeOf(p *program.CheckerProgram, receiver *ast.Node) shapeOfResult {
 		return shapeOfResult{}
 	}
 	return shapeOfResult{Names: names, Root: root, Ok: true}
+}
+
+// RootsInObject is the exported spelling of rootsInObject — the hover
+// answer path (service) asks it before compiling an inline object
+// schema at a property assignment.
+func RootsInObject(p *program.CheckerProgram, expr *ast.Node) bool {
+	return rootsInObject(p, expr)
 }
 
 // rootsInObject is rootsInObject in the TS source: is this expression

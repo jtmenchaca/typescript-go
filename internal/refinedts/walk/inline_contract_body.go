@@ -60,10 +60,74 @@ func SummaryCallReceiver(ctx *FlowContext, env Env, call *ast.Node) abstractdoma
 		return silence.Residue()
 	}
 	receiver := callee.AsPropertyAccessExpression().Expression
-	if receiver == nil || !ReadsWithoutEffect(receiver) {
+	if receiver == nil {
 		return silence.Residue()
 	}
-	return evaluateExpression(ctx, env, receiver)
+	if ReadsWithoutEffect(receiver) {
+		return evaluateExpression(ctx, env, receiver)
+	}
+	if constructed := constructedReceiverValue(ctx, env, receiver); constructed != nil {
+		return *constructed
+	}
+	return silence.Residue()
+}
+
+// constructedReceiverValue reads a `new C(...)` RECEIVER —
+// `new Person().years()` — as the instance the construction holds.
+//
+// The caller's walk already ran the construction once for its effects
+// (evaluate_call_expression walks a contracted method call's receiver
+// before the arguments) and dropped the value; without this reading the
+// method's this-field entries all fill TOP and the field knowledge the
+// constructor established never reaches the call. Deriving the value
+// again is safe exactly when every constructor argument is effect-free
+// to read twice — a literal or an effect-free chain of names —
+// because ConstructedInstance itself walks the constructor's body on a
+// fresh environment and touches nothing the caller tracks. The re-run
+// is SILENT: whatever the first evaluation had to report is reported
+// already, and a second copy of each diagnostic would be a new claim.
+//
+// Nil for every other receiver — anything that RUNS beyond the gated
+// construction keeps the residue the caller supplies.
+func constructedReceiverValue(ctx *FlowContext, env Env, receiver *ast.Node) *abstractdomain.AbstractValue {
+	core := Unwrapped(receiver)
+	if core == nil || !ast.IsNewExpression(core) {
+		return nil
+	}
+	newExpr := core.AsNewExpression()
+	if newExpr.Arguments != nil {
+		for _, argument := range newExpr.Arguments.Nodes {
+			if !readsTwiceWithoutEffect(argument) {
+				return nil
+			}
+		}
+	}
+	silent := *ctx
+	silent.Report = func(assignability.RefinementDiagnostic) {}
+	return EvaluateNewExpression(&silent, env, core)
+}
+
+// readsTwiceWithoutEffect: an argument a second evaluation cannot
+// double — an effect-free chain of names, or a literal (a negated
+// number included).
+func readsTwiceWithoutEffect(argument *ast.Node) bool {
+	if argument == nil {
+		return false
+	}
+	if ReadsWithoutEffect(argument) {
+		return true
+	}
+	switch argument.Kind {
+	case ast.KindNumericLiteral, ast.KindStringLiteral,
+		ast.KindNoSubstitutionTemplateLiteral, ast.KindBigIntLiteral,
+		ast.KindTrueKeyword, ast.KindFalseKeyword, ast.KindNullKeyword:
+		return true
+	}
+	if ast.IsPrefixUnaryExpression(argument) {
+		prefix := argument.AsPrefixUnaryExpression()
+		return prefix.Operator == ast.KindMinusToken && prefix.Operand.Kind == ast.KindNumericLiteral
+	}
+	return false
 }
 
 // InlineContractBody is inlineContractBody in the TS source.
@@ -159,7 +223,15 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	// join the callee's in the key. Knowledge carrying compiler
 	// objects still has no plain spelling and runs unmemoized rather
 	// than mis-keyed.
-	memoKey := computeInlineMemoKey(ctx, env, call, contract, calleeName, effective)
+	//
+	// The RECEIVER is read once, here: it feeds the summary route's
+	// this-entries below AND the key — a method's outcome is a function
+	// of the fields its body reads off the instance, so two calls on
+	// receivers holding different field values must never share an
+	// outcome (`new Sealed(40).years()` and `new Sealed(200).years()`
+	// spell one argument list and one caller state).
+	receiver := SummaryCallReceiver(ctx, env, call)
+	memoKey := computeInlineMemoKey(ctx, env, call, contract, calleeName, effective, receiver)
 	if memoKey != "" {
 		inlineMemoMu.Lock()
 		byKey := inlineMemoOf(ctx.P)[contract.Declaration]
@@ -188,7 +260,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	// The summary's admitted bodies have no caller-visible effect
 	// beyond the return (KernelSummaryDirect's comment carries the
 	// argument), so the remembered outcome carries no posts.
-	if summarized, ok := KernelSummaryDirectOn(ctx, argKnowns, contract, SummaryCallReceiver(ctx, env, call)); ok {
+	if summarized, ok := KernelSummaryDirectOn(ctx, argKnowns, contract, receiver); ok {
 		tracing.Count("inline.summaryDirect", 0)
 		// THE SERVED-CALL FORGET: a summary whose body writes receiver
 		// fields, writes a parameter bundle's fields, or returns its

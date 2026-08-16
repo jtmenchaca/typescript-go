@@ -16,6 +16,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 )
 
 // SuperRootedCallee: whether a call-like node's callee is rooted at
@@ -214,6 +215,72 @@ func inheritedConstructorDeclaration(ctx *FlowContext, base *ast.Node) *ast.Node
 	return nil
 }
 
+// NewExpressionDispatchTarget: whether a method callee is read off a
+// DIRECT `new C(…)` construction and `declaration` is the very member
+// class C dispatches for that name. A value spelled `new C(…)` has C
+// as its EXACT runtime class — no subclass instance can stand behind
+// the expression — so the dispatch is as static as a super call's, and
+// ContractOf's override gate (which guards virtual dispatch through
+// receivers whose runtime class may be derived) has nothing to guard.
+//
+// The reading is deliberately syntactic: only a receiver that IS the
+// construction (parens and casts stepped through) qualifies. A name a
+// construction was bound to answers false here — the binding's class
+// exactness is flow knowledge this gate does not carry.
+func NewExpressionDispatchTarget(ctx *FlowContext, callee *ast.Node, declaration *ast.Node) bool {
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+		return false
+	}
+	if callee == nil || !ast.IsPropertyAccessExpression(callee) {
+		return false
+	}
+	access := callee.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return false
+	}
+	name := access.Name()
+	if name == nil || !ast.IsIdentifier(name) {
+		return false
+	}
+	receiver := Unwrapped(access.Expression)
+	if receiver == nil || !ast.IsNewExpression(receiver) {
+		return false
+	}
+	constructorName := Unwrapped(receiver.AsNewExpression().Expression)
+	if constructorName == nil {
+		return false
+	}
+	var classLike *ast.Node
+	if ast.IsClassLike(constructorName) {
+		// `new (class { … })().m()` names its class inline
+		classLike = constructorName
+	} else {
+		if !ast.IsIdentifier(constructorName) {
+			return false
+		}
+		symbol := symbolAt(ctx.P.Checker, constructorName)
+		if symbol == nil || symbol.ValueDeclaration == nil {
+			return false
+		}
+		classLike = symbol.ValueDeclaration
+		if !ast.IsClassLike(classLike) {
+			return false
+		}
+		// a class NAME the file reassigns may hold a different
+		// constructor at runtime — the same doubt ContractOf reads for
+		// a reassigned function name
+		if _, reassigned := narrowing.ReassignedNames(ast.GetSourceFileOfNode(classLike))[constructorName.Text()]; reassigned {
+			return false
+		}
+	}
+	if ast.GetSourceFileOfNode(classLike).IsDeclarationFile {
+		return false
+	}
+	// the member C's own chain dispatches for the name — the same
+	// walk a super call reads, started at C itself
+	return inheritedMemberDeclaration(ctx, classLike, name.Text()) == declaration
+}
+
 // inheritedMemberDeclaration is the METHOD a `super.m(…)` runs: the
 // member named m on the base, or on the first class above it in the
 // heritage chain that declares one with a body. A STATIC member is
@@ -262,11 +329,14 @@ func inheritedMemberDeclaration(ctx *FlowContext, base *ast.Node, memberName str
 // symbol ContractBySymbol can follow, so the declaration node is the
 // only identity available.
 //
-// The OVERRIDE gate ContractOf applies to a method callee is applied
-// here too: a base method overridden anywhere in view has a body that
-// does not stand for every instance. `super.m(…)` dispatches to the
-// base body statically, so keeping the gate is stricter than the call
-// needs — and stricter is the side every doubt here falls on.
+// NO OVERRIDE GATE rides here. ContractOf's gate exists because an
+// ordinary method callee dispatches virtually — the receiver's runtime
+// class picks the body. A `super.m(…)` lookup starts at the HOME
+// object's prototype (sec-super-keyword's MakeSuperPropertyReference),
+// never at the instance, so the base body the heritage walk above
+// resolved is the body that runs whatever the instance's own class
+// declares — an override of the name elsewhere never changes which
+// body a super call runs.
 func SuperCallContract(ctx *FlowContext, callee *ast.Node) *FunctionContract {
 	declaration := SuperCallDeclaration(ctx, callee)
 	if declaration == nil {
@@ -275,14 +345,6 @@ func SuperCallContract(ctx *FlowContext, callee *ast.Node) *FunctionContract {
 	held, ok := ContractIndexOf(&ctx.Contracts)[declaration]
 	if !ok {
 		return nil
-	}
-	if ast.IsMethodDeclaration(declaration) {
-		name := declaration.Name()
-		if name != nil && ast.IsIdentifier(name) {
-			if _, overridden := OverriddenMethodNames(&ctx.Contracts)[name.Text()]; overridden {
-				return nil
-			}
-		}
 	}
 	return held
 }

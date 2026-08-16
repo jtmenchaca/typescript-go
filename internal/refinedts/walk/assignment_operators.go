@@ -113,8 +113,18 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 		right := evaluateExpression(ctx, env, bin.Right)
 		op, hasOp := compoundOperator(bin.OperatorToken.Kind)
 		before := evaluateExpression(ctx, env, bin.Left)
+		// `+=` rides the same concatenation transfer as spelled-out `+`:
+		// both run ApplyStringOrNumericBinaryOperator, whose string arm
+		// concatenates (sec-applystringornumericbinaryoperator;
+		// sec-assignment-operators-runtime-semantics-evaluation)
+		var concatenated *abstractdomain.AbstractValue
+		if bin.OperatorToken.Kind == ast.KindPlusEqualsToken {
+			concatenated = readStringConcatenation(ctx, bin.Left, bin.Right, before, right)
+		}
 		var next abstractdomain.AbstractValue
 		switch {
+		case concatenated != nil:
+			next = *concatenated
 		case hasOp:
 			next = TransferBinary(op, before, right)
 		case bin.OperatorToken.Kind == ast.KindAsteriskAsteriskEqualsToken:
@@ -135,8 +145,18 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 		if !ok {
 			before = silence.Residue()
 		}
+		// `+=` rides the same concatenation transfer as spelled-out `+`:
+		// both run ApplyStringOrNumericBinaryOperator, whose string arm
+		// concatenates (sec-applystringornumericbinaryoperator;
+		// sec-assignment-operators-runtime-semantics-evaluation)
+		var concatenated *abstractdomain.AbstractValue
+		if bin.OperatorToken.Kind == ast.KindPlusEqualsToken {
+			concatenated = readStringConcatenation(ctx, bin.Left, bin.Right, before, right)
+		}
 		var next abstractdomain.AbstractValue
 		switch {
+		case concatenated != nil:
+			next = *concatenated
 		case hasOp:
 			next = TransferBinary(op, before, right)
 		case bin.OperatorToken.Kind == ast.KindAsteriskAsteriskEqualsToken:

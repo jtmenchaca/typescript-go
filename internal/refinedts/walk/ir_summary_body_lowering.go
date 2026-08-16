@@ -60,6 +60,14 @@ func lowerSummaryBodyReporting(
 		Result:   &LoweringResult{Done: slotLayout.DoneIndex, Ret: slotLayout.RetIndex},
 		ResolveCallee: func(callee *ast.Node) *ast.Node {
 			called := ContractOf(ctx, callee)
+			if called == nil {
+				// `super.m(…)` names no symbol ContractOf can follow;
+				// super_binding.go walks the enclosing class's heritage
+				// to the base body the call RUNS — the dispatch is
+				// static, so the resolved declaration's summary splices
+				// exactly as a named callee's does
+				called = SuperCallContract(ctx, callee)
+			}
 			if called == nil || !summaryLowerable(called.Declaration) {
 				return nil
 			}

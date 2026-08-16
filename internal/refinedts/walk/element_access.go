@@ -204,12 +204,37 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 				// and `b[k]` with an exact k ARE the dotted read — both evaluate
 				// to the same Reference (sec-property-accessors)
 				if receiver.Kind == abstractdomain.KindObject {
+					// a STABLE SYMBOL key reads the slot the literal wrote
+					// under the derived #sym: name (object_literal.go /
+					// keyed_slot_reads.go). A missed slot claims NOTHING —
+					// not even absence: two different consts may spell the
+					// SAME registry symbol (Symbol.for twice,
+					// sec-symbol.for), so the missing spelled slot does not
+					// witness a missing runtime key.
+					if elem.QuestionDotToken == nil {
+						if slot, _, stable := stableSymbolSlotOf(ctx.P.Checker, elem.ArgumentExpression); stable {
+							if idx, found := objectKeyIndex(receiver, slot); found {
+								out := receiver.Keys[idx].Value
+								return &out
+							}
+							out := silence.Residue()
+							return &out
+						}
+					}
 					var key string
 					hasKey := false
 					if ast.IsStringLiteral(elem.ArgumentExpression) || ast.IsNoSubstitutionTemplateLiteral(elem.ArgumentExpression) {
 						key, hasKey = elem.ArgumentExpression.Text(), true
 					} else if index.Kind == abstractdomain.KindValues && index.KindTag == abstractdomain.PrimitiveString {
 						key, hasKey = stringOf(index.Values), true
+					}
+					// an exact string spelling the #sym: prefix would read a
+					// symbol slot as if it were a string key — the slot
+					// vocabulary owns that spelling, so the read claims
+					// nothing
+					if hasKey && symbolSlotKey(key) {
+						out := silence.Residue()
+						return &out
 					}
 					if hasKey {
 						if idx, ok := objectKeyIndex(receiver, key); ok {
@@ -235,6 +260,60 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 						}
 						out := silence.Residue()
 						return &out
+					}
+					// a key that is ONE OF several exact strings reads the
+					// JOIN of the named slots: ToPropertyKey of an exact
+					// string is that string (sec-topropertykey), so the
+					// runtime read lands on one of the spelled names and
+					// every value it can answer is one the join admits. A
+					// member the object does not name reads as the
+					// missing-key rule above answers it; a member the walk
+					// cannot resolve leaves the whole read unclaimed. The
+					// sort gate keeps a numeric one-member set from being
+					// reread as code units (oneOf pins neither sort —
+					// sortOfForms, kernel_delegation.go).
+					if index.Kind == abstractdomain.KindSet && index.SetKindTag == abstractdomain.SetKindTagNone &&
+						sortOfForms(index.Set.Forms) == BindingKindString {
+						if words, wordsOK := exactWordsOfSet(index.Set); wordsOK && len(words) > 0 {
+							var joined abstractdomain.AbstractValue
+							hasJoined := false
+							determined := true
+							for _, word := range words {
+								name := stringOf(word)
+								var member abstractdomain.AbstractValue
+								if symbolSlotKey(name) {
+									determined = false
+									break
+								}
+								if idx, found := objectKeyIndex(receiver, name); found {
+									member = receiver.Keys[idx].Value
+								} else if receiver.Complete && !openMapReceiver(ctx, elem.Expression) {
+									switch {
+									case receiver.BareProto:
+										member = abstractdomain.Undef
+									case abstractdomain.ObjectPrototypeFunctionKeys[name]:
+										member = abstractdomain.HostFunction
+									default:
+										member = abstractdomain.Undef
+									}
+								} else {
+									determined = false
+									break
+								}
+								if !hasJoined {
+									joined, hasJoined = member, true
+								} else {
+									joined = abstractdomain.JoinKnown(joined, member)
+								}
+							}
+							if determined && hasJoined {
+								out := abstractdomain.AtTrustLevel(joined,
+									abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(joined), abstractdomain.TrustLevelOf(index)))
+								return &out
+							}
+							out := silence.Residue()
+							return &out
+						}
 					}
 				}
 				// a list element read is that slot's own knowledge.

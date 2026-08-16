@@ -65,6 +65,14 @@ var StringReadMethods = map[string]struct{}{
 	"trim":        {},
 	"trimStart":   {},
 	"trimEnd":     {},
+	// the Annex B aliases: "The initial value of the *trimLeft* property
+	// is %String.prototype.trimStart%" (String.prototype.trimleft,
+	// String.prototype.trimright) — the SAME function objects
+	"trimLeft":  {},
+	"trimRight": {},
+	// String.prototype.toString on a string is the string itself
+	// (sec-string.prototype.tostring)
+	"toString": {},
 	"startsWith":  {},
 	"endsWith":    {},
 	"charAt":      {},

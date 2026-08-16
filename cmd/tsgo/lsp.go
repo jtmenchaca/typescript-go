@@ -40,6 +40,11 @@ func runLSP(args []string) int {
 		defer profileSession.Stop()
 	}
 
+	// the refinement kernel's dylib path is stated once, before any
+	// request — the first diagnostic pull loads it on demand
+	// (refinedts_kernel.go; GO-LSP-EDITOR-PATH.md §11.5, §15.4)
+	configureRefinedTSKernel()
+
 	fs := bundled.WrapFS(osvfs.FS())
 	defaultLibraryPath := bundled.LibPath()
 	typingsLocation := osvfs.GetGlobalTypingsCacheLocation()

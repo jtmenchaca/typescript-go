@@ -37,6 +37,12 @@ type FunctionContract struct {
 	Declaration *ast.Node // FunctionDeclaration | ArrowFunction | FunctionExpression | MethodDeclaration
 	Params      []*annotations.DeclaredRefinement
 	Result      *annotations.DeclaredRefinement
+	// Yield: the stated yield position of a GENERATOR declaration —
+	// the Y of a written `Generator<Y, R, N>`, what every `yield e`
+	// in the body hands the caller (Result holds R, the return
+	// statement's own position). Nil for every non-generator and
+	// wherever Y states nothing.
+	Yield *annotations.DeclaredRefinement
 	// Grounded is true when some position or bound came from a stated
 	// annotation. An ungrounded signature (plain TS, pure generics)
 	// still walks and still instantiates at calls, but its OWN
@@ -91,6 +97,11 @@ type FlowContext struct {
 	// COLLECTED here instead of ending a contract walk — the seam
 	// callbacks and inlined closures read their block bodies through.
 	ReturnSink *[]abstractdomain.AbstractValue
+	// YieldStated: the enclosing generator body's stated yield
+	// position — what every `yield e` judges its operand against
+	// (yield_contract.go). analyzeFunctionBody sets it per body, so
+	// it is nil outside a grounded generator's own walk.
+	YieldStated *annotations.DeclaredRefinement
 	// Inlining: the closures currently being inlined — re-entry is
 	// recursion, and a recursive inline answers unknown rather than
 	// diverging.

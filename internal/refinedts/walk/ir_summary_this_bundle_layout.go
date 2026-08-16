@@ -76,6 +76,12 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 		return thisBundleLayout{}
 	}
 	classLike := declaration.Parent
+	// an OBJECT LITERAL's shorthand method: the receiver's fields are the
+	// literal's own scalar rows rather than a class's declarations —
+	// literalThisBundleOf (method_this_writes.go) is the literal arm
+	if classLike != nil && ast.IsObjectLiteralExpression(classLike) && ast.IsMethodDeclaration(declaration) {
+		return literalThisBundleOf(ctx, declaration, classLike)
+	}
 	if classLike == nil || !ast.IsClassLike(classLike) {
 		return thisBundleLayout{}
 	}

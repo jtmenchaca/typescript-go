@@ -415,6 +415,42 @@ func orderedQuestion(rawA, rawB abstractdomain.AbstractValue, pose func(a, b ref
 	return &answer
 }
 
+// tightenStrictBounds rewrites each top-level strict ray of a posed
+// operand set to the closed ray at its neighboring float: `above a`
+// becomes `>= nextafter(a, +Inf)` and `below b` becomes
+// `<= nextafter(b, -Inf)`. A runtime double strictly past a float
+// bound sits at or past that bound's format neighbor — the kernel's
+// own proved fact (pred_bounds_strict, transfers/strict_precision.lean)
+// and the same step its floor/ceil/round/trunc transfer takes
+// (tightLo/tightHi, set_functions/transfer.lean). The kernel's binary
+// transfers (transferAdd, transferMul, ...) read only CLOSED corners
+// and drop the strict flags, so without this step Math.random()'s
+// [0, 1) — "greater than or equal to +0𝔽 but strictly less than 1𝔽",
+// vendored spec sec-math.random — multiplies as if 1 were reachable,
+// and Math.floor(Math.random() * 121) reads as reaching 121. Infinite
+// bounds stay as they are, mirroring the kernel's tightLo/tightHi,
+// which step only finite ones.
+func tightenStrictBounds(set refinementsets.RefinedSet) refinementsets.RefinedSet {
+	changed := false
+	forms := make([]refinementsets.Refinement, len(set.Forms))
+	for i, f := range set.Forms {
+		switch {
+		case f.Form == refinementsets.FormAbove && isFinite(f.A):
+			forms[i] = refinementsets.AtLeast(math.Nextafter(f.A, math.Inf(1)))
+			changed = true
+		case f.Form == refinementsets.FormBelow && isFinite(f.A):
+			forms[i] = refinementsets.AtMost(math.Nextafter(f.A, math.Inf(-1)))
+			changed = true
+		default:
+			forms[i] = f
+		}
+	}
+	if !changed {
+		return set
+	}
+	return refinementsets.MakeRefinedSet(forms...)
+}
+
 func binaryImage(op NumericOperator, rawA, rawB abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	a := NumericOperand(rawA)
 	b := NumericOperand(rawB)
@@ -433,6 +469,8 @@ func binaryImage(op NumericOperator, rawA, rawB abstractdomain.AbstractValue) ab
 	if !aOk || !bOk {
 		return silence.Residue()
 	}
+	A = tightenStrictBounds(A)
+	B = tightenStrictBounds(B)
 	return abstractdomain.AtTrustLevel(
 		KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: opWire[op], A: A, B: B})),
 		grade,

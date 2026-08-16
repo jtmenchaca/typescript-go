@@ -36,6 +36,10 @@ import (
 // when the value is unknown.
 var stringOutMethods = map[string]struct{}{
 	"toUpperCase": {}, "toLowerCase": {}, "trim": {}, "trimStart": {}, "trimEnd": {},
+	// trimLeft/trimRight are the Annex B names for the SAME function
+	// objects as trimStart/trimEnd (String.prototype.trimleft,
+	// String.prototype.trimright)
+	"trimLeft": {}, "trimRight": {},
 	"replace": {}, "replaceAll": {}, "charAt": {}, "padStart": {}, "padEnd": {},
 	"repeat": {}, "slice": {}, "substring": {},
 }
@@ -138,35 +142,16 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 			arguments = call.Arguments.Nodes
 		}
 		if len(arguments) == 0 {
-			switch method {
-			// Go's ToUpper/ToLower is the SIMPLE case mapping; the
-			// spec's Default Case Conversion carries SpecialCasing's
-			// multi-point rows ("ß" uppercases to "SS" —
-			// sec-string.prototype.touppercase), so only the ASCII
-			// range, where the two agree, computes — a wider receiver
-			// keeps the sort-level answer below
-			case "toUpperCase":
-				if isASCII(text) {
-					out := outString(strings.ToUpper(text))
-					return &out
-				}
-			case "toLowerCase":
-				if isASCII(text) {
-					out := outString(strings.ToLower(text))
-					return &out
-				}
-			// the trims remove the spec's white-space set
-			// (sec-trimstring: WhiteSpace ∪ LineTerminator), which is
-			// not Go's — unicode.IsSpace holds NEL and omits ZWNBSP —
-			// and not the ASCII cut list either (NBSP, LS, PS)
-			case "trim":
-				out := outString(strings.TrimFunc(text, isJSWhiteSpace))
+			// String.prototype.toString on a string is the string itself
+			// (sec-string.prototype.tostring: Return ? ThisStringValue(*this*
+			// value)) — the receiver rides unchanged, with no text
+			// round-trip, so even a lone-surrogate tuple stays exact
+			if method == "toString" {
+				out := abstractdomain.AtTrustLevel(receiver, oracleGrade)
 				return &out
-			case "trimStart":
-				out := outString(strings.TrimLeftFunc(text, isJSWhiteSpace))
-				return &out
-			case "trimEnd":
-				out := outString(strings.TrimRightFunc(text, isJSWhiteSpace))
+			}
+			if result, ok := exactZeroArgStringRow(method, text); ok {
+				out := outString(result)
 				return &out
 			}
 		}
@@ -264,6 +249,35 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 					}
 					out := outString(compiled.ReplaceAllString(text, goReplacementOf(replacement)))
 					return &out
+				}
+			}
+			// a FUNCTION replacer at an exact string pattern: the spec
+			// computes each replacement as ? ToString(? Call(_replaceValue_,
+			// *undefined*, « _searchString_, 𝔽(_position_), _string_ »)) —
+			// once at the first match (sec-string.prototype.replace) or
+			// once per match position, advancing by max(1, _searchLength_)
+			// (sec-string.prototype.replaceall) — and the functional path
+			// runs NO GetSubstitution: the returned text lands literally.
+			// With the replacer's body inline, each call runs with those
+			// exact arguments; an exact string answer at every position
+			// assembles the exact result. Anything less exact keeps the
+			// readings below (the sort-level string-out row still speaks).
+			if literal, literalOk := exactStringOf(argKnowns[0]); literalOk {
+				replacer := Unwrapped(call.Arguments.Nodes[1])
+				if replacer != nil && (ast.IsArrowFunction(replacer) || ast.IsFunctionExpression(replacer)) && replacer.Body() != nil {
+					floor := oracleGrade
+					result, ok := replaceWithFunctionResult(text, literal, method == "replaceAll", func(matched string, position int) (string, bool) {
+						answered := inlineReplacerCall(ctx, site.Env, replacer, matched, position, text)
+						if answered.Kind == abstractdomain.KindValues && answered.KindTag == abstractdomain.PrimitiveString {
+							floor = abstractdomain.MinTrustLevel(floor, abstractdomain.TrustLevelOf(answered))
+							return stringOf(answered.Values), true
+						}
+						return "", false
+					})
+					if ok {
+						out := abstractdomain.KnownValues(refinementsets.CodepointsOf(result), abstractdomain.PrimitiveString, floor)
+						return &out
+					}
 				}
 			}
 		}
@@ -454,6 +468,13 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 			out := abstractdomain.PossiblyUndefined(silence.Residue(), "", false, false)
 			return &out
 		}
+		// String.prototype.toString on a string-sorted receiver is the
+		// receiver itself (sec-string.prototype.tostring) — identity
+		// keeps the whole SET, not just the sort
+		if method == "toString" && len(arguments) == 0 {
+			out := receiver
+			return &out
+		}
 		if _, ok := stringOutMethods[method]; ok {
 			out := abstractdomain.KnownSet(refinementsets.Strings, nil, oracleGrade, abstractdomain.SetKindTagNone)
 			return &out
@@ -585,6 +606,165 @@ func readStringMatchWithConstRegex(site MethodCallSite) *abstractdomain.Abstract
 	}
 	out := abstractdomain.KnownList(items, grade)
 	return &out
+}
+
+// exactZeroArgStringRow computes the argument-free string reads on an
+// exact receiver text — the case-mapping and trimming rows of
+// readStringMethods, split out so their transcription is testable on
+// its own. ("", false) where no row speaks.
+func exactZeroArgStringRow(method string, text string) (string, bool) {
+	switch method {
+	// Go's ToUpper/ToLower is the SIMPLE case mapping; the spec's
+	// Default Case Conversion carries SpecialCasing's multi-point rows
+	// ("ß" uppercases to "SS" — sec-string.prototype.touppercase), so
+	// only the ASCII range, where the two agree, computes — a wider
+	// receiver keeps the sort-level answer
+	case "toUpperCase":
+		if isASCII(text) {
+			return strings.ToUpper(text), true
+		}
+	case "toLowerCase":
+		if isASCII(text) {
+			return strings.ToLower(text), true
+		}
+	// the trims remove the spec's white-space set (sec-trimstring:
+	// WhiteSpace ∪ LineTerminator), which is not Go's — unicode.IsSpace
+	// holds NEL and omits ZWNBSP — and not the ASCII cut list either
+	// (NBSP, LS, PS). trimLeft/trimRight are the Annex B names for the
+	// SAME function objects — "The initial value of the *trimLeft*
+	// property is %String.prototype.trimStart%"
+	// (String.prototype.trimleft, String.prototype.trimright) — so each
+	// alias computes its target's row.
+	case "trim":
+		return strings.TrimFunc(text, isJSWhiteSpace), true
+	case "trimStart", "trimLeft":
+		return strings.TrimLeftFunc(text, isJSWhiteSpace), true
+	case "trimEnd", "trimRight":
+		return strings.TrimRightFunc(text, isJSWhiteSpace), true
+	}
+	return "", false
+}
+
+// replaceWithFunctionResult assembles String.prototype.replace /
+// replaceAll over an exact receiver and an exact string pattern with a
+// per-position replacement oracle. Positions are UTF-16 CODE-UNIT
+// indices (StringIndexOf counts code units); replaceAll's match scan
+// advances by max(1, _searchLength_) (sec-string.prototype.replaceall),
+// and the pieces concatenate preserved-then-replacement with the tail
+// appended (sec-string.prototype.replace steps 9-15). ("", false) when
+// the oracle cannot pin a replacement.
+func replaceWithFunctionResult(text string, pattern string, everyMatch bool, replacementAt func(matched string, position int) (string, bool)) (string, bool) {
+	units := utf16UnitsOf(text)
+	patternUnits := utf16UnitsOf(pattern)
+	searchLength := len(patternUnits)
+	advanceBy := searchLength
+	if advanceBy < 1 {
+		advanceBy = 1
+	}
+	// StringIndexOf over code units: the first start at or after `from`
+	// where every pattern unit matches; an EMPTY pattern matches at
+	// every index up to and including the length (sec-stringindexof)
+	indexOfUnits := func(from int) int {
+		for i := from; i+searchLength <= len(units); i++ {
+			match := true
+			for j := 0; j < searchLength; j++ {
+				if units[i+j] != patternUnits[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return i
+			}
+		}
+		return -1
+	}
+	var positions []int
+	position := indexOfUnits(0)
+	if everyMatch {
+		for position != -1 {
+			positions = append(positions, position)
+			position = indexOfUnits(position + advanceBy)
+		}
+	} else if position != -1 {
+		positions = append(positions, position)
+	}
+	// no match: the receiver rides unchanged (sec-string.prototype.replace
+	// returns _string_ when _position_ is ~not-found~)
+	if len(positions) == 0 {
+		return text, true
+	}
+	var built []uint16
+	endOfLastMatch := 0
+	for _, matchPosition := range positions {
+		replacement, ok := replacementAt(pattern, matchPosition)
+		if !ok {
+			return "", false
+		}
+		built = append(built, units[endOfLastMatch:matchPosition]...)
+		built = append(built, utf16UnitsOf(replacement)...)
+		endOfLastMatch = matchPosition + searchLength
+	}
+	if endOfLastMatch < len(units) {
+		built = append(built, units[endOfLastMatch:]...)
+	}
+	return utf16ToString(built), true
+}
+
+// inlineReplacerCall runs a function replacer's body once with the
+// spec's three arguments bound — « _searchString_, 𝔽(_position_),
+// _string_ » (sec-string.prototype.replace) — the same mechanics as
+// InlineCallback (callback_models.go), widened to the three-argument
+// shape. Whatever the body writes to outer names is forgotten: a
+// replacer is still a write site.
+func inlineReplacerCall(ctx *FlowContext, env Env, replacer *ast.Node, matched string, position int, whole string) abstractdomain.AbstractValue {
+	callArguments := []abstractdomain.AbstractValue{
+		abstractdomain.KnownValues(refinementsets.CodepointsOf(matched), abstractdomain.PrimitiveString, abstractdomain.TrustSpec),
+		abstractdomain.KnownValues([]float64{float64(position)}, abstractdomain.PrimitiveNumber, abstractdomain.TrustSpec),
+		abstractdomain.KnownValues(refinementsets.CodepointsOf(whole), abstractdomain.PrimitiveString, abstractdomain.TrustSpec),
+	}
+	parameters := replacer.Parameters()
+	bindings := map[string]abstractdomain.AbstractValue{}
+	for i, argument := range callArguments {
+		var parameter *ast.Node
+		if len(parameters) > i {
+			parameter = parameters[i]
+		}
+		BindParameter(ctx.P.Checker, parameter, argument, bindings)
+	}
+	callEnv := env.Clone()
+	for name, known := range bindings {
+		callEnv.Set(name, known)
+	}
+	body := replacer.Body()
+	result := silence.Residue()
+	if body != nil {
+		if ast.IsBlock(body) {
+			var sink []abstractdomain.AbstractValue
+			sinkCtx := *ctx
+			sinkCtx.ReturnSink = &sink
+			AnalyzeStatement(&sinkCtx, callEnv, body, nil)
+			if len(sink) > 0 {
+				joined := sink[0]
+				for _, v := range sink[1:] {
+					joined = abstractdomain.JoinKnown(joined, v)
+				}
+				result = joined
+			}
+		} else {
+			result = evaluateExpression(ctx, callEnv, body)
+		}
+	}
+	written := map[string]struct{}{}
+	if body != nil {
+		AssignedNames(ctx.P.Checker, body, written)
+	}
+	for name := range written {
+		if _, ok := env.Get(name); ok {
+			HavocEnv(ctx.Aliases, env, name)
+		}
+	}
+	return result
 }
 
 // goReplacementOf mirrors a JS plain-string replacement against Go's

@@ -61,7 +61,15 @@ import (
 // the one the walk would have produced. The key's argument spellings
 // carry the distinction; the call node's own id rides only where a
 // callback argument makes the body's behavior node-dependent.
-func computeInlineMemoKey(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, calleeName *ast.Node, effective EffectiveArguments) string {
+// The RECEIVER rides in the key beside the arguments: a method call's
+// outcome is a function of the instance fields its body reads, so a
+// KNOWN receiver spells its whole value and two calls on receivers
+// holding different fields key apart. A receiver nothing is known
+// about spells NOTHING — every route then filled the this-entries TOP,
+// so the outcome is receiver-independent and sharing it is sound; a
+// known receiver that cannot spell refuses the key (no memo) rather
+// than mis-keying.
+func computeInlineMemoKey(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, calleeName *ast.Node, effective EffectiveArguments, receiver abstractdomain.AbstractValue) string {
 	var callbacks []*ast.Node
 	for _, a := range effective.Nodes {
 		if a == nil {
@@ -139,6 +147,18 @@ func computeInlineMemoKey(ctx *FlowContext, env Env, call *ast.Node, contract *F
 			}
 			return ""
 		}
+		key.WriteString(spelled)
+		key.WriteByte('\x1e')
+	}
+	if receiver.Kind != abstractdomain.KindUnknown {
+		spelled, ok := abstractdomain.SpellForMemoKey(receiver)
+		if !ok {
+			if tracing.Recording(tracing.GrainStep) {
+				tracing.Count("inline.unkeyed."+calleeName.Text(), 0)
+			}
+			return ""
+		}
+		key.WriteString("this=")
 		key.WriteString(spelled)
 		key.WriteByte('\x1e')
 	}

@@ -12,6 +12,11 @@
 // no outside holder can write them and this walk still reads every
 // write; a `private`-modifier field loses its invariant, because the
 // modifier is erased and the escaped reference writes it freely.
+//
+// A NON-private field has no language fence at all, so its invariant
+// stands only where the FILE is the fence: the public-field seal
+// (class_public_field_seal.go) proves the class and its instances
+// never leave the file and no non-`this` text writes the field.
 
 package walk
 
@@ -347,6 +352,16 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 	// modifier for tsc to refuse outside writes. A field with no
 	// initializer holds `undefined` until a write lands, so the absent
 	// value joins the writes.
+	//
+	// A NON-PRIVATE field joins the candidates only behind the
+	// public-field seal (class_public_field_seal.go): the class value
+	// and its instances provably never leave the file, so this file's
+	// text holds every write — and the seal's own write census names
+	// the fields some non-`this` text writes anyway, which stay out.
+	var publicSeal PublicFieldSeal
+	if !escapes {
+		publicSeal = PublicFieldSealOf(ctx, declaration)
+	}
 	var candidateOrder []string
 	candidates := map[string]abstractdomain.AbstractValue{}
 	// method bodies run at times this scope cannot place, so nothing
@@ -402,7 +417,16 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 		case name != nil && (ast.IsIdentifier(name) || ast.IsPrivateIdentifier(name)):
 			nameText = name.Text()
 			if flags&ast.ModifierFlagsPrivate == 0 && !ast.IsPrivateIdentifier(name) {
-				continue
+				// a PUBLIC (or protected, or readonly) field: writable by
+				// every holder of the instance, so it keeps an invariant
+				// only where the seal proves this file's text is every
+				// holder there is, and nothing outside `this` writes it
+				if !publicSeal.Sealed {
+					continue
+				}
+				if _, written := publicSeal.OutsideWritten[nameText]; written {
+					continue
+				}
 			}
 			// after an escape only the `#`-named fields survive: the language
 			// keeps outside code from writing them at all, so this walk still

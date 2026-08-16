@@ -144,6 +144,13 @@ func dottedPathOf(node *ast.Node) (string, bool) {
 		steps = append(steps, current.Text())
 	case current.Kind == ast.KindThisKeyword:
 		steps = append(steps, "this")
+	case current.Kind == ast.KindSuperKeyword:
+		// `super.m(…)` runs the BASE body on the CALLER'S OWN instance —
+		// the receiver is `this`, spelled `super` — so the slots that
+		// fill (and take back, and havoc) the callee's this-entries are
+		// the caller's "this.<field>" slots, the same rows `this.m(…)`
+		// reads
+		steps = append(steps, "this")
 	default:
 		return "", false
 	}
