@@ -117,3 +117,60 @@ func TestLoweringToKernelIR_StatementsAfterAnOpaqueReturningArmStillGateOnTheDon
 		t.Errorf("the flag-down arm = %+v, want the one later assignment", gate.Else)
 	}
 }
+
+// TestLoweringToKernelIR_AFieldReadNoSlotResolvesHavocsRatherThanStayingInert
+// pins the syntax-wave divergence (AGENT-BRIEF.md, i-more-expressions.ts's
+// privateAccessorSlotLaidOut and b-body-expressions.ts's thisFieldRead):
+// `return this.#age;` (a private-named step propertyPathOf/SpelledNameOf
+// cannot spell) and `return this.age;` (a step this minimal, bundle-less
+// context has no slot for either) both used to take THE INERT RETURN
+// branch — writeAndCallFree(head) is true for a plain property read, so
+// the ret slot wrote unknown WITHOUT calling NoteFirstHavoc. A body that
+// lowers with no havoc name reads as COMPLETE (SummaryOutcomeOf), and
+// applySummary's serving rule serves a COMPLETE body's TOP ret
+// unconditionally — so a call through this route answered unknown as a
+// genuine, served claim instead of declining to the walk route, which
+// reads the field correctly (a class field invariant, an accessor's own
+// backing field). The fix: a property/element read is no longer treated
+// as inert — it falls to THE OPAQUE RETURN below, which notes the havoc,
+// so the summary reads POROUS and applySummary declines instead of
+// serving a lost read as if it were a real answer.
+func TestLoweringToKernelIR_AFieldReadNoSlotResolvesHavocsRatherThanStayingInert(t *testing.T) {
+	cases := []string{
+		"return this.#age;",
+		"return this.age;",
+		"return this.a.b;",
+	}
+	for _, source := range cases {
+		context := loweringResultContext(nil, nil)
+		stmts, ok := LowerStatements(context, loweringParse(t, source))
+		if !ok {
+			t.Errorf("%q declined outright — its control flow is exact even where its value is not", source)
+			continue
+		}
+		if context.FirstHavoc == "" {
+			t.Errorf("%q lowered with FirstHavoc = \"\" (COMPLETE) — want a havoc name, since no slot named this field's own read", source)
+		}
+		if !RaisesDone(stmts, context.Result.Done) {
+			t.Errorf("%q: RaisesDone = false, want true — the block ends at this return", source)
+		}
+	}
+}
+
+// TestLoweringToKernelIR_ABareThisReturnStaysInert is the regression
+// guard beside the fix above: `return this;` itself — no property or
+// element step at all — carries no scalar value on ANY route (a bare
+// instance reference), and ReturnsSelf/ReturnsReceiver is the standing
+// mechanism that already covers its aliasing implications at the call
+// sites. It must keep answering COMPLETE (no havoc name), exactly as
+// before — the fix narrows THE INERT RETURN to exclude a real field or
+// element read, not every value-free expression.
+func TestLoweringToKernelIR_ABareThisReturnStaysInert(t *testing.T) {
+	context := loweringResultContext(nil, nil)
+	if _, ok := LowerStatements(context, loweringParse(t, "return this;")); !ok {
+		t.Fatalf("`return this;` declined — a bare this always lowers")
+	}
+	if context.FirstHavoc != "" {
+		t.Errorf("FirstHavoc = %q, want \"\" — a bare `this` carries no field read to lose", context.FirstHavoc)
+	}
+}

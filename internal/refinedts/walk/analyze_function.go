@@ -50,10 +50,13 @@ func analyzeFunctionBody(outer *FlowContext, contract *FunctionContract, callSit
 	// THIS body (yield_contract.go) — set per body, nil for every
 	// non-generator, so a nested walk never wears an outer
 	// generator's claim; an ungrounded contract judges nothing here,
-	// the same as its result
+	// the same as its result. The stated RESUME position (N) seeds
+	// the same way, for a `yield e` read as its own value.
 	ctx.YieldStated = nil
+	ctx.YieldResumeStated = nil
 	if contract.Grounded {
 		ctx.YieldStated = contract.Yield
+		ctx.YieldResumeStated = contract.YieldResume
 	}
 
 	env := NewEnv()

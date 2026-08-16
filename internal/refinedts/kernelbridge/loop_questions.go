@@ -546,6 +546,17 @@ const (
 	// callee's out-states land — Rets[k] is the caller binding the
 	// k-th out-state writes, and -1 there drops it.
 	IrStatementCall IrStatementKind = "call"
+	// IrStatementLoopCounted is the literal-bounded loop: the walk-side
+	// exact unroll (walk/loop_unroll.go) steps a `for` whose trip count
+	// the syntax pins a fixed number of times, no widening. This is its
+	// kernel-portable twin — the same per-binding parallel effect the
+	// effect-bodied loop carries in Body, composed with itself Count
+	// times from the entry state rather than solved by the fixpoint.
+	// Count comes from LiteralTripCountWith on the Go side; the kernel
+	// mirrors LoopUnrollBudget as its own gate (loop_questions.go's
+	// wire never carries a count past the budget — the Go lowering
+	// falls back to the ordinary loop/loopStmts form there).
+	IrStatementLoopCounted IrStatementKind = "loopCounted"
 )
 
 // IrBranchTest is the test field of a branch IrStatement.
@@ -652,6 +663,21 @@ type IrStatement struct {
 	// Rets: per callee out-state, the caller binding it writes. -1 says
 	// nothing reads that out-state and spells `null` on the wire.
 	Rets []int
+
+	// "loopCounted"
+	// Count: the exact trip count the syntax pinned
+	// (LiteralTripCountWith), gated at LoopUnrollBudget before this
+	// form is ever built — the Go lowering falls back to "loop" past
+	// the budget, so the kernel never has to re-check it, but the
+	// kernel gates its own walk at the same budget anyway (mirrored
+	// rather than trusted from the wire).
+	Count int
+	// CountedBody: one effect per binding, the SAME parallel form
+	// LoopStatement's Body carries for the effect-bodied loop (the
+	// incrementor folded in as the index binding's own effect) — the
+	// kernel composes this with itself Count times from the entry
+	// state, no widening.
+	CountedBody []LoopEffect
 }
 
 // IrLoopCondCmp is a loop head comparing two tracked slots: On
@@ -737,6 +763,20 @@ func StmtWire(s IrStatement) string {
 		return fmt.Sprintf(
 			`{"branchBoth":{"thn":[%s],"els":[%s]}}`,
 			strings.Join(thn, ","), strings.Join(els, ","),
+		)
+	}
+	if s.Kind == IrStatementLoopCounted {
+		// count, then one effect per binding — the same per-binding shape
+		// "loop" carries in Body, no cond/after/condCmp at all: the trip
+		// count is exact, so there is nothing to widen and nothing to
+		// certify
+		body := make([]string, len(s.CountedBody))
+		for i, e := range s.CountedBody {
+			body[i] = EffectWire(e)
+		}
+		return fmt.Sprintf(
+			`{"loopCounted":{"count":%d,"body":[%s]}}`,
+			s.Count, strings.Join(body, ","),
 		)
 	}
 	if s.Kind == IrStatementLoopStmts {

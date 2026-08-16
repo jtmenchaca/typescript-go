@@ -50,6 +50,30 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			RecordCallSnapshot(ctx.P, ctx.SnapshotOwner, e, env)
 		}
 	}
+	// Function.prototype.call/.apply/.bind on a contracted callee with
+	// its own written `this` parameter: `withThis.call(t, ...rest)`,
+	// `withThis.apply(t, [...])`, and a direct or const-stored
+	// `withThis.bind(t, ...)(...)` all reach here BEFORE the builtin
+	// dispatcher below, because that dispatcher's own method-call
+	// chain gates only on ContractOf finding no contract for the
+	// CALLEE EXPRESSION AS WRITTEN (`withThis.call`, whose property
+	// name `call` resolves to Function.prototype's own library
+	// method, never a user contract) — so it WOULD enter its
+	// always-answering unmodeled-method fallback for exactly these
+	// shapes unless one of these three recognizers claims the call
+	// first. Each reads the RECEIVER's own contract instead of the
+	// call expression's, and walks arguments as part of its own
+	// binding, so a match returns directly rather than falling
+	// through to any later evaluation of them.
+	if thisCallResult := ThisParameterCallResult(ctx, env, e); thisCallResult != nil {
+		return *thisCallResult
+	}
+	if applyCallResult := ApplyCallResult(ctx, env, e); applyCallResult != nil {
+		return *applyCallResult
+	}
+	if bindCallResult := BindCallResult(ctx, env, e); bindCallResult != nil {
+		return *bindCallResult
+	}
 	// a SPREAD argument expands its exact sequence into positional
 	// arguments — Math.max(...values) reads every element. The builtin
 	// models want the VALUES alone, so they read the effective list's

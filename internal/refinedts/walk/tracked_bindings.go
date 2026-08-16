@@ -42,14 +42,19 @@ const (
 // SpelledNameOf is the spelled name a binding is tracked under: an
 // identifier, or a single property step on an identifier or `this` —
 // "this.count" is the spelling a method's bundle layout gives its
-// field slots.
+// field slots. The step's own name is a plain identifier OR a private
+// identifier (`this.#age`) — the bundle layout spells a `#`-named
+// field the same way (ClassFieldsOf's `name.Text()`, which carries the
+// `#`), so the read side must recognize both spellings or a private
+// field's own slot is never found — see the AGENT-BRIEF.md's
+// syntax-wave entry on this exact gap.
 func SpelledNameOf(e *ast.Node) (string, bool) {
 	if ast.IsIdentifier(e) {
 		return e.Text(), true
 	}
 	if ast.IsPropertyAccessExpression(e) {
 		access := e.AsPropertyAccessExpression()
-		if !ast.IsIdentifier(access.Name()) {
+		if !ast.IsIdentifier(access.Name()) && !ast.IsPrivateIdentifier(access.Name()) {
 			return "", false
 		}
 		if ast.IsIdentifier(access.Expression) {

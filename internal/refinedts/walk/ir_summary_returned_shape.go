@@ -207,6 +207,70 @@ func retMemberNameOf(property *ast.Node) (string, bool) {
 	return "", false
 }
 
+// returnedWholeParameterMembers answers the member rows for a body whose
+// EVERY return is a bare read of the SAME record-expanded parameter —
+// `return person;`, where `person: { age: number }` already carries one
+// entry slot per leaf ("person.age"). Unlike returnedLiteralShape's object
+// case, no new slot is allocated and no new effect is written: the
+// parameter's own entry slots already hold the value for every run, at
+// entry AND at any later exit (a body that writes `person.age` before
+// returning it leaves the write's own value sitting in that same slot,
+// which is exactly what the return should read back). The member rows
+// here ALIAS the existing bundle entries by index — pointing the returned
+// object's "age" key at the same exit summaryMemberResult would read for
+// `person.age` on its own.
+//
+// The rule mirrors returnedLiteralShape's own: one shape for the whole
+// body. A body returning `person` on one path and something else (even
+// `return person.age`, a narrower read) on another has no single member
+// layout to alias, and keeps the scalar #ret alone.
+func returnedWholeParameterMembers(body *ast.Node, bundleEntries []BundleEntry) ([]RetMemberEntry, RetShapeKind) {
+	if body == nil || len(bundleEntries) == 0 {
+		return nil, RetShapeNone
+	}
+	returns := returnedExpressionsOf(body)
+	if len(returns) == 0 {
+		return nil, RetShapeNone
+	}
+	var holder string
+	for _, returned := range returns {
+		head := Unwrapped(returned)
+		if head == nil || !ast.IsIdentifier(head) {
+			return nil, RetShapeNone
+		}
+		name := head.Text()
+		if holder == "" {
+			holder = name
+		} else if holder != name {
+			// two different names read on two paths: no single parameter's
+			// leaves can stand for the whole body's returned value
+			return nil, RetShapeNone
+		}
+	}
+	if holder == "" {
+		return nil, RetShapeNone
+	}
+	prefix := holder + "."
+	var members []RetMemberEntry
+	for _, entry := range bundleEntries {
+		if !strings.HasPrefix(entry.Path, prefix) {
+			continue
+		}
+		// only the parameter's own DEPTH-1 leaves name a key of the
+		// returned object directly; a nested leaf ("person.address.city")
+		// belongs to a member this reader does not reconstruct
+		leaf := strings.TrimPrefix(entry.Path, prefix)
+		if strings.Contains(leaf, ".") {
+			continue
+		}
+		members = append(members, RetMemberEntry{Name: leaf, Index: entry.Index})
+	}
+	if len(members) == 0 {
+		return nil, RetShapeNone
+	}
+	return members, RetShapeObject
+}
+
 // arrayRetMembersOf answers the ".len"/".elem" pair for a body whose
 // every return carries an array literal.
 //

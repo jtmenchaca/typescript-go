@@ -38,6 +38,7 @@ const (
 	KindObjectStar        Kind = "objectStar"
 	KindVariable          Kind = "variable"
 	KindList              Kind = "list"
+	KindArrayHoles        Kind = "arrayHoles"
 	KindCollection        Kind = "collection"
 	KindPromise           Kind = "promise"
 	KindDate              Kind = "date"
@@ -134,14 +135,75 @@ type AbstractValue struct {
 	// "list": a nested exact sequence.
 	Items []AbstractValue
 
+	// "arrayHoles": an array whose LENGTH is the exact scalar Inner
+	// (a KindValues {n}, the same shape .length already reads for
+	// every other array kind) and whose PRESENT-ELEMENT set is
+	// ElementSet — the empty set (refinementsets' OneOf(nil)), because
+	// a hole array has no present elements at all. Neither claim is
+	// asserted through RepeatOf/star: a repetition set denotes tuples
+	// whose OWN members are drawn from ElementSet, and RepeatOf(∅, n,
+	// n) for n > 0 denotes ∅ itself (no tuple can fill n positions
+	// from an empty alphabet) — sound as "the present elements admit
+	// nothing," unsound as "the array IS a member of nothing." The two
+	// claims stay independent scalars/sets, exactly the way the walk's
+	// own array-local frame (walk/ir_array_slots.go's ".len"/".elem"
+	// pair) keeps a length slot and an element slot apart rather than
+	// fusing them into one kernel question. A read of .length answers
+	// Inner directly; an element read answers absent because
+	// ElementSet, being empty, has nothing to hand back — the same
+	// Undef machinery KindUndef already carries.
+	//
+	// `new Array(n)` past KnownList's materialization ceiling builds
+	// this instead of a per-slot list; `new Array(40)` stays a
+	// KindList (the existing pinned row) because a small list carries
+	// strictly more precision (a consumer can iterate, spread, or
+	// destructure its slots) and nothing here should narrow that.
+	ElementSet refinementsets.RefinedSet
+
+	// "arrayHoles": Dense and DenseKnown are the one bit every read
+	// path EXCEPT Object.keys/values/entries does not need. `new
+	// Array(n)` and `Array.from({length: n})` build the same
+	// Length/ElementSet pair (sec-array vs. sec-array.from,
+	// tmp/ecma262/spec.html) but differ in OWN PROPERTIES: `new
+	// Array(n)` never calls CreateDataPropertyOrThrow, so no index
+	// 0..n-1 is an own property (SPARSE — Object.keys answers []);
+	// Array.from's array-like branch calls CreateDataPropertyOrThrow
+	// at every index (DENSE — every index is an own property holding
+	// undefined, so Object.keys answers the n index strings).
+	// EnumerableOwnProperties (sec-enumerableownproperties, the walk
+	// object_static_models.go's Object.keys/values/entries read
+	// through) iterates OWN keys only, so this is the one place the
+	// two shapes read apart. Every other read (.length, an element
+	// read, Array.isArray, instanceof, truthiness, spread, for-of,
+	// .join()) answers off Length/ElementSet alone and is provably
+	// identical either way — Dense carries no weight there and those
+	// call sites do not read it.
+	//
+	// DenseKnown separates "affirmatively sparse" from "density not
+	// established" the same way ProvedAbsent separates "proved absent"
+	// from "not proved present" on possiblyUndefined: a bare Dense bool
+	// cannot carry both "definitely sparse" and "unproven" without one
+	// of Object.keys' two arms overclaiming from a join that could not
+	// actually establish either shape (a KindArrayHoles joined with a
+	// plain KindList of undefined items proves neither — KnownList's
+	// items never carry an own-property fact). DenseKnown false means
+	// object_static_models.go's Object.keys/values/entries arms must
+	// decline rather than read Dense at all; DenseKnown true means
+	// Dense is the proved fact.
+	Dense      bool
+	DenseKnown bool
+
 	// "collection": a built Map or Set.
 	CollectionFlavor Flavor
 	Entries          []CollectionEntry
 
-	// "promise" / "possiblyUndefined" / "possiblyNaN" / "objectStar":
-	// the wrapped value. For "objectStar" it is the ELEMENT — what one
-	// position of the sequence holds — and the sequence states no length
-	// of its own.
+	// "promise" / "possiblyUndefined" / "possiblyNaN" / "objectStar" /
+	// "arrayHoles": the wrapped value. For "objectStar" it is the
+	// ELEMENT — what one position of the sequence holds — and the
+	// sequence states no length of its own. For "arrayHoles" it is the
+	// LENGTH — the exact scalar {n}, the same AbstractValue a .length
+	// read hands back whole; LengthOfArrayHoles unwraps it to a plain
+	// int for callers that want the number rather than the claim.
 	Inner *AbstractValue
 
 	// "date": the time value, as its own AbstractValue (number knowledge).

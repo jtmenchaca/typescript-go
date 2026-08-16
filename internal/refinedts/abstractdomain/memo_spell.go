@@ -184,6 +184,27 @@ func spellInto(b *strings.Builder, known AbstractValue) bool {
 		b.WriteByte(';')
 		b.WriteString(string(known.Grade))
 		b.WriteByte(')')
+	case KindArrayHoles:
+		// the length (wrapped in Inner) is the whole claim beside the
+		// (always-∅) element set — there is no per-slot knowledge to
+		// write, unlike KindList. Dense/DenseKnown must key the memo
+		// too: a dense and a sparse array-holes of the same length
+		// answer Object.keys differently (object_static_models.go), so
+		// collapsing them to the same key would serve one call's cached
+		// answer to the other.
+		length, ok := LengthOfArrayHoles(known)
+		if !ok {
+			return false
+		}
+		b.WriteString("ah(")
+		b.WriteString(strconv.Itoa(length))
+		b.WriteByte(';')
+		b.WriteString(string(known.Grade))
+		b.WriteByte(';')
+		b.WriteString(strconv.FormatBool(known.DenseKnown))
+		b.WriteByte(';')
+		b.WriteString(strconv.FormatBool(known.Dense))
+		b.WriteByte(')')
 	case KindVariable:
 		b.WriteString("var(")
 		fmt.Fprintf(b, "%p", known.Symbol)

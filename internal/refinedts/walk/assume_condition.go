@@ -380,6 +380,19 @@ func assumeCondition(
 	computedVerdict bool,
 	hasComputedVerdict bool,
 ) AssumedCondition {
+	// a condition tested INSIDE a with body resolves its subject names
+	// against the scope object, which a getter can answer differently
+	// at every read — no narrowing, difference/sum row, or length
+	// guard this condition would otherwise prove is trustworthy, so
+	// nothing is recorded and both sides carry the entry env unchanged
+	if expression.Flags&ast.NodeFlagsInWithStatement != 0 {
+		return AssumedCondition{
+			WhenTrue:  AssumedBranch{Env: env.Clone(), Ctx: ctx, Dead: hasComputedVerdict && !computedVerdict},
+			WhenFalse: AssumedBranch{Env: env.Clone(), Ctx: ctx, Dead: hasComputedVerdict && computedVerdict},
+			RefuteIntoContinuation: func(statement *ast.Node, scope *ast.Node, continuation Env) {
+			},
+		}
+	}
 	// a condition BOUND TO A NAME keeps every fact it encodes for the
 	// ROW machinery; narrowings() resolves bound names internally
 	condition := narrowing.BoundConditionInitializer(ctx.P.Checker, expression)

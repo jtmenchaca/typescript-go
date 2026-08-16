@@ -115,11 +115,33 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 			}
 		}
 	}
-	// an element read DIRECTLY off a call's result: the list the call
-	// answered indexes like any tracked list — `text.split("?")[0]`
+	// an element read DIRECTLY off a call's result, off ANOTHER such
+	// read chained onto it, off a FRESH array literal built in place, or
+	// off a FRESH construction (`new Array(n)[0]`, `new Uint8Array([…])
+	// [0]`): the list indexes like any tracked list — `text.split("?")[0]`
 	// reads the exact piece; past the end reads undefined (the list is
-	// the whole answer)
-	if ast.IsElementAccessExpression(e) && ast.IsCallExpression(e.AsElementAccessExpression().Expression) {
+	// the whole answer). The receiver may itself be an element access on
+	// a call result — `Object.entries(o)[0][1]` reads the pair at [0]
+	// through this same arm (the recursive evaluateExpression call
+	// below), then reads its second slot through this arm again — so the
+	// gate admits a receiver that is itself an ElementAccessExpression,
+	// not only a bare CallExpression. An array literal receiver —
+	// `[...xs.values()][0]`, `[...a.union(b)][0]` — has no tracked name
+	// and is not a call or element access itself, so without this arm
+	// ElementAccessOf never even evaluates it: every arm below this one
+	// gates on `elem.Expression` being an identifier, so the literal's
+	// own value (EvaluateArrayLiteral, which reads the spread's items
+	// exactly) is left unvisited and the read falls to the type-seeded
+	// fallback. A bare `new Array(n)[0]`/`new Uint8Array([…])[0]` has the
+	// same shape: EvaluateNewExpression already reads it exactly
+	// (array_construction.go, typed_array_models.go), but with no
+	// tracked name of its own it is neither a call, an element access,
+	// nor a literal — the same gap the array-literal receiver closed for
+	// a fresh literal, now closed for a fresh construction.
+	if ast.IsElementAccessExpression(e) && (ast.IsCallExpression(e.AsElementAccessExpression().Expression) ||
+		ast.IsElementAccessExpression(e.AsElementAccessExpression().Expression) ||
+		ast.IsArrayLiteralExpression(e.AsElementAccessExpression().Expression) ||
+		ast.IsNewExpression(e.AsElementAccessExpression().Expression)) {
 		elem := e.AsElementAccessExpression()
 		called := evaluateExpression(ctx, env, elem.Expression)
 		index := evaluateExpression(ctx, env, elem.ArgumentExpression)
@@ -128,6 +150,19 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 		if index.Kind == abstractdomain.KindValues && index.KindTag == abstractdomain.PrimitiveNumber &&
 			len(index.Values) == 1 && isInteger(index.Values[0]) {
 			exactIndex, hasExactIndex = index.Values[0], true
+		}
+		// an array-holes receiver (new Array(n) past the materialization
+		// ceiling): the PRESENT-element set is ∅, so no index — in range
+		// or past it — ever names a present value; the same Undef
+		// machinery the identifier-receiver arm below wears for a
+		// tracked KindArrayHoles (this file's own comment there)
+		if called.Kind == abstractdomain.KindArrayHoles {
+			if index.Kind == abstractdomain.KindValues && len(index.Values) == 1 {
+				out := abstractdomain.Undef
+				return &out
+			}
+			out := silence.Residue()
+			return &out
 		}
 		if called.Kind == abstractdomain.KindList && hasExactIndex {
 			if exactIndex >= 0 && int(exactIndex) < len(called.Items) {
@@ -144,6 +179,64 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 			}
 			out := abstractdomain.Undef
 			return &out
+		}
+		// a star/repetition-shaped sequence built by THIS literal, with no
+		// tracked name of its own — `[...new GenAges().ages()][0]`:
+		// EvaluateArrayLiteral's own spread arm (array_literal.go) answers
+		// a star over the drained sequence, carrying a proven LOWER BOUND
+		// as a Repetition where the source proved one (a generator's
+		// leading unconditional yields — GeneratorSequenceOf,
+		// generator_element.go). InBoundsElementOf (below, the
+		// identifier-receiver arm's reader) wraps even an under-floor read
+		// in PossiblyUndefined, because a receiver reached by NAME may
+		// have arrived from anywhere — a parameter, a summary row — and
+		// carries no proof it was never sparsified after the fact. A
+		// value this arm just built, this expression, from this literal's
+		// own spread has no such history: nothing between the build and
+		// this read could have punched a hole in it, so an index proven
+		// under the repetition's floor reads the element BARE.
+		if called.Kind == abstractdomain.KindSet && called.SetKindTag == abstractdomain.SetKindTagNone &&
+			hasExactIndex && !primitives.IsStringKind(ctx.P.Checker, elem.Expression) {
+			if rep, repOk := refinementsets.AsRepetition(called.Set); repOk {
+				window := IndexWindow(index)
+				if window != nil && window.Hi < float64(rep.Lo) && !isStringGroundElement(rep.Element) {
+					grade := abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(called), abstractdomain.TrustLevelOf(index))
+					var read abstractdomain.AbstractValue
+					// the element set collapses to ONE number — every yield
+					// this floor covers read the same constant (the generator
+					// body's own straight-line reading, generator_element.go)
+					// — so the position is that exact value, spelled the way
+					// every other exact scalar position is (KnownValues), not
+					// the set form a wider element would need
+					if elementRange := RangeOfSet(rep.Element); elementRange != nil && elementRange.Lo == elementRange.Hi &&
+						!elementRange.LoStrict && !elementRange.HiStrict {
+						read = abstractdomain.KnownValues([]float64{elementRange.Lo}, abstractdomain.PrimitiveNumber, grade)
+					} else {
+						read = abstractdomain.KnownSet(rep.Element, nil, grade, abstractdomain.SetKindTagNone)
+					}
+					if called.NaNElements {
+						out := abstractdomain.PossiblyNaN(read)
+						return &out
+					}
+					return &read
+				}
+			}
+		}
+		// `re.exec(s)?.[1]`: the call's result rides the maybe wrapper
+		// (null-or-match, sec-regexp.prototype.exec) — the SAME optional-
+		// chain rule property and identifier-receiver element reads use
+		// (maybe_receiver_access.go), applied here where the receiver is
+		// the call expression itself rather than a tracked name
+		if elem.QuestionDotToken != nil && hasExactIndex {
+			threaded := ReadThroughMaybeReceiver(called, func(inner abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+				if inner.Kind == abstractdomain.KindList && exactIndex >= 0 && int(exactIndex) < len(inner.Items) {
+					return inner.Items[int(exactIndex)]
+				}
+				return silence.Residue()
+			})
+			if threaded != nil {
+				return threaded
+			}
 		}
 	}
 	if ast.IsElementAccessExpression(e) {
@@ -224,6 +317,13 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 					var key string
 					hasKey := false
 					if ast.IsStringLiteral(elem.ArgumentExpression) || ast.IsNoSubstitutionTemplateLiteral(elem.ArgumentExpression) {
+						key, hasKey = elem.ArgumentExpression.Text(), true
+					} else if ast.IsNumericLiteral(elem.ArgumentExpression) {
+						// `person[0]` — ToPropertyKey converts the Number
+						// argument through ToString (sec-topropertykey step
+						// 2), the same key `{ 0: 40 }` writes
+						// (object_literal.go); the literal's own source
+						// spelling is that string
 						key, hasKey = elem.ArgumentExpression.Text(), true
 					} else if index.Kind == abstractdomain.KindValues && index.KindTag == abstractdomain.PrimitiveString {
 						key, hasKey = stringOf(index.Values), true
@@ -352,6 +452,21 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 					out := silence.Residue()
 					return &out
 				}
+				// an array-holes receiver's element read: the PRESENT-element
+				// set (receiver.ElementSet) is ∅ — nothing is a member of
+				// it, so there is no present value any index could name, in
+				// range or past it, whatever the index's own shape. The read
+				// answers undefined not because the index missed a bound but
+				// because the empty set never has a member to hand back —
+				// the same Undef machinery a plain absent value wears.
+				if receiver.Kind == abstractdomain.KindArrayHoles {
+					if index.Kind == abstractdomain.KindValues && len(index.Values) == 1 {
+						out := abstractdomain.Undef
+						return &out
+					}
+					out := silence.Residue()
+					return &out
+				}
 				if receiver.Kind == abstractdomain.KindValues && index.Kind == abstractdomain.KindValues && len(index.Values) == 1 {
 					receiverStringy := primitives.IsStringKind(ctx.P.Checker, elem.Expression) || receiver.KindTag == abstractdomain.PrimitiveString
 					// a string index is a UTF-16 unit position: it names a scalar
@@ -372,6 +487,16 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 							kindTag,
 							abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(receiver), abstractdomain.TrustLevelOf(index)),
 						)
+						return &out
+					}
+					// an integer index past the tuple — negative or beyond
+					// the length — reads exactly undefined: an array's get
+					// past the end (sec-array-exotic-objects), a
+					// TypedArray's invalid integer index
+					// (TypedArrayGetElement), and a string's out-of-range
+					// unit position all answer absence, never a value
+					if isInteger(i) && (receiver.KindTag == abstractdomain.PrimitiveArray || receiverStringy) {
+						out := abstractdomain.Undef
 						return &out
 					}
 				}

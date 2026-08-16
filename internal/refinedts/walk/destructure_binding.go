@@ -1,12 +1,14 @@
 // from control_flow/destructure_binding.ts
 //
-// What a destructuring variable declaration does to the env. Nested
-// patterns go through the shared reader (bindings/destructuring.ts,
-// ported at walk/destructuring.go); the top-level object and array
-// arms keep the extra behavior that reader does not: OPAQUE array
-// rest, rest without seededBinding, a default's value JOINED with the
-// member's own reading (not residued to unknown), skipped nested
-// array patterns, and alias linking for a destructured reference.
+// What a destructuring variable declaration does to the env. A NESTED
+// pattern at either arm's top level (an object key holding a pattern,
+// an array element holding a pattern) recurses through the shared
+// reader (bindings/destructuring.ts, ported at walk/destructuring.go);
+// the top-level object and array arms keep the extra behavior that
+// reader does not: OPAQUE array rest, rest without seededBinding, a
+// default's value JOINED with the member's own reading (not residued
+// to unknown), a computed object key that pins exactly one string, and
+// alias linking for a destructured reference.
 
 package walk
 
@@ -24,6 +26,33 @@ func destructureInto(ctx *FlowContext, env Env, name *ast.Node, source abstractd
 	ReadDestructuring(name, source, func(text string, held abstractdomain.AbstractValue, at *ast.Node) {
 		WriteBinding(ctx, env, text, silence.SeededBinding(ctx.P.Checker, held, at), at, "an initialized value")
 	})
+}
+
+// bindingElementKey is the property name ONE object-pattern element
+// picks: a plain identifier property name (`{ age }`, `{ age: b }`)
+// reads its text directly; a COMPUTED name (`{ [k]: age }`) evaluates
+// the key expression in the CURRENT env and, where it pins exactly one
+// string (exactStringName, object_literal.go's own write-side rule —
+// ToPropertyKey of a string is that string unchanged), reads the same
+// slot a plain name would. Any other computed value — a number, a set
+// of strings, an unresolved read — names no one key, so the pick stays
+// honestly unknown rather than guessing a key.
+func bindingElementKey(ctx *FlowContext, env Env, be *ast.BindingElement) (string, bool) {
+	if be.PropertyName != nil {
+		if ast.IsIdentifier(be.PropertyName) {
+			return be.PropertyName.Text(), true
+		}
+		if ast.IsComputedPropertyName(be.PropertyName) {
+			keyValue := evaluateExpression(ctx, env, be.PropertyName.AsComputedPropertyName().Expression)
+			return exactStringName(keyValue)
+		}
+		return "", false
+	}
+	beName := be.Name()
+	if beName != nil && ast.IsIdentifier(beName) {
+		return beName.Text(), true
+	}
+	return "", false
 }
 
 // withDefaultValue is a defaulted slot's true binding: the default
@@ -92,11 +121,7 @@ func bindObjectPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer
 		beName := be.Name()
 		// a NESTED pattern under a key recurses element by element
 		if beName == nil || !ast.IsIdentifier(beName) {
-			var key string
-			hasKey := false
-			if be.PropertyName != nil && ast.IsIdentifier(be.PropertyName) {
-				key, hasKey = be.PropertyName.Text(), true
-			}
+			key, hasKey := bindingElementKey(ctx, env, be)
 			var slot abstractdomain.AbstractValue
 			if hasKey {
 				slot = SlotOf(source, key)
@@ -137,15 +162,7 @@ func bindObjectPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer
 			WriteBinding(ctx, env, be.Name().Text(), rest, element, "an initialized value")
 			continue
 		}
-		var key string
-		hasKey := false
-		if be.PropertyName != nil {
-			if ast.IsIdentifier(be.PropertyName) {
-				key, hasKey = be.PropertyName.Text(), true
-			}
-		} else {
-			key, hasKey = be.Name().Text(), true
-		}
+		key, hasKey := bindingElementKey(ctx, env, be)
 		var held abstractdomain.AbstractValue
 		if hasKey {
 			held = SlotOf(source, key)
@@ -181,7 +198,22 @@ func bindArrayPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer 
 		// the nil check must come first; a nil name binds nothing here,
 		// the same "no name at this position" fallback
 		// dataflowfacts/syntactic_facts.go's bindingNames uses.
-		if be.Name() == nil || !ast.IsIdentifier(be.Name()) {
+		beName := be.Name()
+		if beName == nil {
+			continue
+		}
+		// a NESTED pattern at this position (`[[first]]`, `[{ age }]`)
+		// recurses element by element through the shared reader, the
+		// same way bindObjectPattern's nested branch does above —
+		// without this branch the name inside the nested pattern is
+		// never bound at all, and reads back through the checker's own
+		// wide static type instead of the destructured slot
+		if !ast.IsIdentifier(beName) {
+			if be.DotDotDotToken != nil {
+				// a nested pattern can never sit after `...` syntactically
+				continue
+			}
+			destructureInto(ctx, env, beName, SlotOfIndex(source, i))
 			continue
 		}
 		var held abstractdomain.AbstractValue
@@ -210,6 +242,12 @@ func bindArrayPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer 
 			// one slot, by the shared rules — an exact element, a
 			// repeated item set, or the source's own opacity
 			held = SlotOfIndex(source, i)
+			// the default expression runs exactly when the slot is
+			// provably absent — the same join bindObjectPattern's leaf
+			// branch already applies through withDefaultValue
+			if be.Initializer != nil {
+				held = withDefaultValue(ctx, env, held, be.Initializer)
+			}
 		}
 		WriteBinding(ctx, env, be.Name().Text(), silence.SeededBinding(ctx.P.Checker, held, be.Name()), element, "an initialized value")
 	}

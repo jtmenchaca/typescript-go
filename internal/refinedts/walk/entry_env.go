@@ -216,13 +216,32 @@ func BindEntryEnv(input BindEntryEnvInput) {
 		}
 		decl := parameter.AsParameterDeclaration()
 		if !ast.IsIdentifier(decl.Name()) {
-			var source abstractdomain.AbstractValue
+			// STATED outranks a call-site join here exactly as it does for
+			// an identifier parameter below (this function's own doc) — a
+			// pattern with its own written annotation reads through it
+			// alone, with no join lookup at all.
 			if stated != nil {
-				source = AbstractValueOfDeclared(*stated)
-			} else {
-				source = InitialStateOfPlainParameter(input.P, parameter)
+				source := AbstractValueOfDeclared(*stated)
+				ReadDestructuring(decl.Name(), source, func(name string, held abstractdomain.AbstractValue, at *ast.Node) {
+					input.Env.Set(name, silence.SeededBinding(input.P.Checker, held, at))
+				})
+				continue
 			}
-			ReadDestructuring(decl.Name(), source, func(name string, held abstractdomain.AbstractValue, at *ast.Node) {
+			// unstated: a destructured parameter's LEAVES are what a
+			// call-site join binds (BindParameter already runs the
+			// argument through this same ReadDestructuring at the call
+			// site, per name) — read each leaf here exactly as the
+			// identifier branch below reads its one name, meeting the join
+			// against the pattern's own plain reading rather than
+			// discarding it
+			plain := InitialStateOfPlainParameter(input.P, parameter)
+			ReadDestructuring(decl.Name(), plain, func(name string, held abstractdomain.AbstractValue, at *ast.Node) {
+				if input.CallSiteInitialStates != nil {
+					if fromCall, ok := input.CallSiteInitialStates[name]; ok {
+						input.Env.Set(name, entryStateMeet(input.P.Checker, at, fromCall, held))
+						return
+					}
+				}
 				input.Env.Set(name, silence.SeededBinding(input.P.Checker, held, at))
 			})
 			continue
@@ -242,6 +261,16 @@ func BindEntryEnv(input BindEntryEnvInput) {
 			}
 		}
 		if held, ok := input.Env.Get(name); ok && held.Kind != abstractdomain.KindUnknown {
+			continue
+		}
+		// a `this` parameter is the receiver's type annotation, not a
+		// value parameter: nothing fills it at a plain body walk, so
+		// seeding it from the declared type would manufacture a typed
+		// receiver the walk never saw. A caller that DID bind one
+		// (ThisParameterCall's callEnv, a call-site state) is kept by
+		// the branches above; unbound, the `this` readers keep their
+		// honest floor (this_property_access.go's Opaque).
+		if name == "this" {
 			continue
 		}
 		input.Env.Set(name, InitialStateOfPlainParameter(input.P, parameter))

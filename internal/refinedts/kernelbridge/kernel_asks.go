@@ -220,8 +220,14 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 		if err != nil {
 			panic(fmt.Sprintf("kernel.Decimal: %v", err))
 		}
+		// the wire shape is {"num":…,"exp":…} (boundary/exports.lean's
+		// decodeDyadic reads those two lowercase fields) — WireNumber's
+		// own MarshalJSON is what every other dyadic-carrying question
+		// already goes through; marshalWireValue(d) would serialize the
+		// bare Go struct's exported field names (Num/Exp) instead, which
+		// decodeDyadic's `j.field "num"` never finds
 		raw, err := ask1(
-			"decimal", "kernel_decimal", marshalWireValue(d), fmt.Sprintf("dec:%de%d", d.Num, d.Exp),
+			"decimal", "kernel_decimal", marshalWireValue(WireNumber{Dyadic: d}), fmt.Sprintf("dec:%de%d", d.Num, d.Exp),
 		)
 		if err != nil {
 			panic(err.Error())

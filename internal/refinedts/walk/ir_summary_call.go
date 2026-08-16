@@ -61,6 +61,21 @@ func constructorDeclarationOf(context *LoweringContext, callee *ast.Node) *ast.N
 		return nil
 	}
 	classLike := symbol.ValueDeclaration
+	// `const C = class { … }` binds the NAME to a variable, so the
+	// symbol's value declaration is the VariableDeclaration — the class
+	// expression sits in its initializer. A `const` binding holds that
+	// one class for its whole life, so the expression reads exactly as
+	// a declaration does; a `let`/`var` may hold a different
+	// constructor by the time the `new` runs, and stays unresolved
+	// here. Mirrors the same unwrap in evaluate_new_expression.go.
+	if !ast.IsClassLike(classLike) && ast.IsVariableDeclaration(classLike) &&
+		classLike.Parent != nil && (classLike.Parent.Flags&ast.NodeFlagsConst) != 0 {
+		if initializer := classLike.AsVariableDeclaration().Initializer; initializer != nil {
+			if unwrapped := Unwrapped(initializer); unwrapped != nil && ast.IsClassExpression(unwrapped) {
+				classLike = unwrapped
+			}
+		}
+	}
 	// class-LIKE: a `const C = class { … }` expression constructs
 	// exactly as a declaration does
 	if !ast.IsClassLike(classLike) || ast.GetSourceFileOfNode(classLike).IsDeclarationFile {

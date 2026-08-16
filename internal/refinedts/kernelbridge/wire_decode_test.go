@@ -40,6 +40,27 @@ func TestDecodeWireSetEncodeSetRoundTrip(t *testing.T) {
 		t.Errorf("round trip countLike: got %+v, want %+v", got, countLike)
 	}
 
+	// the empty set — OneOf(nil) — is boundary/exports.lean's own
+	// bottom-enclosure spelling (encodeEnclosure: a BOTTOM result wires
+	// as oneOf over an EMPTY w list, never through don't-care bounds).
+	// The Go encoder must produce that exact wire shape, and the Go
+	// decoder must read it back to the same empty OneOf every other
+	// provably-empty position already builds (walk/kernel_delegation.go's
+	// package-private emptySet).
+	empty := refinementsets.MakeRefinedSet(refinementsets.OneOf(nil))
+	emptyWire := EncodeSet(empty)
+	wantEmptyWire := `{"forms":[{"form":"oneOf","w":[]}]}`
+	if emptyWire != wantEmptyWire {
+		t.Errorf("EncodeSet(OneOf(nil)) = %q, want %q", emptyWire, wantEmptyWire)
+	}
+	got = DecodeWireSet(parseWire(t, emptyWire))
+	if !reflect.DeepEqual(got, empty) {
+		t.Errorf("round trip empty OneOf: got %+v, want %+v", got, empty)
+	}
+	if len(got.Forms) != 1 || got.Forms[0].Form != refinementsets.FormOneOf || len(got.Forms[0].W) != 0 {
+		t.Errorf("round trip empty OneOf did not survive as a single empty-W oneOf form: %+v", got)
+	}
+
 	window := refinementsets.MakeRefinedSet(refinementsets.Above(-1), refinementsets.AtMost(10))
 	got = DecodeWireSet(parseWire(t, EncodeSet(window)))
 	if !reflect.DeepEqual(got, window) {

@@ -13,7 +13,11 @@
 //     throws a RangeError instead ("If SameValueZero(intLength,
 //     length) is false, throw a RangeError exception") — the argument
 //     contract in builtin_contracts.go fires there, and no array
-//     exists for this model to answer.
+//     exists for this model to answer. Below the materialization
+//     ceiling the holes build a KindList (every consumer — spread,
+//     destructuring, iteration, join — reads it exactly); at or past
+//     it, KindArrayHoles carries the same claim (exact length, every
+//     slot a hole) without allocating one AbstractValue per slot.
 //   - one NON-number argument → the one-element array of it ("If
 //     length is not a Number … CreateDataPropertyOrThrow(array, "0",
 //     length)"). Answered only where the value's sort is pinned
@@ -32,11 +36,13 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 )
 
-// arrayConstructionHoleLimit caps the materialized hole list — the
-// same ceiling readArrayFrom's counted form keeps. A larger exact
-// length is not answered yet: the honest claim (length pinned, slots
-// undefined, list unmaterialized) needs a sequence form that can
-// spell an undefined element, which the set grammar does not hold.
+// arrayConstructionHoleLimit caps the MATERIALIZED hole list — the
+// same ceiling readArrayFrom's counted form keeps. Past it, the array
+// is not built element-by-element: KnownArrayHoles carries the same
+// exact claim (length pinned, every slot undefined) as one struct
+// with a length field, no per-slot allocation. The ceiling now bounds
+// only which of the two REPRESENTATIONS answers, never whether the
+// construction itself is claimed.
 const arrayConstructionHoleLimit = 10_000
 
 // ReadArrayConstruction answers what `Array(…)` / `new Array(…)` on
@@ -80,7 +86,14 @@ func ReadArrayConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 				return &out
 			}
 			if length > arrayConstructionHoleLimit {
-				return nil
+				// past the materialization ceiling: the same claim — length
+				// exactly this, every slot a hole — without allocating one
+				// AbstractValue per slot. Dense=false: sec-array's algorithm
+				// never calls CreateDataPropertyOrThrow for a hole array, so
+				// no index is an own property (SPARSE) — unlike
+				// Array.from({length: n})'s dense fill (array_method_models.go).
+				out := abstractdomain.KnownArrayHoles(int(length), grade, false)
+				return &out
 			}
 			items := make([]abstractdomain.AbstractValue, int(length))
 			for i := range items {
@@ -136,7 +149,7 @@ func arrayArgumentPinnedNonNumber(known abstractdomain.AbstractValue) bool {
 	switch known.Kind {
 	case abstractdomain.KindValues:
 		return known.KindTag != abstractdomain.PrimitiveNumber
-	case abstractdomain.KindList, abstractdomain.KindObject, abstractdomain.KindObjectStar,
+	case abstractdomain.KindList, abstractdomain.KindArrayHoles, abstractdomain.KindObject, abstractdomain.KindObjectStar,
 		abstractdomain.KindCollection, abstractdomain.KindDate, abstractdomain.KindRegex,
 		abstractdomain.KindSymbol, abstractdomain.KindBigints, abstractdomain.KindHostFunction,
 		abstractdomain.KindPromise, abstractdomain.KindUndef:

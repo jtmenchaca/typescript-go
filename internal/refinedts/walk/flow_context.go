@@ -43,6 +43,12 @@ type FunctionContract struct {
 	// statement's own position). Nil for every non-generator and
 	// wherever Y states nothing.
 	Yield *annotations.DeclaredRefinement
+	// YieldResume: the stated resume position of a GENERATOR
+	// declaration — the N of a written `Generator<Y, R, N>`, what the
+	// yield EXPRESSION ITSELF reads as (what the caller's next(v)
+	// sends back). Nil for every non-generator and wherever N states
+	// nothing.
+	YieldResume *annotations.DeclaredRefinement
 	// Grounded is true when some position or bound came from a stated
 	// annotation. An ungrounded signature (plain TS, pure generics)
 	// still walks and still instantiates at calls, but its OWN
@@ -102,6 +108,12 @@ type FlowContext struct {
 	// (yield_contract.go). analyzeFunctionBody sets it per body, so
 	// it is nil outside a grounded generator's own walk.
 	YieldStated *annotations.DeclaredRefinement
+	// YieldResumeStated: the enclosing generator body's stated resume
+	// position — what a `yield e` EXPRESSION reads as its own value
+	// (yield_contract.go). Set per body alongside YieldStated, nil
+	// outside a grounded generator's own walk or wherever N states
+	// nothing.
+	YieldResumeStated *annotations.DeclaredRefinement
 	// Inlining: the closures currently being inlined — re-entry is
 	// recursion, and a recursive inline answers unknown rather than
 	// diverging.
@@ -142,6 +154,25 @@ type FlowContext struct {
 	// (fields.ts). Reads of `this.key` answer nothing while it is
 	// set, so no invariant rests on itself.
 	ThisWriteSink map[string][]abstractdomain.AbstractValue
+	// ThisOwnerDeclaration: the declaration node this walk bound "this"
+	// FOR, when that binding cannot be proven from `site`'s own static
+	// position alone (method_this_writes.go's property-alias route: a
+	// plain FunctionDeclaration/FunctionExpression reached through an
+	// object-literal property alias, `{ bump: helperFn }` — the SAME
+	// declaration also serves a bare `helperFn()` call elsewhere, so no
+	// syntactic climb can tell the two apart the way
+	// EnclosingThisObjectLiteralMethod's parent-is-a-literal check does
+	// for a directly-written method). evaluate_expression.go's
+	// KindThisKeyword arm trusts env's own "this" binding only when
+	// dataflowfacts.EnclosingThisOwner(site) is IDENTICAL to this field
+	// — the nearest function/method that owns `site`'s `this` must be
+	// the exact declaration this walk bound, not a more deeply nested
+	// sibling function with its own unrelated dynamic receiver. Nil
+	// everywhere else, including the class and direct-object-literal-
+	// method routes, which stay on their existing syntactic recognizers
+	// (EnclosingThisClass, EnclosingThisObjectLiteralMethod) and never
+	// set this field.
+	ThisOwnerDeclaration *ast.Node
 	// DifferenceConstraints: strict order rows the dominating guards
 	// vouch: on every run reaching this code, minuend's value −
 	// subtrahend's value ≥ bound (recorded only over bindings the

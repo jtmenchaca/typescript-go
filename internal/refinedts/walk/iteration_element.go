@@ -76,6 +76,13 @@ func ElementOf(iterable abstractdomain.AbstractValue) abstractdomain.AbstractVal
 		}
 		return *element
 	}
+	// an ARRAY-HOLES sequence's element is undefined at every position —
+	// the present-element set is ∅, so there is nothing else a position
+	// could hold (the same reading a KindList's Undef items give, just
+	// without materializing one per slot)
+	if iterable.Kind == abstractdomain.KindArrayHoles {
+		return abstractdomain.Undef
+	}
 	// a LIST's element is the join of its items' knowledge
 	if iterable.Kind == abstractdomain.KindList {
 		var element *abstractdomain.AbstractValue

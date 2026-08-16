@@ -4,6 +4,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
 
@@ -165,8 +166,35 @@ func lowerForStatement(
 		return out, false, true
 	}
 	out = append(out, init...)
-	out = append(out, LoopStatement(context, head, body))
+	out = append(out, loopStatementOrCounted(context, s, head, body))
 	return out, false, true
+}
+
+// loopStatementOrCounted is the "loop" statement LoopStatement would
+// build, replaced with "loopCounted" wherever the syntax pins the trip
+// count exactly (LiteralTripCountWith, the same reading the walk-side
+// exact unroll gates on — walk/loop_unroll.go). The count is re-read
+// here rather than threaded through, the same way
+// unrollLiteralCountedFor re-derives it from the loop node alone;
+// declining falls back to the widened effect-bodied form unchanged.
+//
+// The kernel-side gate mirrors LoopUnrollBudget exactly, so a count
+// past it is never sent as "loopCounted" — the ordinary "loop" form
+// carries on solving it, exactly as today.
+func loopStatementOrCounted(context *LoweringContext, loop *ast.Node, head LoopHead, body LoopBody) kernelbridge.IrStatement {
+	var checkerRef *checker.Checker
+	if context.Flow != nil && context.Flow.P != nil {
+		checkerRef = context.Flow.P.Checker
+	}
+	count, isCounted := LiteralTripCountWith(checkerRef, loop)
+	if !isCounted || count > LoopUnrollBudget {
+		return LoopStatement(context, head, body)
+	}
+	return kernelbridge.IrStatement{
+		Kind:        kernelbridge.IrStatementLoopCounted,
+		Count:       count,
+		CountedBody: body.Effects,
+	}
 }
 
 // loopBodyRaisesDone is whether a lowered LOOP statement's own body

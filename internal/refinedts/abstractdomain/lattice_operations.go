@@ -58,6 +58,21 @@ func MeetKnown(a, b AbstractValue) AbstractValue {
 	if b.Kind == KindObjectStar && a.Kind == KindList {
 		return a
 	}
+	// array-holes met with an exact LIST of the SAME length: the list
+	// already states every slot (holes and all), which is everything
+	// array-holes says and no less — both describe the same runtime
+	// value by hypothesis, so the list is the meet outright, keeping
+	// whichever slot knowledge it carries.
+	if a.Kind == KindArrayHoles && b.Kind == KindList {
+		if length, ok := LengthOfArrayHoles(a); ok && length == len(b.Items) {
+			return b
+		}
+	}
+	if b.Kind == KindArrayHoles && a.Kind == KindList {
+		if length, ok := LengthOfArrayHoles(b); ok && length == len(a.Items) {
+			return a
+		}
+	}
 	if a.Kind == KindSet && b.Kind == KindSet &&
 		a.Temporal == nil && b.Temporal == nil &&
 		a.SetKindTag == SetKindTagNone && b.SetKindTag == SetKindTagNone {
@@ -98,11 +113,11 @@ func Truthiness(k AbstractValue) (bool, bool) {
 		return false, false
 	case KindObject, KindList, KindCollection, KindPromise, KindDate, KindRegex:
 		return true, true // an object — always truthy
-	case KindObjectStar:
+	case KindObjectStar, KindArrayHoles:
 		// an Array is an Object, and ToBoolean maps every Object to true
 		// (sec-toboolean: only undefined, null, false, ±0, NaN, "" and 0n
 		// are false). An EMPTY array is still an object, so the unstated
-		// length changes nothing here.
+		// (or stated-zero) length changes nothing here.
 		return true, true
 	case KindSymbol:
 		return true, true // every symbol is truthy
@@ -197,6 +212,22 @@ func SameKnown(a, b AbstractValue) bool {
 	case KindObjectStar:
 		// the element is the whole claim — neither side states a length,
 		// so two stars over the same element say the same thing
+		if a.Inner == nil || b.Inner == nil {
+			return a.Inner == b.Inner
+		}
+		return SameKnown(*a.Inner, *b.Inner)
+	case KindArrayHoles:
+		// the length (wrapped in Inner, {n}) and the always-∅ element
+		// set say the same thing for a dense and a sparse array-holes
+		// alike, but Dense/DenseKnown is a real observable difference
+		// (Object.keys answers [] for one and n index strings for the
+		// other, and answers nothing at all where density was never
+		// established) — two array-holes compare equal only when the
+		// length AND the density claim (proved-or-not, and if proved,
+		// which way) agree.
+		if a.DenseKnown != b.DenseKnown || (a.DenseKnown && a.Dense != b.Dense) {
+			return false
+		}
 		if a.Inner == nil || b.Inner == nil {
 			return a.Inner == b.Inner
 		}
@@ -364,6 +395,16 @@ func SetOfKnown(k AbstractValue) (refinementsets.RefinedSet, bool) {
 		return refinementsets.RefinedSet{}, false
 	case KindList, KindCollection, KindPromise, KindDate:
 		return refinementsets.RefinedSet{}, false // nested structure the tuple layer cannot formatAt
+	case KindArrayHoles:
+		// every slot is the absent value, and undefined leaves ℝ̄ — no
+		// tuple-layer set holds a hole, the same refusal KindUndef makes.
+		// This deliberately does NOT return k.ElementSet (∅): ElementSet
+		// is a claim about which VALUES are present at some position, not
+		// a claim that the array itself is a member of that set — SetOfKnown
+		// asks the latter, and answering ∅ here would let an assignability
+		// check see ∅ ⊆ every target and wrongly accept the array against
+		// any annotation (known_constructors.go's KnownArrayHoles doc).
+		return refinementsets.RefinedSet{}, false
 	case KindVariable:
 		set := k.Bound
 		for i := 0; i < k.StarDepth; i++ {
@@ -443,6 +484,13 @@ func statesOnlyLongSequences(set refinementsets.RefinedSet) bool {
 		if f.Form == refinementsets.FormConcatenation {
 			continue
 		}
+		// the empty tuple is the concatenation identity — no scalar
+		// tuple at all, so there is no length to reread as a scalar,
+		// the same argument stringWordSet's own len==0 gate makes for
+		// the empty word on the KindValues side
+		if f.Form == refinementsets.FormEmptyTuple {
+			continue
+		}
 		if f.Form == refinementsets.FormUnion &&
 			statesOnlyLongSequences(*f.A_) && statesOnlyLongSequences(*f.B) {
 			continue
@@ -454,12 +502,16 @@ func statesOnlyLongSequences(set refinementsets.RefinedSet) bool {
 
 // stringWordSet is the TS source's stringWordSet: the side's strings as
 // a set, where the side is DEMONSTRABLY a string-sorted word of length
-// two or more (its tuple can never be reread as a scalar), or an
+// two or more (its tuple can never be reread as a scalar), the EMPTY
+// word (the concatenation identity — no tuple at all, so there is no
+// value to misread as a scalar; the admitted-language rule guards
+// against a 1-tuple rereading, which the empty tuple cannot do), or an
 // untagged set all of whose members are such sequences. (nil, false)
-// anywhere else.
+// anywhere else. A length-one word is still refused: THAT tuple is the
+// one a scalar position could reread.
 func stringWordSet(k AbstractValue) (refinementsets.RefinedSet, bool) {
 	if k.Kind == KindValues && k.KindTag == PrimitiveString {
-		if len(k.Values) >= 2 {
+		if len(k.Values) >= 2 || len(k.Values) == 0 {
 			return refinementsets.StringTuple(stringOf(k.Values)), true
 		}
 		return refinementsets.RefinedSet{}, false
@@ -691,6 +743,84 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 			items[i] = JoinKnown(item, b.Items[i])
 		}
 		return KnownList(items, grade)
+	}
+	// two array-holes of the SAME length: every slot is a hole on both
+	// arms, so the joined value states the same length and the same
+	// hole claim. A length mismatch loses the exactness — the walk's
+	// own gap, same as two mismatched KindLists. Density: the
+	// Length/ElementSet claim (every read except Object.keys/values/
+	// entries) survives regardless of whether the two arms agree on
+	// density, so a density disagreement (or either side's density
+	// being unestablished) only drops the Dense claim itself, via
+	// DenseKnown — it does NOT degrade the whole join to Unknown the
+	// way a length mismatch does, because every OTHER claim the kind
+	// carries is still exactly true of both arms. (The length-AND-
+	// density-agreeing case never reaches here: SameKnown's own
+	// KindArrayHoles arm already requires DenseKnown/Dense agreement
+	// alongside the length, so JoinKnown's SameKnown(a, b) fast path
+	// above returns first whenever both would hold.)
+	if a.Kind == KindArrayHoles && b.Kind == KindArrayHoles {
+		aLength, aOk := LengthOfArrayHoles(a)
+		bLength, bOk := LengthOfArrayHoles(b)
+		if !aOk || !bOk || aLength != bLength {
+			return Unknown
+		}
+		lengthClaim := KnownValues([]float64{float64(aLength)}, PrimitiveNumber, grade)
+		out := AbstractValue{Kind: KindArrayHoles, Inner: &lengthClaim, ElementSet: emptyElementSet}
+		if grade != TrustProved {
+			out.Grade = grade
+		}
+		return out
+	}
+	// an array-holes side beside an exact KindList of the SAME length:
+	// every KindList slot already claims undefined-or-more than a hole
+	// (KnownList's own Items may hold non-undef knowledge), so the join
+	// is holes at every position both arms could differ on — which is
+	// exactly the array-holes claim, unless the list's own item at a
+	// position is provably NOT undef, in which case that slot's join
+	// with a hole is "that value, or absent" and the whole sequence is
+	// no longer a pure hole claim. Conservative: only a list whose every
+	// item IS a hole itself joins cleanly to array-holes; anything else
+	// is the walk's own gap.
+	//
+	// Density: a plain KindList's KindUndef items carry no own-property
+	// fact at all (ReadArrayConstruction's below-ceiling `new Array(n)`
+	// and readArrayFrom's below-ceiling `Array.from({length:n})` both
+	// build the identical n-slot list of Undef — a pre-existing gap
+	// this join inherits, not one it introduces). Neither Dense=true
+	// nor Dense=false is provable from the list side, so the joined
+	// value carries DenseKnown=false — the Length/ElementSet claim
+	// (every pre-existing read except Object.keys/values/entries)
+	// stays exactly as determined as it already was; only the new
+	// Object.keys-relevant claim declines.
+	joinArrayHolesWithList := func(holes, list AbstractValue) AbstractValue {
+		length, ok := LengthOfArrayHoles(holes)
+		if !ok || length != len(list.Items) {
+			return Unknown
+		}
+		for _, item := range list.Items {
+			if item.Kind != KindUndef {
+				return Unknown
+			}
+		}
+		lengthClaim := KnownValues([]float64{float64(length)}, PrimitiveNumber, grade)
+		out := AbstractValue{Kind: KindArrayHoles, Inner: &lengthClaim, ElementSet: emptyElementSet}
+		if grade != TrustProved {
+			out.Grade = grade
+		}
+		return out
+	}
+	if a.Kind == KindArrayHoles && b.Kind == KindList {
+		return joinArrayHolesWithList(a, b)
+	}
+	if b.Kind == KindArrayHoles && a.Kind == KindList {
+		return joinArrayHolesWithList(b, a)
+	}
+	// an array-holes side beside anything else that is not itself a
+	// sequence of the exact same shape: no position claim survives —
+	// the same refusal an object-star beside a non-sequence makes
+	if a.Kind == KindArrayHoles || b.Kind == KindArrayHoles {
+		return Unknown
 	}
 	if a.Kind == KindObject && b.Kind == KindObject {
 		bByName := make(map[string]AbstractValue, len(b.Keys))

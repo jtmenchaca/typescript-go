@@ -260,6 +260,10 @@ func walkStatementForm(ctx *FlowContext, env Env, statement *ast.Node, result *a
 				CheckAssignability(ctx, evaluateExpression(ctx, env, pd.Initializer), *read.Stated, pd.Initializer, "a field initializer", nil)
 			}
 		}
+		// a constructor never registers as a FunctionContract, so no
+		// other pass ever judges its own `this.key = value` writes
+		// against the written field's declared type (constructor_field_writes.go)
+		checkConstructorFieldWrites(ctx, statement)
 		// a static block or an initializer can still write outer names
 		havocAssigned(ctx, env, statement)
 		return false

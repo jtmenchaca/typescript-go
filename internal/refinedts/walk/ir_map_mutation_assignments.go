@@ -38,7 +38,7 @@ func MapSetAssignmentsOf(context *LoweringContext, statement *ast.Node) ([]Assig
 	if !ast.IsPropertyAccessExpression(access) {
 		return nil, false
 	}
-	receiver := access.AsPropertyAccessExpression().Expression
+	receiver := Unwrapped(access.AsPropertyAccessExpression().Expression)
 	if !ast.IsIdentifier(receiver) {
 		return nil, false
 	}
@@ -125,7 +125,7 @@ func MapDeleteAssignmentsOf(context *LoweringContext, statement *ast.Node) ([]As
 	if !ast.IsPropertyAccessExpression(access) {
 		return nil, false
 	}
-	receiver := access.AsPropertyAccessExpression().Expression
+	receiver := Unwrapped(access.AsPropertyAccessExpression().Expression)
 	if !ast.IsIdentifier(receiver) {
 		return nil, false
 	}
@@ -162,7 +162,7 @@ func MapClearAssignmentsOf(context *LoweringContext, statement *ast.Node) ([]Ass
 	if !ast.IsPropertyAccessExpression(access) {
 		return nil, false
 	}
-	receiver := access.AsPropertyAccessExpression().Expression
+	receiver := Unwrapped(access.AsPropertyAccessExpression().Expression)
 	if !ast.IsIdentifier(receiver) {
 		return nil, false
 	}
@@ -207,7 +207,7 @@ func getOrInsertSlotEffectsOf(context *LoweringContext, call *ast.Node, name str
 	if !ast.IsPropertyAccessExpression(access) {
 		return nil, 0, false
 	}
-	receiver := access.AsPropertyAccessExpression().Expression
+	receiver := Unwrapped(access.AsPropertyAccessExpression().Expression)
 	if !ast.IsIdentifier(receiver) || receiver.Text() != name {
 		return nil, 0, false
 	}
@@ -296,7 +296,10 @@ func MapGetOrInsertAssignmentsOf(context *LoweringContext, statement *ast.Node) 
 
 // getOrInsertReceiverOf is the Map name a call expression reads
 // `getOrInsert` on — `m` in `m.getOrInsert(k, v)` — or ("", false) for
-// anything that is not a property-access call on a plain name.
+// anything that is not a property-access call on a plain name. The
+// receiver may stand behind parens and casts — `(m as unknown as {
+// getOrInsert… })` — which erase at runtime (Unwrapped), so the call
+// still names the tracked collection underneath.
 func getOrInsertReceiverOf(call *ast.Node) (string, bool) {
 	if !ast.IsCallExpression(call) {
 		return "", false
@@ -305,7 +308,7 @@ func getOrInsertReceiverOf(call *ast.Node) (string, bool) {
 	if !ast.IsPropertyAccessExpression(access) {
 		return "", false
 	}
-	receiver := access.AsPropertyAccessExpression().Expression
+	receiver := Unwrapped(access.AsPropertyAccessExpression().Expression)
 	if !ast.IsIdentifier(receiver) {
 		return "", false
 	}

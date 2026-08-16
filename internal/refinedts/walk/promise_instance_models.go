@@ -44,15 +44,22 @@ func promiseHandlerOf(ctx *FlowContext, argument *ast.Node) Callback {
 	return FunctionInReach(ctx, argument)
 }
 
-// promiseCallbackAnalyzers is the analyzer triple a settlement
-// handler's body walks under — the same set every InlineCallback site
-// in the evaluation passes.
-func promiseCallbackAnalyzers() LoopAnalyzers {
+// StandardAnalyzers is the analyzer triple every InlineCallback site
+// in the evaluation passes — exported for callers outside this
+// package (the hover rendering in service inlines transform callbacks
+// under the same walk).
+func StandardAnalyzers() LoopAnalyzers {
 	return LoopAnalyzers{
 		AnalyzeStatement:   AnalyzeStatement,
 		EvaluateExpression: evaluateExpression,
 		IterationElement:   IterationElementOf,
 	}
+}
+
+// promiseCallbackAnalyzers is the same triple under the settlement
+// handlers' own name.
+func promiseCallbackAnalyzers() LoopAnalyzers {
+	return StandardAnalyzers()
 }
 
 // promiseRunHandler runs one settlement handler with the argument

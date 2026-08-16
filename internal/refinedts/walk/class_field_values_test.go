@@ -177,6 +177,59 @@ func TestConstructedInstance_APrivateNameInitializerIsAKey(t *testing.T) {
 	classFieldValuesExactNumber(t, classFieldValuesKey(t, instance, "#age"), 40)
 }
 
+// TestConstructedInstance_APrivateGetAccessorIsAKey pins the
+// i-more-expressions.ts privateAccessorSlotLaidOut row:
+// `PrivateAccessorHolder` stores through a backing `#raw` field and
+// reads it through a private `get #age()` accessor. The getter is
+// never a PropertyDeclaration, so before this fix the constructed
+// instance carried no `#age` key at all and a read through it fell to
+// the opaque floor (KindUnknown) rather than the backing field's own
+// 40.
+func TestConstructedInstance_APrivateGetAccessorIsAKey(t *testing.T) {
+	p := classFieldValuesProgram(t,
+		"class PrivateAccessorHolder {\n"+
+			"  #raw = 40;\n"+
+			"  get #age(): number {\n"+
+			"    return this.#raw;\n"+
+			"  }\n"+
+			"  read(): number {\n"+
+			"    return this.#age;\n"+
+			"  }\n"+
+			"}\n"+
+			"void PrivateAccessorHolder;\n")
+	declaration := classFieldValuesClassNamed(t, p, "PrivateAccessorHolder")
+	ctx := classFieldValuesContext(p)
+	instance := ConstructedInstance(ctx, declaration, nil)
+	classFieldValuesExactNumber(t, classFieldValuesKey(t, instance, "#age"), 40)
+}
+
+// TestSummaryCallReceiver_APrivateGetAccessorReadsThroughToTheReceiver
+// pins the row end to end: `new PrivateAccessorHolder().read()`'s
+// receiver carries the accessor-computed `#age` key, the same way
+// TestSummaryCallReceiver_AConstructedReceiverAnswersTheInstance pins
+// a plain private field.
+func TestSummaryCallReceiver_APrivateGetAccessorReadsThroughToTheReceiver(t *testing.T) {
+	p := classFieldValuesProgram(t,
+		"class PrivateAccessorHolder {\n"+
+			"  #raw = 40;\n"+
+			"  get #age(): number {\n"+
+			"    return this.#raw;\n"+
+			"  }\n"+
+			"  read(): number {\n"+
+			"    return this.#age;\n"+
+			"  }\n"+
+			"}\n"+
+			"const ok = new PrivateAccessorHolder().read();\n"+
+			"void ok;\n")
+	call := classFieldValuesFirstNode(t, p, "method call on a construction", func(node *ast.Node) bool {
+		return ast.IsCallExpression(node) &&
+			ast.IsPropertyAccessExpression(node.AsCallExpression().Expression)
+	})
+	ctx := classFieldValuesContext(p)
+	held := SummaryCallReceiver(ctx, NewEnv(), call)
+	classFieldValuesExactNumber(t, classFieldValuesKey(t, held, "#age"), 40)
+}
+
 /* ── the const class expression ──────────────────────────────────── */
 
 func TestEvaluateNewExpression_AConstClassExpressionResolves(t *testing.T) {

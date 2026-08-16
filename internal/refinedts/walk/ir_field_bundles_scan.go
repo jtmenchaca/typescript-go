@@ -128,7 +128,13 @@ func (s *fieldCensusScan) fieldAccessOf(node *ast.Node) (string, bool) {
 	if !s.isReceiver(Unwrapped(access.Expression)) {
 		return "", false
 	}
-	if !ast.IsIdentifier(access.Name()) {
+	// a step's own name is a plain identifier OR a private identifier —
+	// `this.#age` names the field `#age` exactly as `this.age` names
+	// `age`. Without this arm the census never recognizes a private
+	// field's read/write/call at all, so `this.#age` walks on as a bare
+	// mention of `this` and wrongly marks the whole bundle Escaped
+	// (visitBareMention), which drops every field's slot for the body.
+	if !ast.IsIdentifier(access.Name()) && !ast.IsPrivateIdentifier(access.Name()) {
 		return "", false
 	}
 	return access.Name().Text(), true

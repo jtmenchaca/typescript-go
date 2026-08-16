@@ -363,7 +363,7 @@ func SummaryResult(
 	argKnowns []abstractdomain.AbstractValue,
 	resolveCallee func(callee *ast.Node) *ast.Node,
 ) (abstractdomain.AbstractValue, bool) {
-	return applySummary(&FlowContext{P: p}, declaration, argKnowns, unknownReceiver())
+	return applySummary(&FlowContext{P: p}, declaration, argKnowns, unknownReceiver(), false)
 }
 
 // SummaryResultIn is the same route with the walk's own context — the
@@ -375,7 +375,37 @@ func SummaryResult(
 // entries are what the summary quantifies over. A caller that can reach
 // the receiver goes through SummaryResultOn.
 func SummaryResultIn(ctx *FlowContext, declaration *ast.Node, argKnowns []abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
-	return applySummary(ctx, declaration, argKnowns, unknownReceiver())
+	return applySummary(ctx, declaration, argKnowns, unknownReceiver(), false)
+}
+
+// SummaryResultExactIn is SummaryResultIn where the caller ALSO knows
+// the call's own argument list is EXACT — the effective-arguments
+// reading found no unread spread, so every position (a trailing rest
+// parameter's tail included) is really the one the call wrote. A
+// summary's own compiled program still cannot carry that: it is
+// proved once for every call, so a REST parameter's entry always
+// enters TOP (summaryEntryStates), whatever this one call passed —
+// and an ARRAY-TYPED parameter's TWO entries (its "p.len"/"p.elem"
+// pair) enter TOP the same unconditional way, for the same reason:
+// the compiled program is reused across every call, so it cannot
+// carry one call's own array length or element values either. A
+// TOP-fed rest or array-parameter read then answers a TOP ret, and a
+// COMPLETE body's own serving rule (applySummary's comment) would
+// otherwise hand that TOP back as the call's answer — discarding the
+// caller's own exact tuple for nothing the summary route could ever
+// have used it for. EXACT tells applySummary to decline THAT ONE
+// serving instead: the call falls through to the walk-based recovery
+// (recoverPureBody/InlineContractBody), which binds the rest
+// parameter through ParameterKnown's own exact list, or the array
+// parameter through BoundParameterKnown/ReadDestructuring's own
+// element reads, and reads what the summary could not spell.
+//
+// Every OTHER answer a summary can determine — a scalar ret, an
+// object member, anything not fed from a topped rest or array slot —
+// is unaffected: EXACT only removes the one case where TOP-serving
+// would have thrown away knowledge the call actually had.
+func SummaryResultExactIn(ctx *FlowContext, declaration *ast.Node, argKnowns []abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
+	return applySummary(ctx, declaration, argKnowns, unknownReceiver(), true)
 }
 
 // SummaryResultOn is SummaryResultIn with the call's RECEIVER supplied —
@@ -386,7 +416,7 @@ func SummaryResultOn(
 	argKnowns []abstractdomain.AbstractValue,
 	receiver abstractdomain.AbstractValue,
 ) (abstractdomain.AbstractValue, bool) {
-	return applySummary(ctx, declaration, argKnowns, receiver)
+	return applySummary(ctx, declaration, argKnowns, receiver, false)
 }
 
 // unknownReceiver is the receiver a call site that reached none supplies:
@@ -407,11 +437,27 @@ func unknownReceiver() abstractdomain.AbstractValue {
 // (result, false) — no claim — wherever the body, the arguments, or
 // the kernel decline; the JS inline walk then serves exactly as
 // before.
+//
+// EXACT is the one addition past the whole-body walk's own answer: a
+// REST parameter's entry state is always TOP (summaryEntryStates —
+// the compiled program is reused across every call, so it cannot
+// carry one call's own array length), an ARRAY-TYPED parameter's two
+// entries are always TOP for the same reason, and a body that only
+// reads through one of those therefore serves a TOP ret under the
+// COMPLETE-body rule regardless of what this call passed. EXACT true
+// says this call's own arguments are the real, fully-read positions
+// (no unread spread ate the count) — so when the ret would serve TOP
+// AND the declaration has a rest parameter OR an array parameter, the
+// route declines instead of serving: this call's exact tail or exact
+// array is knowledge only the walk-based recovery can use
+// (ParameterKnown, BoundParameterKnown), and TOP-serving here would
+// discard it for nothing the summary route determined either.
 func applySummary(
 	ctx *FlowContext,
 	declaration *ast.Node,
 	argKnowns []abstractdomain.AbstractValue,
 	receiver abstractdomain.AbstractValue,
+	exact bool,
 ) (abstractdomain.AbstractValue, bool) {
 	if EngineKernelHeld() == nil {
 		return abstractdomain.AbstractValue{}, false
@@ -494,14 +540,36 @@ func applySummary(
 	// fall-off path leaves undefined, which is exactly the flag-still-down
 	// case decided below.
 	returned := retExit.Returned()
-	answer := KnownOfState(kernelbridge.KnownStateWire{Set: returned.Set, Absent: false, Nan: returned.Nan})
+	// Top must ride along here: KnownOfState's own gate (`if s.Top:
+	// return silence.Residue()`) is what turns a TOP ret into
+	// KindUnknown, which is what lets the branch below and its
+	// EXACT-gated rest/array decline ever run. Building this wire
+	// with Top left at its zero value (false) made a TOP ret read as
+	// KindSet over an EMPTY RefinedSet instead — FormatForDiagnostics'
+	// own "any value" spelling for zero Forms, RTS7001's "not
+	// assignable" symptom on an in-set leg, and a decline gate that
+	// never got the chance to run because answer.Kind was never
+	// KindUnknown to begin with.
+	answer := KnownOfState(kernelbridge.KnownStateWire{Top: returned.Top, Set: returned.Set, Absent: false, Nan: returned.Nan})
 	if answer.Kind == abstractdomain.KindUnknown {
 		// a COMPLETE body serving a TOP ret answers SILENCE, which is what
 		// "the return value is unconstrained" spells — and the route still
 		// says it SERVED, so the caller keeps this answer instead of
 		// re-walking the body to derive the same nothing. Every other
 		// unknown answer declines, exactly as before.
+		//
+		// EXCEPT where EXACT is true and the declaration has a REST
+		// parameter: the TOP that produced this ret is summaryEntryStates'
+		// own always-TOP rest entry, not a genuine "this body's return is
+		// unconstrained" reading — this call's own arguments fill that
+		// rest position exactly, knowledge the compiled program can never
+		// carry (applySummary's own comment). Declining here, rather than
+		// serving silence, is what lets the walk-based recovery
+		// (ParameterKnown's exact rest list) answer instead.
 		if !serveTop {
+			return abstractdomain.AbstractValue{}, false
+		}
+		if exact && (declarationHasRestParameter(declaration) || declarationHasArrayParameter(ctx, declaration)) {
 			return abstractdomain.AbstractValue{}, false
 		}
 		tracing.Count("summaryServed", 0)
@@ -717,6 +785,41 @@ func constEffectState(effect kernelbridge.LoopEffect) (kernelbridge.KnownStateWi
 		return kernelbridge.KnownStateWire{Set: effect.Set, Absent: effect.Absent, Nan: effect.Nan}, true
 	}
 	return kernelbridge.KnownStateWire{}, false
+}
+
+// declarationHasRestParameter: whether the declaration binds a
+// trailing rest parameter — the one shape summaryEntryStates always
+// feeds TOP, whatever a call passed (its own comment). applySummary's
+// EXACT-serving check reads this to know when a TOP ret came from
+// that always-TOP entry rather than a genuinely unconstrained body.
+func declarationHasRestParameter(declaration *ast.Node) bool {
+	for _, parameter := range declaration.Parameters() {
+		if parameter.AsParameterDeclaration().DotDotDotToken != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// declarationHasArrayParameter: whether the declaration binds a
+// parameter that flattens to the two-slot "p.len"/"p.elem" pair
+// (arrayParamSlotsIn) — the other shape summaryEntryStates always
+// feeds TOP for BOTH entries, whatever exact array a call passed
+// (summaryEntryStates' own comment: "the direct apply reads an
+// argument's abstract value, which carries no length and no element
+// join this route can spell"). applySummary's EXACT-serving check
+// reads this the same way it reads declarationHasRestParameter: a
+// TOP ret on a call whose own argument WAS an exact array (a
+// literal, a KindList, a KindValues array) is the always-TOP entry
+// talking, not a genuinely unconstrained body, so EXACT declines the
+// serving instead of answering the imprecise TOP-derived claim.
+func declarationHasArrayParameter(ctx *FlowContext, declaration *ast.Node) bool {
+	for _, parameter := range declaration.Parameters() {
+		if _, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
+			return true
+		}
+	}
+	return false
 }
 
 // summaryEntryStates builds the entry states a call sends, one per
@@ -1072,5 +1175,24 @@ func KernelSummaryDirectOn(
 	if !summaryLowerable(contract.Declaration) {
 		return abstractdomain.AbstractValue{}, false
 	}
-	return applySummary(ctx, contract.Declaration, argKnowns, receiver)
+	return applySummary(ctx, contract.Declaration, argKnowns, receiver, false)
+}
+
+// KernelSummaryDirectExactOn is KernelSummaryDirectOn where the
+// caller's own effective-arguments reading found the call EXACT — see
+// SummaryResultExactIn's comment for what that changes: a rest
+// parameter's TOP-fed entry no longer lets a COMPLETE body serve a
+// TOP ret over this one call's own exact tail, so the inline route
+// (InlineContractBody, whose ParameterKnown already builds that exact
+// tail) gets the chance the plain spelling would have skipped past.
+func KernelSummaryDirectExactOn(
+	ctx *FlowContext,
+	argKnowns []abstractdomain.AbstractValue,
+	contract *FunctionContract,
+	receiver abstractdomain.AbstractValue,
+) (abstractdomain.AbstractValue, bool) {
+	if !summaryLowerable(contract.Declaration) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	return applySummary(ctx, contract.Declaration, argKnowns, receiver, true)
 }

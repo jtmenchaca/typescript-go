@@ -31,6 +31,69 @@ func compoundOperator(kind ast.Kind) (NumericOperator, bool) {
 	}
 }
 
+// compoundBitwiseOperator maps the six bitwise/shift compound tokens
+// (`&= |= ^= <<= >>= >>>=`) to the BitwiseOperator TransferBitwise
+// reads (bitwise_transfer.go) — compoundOperator's own NumericOperator
+// table has no bitwise arm (NumericOperator is the "+ - * / %" union
+// only), so a compound bitwise token needs this separate table rather
+// than an addition to that one. AssignmentOperator's own grammar row
+// (tmp/ecma262/spec.html sec-assignment-operators, `*= /= %= += -= <<=
+// >>= >>>= &= ^= |= **=`) lists these beside the arithmetic compounds,
+// and ApplyStringOrNumericBinaryOperator (the abstract operation every
+// AssignmentOperator's alg step runs) carries the bitwise ops as
+// ordinary table entries, so `age &= 0xff` runs the identical
+// GetValue/rightRef/PutValue shape `age += 5` does — reading a
+// bitwise-shaped op here loses nothing the arithmetic table has.
+func compoundBitwiseOperator(kind ast.Kind) (BitwiseOperator, bool) {
+	switch kind {
+	case ast.KindAmpersandEqualsToken:
+		return BitAnd, true
+	case ast.KindBarEqualsToken:
+		return BitOr, true
+	case ast.KindCaretEqualsToken:
+		return BitXor, true
+	case ast.KindLessThanLessThanEqualsToken:
+		return Shl, true
+	case ast.KindGreaterThanGreaterThanEqualsToken:
+		return Sar, true
+	case ast.KindGreaterThanGreaterThanGreaterThanEqualsToken:
+		return Shr, true
+	default:
+		return "", false
+	}
+}
+
+// compoundResult is the one arithmetic choice every compound-assign
+// route makes from a token, a before-value, and a right-value: string
+// concatenation for `+=` between string-sorted operands, the numeric
+// transfer for the five NumericOperator tokens, the bitwise transfer
+// for the six bitwise/shift tokens, TransferPow for `**=`, or silence
+// for anything else. leftNode/rightNode are effect-free syntax used
+// only to decide string-sortedness (readStringConcatenation's own
+// gate) — never re-evaluated.
+//
+// Shared by the identifier arm, the plain-property arm, and the
+// accessor read-modify-write (ir_accessor_calls_read_modify_write.go)
+// so the three routes compute the identical value for the identical
+// token rather than three hand-kept copies drifting apart.
+func compoundResult(ctx *FlowContext, leftNode, rightNode *ast.Node, kind ast.Kind, before, right abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	if kind == ast.KindPlusEqualsToken {
+		if concatenated := readStringConcatenation(ctx, leftNode, rightNode, before, right); concatenated != nil {
+			return *concatenated
+		}
+	}
+	if op, hasOp := compoundOperator(kind); hasOp {
+		return TransferBinary(op, before, right)
+	}
+	if bitOp, hasBitOp := compoundBitwiseOperator(kind); hasBitOp {
+		return TransferBitwise(bitOp, before, right)
+	}
+	if kind == ast.KindAsteriskAsteriskEqualsToken {
+		return TransferPow(before, right)
+	}
+	return silence.Residue()
+}
+
 // ReadAssignment is readAssignment in the TS source: simple and
 // compound writes through a name or a property — or (AbstractValue{},
 // false) where the operator is not one of those forms.
@@ -64,6 +127,19 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 		}
 		return value, true
 	}
+	// `({ a } = x)` / `[a] = xs` — a destructuring ASSIGNMENT pattern,
+	// not a declaration. Each bound leaf judges against its own
+	// declared type the same way a plain identifier target does
+	// (WriteAssignmentPattern reuses WriteBinding per leaf); the
+	// pattern's own shape (object vs array literal, nested, rest,
+	// default) is read by SlotOf/SlotOfIndex exactly as a declaration
+	// pattern's bind does.
+	if bin.OperatorToken.Kind == ast.KindEqualsToken &&
+		(ast.IsObjectLiteralExpression(bin.Left) || ast.IsArrayLiteralExpression(bin.Left)) {
+		value := evaluateExpression(ctx, env, bin.Right)
+		WriteAssignmentPattern(ctx, env, bin.Left, value, bin.Right)
+		return value, true
+	}
 	// a `this[S] = value` store under a STABLE symbol const: the value
 	// sinks for the field-invariant collection under its #sym: name —
 	// the same sink a dotted `this.key = value` feeds — and the held
@@ -79,6 +155,24 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 				ForgetThisHeld(ctx, env, e)
 				return value, true
 			}
+		}
+	}
+	// a PLAIN write through a GET/SET ACCESSOR: the setter body runs
+	// with the evaluated right side, exactly as the runtime calls it —
+	// checked BEFORE the plain-property arm below, which would otherwise
+	// find no "age" key (ConstructedInstance never census-keys an
+	// accessor as a plain field) and ADD "age" as a fresh unknown-valued
+	// key rather than running the setter (AccessorWalkPlainWrite's own
+	// doc comment, ir_accessor_calls_plain_write.go). RESOLUTION is
+	// checked before bin.Right evaluates — AccessorSetterTargetOf reads
+	// no program state and causes no effect — so a decline here never
+	// double-runs bin.Right the way evaluating it speculatively would.
+	if bin.OperatorToken.Kind == ast.KindEqualsToken &&
+		ast.IsPropertyAccessExpression(bin.Left) &&
+		AccessorSetterTargetOf(ctx, env, bin.Left) {
+		value := evaluateExpression(ctx, env, bin.Right)
+		if next, ok := AccessorWalkPlainWrite(ctx, env, bin.Left, value); ok {
+			return next, true
 		}
 	}
 	// a write THROUGH a property: `obj.key = v`. The object's facts
@@ -106,32 +200,143 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 		WriteProperty(ctx, env, bin.Left, value, bin.Right)
 		return value, true
 	}
+	// `a ||= b` / `a &&= b` / `a ??= b` on a tracked identifier: the
+	// setter runs (and the right side evaluates) only on the branch the
+	// left side's own verdict picks — sec-assignment-operators-runtime-
+	// semantics-evaluation's three LogicalAssignment algs (`&&=`: "If
+	// ToBoolean(leftValue) is false, return leftValue" then evaluate and
+	// PutValue the right side; `||=` the truthy-returns-unchanged dual;
+	// `??=`: "If leftValue is neither undefined nor null, return
+	// leftValue" then evaluate and write the right side otherwise). A
+	// DECIDED left verdict (Truthiness/exact-undef, the same tests
+	// ReadBinary's own `&&`/`||`/`??` arms already run) answers the one
+	// branch the runtime would actually take — held-unchanged, or the
+	// freshly evaluated and written right side — never a join between
+	// them, because the unrun branch is not one of the runs the
+	// expression can produce. An UNDECIDED verdict falls back to the
+	// join both those arms already use for the same reason: the value
+	// really is "kept a, or written b", and the join over-approximates
+	// whichever the runtime picks.
+	// `box.age ||= b` / `box.age &&= b` / `box.age ??= b` through a
+	// GET/SET ACCESSOR PAIR: the short-circuit composition of the two
+	// facts above — a compound through an accessor runs the getter then
+	// the setter, and the logical family's kept branch runs neither.
+	// AccessorTargetOf is checked BEFORE bin.Right evaluates, the same
+	// resolve-before-evaluate discipline the ordinary accessor-compound
+	// arm below follows — AccessorLogicalReadModifyWrite itself decides
+	// whether bin.Right ever evaluates, so this call site must not
+	// evaluate it first. Tried ahead of the identifier-only arm's own
+	// gate (which never matches a property access) and ahead of the
+	// plain-property compound arm further down (which would otherwise
+	// add "age" as a fresh unknown-valued KEY rather than running the
+	// setter — AccessorWalkReadModifyWrite's own doc comment).
+	if (bin.OperatorToken.Kind == ast.KindBarBarEqualsToken ||
+		bin.OperatorToken.Kind == ast.KindAmpersandAmpersandEqualsToken ||
+		bin.OperatorToken.Kind == ast.KindQuestionQuestionEqualsToken) &&
+		ast.IsPropertyAccessExpression(bin.Left) &&
+		AccessorTargetOf(ctx, env, bin.Left) {
+		if next, ok := AccessorLogicalReadModifyWrite(ctx, env, bin.Left, bin.Right, bin.OperatorToken.Kind); ok {
+			return next, true
+		}
+	}
+	if (bin.OperatorToken.Kind == ast.KindBarBarEqualsToken ||
+		bin.OperatorToken.Kind == ast.KindAmpersandAmpersandEqualsToken ||
+		bin.OperatorToken.Kind == ast.KindQuestionQuestionEqualsToken) &&
+		ast.IsIdentifier(bin.Left) {
+		before, hasBefore := env.Get(bin.Left.Text())
+		if !hasBefore {
+			before = silence.Residue()
+		}
+		if bin.OperatorToken.Kind == ast.KindQuestionQuestionEqualsToken {
+			// decided by PRESENCE, exactly as ReadBinary's own `??` arm
+			// (evaluate_operators.go) decides it — an exact absent left
+			// writes the right side outright, an exact present left keeps
+			// its own value unwritten and unevaluated, and a maybe joins
+			// its present inner with the conditionally-run right
+			if before.Kind == abstractdomain.KindUndef {
+				right := evaluateExpression(ctx, env, bin.Right)
+				WriteBinding(ctx, env, bin.Left.Text(), right, e, "an assigned value")
+				return right, true
+			}
+			switch before.Kind {
+			case abstractdomain.KindValues, abstractdomain.KindObject, abstractdomain.KindNaN, abstractdomain.KindSet, abstractdomain.KindList:
+				return before, true
+			}
+			if before.Kind == abstractdomain.KindPossiblyUndefined {
+				right := evaluateExpression(ctx, env, bin.Right)
+				joined := abstractdomain.JoinKnown(*before.Inner, right)
+				WriteBinding(ctx, env, bin.Left.Text(), joined, e, "an assigned value")
+				return joined, true
+			}
+			right := evaluateExpression(ctx, env, bin.Right)
+			joined := abstractdomain.UnknownOver([]abstractdomain.AbstractValue{before, right})
+			WriteBinding(ctx, env, bin.Left.Text(), joined, e, "an assigned value")
+			return joined, true
+		}
+		// `&&=` / `||=`: decided by TRUTHINESS
+		isAnd := bin.OperatorToken.Kind == ast.KindAmpersandAmpersandEqualsToken
+		verdict, hasVerdict := abstractdomain.Truthiness(before)
+		if hasVerdict {
+			wantsAnd := isAnd && !verdict
+			wantsOr := !isAnd && verdict
+			// the branch that keeps `a` unwritten: the runtime's own
+			// GetValue-then-return step, with no PutValue at all — the
+			// right side never evaluates
+			if wantsAnd || wantsOr {
+				return before, true
+			}
+			right := evaluateExpression(ctx, env, bin.Right)
+			WriteBinding(ctx, env, bin.Left.Text(), right, e, "an assigned value")
+			return right, true
+		}
+		// undecided: the join over-approximates both runs the same way
+		// ReadBinary's own `&&`/`||` arm does for the bare operator
+		right := evaluateExpression(ctx, env, bin.Right)
+		joined := abstractdomain.JoinKnown(before, right)
+		var next abstractdomain.AbstractValue
+		if joined.Kind != abstractdomain.KindUnknown {
+			next = joined
+		} else {
+			next = abstractdomain.UnknownOver([]abstractdomain.AbstractValue{before, right})
+		}
+		WriteBinding(ctx, env, bin.Left.Text(), next, e, "an assigned value")
+		return next, true
+	}
+	// a compound write through a GET/SET ACCESSOR PAIR runs both bodies —
+	// the getter's read, the arithmetic, the setter's write — the same
+	// read-modify-write the runtime performs
+	// (sec-assignment-operators-runtime-semantics-evaluation's
+	// AssignmentOperator alg: GetValue(leftRef) before rightRef, then
+	// PutValue). RESOLUTION is checked BEFORE the right side evaluates —
+	// AccessorTargetOf reads no program state and causes no effect, so
+	// trying it first never double-runs bin.Right the way evaluating it
+	// speculatively would. A receiver whose property resolves to an
+	// accessor never falls into the plain-property arm below, which
+	// would otherwise add "age" as a fresh unknown-valued KEY rather
+	// than running the setter (AccessorWalkReadModifyWrite's own doc
+	// comment, ir_accessor_calls_read_modify_write.go). The three
+	// LogicalAssignment tokens are excluded HERE on purpose — they
+	// already matched the arm above this one, which runs the setter only
+	// on the branch the getter's own verdict picks.
+	if bin.OperatorToken.Kind >= ast.KindFirstCompoundAssignment &&
+		bin.OperatorToken.Kind <= ast.KindLastCompoundAssignment &&
+		bin.OperatorToken.Kind != ast.KindBarBarEqualsToken &&
+		bin.OperatorToken.Kind != ast.KindAmpersandAmpersandEqualsToken &&
+		bin.OperatorToken.Kind != ast.KindQuestionQuestionEqualsToken &&
+		ast.IsPropertyAccessExpression(bin.Left) &&
+		AccessorTargetOf(ctx, env, bin.Left) {
+		right := evaluateExpression(ctx, env, bin.Right)
+		if next, ok := AccessorWalkReadModifyWrite(ctx, env, bin.Left, bin.Right, bin.OperatorToken.Kind, right); ok {
+			return next, true
+		}
+	}
 	// a compound write through a property transfers the same way
 	if bin.OperatorToken.Kind >= ast.KindFirstCompoundAssignment &&
 		bin.OperatorToken.Kind <= ast.KindLastCompoundAssignment &&
 		ast.IsPropertyAccessExpression(bin.Left) {
 		right := evaluateExpression(ctx, env, bin.Right)
-		op, hasOp := compoundOperator(bin.OperatorToken.Kind)
 		before := evaluateExpression(ctx, env, bin.Left)
-		// `+=` rides the same concatenation transfer as spelled-out `+`:
-		// both run ApplyStringOrNumericBinaryOperator, whose string arm
-		// concatenates (sec-applystringornumericbinaryoperator;
-		// sec-assignment-operators-runtime-semantics-evaluation)
-		var concatenated *abstractdomain.AbstractValue
-		if bin.OperatorToken.Kind == ast.KindPlusEqualsToken {
-			concatenated = readStringConcatenation(ctx, bin.Left, bin.Right, before, right)
-		}
-		var next abstractdomain.AbstractValue
-		switch {
-		case concatenated != nil:
-			next = *concatenated
-		case hasOp:
-			next = TransferBinary(op, before, right)
-		case bin.OperatorToken.Kind == ast.KindAsteriskAsteriskEqualsToken:
-			next = TransferPow(before, right)
-		default:
-			next = silence.Residue()
-		}
+		next := compoundResult(ctx, bin.Left, bin.Right, bin.OperatorToken.Kind, before, right)
 		WriteProperty(ctx, env, bin.Left, next, e)
 		return next, true
 	}
@@ -140,30 +345,11 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 		bin.OperatorToken.Kind <= ast.KindLastCompoundAssignment &&
 		ast.IsIdentifier(bin.Left) {
 		right := evaluateExpression(ctx, env, bin.Right)
-		op, hasOp := compoundOperator(bin.OperatorToken.Kind)
 		before, ok := env.Get(bin.Left.Text())
 		if !ok {
 			before = silence.Residue()
 		}
-		// `+=` rides the same concatenation transfer as spelled-out `+`:
-		// both run ApplyStringOrNumericBinaryOperator, whose string arm
-		// concatenates (sec-applystringornumericbinaryoperator;
-		// sec-assignment-operators-runtime-semantics-evaluation)
-		var concatenated *abstractdomain.AbstractValue
-		if bin.OperatorToken.Kind == ast.KindPlusEqualsToken {
-			concatenated = readStringConcatenation(ctx, bin.Left, bin.Right, before, right)
-		}
-		var next abstractdomain.AbstractValue
-		switch {
-		case concatenated != nil:
-			next = *concatenated
-		case hasOp:
-			next = TransferBinary(op, before, right)
-		case bin.OperatorToken.Kind == ast.KindAsteriskAsteriskEqualsToken:
-			next = TransferPow(before, right)
-		default:
-			next = silence.Residue()
-		}
+		next := compoundResult(ctx, bin.Left, bin.Right, bin.OperatorToken.Kind, before, right)
 		WriteBinding(ctx, env, bin.Left.Text(), next, e, "an assigned value")
 		return next, true
 	}

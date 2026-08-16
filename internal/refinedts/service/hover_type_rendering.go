@@ -163,9 +163,7 @@ func TransformImage(
 	if !ast.IsArrowFunction(callback) && !ast.IsFunctionExpression(callback) {
 		return walk.Answer{}, false
 	}
-	// the block-body gate (see the file header): an expression body
-	// needs walk's unexported expression evaluator
-	if callback.Body() == nil || !ast.IsBlock(callback.Body()) {
+	if callback.Body() == nil {
 		return walk.Answer{}, false
 	}
 	kernel := kernelbridge.KernelIfLoaded()
@@ -209,13 +207,7 @@ func TransformImage(
 	} else {
 		argument = walk.WornOfAnnotation(*input.Annotation)
 	}
-	result := walk.InlineCallback(ctx, walk.NewEnv(), callback, argument, walk.LoopAnalyzers{
-		AnalyzeStatement: walk.AnalyzeStatement,
-		// EvaluateExpression is never reached: the block-body gate
-		// above keeps InlineCallback on the AnalyzeStatement path
-		EvaluateExpression: nil,
-		IterationElement:   walk.IterationElementOf,
-	}, nil)
+	result := walk.InlineCallback(ctx, walk.NewEnv(), callback, argument, walk.StandardAnalyzers(), nil)
 	graded := result
 	if libraryRuntime {
 		graded = abstractdomain.AtTrustLevel(result, abstractdomain.TrustLibrary)

@@ -7,6 +7,7 @@
 package walk
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -45,6 +46,11 @@ func readArrayIsArray(site MethodCallSite) *abstractdomain.AbstractValue {
 		return answer(argument.KindTag == abstractdomain.PrimitiveArray)
 	case abstractdomain.KindList:
 		return answer(true)
+	case abstractdomain.KindArrayHoles:
+		// the same brand ReadArrayConstruction always builds under —
+		// sec-array's algorithm returns an actual Array exotic object at
+		// any length, holes included
+		return answer(true)
 	case abstractdomain.KindObjectStar:
 		// the object-star is only ever built where the value IS an array
 		// exotic object — Array.from, a spread literal, a declared `T[]`,
@@ -73,7 +79,10 @@ func readArrayIsArray(site MethodCallSite) *abstractdomain.AbstractValue {
 // readArrayFrom is readArrayFrom in the TS source: Array.from — the
 // counted form builds its exact list, an exact length (or an exact
 // sequence) with the callback inlined per index, the same machinery
-// as map.
+// as map. An array-like `{length: n}` source with NO mapper and n past
+// arrayConstructionHoleLimit builds KnownArrayHoles instead of
+// declining — the same past-ceiling representation
+// ReadArrayConstruction (array_construction.go) uses for `new Array(n)`.
 func readArrayFrom(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.AbstractValue {
 	call := e.AsCallExpression()
 	if !ast.IsPropertyAccessExpression(call.Expression) {
@@ -104,13 +113,47 @@ func readArrayFrom(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abstr
 	} else if source.Kind == abstractdomain.KindObject {
 		length := lookupObjectKey(source.Keys, "length")
 		if length != nil && length.Kind == abstractdomain.KindValues && len(length.Values) == 1 &&
-			isNonNegativeInteger(length.Values[0]) && length.Values[0] <= 10_000 {
+			isNonNegativeInteger(length.Values[0]) {
 			n := int(length.Values[0])
-			items = make([]abstractdomain.AbstractValue, n)
-			for i := range items {
-				items[i] = abstractdomain.Undef
+			if n <= arrayConstructionHoleLimit {
+				items = make([]abstractdomain.AbstractValue, n)
+				for i := range items {
+					items[i] = abstractdomain.Undef
+				}
+				hasItems = true
+			} else if argCount == 1 {
+				// past the materialization ceiling, with NO mapper: sec-
+				// array.from's array-like branch (steps _arrayLike_.._k_,
+				// tmp/ecma262/spec.html sec-array.from) reads
+				// Get(arrayLike, ToString(k)) at every index 0..length-1
+				// and writes it via CreateDataPropertyOrThrow — so every
+				// index becomes an OWN property. An array-like whose
+				// length key is all the walk knows (no own numeric keys
+				// read) has no property at any index, and Get on an
+				// ordinary object with no matching own or inherited
+				// property answers undefined (OrdinaryGet, sec-
+				// ordinary-object-internal-methods-and-internal-slots-get-p-receiver).
+				// The RESULT is therefore a DENSE array of n undefined
+				// VALUES — every index IS an own property, unlike
+				// `new Array(n)`'s sparse holes, where no index is an own
+				// property at all. KnownArrayHoles' Length/ElementSet claims
+				// cover both shapes identically for every read the walk
+				// answers off a KindArrayHoles receiver except
+				// Object.keys/values/entries (.length, an element read,
+				// Array.isArray, instanceof, truthiness all read the same
+				// either way — a sparse hole read and a dense-undefined
+				// read both answer undefined). The Dense=true argument below
+				// is what lets Object.keys(arr) answer the n index strings
+				// instead of [] (object_static_models.go). A mapper argument
+				// (argCount == 2) still declines past the ceiling below: each
+				// output is
+				// Call(mapper, thisArg, kValue, 𝔽(k)) (step 10.d.i), which
+				// this model can only answer by inlining the callback per
+				// index — the same reason readArrayFrom's own map/filter
+				// siblings need materialized items.
+				out := abstractdomain.KnownArrayHoles(n, abstractdomain.TrustProved, true)
+				return &out
 			}
-			hasItems = true
 		}
 	} else if collectionItems, ok := collectionSpreadItems(source); ok {
 		// a BUILT collection drains exactly: a Set's members, a Map's
@@ -384,6 +427,63 @@ func readArrayReadMethods(site MethodCallSite, argKnowns []abstractdomain.Abstra
 			}
 		}
 	}
+	// `join` over ARRAY-HOLES: sec-array.prototype.join
+	// (tmp/ecma262/spec.html, sec-array.prototype.join) reads
+	// Get(obj, ToString(k)) at every index and, "If element is neither
+	// undefined nor null," appends its ToString — an undefined element
+	// (every element here; the present-element set is ∅) contributes
+	// NOTHING, not even the empty string via a ToString call, so the
+	// result is exactly (length−1) copies of the separator with no
+	// piece between them: `new Array(n).join(",")` is exactly n−1
+	// commas, the empty string at n ≤ 1. The exact answer is fully
+	// DETERMINED (there is no per-element uncertainty — the piece is
+	// always ""), so this is not a materialization tradeoff the way an
+	// arbitrary array's join is; the only cost is the string LENGTH,
+	// same shape arrayConstructionHoleLimit already bounds.
+	if !receiverStringy && receiver.Kind == abstractdomain.KindArrayHoles && method == "join" && len(argKnowns) <= 1 {
+		length, lengthOk := abstractdomain.LengthOfArrayHoles(receiver)
+		separator, separatorOk := ",", true
+		if len(argKnowns) == 1 {
+			separator, separatorOk = exactStringOf(argKnowns[0])
+		}
+		if lengthOk && separatorOk {
+			grade := abstractdomain.MinTrustLevel(oracleGrade, abstractdomain.TrustLevelOf(receiver))
+			copies := length - 1
+			if copies < 0 {
+				copies = 0
+			}
+			if copies <= arrayConstructionHoleLimit {
+				out := abstractdomain.KnownValues(refinementsets.CodepointsOf(strings.Repeat(separator, copies)), abstractdomain.PrimitiveString, grade)
+				return &out
+			}
+			// past the materialization ceiling: the same EXACT claim,
+			// carried as the fixed-length window over the one-character
+			// alphabet {separator} rather than a materialized codepoint
+			// array (refinementsets.Repetition, the idiom
+			// sequence_copy_models.go/destructuring.go already use for a
+			// length-bounded string set). Only when the separator itself
+			// is exactly ONE codepoint — a multi-codepoint separator
+			// repeated `copies` times has a UTF-16 length this window
+			// cannot pin exactly (astral separators cost 2 units per
+			// occurrence). The one-codepoint case's .length DOES read
+			// back exactly now: evaluate_property_access.go's stringy
+			// branch answers the window's own lo==hi scalar count
+			// whenever the element alphabet is proven astral-free
+			// (astralFreeSet, number_range.go) — a single BMP separator
+			// (a comma) qualifies; an astral one (an emoji) does not and
+			// keeps the floor-only answer.
+			separatorCodepoints := refinementsets.CodepointsOf(separator)
+			if len(separatorCodepoints) == 1 {
+				element := refinementsets.MakeRefinedSet(refinementsets.OneOf(separatorCodepoints))
+				copiesHi := copies
+				out := abstractdomain.KnownSet(
+					refinementsets.Repetition(element, copies, &copiesHi),
+					nil, grade, abstractdomain.SetKindTagNone,
+				)
+				return &out
+			}
+		}
+	}
 	return nil
 }
 
@@ -559,6 +659,81 @@ func readArrayWriteMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 		}
 	}
 	// inexact operands on a writing method: the class forgets
+	HavocEnv(ctx.Aliases, env, trackedName)
+	out := silence.Residue()
+	return &out
+}
+
+// readArraySortReverseMethods is the in-place reorderings — `sort()`
+// with no comparator, and `reverse()` — over an exact numeric tuple.
+// Each mutates the tracked array to its new order and answers that
+// same array back, the way push/pop/splice above update the class in
+// place rather than leaving the old order to be reread stale.
+//
+// `sort(comparator)` — a comparator argument runs arbitrary code this
+// reader does not walk, so only the zero-argument form is modeled;
+// the comparator form falls through to the havoc below, same as an
+// inexact operand on the other writers.
+func readArraySortReverseMethods(site MethodCallSite) *abstractdomain.AbstractValue {
+	ctx, env, e, receiver, method := site.Ctx, site.Env, site.E, site.Receiver, site.Method
+	if !(site.HasTrackedName && receiver.Kind == abstractdomain.KindValues && receiver.KindTag == abstractdomain.PrimitiveArray &&
+		(method == "sort" || method == "reverse")) {
+		return nil
+	}
+	call := e.AsCallExpression()
+	var argCount int
+	if call.Arguments != nil {
+		argCount = len(call.Arguments.Nodes)
+	}
+	trackedName := site.TrackedName
+	if method == "reverse" && argCount == 0 {
+		reversed := make([]float64, len(receiver.Values))
+		for i, v := range receiver.Values {
+			reversed[len(receiver.Values)-1-i] = v
+		}
+		next := abstractdomain.KnownValues(reversed, abstractdomain.PrimitiveArray, abstractdomain.TrustProved)
+		UpdateTrackedEnv(ctx.Aliases, env, trackedName, next)
+		return &next
+	}
+	// `sort()` with no comparator: CompareArrayElements' default arm
+	// converts each element through ToString and orders the pair by
+	// that STRING comparison (sec-array.prototype.sort via
+	// sec-comparearrayelements, steps step-sortcompare-tostring-x/y
+	// onward) — never the numeric order, so `[9, 10]` sorts to
+	// `[10, 9]` (the strings "10" < "9"). The permutation the sort
+	// order clause requires is a STABLE one (equal elements keep
+	// their relative places), which sort.SliceStable gives outright.
+	if method == "sort" && argCount == 0 {
+		type keyedValue struct {
+			text  string
+			value float64
+		}
+		keyed := make([]keyedValue, len(receiver.Values))
+		every := true
+		for i, v := range receiver.Values {
+			text, ok := ctx.Kernel.Decimal(v)
+			if !ok {
+				every = false
+				break
+			}
+			keyed[i] = keyedValue{text: text, value: v}
+		}
+		if every {
+			sort.SliceStable(keyed, func(a, b int) bool {
+				return keyed[a].text < keyed[b].text
+			})
+			sorted := make([]float64, len(keyed))
+			for i, k := range keyed {
+				sorted[i] = k.value
+			}
+			out := abstractdomain.KnownValues(sorted, abstractdomain.PrimitiveArray, abstractdomain.TrustProved)
+			UpdateTrackedEnv(ctx.Aliases, env, trackedName, out)
+			return &out
+		}
+	}
+	// a comparator argument, or an element whose decimal spelling the
+	// kernel declines: the class forgets rather than reread a stale
+	// order
 	HavocEnv(ctx.Aliases, env, trackedName)
 	out := silence.Residue()
 	return &out

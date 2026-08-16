@@ -31,7 +31,10 @@ import (
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
 /* ── recognition: the literal's method rows ──────────────────────── */
@@ -98,6 +101,201 @@ func literalMethodPaths(literal *ast.Node, prefix []string) map[string]*ast.Node
 		}
 	}
 	return out
+}
+
+/* ── the DIRECT-INTERPRETER call: this-binding, no IR, no kernel ─── */
+//
+// Everything above (literalThisBundleOf, LiteralMethodWriteStatements)
+// is wired ONLY into ir_summary_call.go — the kernel-IR summary/lowering
+// path used when a function's body is being compiled into a summary for
+// OTHER callers. `EvaluateCallExpression`'s direct interpreter path
+// (evaluate_call_expression.go → InlineContractBody,
+// inline_contract_body.go) has no counterpart: its callEnv never binds
+// "this" at all, so a call like `person.bump()` — where `bump` writes
+// `this.age` and person is a LOCAL object literal in the SAME function
+// being judged — walks bump's body with `this` unbound. The write lands
+// nowhere (ThisWriteSink is nil there too), and `person` keeps its
+// stale entry afterward. The function below is InlineContractBody's
+// walk-route fix: bind `this` to the receiver, capture the body's
+// `this.key = value` writes, fold them back into the receiver's own
+// tracked object — the same read-modify-write shape
+// accessorReadModifyWriteCore (ir_accessor_calls_read_modify_write.go)
+// already runs for a getter/setter pair, applied here to an ordinary
+// method body instead of a getter/setter split.
+
+// objectLiteralMethodWalkTarget is whether a call's callee is a plain
+// `receiver.method(...)` (or `this.method(...)`) form whose declaration
+// is a method row of an OBJECT LITERAL, and the receiver resolves in
+// env to a tracked KindObject. Anything else — a bare hand-out, a
+// receiver this walk cannot place, a class method (whose `this.key`
+// reads already answer through the class field invariant, and need no
+// binding here) — declines, and the caller falls through to the
+// ordinary walk-route body walk unchanged.
+//
+// Two shapes reach here: `declaration` ITSELF is a MethodDeclaration
+// parented by the literal (`{ bump() {...} }`, the direct shape), or
+// `declaration` is a plain FunctionDeclaration/FunctionExpression
+// registered under a PROPERTY's aliased symbol (contract_file_facts.go's
+// property-alias pass) — `{ bump: helperFn }` where helperFn is
+// declared elsewhere. The second shape's OWN parent is wherever
+// helperFn was declared, never the literal, so that check runs against
+// the CALLEE's resolved property declaration instead
+// (calleePropertyInLiteral) — the binding this function performs (this
+// = the receiver) is correct JS `this` semantics for a plain function
+// or function expression called through a property access
+// (sec-evaluatecall: the base of the reference is the receiver) exactly
+// as it is for a MethodDeclaration; an ArrowFunction is excluded
+// because it lexically captures `this` and must never be rebound to a
+// receiver.
+func objectLiteralMethodWalkTarget(ctx *FlowContext, env Env, call *ast.Node, declaration *ast.Node) (string, abstractdomain.AbstractValue, bool) {
+	if declaration == nil || ast.IsArrowFunction(declaration) {
+		return "", abstractdomain.AbstractValue{}, false
+	}
+	direct := ast.IsMethodDeclaration(declaration) && declaration.Parent != nil && ast.IsObjectLiteralExpression(declaration.Parent)
+	if !direct && !(ast.IsFunctionDeclaration(declaration) || ast.IsFunctionExpression(declaration)) {
+		return "", abstractdomain.AbstractValue{}, false
+	}
+	callee := CalleeExpressionOf(call)
+	if callee == nil || !ast.IsPropertyAccessExpression(callee) {
+		return "", abstractdomain.AbstractValue{}, false
+	}
+	if !direct && !calleePropertyInLiteral(ctx, callee) {
+		return "", abstractdomain.AbstractValue{}, false
+	}
+	name, rooted := rootOfReceiver(callee.AsPropertyAccessExpression().Expression)
+	if !rooted {
+		return "", abstractdomain.AbstractValue{}, false
+	}
+	receiver, hasReceiver := env.Get(name)
+	if !hasReceiver || receiver.Kind != abstractdomain.KindObject {
+		return "", abstractdomain.AbstractValue{}, false
+	}
+	return name, receiver, true
+}
+
+// calleePropertyInLiteral is whether a property-access callee's own
+// NAME resolves to a property symbol whose declaration is a
+// PropertyAssignment or ShorthandPropertyAssignment parented by an
+// ObjectLiteralExpression — `person.bump` where `bump: helperFn` is a
+// row of the literal `person` was built from. Checked independently of
+// what the RESOLVED CONTRACT's declaration is (that is helperFn's own
+// FunctionDeclaration, never a literal row), so this is the one place
+// that confirms the CALL SITE itself is shaped like an object-literal
+// property access before ObjectLiteralMethodWalkCall binds `this` to
+// the receiver.
+func calleePropertyInLiteral(ctx *FlowContext, callee *ast.Node) bool {
+	name := callee.AsPropertyAccessExpression().Name()
+	if name == nil || !ast.IsIdentifier(name) {
+		return false
+	}
+	symbol := ctx.P.Checker.GetSymbolAtLocation(name)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return false
+	}
+	property := symbol.ValueDeclaration
+	if !ast.IsPropertyAssignment(property) && !ast.IsShorthandPropertyAssignment(property) {
+		return false
+	}
+	return property.Parent != nil && ast.IsObjectLiteralExpression(property.Parent)
+}
+
+// ObjectLiteralMethodWalkCall runs an object-literal method's body on
+// the walk route — no IR, no kernel — with `this` bound to the
+// receiver's own tracked value: a fresh call environment, the method's
+// own parameters bound the way InlineContractBody binds them, the
+// return collected through ReturnSink exactly as InlineStoredClosure
+// collects a block body's value, and every `this.key = value` write
+// captured through ThisWriteSink and folded back into the receiver's
+// object value with setObjectKey — the exact key-rebuild WriteProperty
+// itself already runs for a `this.key = v` write, applied here to the
+// method's receiver instead of a plain binding.
+//
+// Declines (ok=false) wherever objectLiteralMethodWalkTarget declines,
+// or the declaration carries no block body — the caller keeps its own
+// fallback (the plain walk-route body walk with no this-binding) for
+// every shape this function does not recognize.
+func ObjectLiteralMethodWalkCall(
+	ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, effective EffectiveArguments,
+) (abstractdomain.AbstractValue, bool) {
+	body := contract.Declaration.Body()
+	if body == nil || !ast.IsBlock(body) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	receiverName, receiver, ok := objectLiteralMethodWalkTarget(ctx, env, call, contract.Declaration)
+	if !ok {
+		return abstractdomain.AbstractValue{}, false
+	}
+	// RECURSION GUARD: a method that calls back into itself (through this
+	// receiver or another holding the same declaration) re-enters this
+	// function with the same symbol marked — accessorReadModifyWriteCore's
+	// own discipline, applied to the method's own name symbol.
+	calleeName := contract.Declaration.Name()
+	if calleeName == nil || !ast.IsIdentifier(calleeName) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	symbol := ctx.P.Checker.GetSymbolAtLocation(calleeName)
+	if symbol == nil {
+		return abstractdomain.AbstractValue{}, false
+	}
+	inlining := ctx.Inlining
+	if inlining == nil {
+		inlining = map[*ast.Symbol]struct{}{}
+	}
+	if _, already := inlining[symbol]; already {
+		return silence.Residue(), true
+	}
+	inlining[symbol] = struct{}{}
+	defer delete(inlining, symbol)
+
+	callEnv := NewEnv()
+	callEnv.Set("this", receiver)
+	for i, parameter := range contract.Declaration.Parameters() {
+		name := parameter.AsParameterDeclaration().Name()
+		if !ast.IsIdentifier(name) {
+			continue
+		}
+		callEnv.Set(name.Text(), BoundParameterKnown(ctx, parameter, i, effective))
+	}
+	var returnSink []abstractdomain.AbstractValue
+	sink := map[string][]abstractdomain.AbstractValue{}
+	silent := *ctx
+	silent.Report = func(assignability.RefinementDiagnostic) {}
+	silent.ReturnSink = &returnSink
+	silent.ThisWriteSink = sink
+	silent.Inlining = inlining
+	// ThisOwnerDeclaration: the identity check evaluate_expression.go's
+	// KindThisKeyword arm runs for the property-alias shape (a plain
+	// FunctionDeclaration/FunctionExpression reached through
+	// calleePropertyInLiteral, whose own static position proves
+	// nothing — the SAME declaration also serves a bare call
+	// elsewhere). Harmless to set for the direct MethodDeclaration
+	// shape too: EnclosingThisObjectLiteralMethod already recognizes
+	// that one on its own, so the OR'd identity check simply agrees.
+	silent.ThisOwnerDeclaration = contract.Declaration
+	AnalyzeStatements(&silent, callEnv, body.AsBlock().Statements.Nodes, nil)
+
+	// fold the method's `this.key = value` writes into the receiver's own
+	// object value — setObjectKey's own rule (index_operators.go), the
+	// same rebuild WriteProperty runs for a `this.key = v` write, applied
+	// to the receiver this call resolved rather than a plain binding
+	nextReceiver := receiver
+	for key, writes := range sink {
+		joined := writes[0]
+		for _, w := range writes[1:] {
+			joined = abstractdomain.JoinKnown(joined, w)
+		}
+		nextReceiver = abstractdomain.KnownObject(setObjectKey(nextReceiver.Keys, key, joined), nil, false, abstractdomain.TrustProved, false)
+	}
+	UpdateTrackedEnv(ctx.Aliases, env, receiverName, nextReceiver)
+
+	returned := silence.Residue()
+	if len(returnSink) > 0 {
+		returned = returnSink[0]
+		for _, v := range returnSink[1:] {
+			returned = abstractdomain.JoinKnown(returned, v)
+		}
+	}
+	return AsCalleeResult(*contract, returned), true
 }
 
 /* ── the method's `this` bundle, read off the literal ────────────── */

@@ -5,7 +5,14 @@
 // on a z.codec schema. Split from builtin_models.ts per the v2 tree.
 //
 // `isZodRoot` (an inline callback of the TS source's readSchemaRuntimeCall)
-// asks `libraryAdapterOfNode(ctx.p, id)?.name === "zod"`.
+// asked only `libraryAdapterOfNode(ctx.p, id)?.name === "zod"` in the
+// TS source — real npm zod, never the checker's own vendored surface.
+// isZodRootHere below widens that reading to the same union
+// resolvesToAnnotationRoot (chain_roots.go) already asks for chain
+// COMPILATION — the surface (p.SurfacePaths) or a registered library
+// adapter — so the parse/safeParse/parseAsync exact-value pipeline
+// recognizes a schema built off refined-ts-typescript/surface/z.ts
+// the same way it already recognizes real zod.
 // service/program_resolution.ts's own libraryAdapterOfNode has no Go
 // port (service/ is not ported — PORT.md), but its body is just
 // symbolAt's declarations tested against libraryadapters.LibraryAdapterOfFile
@@ -17,11 +24,12 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations/libraryadapters"
+	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -113,7 +121,7 @@ func readSchemaRuntimeCall(site MethodCallSite) *abstractdomain.AbstractValue {
 				return varDecl.Initializer
 			},
 			IsZodRoot: func(id *ast.Node) bool {
-				return isZodRootHere(ctx.P.Checker, id)
+				return isZodRootHere(ctx.P, id)
 			},
 			Inline: func(callback TransformCallback, inlineArgument abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 				return InlineCallback(ctx, env, callback, inlineArgument, LoopAnalyzers{
@@ -209,6 +217,21 @@ func readSchemaRuntimeCall(site MethodCallSite) *abstractdomain.AbstractValue {
 			}
 			out := silence.Residue()
 			return &out
+		}
+		// a PROVEN throw on plain `.parse`/`.parseAsync`: the argument
+		// refutes the schema's own stated set (the same judgment
+		// call_argument_contracts.go makes for a plain function
+		// parameter) — report it at the argument, the way every other
+		// refutation in this checker reports 7001 at the offending
+		// node. safeParse already reified this outcome as a value
+		// above; parse and parseAsync throw at runtime, so the
+		// determined verdict is the refutation itself, not a value.
+		if hasOutcome && outcome.Kind == outcomeKindThrows {
+			ctx.Report(assignability.At(
+				argument, 7001,
+				"argument"+parseRefusalWords(ctx, receiverExpression)+
+					" — the schema's `.parse` throws on this value",
+			))
 		}
 		if hasOutcome && outcome.Kind == outcomeKindValue {
 			exact := abstractdomain.AtTrustLevel(outcome.Known, abstractdomain.TrustLibrary)
@@ -306,16 +329,61 @@ func readSchemaRuntimeCall(site MethodCallSite) *abstractdomain.AbstractValue {
 	return nil
 }
 
+// parseRefusalWords spells the stated set a proven `.parse` throw
+// refuted, the way check_assignability.go's own refutation messages
+// name the target — " is not assignable to type '<set>'" off the
+// receiver's compiled annotation, or a bare "is not assignable to the
+// stated object shape" for an object schema (an object annotation
+// carries no single RefinedSet to spell — set_membership.go's own
+// object rows read the same way, key by key, never as one formatted
+// set). A receiver the checker cannot resolve to a stated annotation
+// spells nothing beyond "is not assignable" — the throw is still
+// proven either way, so the diagnostic still fires.
+func parseRefusalWords(ctx *FlowContext, receiverExpression *ast.Node) string {
+	if !ast.IsIdentifier(receiverExpression) {
+		return " is not assignable"
+	}
+	schemaSymbol := symbolAt(ctx.P.Checker, receiverExpression)
+	if schemaSymbol == nil {
+		return " is not assignable"
+	}
+	if object := ctx.Objects[schemaSymbol]; object != nil {
+		return " is not assignable to the stated object shape"
+	}
+	if annotation := ctx.Registry[schemaSymbol]; annotation != nil && annotation.Set != nil {
+		return " is not assignable to type '" +
+			StatedSetWords(*annotation.Set, annotation.Word) + "'"
+	}
+	return " is not assignable"
+}
+
 // isZodRootHere is the TS source's inline isZodRoot callback
-// (`libraryAdapterOfNode(ctx.p, id)?.name === "zod"`), inlined against
-// symbolAt + libraryadapters.LibraryAdapterOfFile (see file banner).
-func isZodRootHere(c *checker.Checker, id *ast.Node) bool {
-	symbol := symbolAt(c, id)
+// (`libraryAdapterOfNode(ctx.p, id)?.name === "zod"`) — WIDENED from
+// the TS source's own reading. The TS callback asks only
+// `libraryAdapterOfNode(...)?.name === "zod"` (real npm zod), so the
+// exact-parse pipeline (runRoot/runCheck) never recognized the
+// vendored surface's OWN `z.number()`/`z.string()`/… roots — every
+// chain built through refined-ts-typescript/surface/z.ts fell through
+// `run()`'s root case to (outcome{}, false), no claim, for every
+// `.parse` call, in-set or out. `CompileAnnotation`'s root question
+// (chain_roots.go's resolvesToAnnotationRoot) already reads BOTH
+// halves — `resolvesToSurface(p, node) || libraryAdapterOfNode(p,
+// node) != nil` — so this reading now asks the same union: the
+// checker's own surface roots the vocabulary `runRoot` reads
+// (`.number()`, `.object()`, `.enum()`, …) exactly as classic zod
+// does, and `.parse`'s exact evaluation should recognize a chain
+// rooting in either the same way the chain COMPILER already does.
+func isZodRootHere(p *program.CheckerProgram, id *ast.Node) bool {
+	symbol := symbolAt(p.Checker, id)
 	if symbol == nil {
 		return false
 	}
 	for _, declaration := range symbol.Declarations {
-		adapter := libraryadapters.LibraryAdapterOfFile(ast.GetSourceFileOfNode(declaration).FileName())
+		fileName := ast.GetSourceFileOfNode(declaration).FileName()
+		if p.SurfacePaths[fileName] {
+			return true
+		}
+		adapter := libraryadapters.LibraryAdapterOfFile(fileName)
 		if adapter != nil && adapter.Name == "zod" {
 			return true
 		}

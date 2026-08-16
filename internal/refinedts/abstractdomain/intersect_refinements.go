@@ -9,6 +9,27 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
+// exactScalarValues reads a folded form list that is exactly one
+// finite scalar list — the one set shape whose canonical spelling is
+// KindValues, so an equality guard's narrow answers the same exact
+// form a literal does.
+func exactScalarValues(forms []refinementsets.Refinement) ([]float64, bool) {
+	if len(forms) != 1 || forms[0].Form != refinementsets.FormOneOf || len(forms[0].W) == 0 {
+		return nil, false
+	}
+	return forms[0].W, true
+}
+
+// narrowedSet spells a narrow's folded intersection: the canonical
+// exact form where the fold landed on one finite scalar list, the
+// set otherwise.
+func narrowedSet(folded []refinementsets.Refinement, trust TrustLevel) AbstractValue {
+	if values, ok := exactScalarValues(folded); ok {
+		return KnownValues(append([]float64{}, values...), PrimitiveNumber, trust)
+	}
+	return KnownSet(refinementsets.MakeRefinedSet(folded...), nil, trust, SetKindTagNone)
+}
+
 // NarrowKnown is narrowKnown in the TS source.
 func NarrowKnown(k AbstractValue, forms []refinementsets.Refinement) AbstractValue {
 	if len(forms) == 0 {
@@ -18,7 +39,7 @@ func NarrowKnown(k AbstractValue, forms []refinementsets.Refinement) AbstractVal
 	// and only the tightest per class constrains — same set, far
 	// cheaper question
 	switch k.Kind {
-	case KindValues, KindObject, KindObjectStar, KindList, KindCollection, KindPromise,
+	case KindValues, KindObject, KindObjectStar, KindList, KindArrayHoles, KindCollection, KindPromise,
 		KindDate, KindSymbol, KindHostFunction, KindBigints, KindRegex:
 		// a set guard says something about a SCALAR; none of these is one,
 		// and the form the guard carries names no position of a sequence.
@@ -27,12 +48,7 @@ func NarrowKnown(k AbstractValue, forms []refinementsets.Refinement) AbstractVal
 		return k
 	case KindSet:
 		combined := append(append([]refinementsets.Refinement{}, k.Set.Forms...), forms...)
-		return KnownSet(
-			refinementsets.MakeRefinedSet(refinementsets.FoldRayForms(combined)...),
-			nil,
-			TrustLevelOf(k),
-			SetKindTagNone,
-		)
+		return narrowedSet(refinementsets.FoldRayForms(combined), TrustLevelOf(k))
 	case KindVariable:
 		// a guard on a T-typed value: what is known is bound ∩ forms
 		// (the variable identity does not survive a narrowing)
@@ -40,12 +56,7 @@ func NarrowKnown(k AbstractValue, forms []refinementsets.Refinement) AbstractVal
 			return k
 		}
 		combined := append(append([]refinementsets.Refinement{}, k.Bound.Forms...), forms...)
-		return KnownSet(
-			refinementsets.MakeRefinedSet(refinementsets.FoldRayForms(combined)...),
-			nil,
-			TrustLevelOf(k),
-			SetKindTagNone,
-		)
+		return narrowedSet(refinementsets.FoldRayForms(combined), TrustLevelOf(k))
 	case KindUndef:
 		return k // a set claim on the absent value: a dead branch
 	case KindNaN:
@@ -65,12 +76,7 @@ func NarrowKnown(k AbstractValue, forms []refinementsets.Refinement) AbstractVal
 		// arm would claim too much
 		return k
 	case KindUnknown:
-		return KnownSet(
-			refinementsets.MakeRefinedSet(refinementsets.FoldRayForms(forms)...),
-			nil,
-			TrustProved,
-			SetKindTagNone,
-		)
+		return narrowedSet(refinementsets.FoldRayForms(forms), TrustProved)
 	default:
 		return k
 	}

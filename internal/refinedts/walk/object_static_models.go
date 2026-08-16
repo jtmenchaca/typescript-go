@@ -61,6 +61,16 @@ func readObjectStaticValues(site MethodCallSite) *abstractdomain.AbstractValue {
 			opaque := abstractdomain.Opaque
 			return &opaque
 		}
+		// a KindArrayHoles argument (new Array(n) or Array.from({length: n})
+		// past the materialization ceiling) is neither KindObject nor
+		// Opaque, but readObjectStaticMethods' own entries arm already
+		// reads it correctly (the exact empty list when sparse, a decline
+		// when dense or undetermined-density) — step aside with nil rather
+		// than deciding here, so that arm gets the call instead of this
+		// one shadowing it with an unconditional decline
+		if argument.Kind == abstractdomain.KindArrayHoles {
+			return nil
+		}
 		out := silence.Residue()
 		return &out
 	}
@@ -136,6 +146,21 @@ func readObjectStaticMethods(site MethodCallSite) *abstractdomain.AbstractValue 
 		arguments = call.Arguments.Nodes
 	}
 	isObjectReceiver := ast.IsIdentifier(receiverExpression) && receiverExpression.Text() == "Object" && resolvesToDefaultLib(ctx, receiverExpression)
+	// Object.freeze(obj) sets [[Extensible]] false and returns the SAME
+	// object (sec-object.freeze) — ordinary [[Get]] of a data property
+	// is untouched by freezing (sec-ordinary-object-internal-methods-
+	// and-internal-slots-get reads the property descriptor's [[Value]]
+	// regardless of [[Extensible]] or a property's own [[Writable]]).
+	// So the call answers exactly what its argument already evaluates
+	// to — no havoc, no shape change — the same "a read is never a
+	// reason to forget" rule Object.assign's fresh-literal arm states
+	// above. A non-object argument (freeze is the identity on every
+	// value, sec-object.freeze step 1: a non-Object argument returns
+	// unchanged) reads through exactly the same way.
+	if isObjectReceiver && method == "freeze" && len(arguments) == 1 {
+		out := evaluateExpression(ctx, env, arguments[0])
+		return &out
+	}
 	// the READ-ONLY Object statics provably keep their arguments'
 	// facts: no havoc, and the representable results transfer. (Placed
 	// BEFORE the array-method gate: "values"/"keys" name array
@@ -168,6 +193,58 @@ func readObjectStaticMethods(site MethodCallSite) *abstractdomain.AbstractValue 
 				}
 			}
 			return out
+		}
+		// Object.keys/values/entries over a KindArrayHoles receiver:
+		// EnumerableOwnProperties (sec-enumerableownproperties,
+		// tmp/ecma262/spec.html) walks OWN property keys only, and
+		// that is exactly what Dense/DenseKnown (abstract_value.go's
+		// KindArrayHoles doc) states. A KindArrayHoles receiver only
+		// ever exists PAST arrayConstructionHoleLimit (below it,
+		// ReadArrayConstruction/readArrayFrom both build a plain
+		// KindList instead) — so length is always past the
+		// materialization ceiling here; there is no in-range case to
+		// special-case the way the KindObject arms below do.
+		//
+		// Sparse (`new Array(n)`, sec-array): no index is an own
+		// property at all, so every one of the three answers the exact
+		// EMPTY list regardless of n — nothing to materialize, so no
+		// ceiling applies.
+		//
+		// Dense (`Array.from({length: n})`, sec-array.from's array-like
+		// branch): every index 0..n-1 IS an own property holding
+		// undefined, so EnumerableOwnProperties yields all n of them.
+		// keys/entries need the actual index STRINGS — n distinct
+		// increasing decimal strings — and no vocabulary here
+		// compresses that claim the way Repetition compresses a
+		// single-character window, so both decline (inventing a new
+		// form is out of scope). values needs only the VALUES, which
+		// are undefined at every position either way: that is exactly
+		// KindArrayHoles' own Length/ElementSet claim describing a
+		// FRESH result array (sec-object.values -> EnumerableOwnProperties
+		// (~value~) then CreateArrayFromList, sec-createarrayfromlist,
+		// which itself calls CreateDataPropertyOrThrow at every index
+		// 0..n-1 — so the RESULT is itself dense, same construction as
+		// Array.from's array-like branch), so values reuses
+		// KnownArrayHoles as the answer even past the ceiling.
+		if hasFirst && first.Kind == abstractdomain.KindArrayHoles {
+			length, lengthOk := abstractdomain.LengthOfArrayHoles(first)
+			if lengthOk && first.DenseKnown && !first.Dense &&
+				(method == "keys" || method == "values" || method == "entries") {
+				out := abstractdomain.KnownList(nil, abstractdomain.TrustProved)
+				return &out
+			}
+			if lengthOk && first.DenseKnown && first.Dense && method == "values" {
+				out := abstractdomain.KnownArrayHoles(length, abstractdomain.TrustProved, true)
+				return &out
+			}
+			// dense keys/entries (no compressed key-list form exists),
+			// or DenseKnown false (a joined value whose density was
+			// never established), or the length itself unpinned: decline
+			// rather than guess which own-property shape the receiver has
+			if method == "keys" || method == "values" || method == "entries" {
+				out := silence.Residue()
+				return &out
+			}
 		}
 		if method == "values" && hasFirst && first.Kind == abstractdomain.KindObject && first.Complete {
 			stringKeys := stringKeysOf(first)

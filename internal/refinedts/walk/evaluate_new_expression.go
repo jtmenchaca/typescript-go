@@ -24,8 +24,23 @@ func EvaluateNewExpression(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 	if array := ReadArrayConstruction(ctx, env, e); array != nil {
 		return array
 	}
+	// what `new Uint8Array(…)` / `new Int8Array(…)` /
+	// `new Uint8ClampedArray(…)` BUILD — a zero-filled view, or each
+	// array-like element seeded through its own ToXxx conversion
+	// (typed_array_models.go)
+	if typedArray := ReadTypedArrayConstruction(ctx, env, e); typedArray != nil {
+		return typedArray
+	}
 	if collection := ReadCollectionConstruction(ctx, env, e); collection != nil {
 		return collection
+	}
+	// `new Proxy(target, {})` with no `get` trap: [[Get]] forwards to
+	// the target exactly (proxy_construction.go, sec-proxy-object step
+	// 5) — checked before the bodiless-callee opaque fallback below,
+	// which would otherwise answer every Proxy construction opaque
+	// regardless of whether its handler traps reads at all
+	if proxied := ReadProxyConstruction(ctx, env, e); proxied != nil {
+		return proxied
 	}
 	if date := ReadDateConstruction(ctx, env, e); date != nil {
 		return date
@@ -141,9 +156,14 @@ func EvaluateNewExpression(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 	// taken path is covered. class-LIKE, so `const C = class { … }`
 	// reads its members exactly as a declaration does — the same
 	// widening ir_summary_call.go's constructorDeclarationOf already
-	// carries on the summary side.
+	// carries on the summary side. symbolAt follows ONE alias hop
+	// (cast_and_await.go) — an imported class name's own symbol is the
+	// IMPORT SPECIFIER's alias symbol, whose ValueDeclaration is the
+	// specifier node, not the class; without the hop every imported
+	// `new Person(...)` fell through this branch entirely and the
+	// instance never read the exporting file's constructor.
 	if ast.IsIdentifier(calleeCore) {
-		symbol := ctx.P.Checker.GetSymbolAtLocation(calleeCore)
+		symbol := symbolAt(ctx.P.Checker, calleeCore)
 		if symbol != nil && symbol.ValueDeclaration != nil {
 			declaration := symbol.ValueDeclaration
 			// `const C = class { … }` binds the NAME to a variable, so the

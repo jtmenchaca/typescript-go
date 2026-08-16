@@ -9,10 +9,10 @@
 // Age — the value flows to a declared position, and the position's set
 // judges it.
 //
-// Two pieces live here:
+// Three pieces live here:
 //
-//   - generatorStatedPositions reads Y and R off the written return
-//     type at contract-compile time (contract_file_facts.go's
+//   - generatorStatedPositions reads Y, R, and N off the written
+//     return type at contract-compile time (contract_file_facts.go's
 //     readSignature calls it for declarations written with the star).
 //     Each argument compiles through the same door every other stated
 //     position uses (annotations.AnnotationOfType), so a refined alias,
@@ -24,10 +24,17 @@
 //     by analyzeFunctionBody) judges what it read. A delegating
 //     `yield* xs` hands the caller every element OF xs, so the element
 //     is what judges — through the same readers the drain routes use.
-//
-// What a yield RESUMES WITH (the N position) is still the caller's to
-// send and is not read here — the one syntax table
-// (syntax_models.go) speaks that decline after the judgment runs.
+//   - the yield EXPRESSION'S OWN VALUE — what the caller's next(v)
+//     sends back, the N position — reads as a stated position too,
+//     the same way a parameter's stated type seeds its entry value
+//     (BindEntryEnv's AbstractValueOfDeclared idiom): a `yield e` used
+//     as a value (`const v = yield e`) evaluates to
+//     AbstractValueOfDeclared(*ctx.YieldResumeStated) wherever N is
+//     grounded and stated, seeded per body in analyzeFunctionBody
+//     exactly as YieldStated is. The one syntax table (syntax_models.go)
+//     still speaks the decline wherever N states nothing — an
+//     ungrounded generator, an unstated third argument, or a
+//     non-generator context ctx.YieldResumeStated never reaches.
 
 package walk
 
@@ -52,6 +59,12 @@ import (
 // name, a missing argument list, a plain type argument. An argument
 // whose reading is UNSUPPORTED reports its own sentence at the
 // argument, the same way an unsupported result type reports.
+//
+// A generator's return type may be SPELLED THROUGH AN ALIAS —
+// `type G = Generator<Age, Age, unknown>; function* f(): G` — so the
+// written node is followed through the alias chain (aliasedTypeReference)
+// BEFORE the name test below runs: the test needs to see `Generator`
+// itself, which a bare `G` never spells directly.
 func generatorStatedPositions(
 	p *program.CheckerProgram,
 	returnType *ast.Node,
@@ -59,21 +72,22 @@ func generatorStatedPositions(
 	objects annotations.ObjectRegistry,
 	reporting bool,
 	report func(d assignability.RefinementDiagnostic),
-) (yieldStated *annotations.DeclaredRefinement, result *annotations.DeclaredRefinement) {
+) (yieldStated *annotations.DeclaredRefinement, result *annotations.DeclaredRefinement, resumeStated *annotations.DeclaredRefinement) {
+	returnType = aliasedTypeReference(p, returnType)
 	if !ast.IsTypeReferenceNode(returnType) || !ast.IsIdentifier(returnType.AsTypeReferenceNode().TypeName) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	reference := returnType.AsTypeReferenceNode()
 	name := reference.TypeName
 	nameText := name.AsIdentifier().Text
 	if !generatorReturnTypeNames[nameText] && nameText != "Iterable" && nameText != "AsyncIterable" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if !p.Checker.SymbolInDefaultLib(p.Checker.GetSymbolAtLocation(name)) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if reference.TypeArguments == nil || len(reference.TypeArguments.Nodes) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	arguments := reference.TypeArguments.Nodes
 	yieldRead := annotations.AnnotationOfType(p, arguments[0], registry, objects)
@@ -90,8 +104,79 @@ func generatorStatedPositions(
 			report(assignability.At(arguments[1], 7004, resultRead.Unsupported))
 		}
 	}
-	return yieldStated, result
+	if len(arguments) >= 3 {
+		resumeRead := annotations.AnnotationOfType(p, arguments[2], registry, objects)
+		if resumeRead.Stated != nil {
+			resumeStated = resumeRead.Stated
+		} else if resumeRead.Unsupported != "" && reporting {
+			report(assignability.At(arguments[2], 7004, resumeRead.Unsupported))
+		}
+	}
+	return yieldStated, result, resumeStated
 }
+
+// aliasedTypeReference follows a written return-type node through a
+// plain (non-generic) type-alias chain to the type reference it
+// finally names — `type G = Generator<Age, Age, unknown>` unfolds `G`
+// to the `Generator<...>` node the name test above reads.
+//
+// Only the SAME alias-following idiom annotations/type_node_aliases.go
+// already vouches for a value position (symbolAt, then the first
+// TypeAliasDeclaration among the symbol's declarations) — no separate
+// rule. A GENERIC alias (`type G<T> = Generator<T, T, unknown>`)
+// is left alone: the type arguments would need their own binding pass
+// to substitute, which the generator position does not attempt here,
+// so the node returns exactly as written and the caller's name test
+// declines it the same way it declines any other unrecognized shape.
+// A node that is not a bare type reference, or whose symbol names no
+// alias, returns unchanged — the ordinary `Generator<...>` spelling
+// takes zero trips through this loop.
+func aliasedTypeReference(p *program.CheckerProgram, typeNode *ast.Node) *ast.Node {
+	cursor := typeNode
+	for range maxAliasChainDepth {
+		if !ast.IsTypeReferenceNode(cursor) || !ast.IsIdentifier(cursor.AsTypeReferenceNode().TypeName) {
+			return cursor
+		}
+		reference := cursor.AsTypeReferenceNode()
+		if reference.TypeArguments != nil && len(reference.TypeArguments.Nodes) > 0 {
+			// the alias itself takes arguments at THIS reference — either
+			// it is generic (left alone, see the doc comment) or it is
+			// already `Generator<...>` itself, which the caller reads
+			// directly; either way the chase stops here
+			return cursor
+		}
+		symbol := symbolAt(p.Checker, reference.TypeName)
+		if symbol == nil {
+			return cursor
+		}
+		var aliasDecl *ast.Node
+		for _, d := range symbol.Declarations {
+			if ast.IsTypeAliasDeclaration(d) {
+				aliasDecl = d
+				break
+			}
+		}
+		if aliasDecl == nil {
+			return cursor
+		}
+		typeAlias := aliasDecl.AsTypeAliasDeclaration()
+		if typeAlias.TypeParameters != nil {
+			// a generic alias's body may mention its own type parameters —
+			// substituting them is outside what a return-type position
+			// reads here (see the doc comment)
+			return cursor
+		}
+		cursor = typeAlias.Type
+	}
+	return cursor
+}
+
+// maxAliasChainDepth bounds aliasedTypeReference's walk: `type A = B;
+// type B = C; …` is finite in any real program, and the ordinary
+// direct-spelling case (the overwhelming majority) exits the loop
+// after zero iterations. The bound exists only so a pathological or
+// mutually-recursive alias chain cannot spin the checker.
+const maxAliasChainDepth = 8
 
 // CheckYieldedValue walks one yield expression's operand and judges it
 // against the enclosing generator's stated yield position. The operand
@@ -110,8 +195,12 @@ func generatorStatedPositions(
 // it judges at the yield itself.
 //
 // The yield expression's own VALUE (what the caller's next(v) sends
-// back — the N position) is not read here; the caller falls through to
-// the one syntax table for that decline.
+// back — the N position) is not judged here — there is nothing to
+// check it AGAINST here, since this function reads the OPERAND, not
+// the yield expression itself. Reading N is evaluateExpression's own
+// arm (evaluate_expression.go's KindYieldExpression case): stated,
+// AbstractValueOfDeclared(*ctx.YieldResumeStated); nil, the one syntax
+// table's decline.
 func CheckYieldedValue(ctx *FlowContext, env Env, e *ast.Node) {
 	y := e.AsYieldExpression()
 	if y.AsteriskToken != nil {

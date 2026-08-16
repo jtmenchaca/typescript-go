@@ -324,6 +324,115 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 	UpdateTrackedEnv(ctx.Aliases, env, name, nextObject)
 }
 
+// WriteAssignmentPattern is an assignment-PATTERN write — `({ a } = x)`,
+// `[a] = xs` — walking the same object/array-literal-as-target shape
+// ForgetThrough and dataflowfacts.TargetNames already recognize, but
+// judging each leaf identifier against its OWN declared type through
+// WriteBinding instead of havocking it. `SlotOf`/`SlotOfIndex`
+// (destructuring.go) read what the source holds at each named or
+// positional slot — the same readers a declaration pattern's bind
+// uses — so an assignment pattern and a declaration pattern judge an
+// identical write identically; only the target shape differs
+// (PropertyAssignment/ShorthandPropertyAssignment/SpreadAssignment on
+// an ObjectLiteralExpression, plain elements/SpreadElement on an
+// ArrayLiteralExpression, versus BindingElement on a BindingPattern).
+// A nested pattern recurses with its own slot as the new source. A
+// target this walk cannot place (a property/element-access leaf, a
+// computed key) forgets through ForgetThrough instead — the same
+// "no stale key survives a write nobody can locate" rule every other
+// write path keeps.
+func WriteAssignmentPattern(ctx *FlowContext, env Env, target *ast.Node, source abstractdomain.AbstractValue, at *ast.Node) {
+	if ast.IsArrayLiteralExpression(target) {
+		for i, element := range target.AsArrayLiteralExpression().Elements.Nodes {
+			if ast.IsOmittedExpression(element) {
+				continue
+			}
+			if ast.IsSpreadElement(element) {
+				ForgetThrough(ctx, env, element.AsSpreadElement().Expression)
+				continue
+			}
+			leaf := element
+			var defaultExpr *ast.Node
+			if ast.IsBinaryExpression(element) {
+				be := element.AsBinaryExpression()
+				if be.OperatorToken.Kind == ast.KindEqualsToken {
+					leaf = be.Left
+					defaultExpr = be.Right
+				}
+			}
+			held := SlotOfIndex(source, i)
+			if defaultExpr != nil {
+				held = withDefault(held)
+			}
+			writeAssignmentTargetLeaf(ctx, env, leaf, held, at)
+		}
+		return
+	}
+	if ast.IsObjectLiteralExpression(target) {
+		for _, property := range target.AsObjectLiteralExpression().Properties.Nodes {
+			switch {
+			case ast.IsPropertyAssignment(property):
+				pa := property.AsPropertyAssignment()
+				var key string
+				hasKey := ast.IsIdentifier(pa.Name()) || ast.IsStringLiteral(pa.Name()) || ast.IsNumericLiteral(pa.Name())
+				if hasKey {
+					key = pa.Name().Text()
+				}
+				leaf := pa.Initializer
+				var defaultExpr *ast.Node
+				if ast.IsBinaryExpression(leaf) {
+					be := leaf.AsBinaryExpression()
+					if be.OperatorToken.Kind == ast.KindEqualsToken {
+						leaf = be.Left
+						defaultExpr = be.Right
+					}
+				}
+				var held abstractdomain.AbstractValue
+				if hasKey {
+					held = SlotOf(source, key)
+				} else {
+					held = darkSlotOf(source)
+				}
+				if defaultExpr != nil {
+					held = withDefault(held)
+				}
+				writeAssignmentTargetLeaf(ctx, env, leaf, held, at)
+			case ast.IsShorthandPropertyAssignment(property):
+				spa := property.AsShorthandPropertyAssignment()
+				WriteBinding(ctx, env, spa.Name().Text(), SlotOf(source, spa.Name().Text()), at, "an assigned value")
+			case ast.IsSpreadAssignment(property):
+				ForgetThrough(ctx, env, property.AsSpreadAssignment().Expression)
+			}
+		}
+		return
+	}
+	// not a pattern at all — a plain identifier/property/element target
+	ForgetThrough(ctx, env, target)
+}
+
+// writeAssignmentTargetLeaf is one leaf of an assignment pattern: an
+// identifier judges through WriteBinding, a nested pattern recurses,
+// anything else (a property/element-access leaf) forgets through
+// ForgetThrough — the same per-leaf dispatch ForgetThrough's own
+// array/object walk already performs, wearing a real value instead of
+// a havoc.
+func writeAssignmentTargetLeaf(ctx *FlowContext, env Env, leaf *ast.Node, held abstractdomain.AbstractValue, at *ast.Node) {
+	if ast.IsIdentifier(leaf) {
+		// the LEAF is the judged position: its own host type is the
+		// bound name's (Age at `[age] = xs`), where the pattern's `at`
+		// (the right-hand side) wears the SOURCE's type — judging there
+		// read the array's own sort as the position and misfired
+		// "a number, and the position states an array" on an in-set bind
+		WriteBinding(ctx, env, leaf.Text(), held, leaf, "an assigned value")
+		return
+	}
+	if ast.IsObjectLiteralExpression(leaf) || ast.IsArrayLiteralExpression(leaf) {
+		WriteAssignmentPattern(ctx, env, leaf, held, at)
+		return
+	}
+	ForgetThrough(ctx, env, leaf)
+}
+
 // embeddedReferences collects reference-typed names a literal
 // EMBEDS — `{ inner: account }` stores the very reference, so binding
 // the literal aliases the embedded name: a write through either path

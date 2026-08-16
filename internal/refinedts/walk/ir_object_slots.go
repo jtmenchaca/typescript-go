@@ -284,7 +284,11 @@ func propertyPathReading(node *ast.Node, admitRootOptional bool) (root string, p
 				return "", nil, false
 			}
 		}
-		if !ast.IsIdentifier(access.Name()) {
+		// a step's own name is a plain identifier OR a private identifier
+		// (`this.#age`) — the same two spellings SpelledNameOf admits, so a
+		// deep or root-optional path through a `#`-named field resolves to
+		// the same slot a one-step read of it would
+		if !ast.IsIdentifier(access.Name()) && !ast.IsPrivateIdentifier(access.Name()) {
 			return "", nil, false
 		}
 		steps = append(steps, access.Name().Text())

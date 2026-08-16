@@ -253,6 +253,16 @@ func formatAbstractValueAt(known AbstractValue, top bool) (string, bool) {
 		}
 		return element + "[]", true
 
+	case KindArrayHoles:
+		// the exact length wrapped in Inner — the same {n} scalar
+		// .length itself reads — spelled the way a hole array's own
+		// claim reads: every slot absent
+		length, ok := LengthOfArrayHoles(known)
+		if !ok {
+			return "", false
+		}
+		return "Array(" + strconv.Itoa(length) + ")", true
+
 	case KindCollection:
 		var entries []string
 		for _, e := range known.Entries {

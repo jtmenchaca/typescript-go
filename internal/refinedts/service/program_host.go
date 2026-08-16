@@ -51,13 +51,41 @@ const SurfacePath = "/surface/z.ts"
 // refined-ts-typescript/surface tree at runtime (a directory
 // parameter, not embedded, per the task's instruction) rather than
 // import.meta.url.
+//
+// The set is the FULL transitive closure z.ts's own import graph
+// walks — every surface/*.ts module z.ts (or one of its siblings)
+// imports, and every refinement_sets/*.ts module any of those import,
+// found by reading each file's own import lines by hand. A partial
+// list here does not fail loudly: the missing module simply never
+// resolves in the in-memory vfs, so a name like z.number() (defined
+// in number_schema.ts) silently loses its declaration and every
+// chain built on it reads as an unrecognized root — the checker falls
+// silent on rows the real on-disk judge (which reads the whole
+// directory) determines cleanly. Six surface files and four
+// refinement_sets files were missing here before this fix:
+// schema_core, number_schema, string_schema, temporal_schema,
+// array_tuple_schema, object_schema_surface (all imported by z.ts
+// directly or via object_schema_surface/array_tuple_schema), and
+// calendar_interpreter, temporal_string_grammars,
+// format_for_diagnostics, format_string_shapes (pulled in by
+// schema_core/temporal_schema and format_for_diagnostics itself).
 var surfaceDeps = map[string]string{
-	SurfacePath:                              "z.ts",
-	"/surface/object_runtime.ts":             "object_runtime.ts",
-	"/refinement_sets/refinement_forms.ts":   "../refinement_sets/refinement_forms.ts",
+	SurfacePath:                            "z.ts",
+	"/surface/object_runtime.ts":           "object_runtime.ts",
+	"/surface/schema_core.ts":              "schema_core.ts",
+	"/surface/number_schema.ts":            "number_schema.ts",
+	"/surface/string_schema.ts":            "string_schema.ts",
+	"/surface/temporal_schema.ts":          "temporal_schema.ts",
+	"/surface/array_tuple_schema.ts":       "array_tuple_schema.ts",
+	"/surface/object_schema_surface.ts":    "object_schema_surface.ts",
+	"/refinement_sets/refinement_forms.ts": "../refinement_sets/refinement_forms.ts",
 	"/refinement_sets/repetition_windows.ts": "../refinement_sets/repetition_windows.ts",
 	"/refinement_sets/codepoint_sets.ts":     "../refinement_sets/codepoint_sets.ts",
 	"/refinement_sets/regex_compiler.ts":     "../refinement_sets/regex_compiler.ts",
+	"/refinement_sets/calendar_interpreter.ts":     "../refinement_sets/calendar_interpreter.ts",
+	"/refinement_sets/temporal_string_grammars.ts": "../refinement_sets/temporal_string_grammars.ts",
+	"/refinement_sets/format_for_diagnostics.ts":   "../refinement_sets/format_for_diagnostics.ts",
+	"/refinement_sets/format_string_shapes.ts":     "../refinement_sets/format_string_shapes.ts",
 }
 
 // ProgramFromSource builds the in-memory program for one entry

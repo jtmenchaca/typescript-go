@@ -7,6 +7,12 @@
 
 package walk
 
+import (
+	"strings"
+
+	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+)
+
 // Sentence holds every coverage sentence — SENTENCE in the TS
 // source.
 var Sentence = struct {
@@ -39,6 +45,26 @@ var Sentence = struct {
 	HostClass:          "the type is a host class — everything the file determines here",
 	FromOutside:        "the value arrives from outside this file — the type is everything this file determines",
 	SettlementFunction: "the promise's settlement function — a function, read at its calls",
+}
+
+// KernelDeclinedAlertText is the 7002 message a diagnostic reports
+// when a kernel ask panicked mid-judgment (a nil kernel, a refused
+// question) and the caller recovered rather than crash the check —
+// the plain sentence, in this file's own register (Sentence.KernelDeclined),
+// never the raw Go panic text a nil-pointer trace would otherwise
+// carry into a diagnostic. Every recover-into-diagnostic site in
+// assignability reports this same text rather than embedding its own
+// copy of err.Error().
+var KernelDeclinedAlertText = assignability.AlertText + " " + sentenceCapitalized(Sentence.KernelDeclined) + "."
+
+// sentenceCapitalized upper-cases a coverage sentence's first letter —
+// every Sentence entry reads lowercase mid-row (it follows "—" in a
+// coverage line), but a diagnostic message sentence starts fresh.
+func sentenceCapitalized(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // SentenceVerdict is the (said, unsupported) pair VerdictOf answers.

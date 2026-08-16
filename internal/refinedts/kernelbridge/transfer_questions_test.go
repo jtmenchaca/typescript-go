@@ -85,3 +85,24 @@ func TestDecodeTransferAnswerTheFourKinds(t *testing.T) {
 		t.Errorf("set: got %+v, want %+v", got.Set, set)
 	}
 }
+
+// TestDecodeTransferAnswerBottomEnclosureIsTheEmptySet exercises the
+// exact wire boundary/exports.lean's encodeEnclosure sends for a
+// BOTTOM arithmetic result: {"kind":"set","set":{"forms":[{"form":
+// "oneOf","w":[]}]}} — an unreachable-result answer, not a
+// hand-picked shape. The literal JSON here is the Lean encoder's own
+// spelling (encodeEnclosure's `if e.bot then` arm), parsed the same
+// way a real kernel answer would arrive (Answered → DecodeTransferAnswer),
+// so this pins the Go decoder against the actual wire the kernel
+// sends, not merely against the Go encoder's own output.
+func TestDecodeTransferAnswerBottomEnclosureIsTheEmptySet(t *testing.T) {
+	leanBottomWire := `{"kind":"set","set":{"forms":[{"form":"oneOf","w":[]}]}}`
+	got := DecodeTransferAnswer(Answered(leanBottomWire))
+	if got.Kind != TransferAnswerSet {
+		t.Fatalf("bottom enclosure: got Kind %v, want TransferAnswerSet", got.Kind)
+	}
+	want := refinementsets.MakeRefinedSet(refinementsets.OneOf(nil))
+	if !reflect.DeepEqual(got.Set, want) {
+		t.Errorf("bottom enclosure: got %+v, want the empty OneOf %+v", got.Set, want)
+	}
+}

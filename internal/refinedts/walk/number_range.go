@@ -247,6 +247,35 @@ func RangeOfSet(set refinementsets.RefinedSet) *NumberRange {
 	return &NumberRange{Lo: lo, Hi: hi, Int: int_, Step: step, LoStrict: loStrict, HiStrict: hiStrict}
 }
 
+// astralCodepointFloor mirrors refinementsets' own unexported
+// astralFloor (codepoint_sets.go): the first scalar value that costs
+// two UTF-16 code units (sec-ecmascript-language-types-string-type).
+// Not importable — refinementsets keeps it package-private — so this
+// is the same literal, restated where astralFreeSet needs it.
+const astralCodepointFloor = 0x10000
+
+// astralFreeSet is whether a codepoint alphabet is PROVEN to sit
+// entirely below the astral floor — the same "unit indexing and
+// scalar indexing coincide" gate refinementsets.AstralFree checks
+// against an exact []float64 tuple, read here off a RefinedSet's sound
+// enclosing range instead, so a bound (`OneOf([44])`, a comma
+// separator) qualifies without needing a materialized value list.
+// Unreadable (a sequence form) or unbounded above answers false —
+// never a guess.
+func astralFreeSet(set refinementsets.RefinedSet) bool {
+	r := RangeOfSet(set)
+	if r == nil || !isFinite(r.Hi) {
+		return false
+	}
+	hi := r.Hi
+	if r.HiStrict {
+		// a strict upper bound admits nothing AT hi, so the enclosed
+		// values sit below it already
+		hi = math.Nextafter(hi, math.Inf(-1))
+	}
+	return hi < astralCodepointFloor
+}
+
 // RangeOfKnown is the range of what is known, when it is one number.
 // A refinement variable ranges over its bound — exact for the
 // universal reading, since every singleton of the bound is an

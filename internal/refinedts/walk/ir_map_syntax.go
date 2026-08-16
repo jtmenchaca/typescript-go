@@ -128,6 +128,10 @@ func seedEntriesOf(seed *ast.Node, isMap bool) (keys []*ast.Node, vals []*ast.No
 // collectionMethodCallOf is `m.<method>(…)` with a plain (non-optional,
 // non-computed) member name on the spelled receiver — the shape every
 // recognized operation wears. Answers the method name and its arguments.
+// The receiver may stand behind parens and casts — `(m as unknown as
+// {…}).set(k, v)` — which erase at runtime (Unwrapped), so the call
+// still reads and writes the tracked collection the same as the bare
+// name would.
 func collectionMethodCallOf(node *ast.Node, name string) (method string, arguments []*ast.Node, ok bool) {
 	if !ast.IsCallExpression(node) {
 		return "", nil, false
@@ -140,7 +144,8 @@ func collectionMethodCallOf(node *ast.Node, name string) (method string, argumen
 	if access.QuestionDotToken != nil {
 		return "", nil, false
 	}
-	if !ast.IsIdentifier(access.Expression) || access.Expression.Text() != name {
+	receiver := Unwrapped(access.Expression)
+	if !ast.IsIdentifier(receiver) || receiver.Text() != name {
 		return "", nil, false
 	}
 	if !ast.IsIdentifier(access.Name()) {

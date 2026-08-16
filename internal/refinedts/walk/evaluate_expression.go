@@ -305,6 +305,13 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		}
 	}
 	if ast.IsIdentifier(e) {
+		// a with body resolves each read against the SCOPE OBJECT first
+		// — a getter on it can answer differently at every call, so no
+		// claim about a with-scoped identifier (not even Infinity/NaN/
+		// undefined, all shadowable properties) survives from here
+		if e.Flags&ast.NodeFlagsInWithStatement != 0 {
+			return silence.Residue()
+		}
 		if e.Text() == "Infinity" {
 			return abstractdomain.KnownValues([]float64{math.Inf(1)}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 		}
@@ -345,10 +352,59 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	// the surrounding `this`) is a tracked binding like a parameter:
 	// initialized at body entry with the class's field invariants, narrowed
 	// by guards, forgotten wherever a write could land. A `this` with
-	// its own dynamic receiver — a function expression's, an object
-	// method's — never reads the tracked one.
+	// its own dynamic receiver — a function expression's — never reads
+	// the tracked one.
+	//
+	// A function or function EXPRESSION declaring its own written
+	// `this` PARAMETER (`function f(this: { age: number }) { … }`) is
+	// the second tracked shape: EnclosingThisParameterFunction finds
+	// the SAME function this `this` belongs to (through arrows, the
+	// same climb EnclosingThisClass makes), and env.Get("this") reads
+	// whatever the call site bound there — a contracted callee inlined
+	// through Function.prototype.call binds it from the call's own
+	// first argument (evaluate_call_expression.go's ThisParameterCall
+	// route); every other caller of a this-parameter function leaves
+	// it unset, which falls through to the same decline below.
+	//
+	// An OBJECT-LITERAL method's own `this` is the THIRD tracked shape:
+	// ObjectLiteralMethodWalkCall (method_this_writes.go) binds "this"
+	// in env to the receiver before walking the method's body on the
+	// walk route, and EnclosingThisObjectLiteralMethod finds the SAME
+	// method this `this` belongs to (through arrows, the same climb).
+	// Without this arm, `this.age` inside `bump()`'s own body read
+	// silence.Residue() regardless of the binding
+	// ObjectLiteralMethodWalkCall had just set, because this was the
+	// dynamic-receiver case the comment above used to lump an object
+	// method into.
+	//
+	// A FOURTH shape rides ctx.ThisOwnerDeclaration rather than a purely
+	// static syntactic climb: `{ bump: helperFn }`, a property pointing
+	// at a SEPARATELY DECLARED FunctionDeclaration/FunctionExpression
+	// (contract_file_facts.go's property-alias pass registers the
+	// contract; objectLiteralMethodWalkTarget's calleePropertyInLiteral
+	// check recognizes the call). helperFn's own body is an ordinary
+	// FunctionDeclaration, called both through the alias (this = the
+	// receiver) and potentially bare elsewhere (this = its own dynamic
+	// receiver) — the SAME declaration node serves both shapes, so no
+	// purely syntactic recognizer can tell them apart the way the class
+	// and object-literal-method climbs do for THEIR shapes (an
+	// object-literal method's own PARENT already proves what its `this`
+	// is; helperFn's parent proves nothing about any one call).
+	// ObjectLiteralMethodWalkCall sets ThisOwnerDeclaration to the exact
+	// declaration it bound "this" for, in its own fresh, isolated
+	// callEnv — dataflowfacts.EnclosingThisOwner(e) climbs from `e` the
+	// same way the other three climbs do (through arrows, stopped at
+	// the nearest function/method) and must land on that SAME node: a
+	// more deeply nested sibling function within the same walked body
+	// (its own dynamic `this`, never the bound receiver) climbs to
+	// ITSELF instead, so the identity check keeps that shape correctly
+	// unrecognized exactly as the other climbs already do for it.
 	if e.Kind == ast.KindThisKeyword {
-		if dataflowfacts.EnclosingThisClass(e) != nil {
+		recognizedThisSite := dataflowfacts.EnclosingThisClass(e) != nil ||
+			dataflowfacts.EnclosingThisParameterFunction(e) != nil ||
+			dataflowfacts.EnclosingThisObjectLiteralMethod(e) != nil ||
+			(ctx.ThisOwnerDeclaration != nil && dataflowfacts.EnclosingThisOwner(e) == ctx.ThisOwnerDeclaration)
+		if recognizedThisSite {
 			if held, ok := env.Get("this"); ok {
 				return held
 			}
@@ -357,9 +413,35 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 			assignability.NoteReason(assignability.ReasonNote{
 				Site:        "expression",
 				Node:        e,
-				Said:        "`this` is tracked only inside a class method body",
+				Said:        "`this` is tracked only inside a class method body or a this-parameter function",
 				Unsupported: true,
 			})
+		}
+		// a RECOGNIZED this-shape (a class method, a this-parameter
+		// function, an object-literal method) with no caller binding in
+		// env is a real gap in what THIS WALK carries, not "nothing
+		// stated about this site" — answering Opaque (still KindUnknown,
+		// so every existing decline check still reads it as undetermined)
+		// stops evaluateForm's own AfterReaders fallback
+		// (silence.RoleModel, this file's tail) from seeding `this.key`'s
+		// PROPERTY read from the declared this-parameter's or the
+		// object-literal method's static host type — a plain `number`
+		// member seeds NumberWithNaN (typereading/recipes.go), which
+		// answered a real-looking possibly-NaN claim for a value this
+		// walk in fact knows nothing about at this call. The class case
+		// already reaches the same opaque floor one layer down
+		// (this_property_access.go's readThisFieldInvariant, "a field
+		// with NO standing invariant" — Opaque there too) for a
+		// RECOGNIZED-class field with no invariant; this puts the
+		// this-parameter and object-literal-method shapes on the same
+		// footing at the keyword read itself, since neither has an
+		// invariant table to fall back through. An UNRECOGNIZED this site
+		// (no enclosing class, this-parameter function, or object-literal
+		// method at all — a function expression's own dynamic receiver)
+		// keeps plain silence.Residue(): nothing here claims to know
+		// anything about that shape, seeded or not.
+		if recognizedThisSite {
+			return abstractdomain.Opaque
 		}
 		return silence.Residue()
 	}
@@ -528,6 +610,17 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		if seeded.Kind != abstractdomain.KindUnknown || seeded.Opaque {
 			return seeded
 		}
+	}
+	// a YIELD EXPRESSION read as its own VALUE — `const v = yield e` —
+	// is what the caller's next(v) sends back: the N of the enclosing
+	// generator's stated `Generator<Y, R, N>` (yield_contract.go).
+	// YieldResumeStated seeds it the same way BindEntryEnv seeds a
+	// parameter from its own declared type (AbstractValueOfDeclared).
+	// Nil — an ungrounded generator, an unstated N, or no enclosing
+	// generator walk at all — falls through to the syntax table's
+	// decline exactly as before.
+	if e.Kind == ast.KindYieldExpression && ctx.YieldResumeStated != nil {
+		return AbstractValueOfDeclared(*ctx.YieldResumeStated)
 	}
 	// the terminal unknown — sound every way, but not the same fact:
 	// the ONE syntax table says which. A modeled kind fell through an

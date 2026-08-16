@@ -57,6 +57,41 @@ func lowerReturnStatement(
 		} else if ast.IsStringLiteral(Unwrapped(rs.Expression)) {
 			sort = BindingKindString
 		}
+		// `return age + (extra ?? 0)`: an ARITHMETIC operator over a
+		// short-circuit operand, tried as a BRANCH before the plain effect
+		// grammar below — returnArithmeticOverShortCircuit composes the
+		// outer arithmetic inside each arm, narrowing the short circuit's
+		// own left slot to what that arm's runtime actually proves, rather
+		// than joining both possible operand sets before the arithmetic
+		// runs (which is what the plain `RhsEffect` route below does, and
+		// is why this route is tried first — sound, but wider than the
+		// branch's answer wherever `??`/`&&`/`||` itself rules an operand
+		// out on one side).
+		//
+		// EXACT ONLY UNDER A KERNEL WHOSE JOIN TREATS AN EMPTY-SET ARM AS
+		// IDENTITY. This lowering was pulled once already: the
+		// then-current kernel's enclosure world had no bottom — an empty
+		// refined set (`oneOfEnc([])`) fell through to `Enclosure.top`
+		// (unbounded), so the arm narrowed to a provably-unreachable state
+		// contributed UNBOUNDED arithmetic to `KnownState.join`, widening
+		// the whole answer back to unknown. It is restored now on the
+		// contract that `oneOfEnc [] = bottom`, that arithmetic transfers
+		// absorb bottom, and that `KnownState.join` treats a bottom/empty
+		// state as identity (contributing neither enclosure content nor
+		// flags) — see returnArithmeticOverShortCircuit's own doc
+		// (lowering_to_kernel_ir_return_branch.go) for the full argument.
+		// THE KERNEL ARTIFACTS MUST BE REBUILT (`pnpm kernel` then `pnpm
+		// kernel:native`) before the judge reflects this lowering —
+		// against a stale dylib the empty arm still reads top and the
+		// join still widens, exactly the failure this route was pulled
+		// for the first time.
+		dropHoists()
+		if branched, ok := returnArithmeticOverShortCircuit(context, rs.Expression, sort, raise); ok {
+			out = flush(out)
+			out = append(out, branched...)
+			return out, true
+		}
+		dropHoists()
 		effect, ok := RhsEffect(context, sort, rs.Expression)
 		if ok {
 			// `return this.a(this.b(x)) + 1`: the hoisted calls go out
@@ -195,12 +230,27 @@ func lowerReturnStatement(
 		// THE INERT RETURN: a returned FUNCTION LITERAL (creating one
 		// runs nothing, whatever its body holds — the census rules its
 		// captures), and any other returned expression that MOVES
-		// NOTHING (write- and call-free) — `return this`,
-		// `return host && host.instance`, `return x ? a[k] : a`,
-		// `return { }`. The value has no scalar spelling, so unknown
-		// IS what the ret slot can say, and evaluating the expression
-		// changed no state — the statement is READ, not floored.
-		if ast.IsFunctionLike(head) || writeAndCallFree(head) {
+		// NOTHING (write- and call-free) AND READS NO FIELD OR ELEMENT
+		// — `return this`, `return { }`. The value has no scalar
+		// spelling, so unknown IS what the ret slot can say, and
+		// evaluating the expression changed no state — the statement is
+		// READ, not floored, and the body stays COMPLETE.
+		//
+		// A property/element read past this gate (`return this.#age`,
+		// `return host && host.instance`) is NOT inert in the sense that
+		// matters here: it is a real value this walk simply could not
+		// spell a slot for (a PRIVATE name, an unresolvable receiver),
+		// exactly the gap the OPAQUE RETURN below exists to flag. Before
+		// this check, such a read took this same unknown-ret write but
+		// skipped NoteFirstHavoc — so the body lowered "complete" with a
+		// lost field read inside it, and applySummary's serving rule
+		// ("only a COMPLETE body serves") served that unknown as the
+		// call's own answer instead of declining to the walk route,
+		// which reads the field correctly (a class field invariant, an
+		// accessor's own backing field). Falling through to the opaque
+		// return below keeps the unknown ret write identical and adds
+		// exactly the one thing that was missing: the havoc note.
+		if ast.IsFunctionLike(head) || (writeAndCallFree(head) && !containsPropertyOrElementRead(head)) {
 			out = flush(out)
 			out = append(out, kernelbridge.IrStatement{
 				Kind:   kernelbridge.IrStatementAssign,

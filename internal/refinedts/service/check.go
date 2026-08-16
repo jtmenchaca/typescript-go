@@ -718,10 +718,12 @@ func checkObjectGraphs(
 		// over the kernel's budget alerts at the statement, never
 		// crashes — the kernel closure PANICS on a refused question
 		// (PORT.md's kernel-panic convention), recovered here the way
-		// the TS source's try/catch does.
+		// the TS source's try/catch does. The alert states the plain
+		// fact (walk.KernelDeclinedAlertText), never the raw Go panic
+		// text the recover caught.
 		verdict, declined := checkAssignabilityRecovered(kernel, assembled.Spec)
-		if declined != "" {
-			report(assignability.At(site, 7002, "this object's graph judgment was declined — "+declined))
+		if declined {
+			report(assignability.At(site, 7002, walk.KernelDeclinedAlertText))
 			continue
 		}
 		if !verdict.Structural {
@@ -742,19 +744,18 @@ func checkObjectGraphs(
 // checkAssignabilityRecovered wraps objectgraphs.CheckAssignability's
 // panic-on-decline (RefinedTSKernel's question methods panic on a
 // refused question, mirroring the TS source's `throw`) into a
-// (verdict, declineMessage) pair — declineMessage is "" on success.
-func checkAssignabilityRecovered(kernel *kernelbridge.RefinedTSKernel, spec objectgraphs.Specification) (verdict kernelbridge.JudgeAnswer, declineMessage string) {
+// (verdict, declined) pair — declined is false on success. The panic's
+// own text is discarded here (never a checker fact about the graph
+// being judged); the caller reports the tree's own plain decline
+// sentence instead.
+func checkAssignabilityRecovered(kernel *kernelbridge.RefinedTSKernel, spec objectgraphs.Specification) (verdict kernelbridge.JudgeAnswer, declined bool) {
 	defer func() {
-		if r := recover(); r != nil {
-			if err, ok := r.(error); ok {
-				declineMessage = err.Error()
-			} else {
-				declineMessage = "declined"
-			}
+		if recover() != nil {
+			declined = true
 		}
 	}()
 	verdict = objectgraphs.CheckAssignability(kernel, spec, nil)
-	return verdict, ""
+	return verdict, false
 }
 
 // keyNameOfPath is keyNameOfPath in the TS source: which key a

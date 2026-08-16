@@ -67,7 +67,7 @@ func PublicFieldSealOf(ctx *FlowContext, declaration *ast.Node) PublicFieldSeal 
 	}
 	return PublicFieldSeal{
 		Sealed:         true,
-		OutsideWritten: nonThisWrittenFieldNames(sourceFile.AsNode()),
+		OutsideWritten: nonThisWrittenFieldNames(c, sourceFile.AsNode(), symbol),
 	}
 }
 
@@ -389,15 +389,27 @@ func declaredMemberKind(declaration *ast.Node, name string) (isField bool, isMet
 
 // nonThisWrittenFieldNames: every property name the FILE writes through
 // a receiver that is not `this` — `x.age = v`, `x["age"] = v`,
-// `x.age++`, `delete x.age`, a destructuring target. The invariant
-// walk's sink collects the `this.<key>` writes; these are the writes
-// it cannot, whichever object they land on, so a name in this set
-// vetoes the matching public field of EVERY sealed class in the file.
-func nonThisWrittenFieldNames(fileNode *ast.Node) map[string]struct{} {
+// `x.age++`, `delete x.age`, a destructuring target — AND whose
+// receiver's own type could actually hold an instance of `classSymbol`.
+// The invariant walk's sink collects the `this.<key>` writes; these are
+// the writes it cannot, whichever object they land on, so a name in
+// this set vetoes the matching public field of the sealed class.
+//
+// A bare NAME match alone over-vetoes: `delete person.age` where
+// `person` is a const bound to its own object literal in an unrelated
+// function can never touch a `ThisPerson` instance — the literal is a
+// fresh ordinary object and the const never rebinds. That PROVENANCE
+// is the narrowing this reading uses; the receiver's stated TYPE
+// proves nothing, because TypeScript is structural — `{ age?: number }`
+// and `any` both admit a class instance behind them. Any receiver
+// whose provenance is not that one provable shape still counts — the
+// conservative, sound default.
+func nonThisWrittenFieldNames(c *checker.Checker, fileNode *ast.Node, classSymbol *ast.Symbol) map[string]struct{} {
 	written := map[string]struct{}{}
 	var visit func(node *ast.Node)
 	visit = func(node *ast.Node) {
 		var name string
+		var receiver *ast.Node
 		named := false
 		if ast.IsPropertyAccessExpression(node) {
 			access := node.AsPropertyAccessExpression()
@@ -405,6 +417,7 @@ func nonThisWrittenFieldNames(fileNode *ast.Node) map[string]struct{} {
 				nameNode := access.Name()
 				if nameNode != nil && (ast.IsIdentifier(nameNode) || ast.IsPrivateIdentifier(nameNode)) {
 					name, named = nameNode.Text(), true
+					receiver = access.Expression
 				}
 			}
 		} else if ast.IsElementAccessExpression(node) {
@@ -413,10 +426,11 @@ func nonThisWrittenFieldNames(fileNode *ast.Node) map[string]struct{} {
 				argument := Unwrapped(access.ArgumentExpression)
 				if argument != nil && ast.IsStringLiteralLike(argument) {
 					name, named = argument.Text(), true
+					receiver = access.Expression
 				}
 			}
 		}
-		if named && writtenAt(node) != writtenAtNone {
+		if named && writtenAt(node) != writtenAtNone && receiverCouldHoldAnInstance(c, receiver) {
 			written[name] = struct{}{}
 		}
 		node.ForEachChild(func(child *ast.Node) bool {
@@ -426,4 +440,37 @@ func nonThisWrittenFieldNames(fileNode *ast.Node) map[string]struct{} {
 	}
 	visit(fileNode)
 	return written
+}
+
+// receiverCouldHoldAnInstance: could `receiver` reference a class
+// instance at runtime? The stated type cannot answer this — structural
+// assignability lets `{ age?: number }` and `any` alike carry one. The
+// ONE provably-clear shape is a CONST binding born from an object
+// LITERAL: the literal is a fresh ordinary object and the const never
+// rebinds, so no instance can ever sit behind the name. Everything
+// else answers true — the conservative, sound default.
+func receiverCouldHoldAnInstance(c *checker.Checker, receiver *ast.Node) bool {
+	if c == nil || receiver == nil {
+		return true
+	}
+	root := Unwrapped(receiver)
+	if root == nil || !ast.IsIdentifier(root) {
+		return true
+	}
+	symbol := symbolAt(c, root)
+	if symbol == nil || len(symbol.Declarations) != 1 {
+		return true
+	}
+	declaration := symbol.Declarations[0]
+	if !ast.IsVariableDeclaration(declaration) {
+		return true
+	}
+	if declaration.Parent == nil || declaration.Parent.Flags&ast.NodeFlagsConst == 0 {
+		return true
+	}
+	initializer := declaration.AsVariableDeclaration().Initializer
+	if initializer == nil {
+		return true
+	}
+	return !ast.IsObjectLiteralExpression(Unwrapped(initializer))
 }

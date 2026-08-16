@@ -192,6 +192,9 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 		if answered := readArrayWriteMethods(site); answered != nil {
 			return answered
 		}
+		if answered := readArraySortReverseMethods(site); answered != nil {
+			return answered
+		}
 		if answered := readConsoleSink(site); answered != nil {
 			return answered
 		}
@@ -218,6 +221,9 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 			return answered
 		}
 		if answered := readStringMatchWithConstRegex(site); answered != nil {
+			return answered
+		}
+		if answered := readRegExpExecCall(site); answered != nil {
 			return answered
 		}
 		answered := readUnmodeledMethod(site)

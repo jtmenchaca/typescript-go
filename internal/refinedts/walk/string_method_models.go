@@ -264,7 +264,23 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 			// readings below (the sort-level string-out row still speaks).
 			if literal, literalOk := exactStringOf(argKnowns[0]); literalOk {
 				replacer := Unwrapped(call.Arguments.Nodes[1])
-				if replacer != nil && (ast.IsArrowFunction(replacer) || ast.IsFunctionExpression(replacer)) && replacer.Body() != nil {
+				if replacer != nil && !ast.IsArrowFunction(replacer) && !ast.IsFunctionExpression(replacer) {
+					// a NAMED replacer — the same fallback promiseHandlerOf
+					// takes for a settlement handler passed by name:
+					// follow it to its declaration when the resolver can
+					// reach one. FunctionInReach/PinnedFunctionOf answers a
+					// FunctionDeclaration node here (a top-level `function
+					// swap(...) {...}`), never an arrow or function
+					// expression, so the gate right below must admit that
+					// shape too or this resolution can never actually be
+					// used — inlineReplacerCall itself is already
+					// declaration-shape-agnostic (Parameters()/Body() read
+					// the same off all three function node kinds).
+					if named := FunctionInReach(ctx, call.Arguments.Nodes[1]); named != nil {
+						replacer = named
+					}
+				}
+				if replacer != nil && (ast.IsArrowFunction(replacer) || ast.IsFunctionExpression(replacer) || ast.IsFunctionDeclaration(replacer)) && replacer.Body() != nil {
 					floor := oracleGrade
 					result, ok := replaceWithFunctionResult(text, literal, method == "replaceAll", func(matched string, position int) (string, bool) {
 						answered := inlineReplacerCall(ctx, site.Env, replacer, matched, position, text)

@@ -10,6 +10,8 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
@@ -22,6 +24,205 @@ import (
 func collectionKey(k abstractdomain.AbstractValue) bool {
 	return k.Kind == abstractdomain.KindValues && k.KindTag != abstractdomain.PrimitiveArray &&
 		(k.KindTag == abstractdomain.PrimitiveString || len(k.Values) == 1)
+}
+
+// weakEntryIdentity is a WeakMap/WeakSet key's REFERENCE identity — the
+// declaring symbol of a plain, never-reassigned local identifier
+// (`const key = {}`). collectionKey's value-equality reading is the
+// wrong question for a WeakMap key (sec-weakmap.prototype.set requires
+// an Object key, and WeakMapData compares SameValue on the KEY
+// REFERENCE, never its shape — two `{}` literals are different keys
+// even though they read identically as objects); this is deliberately
+// NOT routed through SameKnown/CollectionEntry's own KindObject
+// comparison, which compares by key SET and would wrongly treat every
+// empty object as the same key.
+//
+// A plain identifier that the file never reassigns anywhere denotes
+// the SAME reference at every read between its declaration and any
+// later mention (ReassignedNames is file-wide, so this is sound though
+// coarser than a scope-local check) — the same soundness bar
+// assignments.go's WriteProperty applies to a "local const" object
+// write.
+func weakEntryIdentity(ctx *FlowContext, key *ast.Node) (*ast.Symbol, bool) {
+	if !ast.IsIdentifier(key) {
+		return nil, false
+	}
+	// gated to OBJECT-sorted keys only: an ordinary Map's string/number
+	// key read through a plain identifier must keep collectionKey's own
+	// value-equality reading untouched — this model answers the
+	// reference-identity question a WeakMap key poses, never a primitive
+	// one
+	if !dataflowfacts.ReferenceTyped(ctx.P.Checker, key) {
+		return nil, false
+	}
+	if _, reassigned := narrowing.ReassignedNames(ast.GetSourceFileOfNode(key))[key.Text()]; reassigned {
+		return nil, false
+	}
+	symbol := symbolAt(ctx.P.Checker, key)
+	if symbol == nil {
+		return nil, false
+	}
+	return symbol, true
+}
+
+// weakEntrySymbol wraps an identity symbol as the CollectionEntry.Key
+// this file's own set-then-get reads compare — Kind stays KindObject
+// (an ordinary, if unusual, object-sorted value) so nothing outside
+// sameWeakEntry ever reads .Symbol off it; SameKnown's own KindObject
+// case (key-set comparison) is untouched.
+func weakEntrySymbol(symbol *ast.Symbol) abstractdomain.AbstractValue {
+	return abstractdomain.AbstractValue{Kind: abstractdomain.KindObject, Complete: true, Symbol: symbol}
+}
+
+// sameWeakEntry compares two weakEntrySymbol markers by the identity
+// they carry — the declaring symbol, never the object's shape.
+func sameWeakEntry(a, b abstractdomain.AbstractValue) bool {
+	return a.Kind == abstractdomain.KindObject && b.Kind == abstractdomain.KindObject &&
+		a.Symbol != nil && a.Symbol == b.Symbol
+}
+
+// findWeakEntry finds a weakEntrySymbol-keyed entry by identity, or
+// nil.
+func findWeakEntry(entries []abstractdomain.CollectionEntry, key abstractdomain.AbstractValue) *abstractdomain.CollectionEntry {
+	for i := range entries {
+		if sameWeakEntry(entries[i].Key, key) {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// readWeakEntrySet is `.set(key, value)` / `.add(key)` on a tracked
+// WeakMap/WeakSet whose key is an identity weakEntryIdentity can name
+// — the entry list keyed by symbol identity rather than
+// collectionKey's value equality (weakEntryIdentity's own doc). A key
+// this reader cannot identify still writes the collection: the
+// entries drop and a later get/has on ANY key answers honestly rather
+// than keeping a stale record.
+func readWeakEntrySet(site MethodCallSite, collectionReceiver abstractdomain.AbstractValue) *abstractdomain.AbstractValue {
+	ctx, env, e, method := site.Ctx, site.Env, site.E, site.Method
+	if !site.HasTrackedName || collectionReceiver.Kind != abstractdomain.KindCollection {
+		return nil
+	}
+	call := e.AsCallExpression()
+	var arguments []*ast.Node
+	if call.Arguments != nil {
+		arguments = call.Arguments.Nodes
+	}
+	isSet := collectionReceiver.CollectionFlavor == abstractdomain.FlavorMap && method == "set" && len(arguments) == 2
+	isAdd := collectionReceiver.CollectionFlavor == abstractdomain.FlavorSet && method == "add" && len(arguments) == 1
+	if !isSet && !isAdd {
+		return nil
+	}
+	// an ordinary Map/Set's PRIMITIVE key stays with collectionKey's own
+	// value-equality path below — this reader answers only the
+	// reference-identity question an OBJECT key poses, checked before
+	// any evaluation or write so a plain `.set("key", 40)` call is left
+	// completely untouched
+	if !dataflowfacts.ReferenceTyped(ctx.P.Checker, arguments[0]) {
+		return nil
+	}
+	c := collectionReceiver
+	grade := abstractdomain.TrustLevelOf(c)
+	refresh := func(entries []abstractdomain.CollectionEntry, complete bool) abstractdomain.AbstractValue {
+		next := abstractdomain.AbstractValue{Kind: abstractdomain.KindCollection, CollectionFlavor: c.CollectionFlavor, Entries: entries, Complete: complete}
+		if grade != abstractdomain.TrustProved {
+			next.Grade = grade
+		}
+		UpdateTrackedEnv(ctx.Aliases, env, site.TrackedName, next)
+		return next
+	}
+	symbol, hasIdentity := weakEntryIdentity(ctx, arguments[0])
+	if !hasIdentity {
+		evaluateExpression(ctx, env, arguments[0])
+		if isSet {
+			evaluateExpression(ctx, env, arguments[1])
+		}
+		refresh(nil, false)
+		out := silence.Residue()
+		return &out
+	}
+	key := weakEntrySymbol(symbol)
+	var value abstractdomain.AbstractValue
+	if isSet {
+		value = evaluateExpression(ctx, env, arguments[1])
+	} else {
+		value = abstractdomain.Undef
+	}
+	var next []abstractdomain.CollectionEntry
+	if held := findWeakEntry(c.Entries, key); held != nil {
+		next = make([]abstractdomain.CollectionEntry, len(c.Entries))
+		for i, entry := range c.Entries {
+			if sameWeakEntry(entry.Key, key) {
+				next[i] = abstractdomain.CollectionEntry{Key: key, Value: value}
+			} else {
+				next[i] = entry
+			}
+		}
+	} else {
+		next = append(append([]abstractdomain.CollectionEntry{}, c.Entries...), abstractdomain.CollectionEntry{Key: key, Value: value})
+	}
+	out := refresh(next, c.Complete)
+	return &out
+}
+
+// readWeakEntryGet is `.get(key)` / `.has(key)` on a tracked WeakMap/
+// WeakSet whose key is an identity weakEntryIdentity can name — a
+// found entry answers even on an incomplete record (a call the walk
+// could not follow may have set other keys, but THIS key was set
+// right here); a miss stays honestly unknown, since an untraced call
+// could have set this exact key too.
+func readWeakEntryGet(site MethodCallSite, collectionReceiver abstractdomain.AbstractValue) *abstractdomain.AbstractValue {
+	ctx, e, method := site.Ctx, site.E, site.Method
+	if collectionReceiver.Kind != abstractdomain.KindCollection {
+		return nil
+	}
+	call := e.AsCallExpression()
+	var argCount int
+	if call.Arguments != nil {
+		argCount = len(call.Arguments.Nodes)
+	}
+	if argCount != 1 || (method != "get" && method != "has") {
+		return nil
+	}
+	symbol, hasIdentity := weakEntryIdentity(ctx, call.Arguments.Nodes[0])
+	if !hasIdentity {
+		return nil
+	}
+	key := weakEntrySymbol(symbol)
+	held := findWeakEntry(collectionReceiver.Entries, key)
+	grade := abstractdomain.TrustLevelOf(collectionReceiver)
+	if method == "has" {
+		if held != nil {
+			out := abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean, grade)
+			return &out
+		}
+		if collectionReceiver.Complete {
+			out := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, grade)
+			return &out
+		}
+		out := silence.Residue()
+		return &out
+	}
+	if collectionReceiver.CollectionFlavor != abstractdomain.FlavorMap {
+		return nil
+	}
+	if held != nil {
+		out := abstractdomain.AtTrustLevel(held.Value, grade)
+		return &out
+	}
+	// a key this walk never saw .set — provably absent exactly when the
+	// record is COMPLETE (no untracked call may have set it since; a
+	// call the walk cannot follow already drops Complete through
+	// readWeakEntrySet's own unreadable-key fallback, or through
+	// HavocEnv/ForgetThrough elsewhere), the same reading an ordinary
+	// Map gives a missing key on a complete record
+	if collectionReceiver.Complete {
+		out := abstractdomain.AtTrustLevel(abstractdomain.Undef, grade)
+		return &out
+	}
+	out := silence.Residue()
+	return &out
 }
 
 // ReadCollectionConstruction is readCollectionConstruction in the TS
@@ -39,11 +240,16 @@ func ReadCollectionConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstrac
 	}
 	var flavor abstractdomain.Flavor
 	hasFlavor := true
+	weak := false
 	switch newExpr.Expression.Text() {
 	case "Map":
 		flavor = abstractdomain.FlavorMap
 	case "Set":
 		flavor = abstractdomain.FlavorSet
+	case "WeakMap":
+		flavor, weak = abstractdomain.FlavorMap, true
+	case "WeakSet":
+		flavor, weak = abstractdomain.FlavorSet, true
 	default:
 		hasFlavor = false
 	}
@@ -57,6 +263,16 @@ func ReadCollectionConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstrac
 	if len(args) == 0 {
 		out := abstractdomain.AbstractValue{Kind: abstractdomain.KindCollection, CollectionFlavor: flavor, Entries: nil, Complete: true}
 		return &out
+	}
+	// a WeakMap/WeakSet's constructor argument is an iterable of
+	// object-keyed entries this walk cannot compare by identity at
+	// construction time (the literal-entries route below is
+	// collectionKey's value-equality reading, wrong for a reference
+	// key) — only the bare, empty constructor is read; set-then-get
+	// identity is tracked from `.set()` onward instead
+	// (readWeakEntrySet/readWeakEntryGet).
+	if weak {
+		return nil
 	}
 	if len(args) != 1 || !ast.IsArrayLiteralExpression(args[0]) {
 		return nil
@@ -135,6 +351,13 @@ func readCollectionGetHas(site MethodCallSite) *abstractdomain.AbstractValue {
 	var argCount int
 	if call.Arguments != nil {
 		argCount = len(call.Arguments.Nodes)
+	}
+	// a WeakMap/WeakSet's OBJECT key reads by reference identity, never
+	// by collectionKey's value equality (weakEntryIdentity's own doc) —
+	// checked first so the generic value-key path below never runs on
+	// an object argument it would only residue away
+	if weakAnswer := readWeakEntryGet(site, collectionReceiver); weakAnswer != nil {
+		return weakAnswer
 	}
 	// a collection read: `.get`/`.has` with a primitive exact key on a
 	// built Map or Set — a found entry answers even on an incomplete
@@ -281,6 +504,14 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 			refresh(nil, true)
 			out := abstractdomain.Undef
 			return &out
+		}
+		// a WeakMap/WeakSet's OBJECT key writes by reference identity,
+		// never by collectionKey's value equality (weakEntryIdentity's
+		// own doc) — checked first so an object argument never falls
+		// into the value-key path below, which would only drop the
+		// collection's entries for a key it cannot compare
+		if weakAnswer := readWeakEntrySet(site, collectionReceiver); weakAnswer != nil {
+			return weakAnswer
 		}
 		if c.CollectionFlavor == abstractdomain.FlavorMap && method == "set" && len(arguments) == 2 {
 			key := evaluateExpression(ctx, env, arguments[0])

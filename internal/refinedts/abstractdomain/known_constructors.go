@@ -6,6 +6,15 @@
 
 package abstractdomain
 
+import "github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+
+// emptyElementSet is the empty set, OneOf(nil): the "present element"
+// claim a hole array wears — no scalar is a member, because there is
+// no present element to be one. The same shape kernel_delegation.go's
+// emptySet builds (package-private there); this is abstractdomain's
+// own copy so KnownArrayHoles does not reach into walk.
+var emptyElementSet = refinementsets.MakeRefinedSet(refinementsets.OneOf(nil))
+
 // KnownObject is knownObject in the TS source.
 //
 // bareProto takes the place of TS's optional `bareProto?: true`
@@ -117,4 +126,73 @@ func KnownList(items []AbstractValue, grade TrustLevel) AbstractValue {
 		return AbstractValue{Kind: KindList, Items: items}
 	}
 	return AbstractValue{Kind: KindList, Items: items, Grade: floor}
+}
+
+// KnownArrayHoles builds the array-holes form from the TWO claims that
+// together say everything `new Array(n)` past KnownList's
+// materialization ceiling (arrayConstructionHoleLimit,
+// walk/array_construction.go) is known to be: the length is EXACTLY
+// length (wrapped as the ordinary KindValues scalar {n} — the same
+// shape every other array kind's .length answers in), and the set of
+// PRESENT elements is EMPTY (wrapped as the kernel's own ∅,
+// OneOf(nil)) — a hole array has no present element to admit.
+//
+// dense is the sparse/dense bit (AbstractValue.Dense's doc): pass
+// false for `new Array(n)` (sparse — sec-array never calls
+// CreateDataPropertyOrThrow), true for `Array.from({length: n})`'s
+// past-ceiling arm (dense — sec-array.from's array-like branch calls
+// CreateDataPropertyOrThrow at every index). Both call sites know
+// their density affirmatively, so KnownArrayHoles always sets
+// DenseKnown true; a joined value that cannot establish either shape
+// builds the struct literal directly with DenseKnown false instead of
+// calling this constructor (JoinKnown's own array-holes/KindList arm).
+// Every other claim this constructor builds (Length, ElementSet) is
+// identical either way.
+//
+// The two claims stay separate rather than folding into one
+// RepeatOf(∅, n, n) kernel-set question: that question denotes ∅
+// itself for n > 0 (no tuple can fill n positions from an empty
+// alphabet), which would be sound as "the present elements admit
+// nothing" but UNSOUND as "the array is a member of nothing" — an
+// assignability check reading the receiver's own Set would then see
+// ∅ ⊆ every target and accept `new Array(n)` against any annotation.
+// Keeping Length as its own scalar and ElementSet as its own (unequated)
+// set sidesteps that: nothing ever asks the kernel whether the array
+// is a member of ElementSet, only whether the EMPTY set has members
+// worth handing back at an element read (it does not) — the walk's
+// own read paths (evaluate_property_access.go, element_access.go)
+// decide length and element reads directly off the two fields, the
+// same way KindList's reads index Items rather than asking the kernel
+// a question about the whole list.
+//
+// Go-native: no TS counterpart exists yet for this shape
+// (array_construction.go itself has none either — the Array
+// constructor's model is Go-first in this tree), so there is no TS
+// source to port from or keep in step.
+//
+// length is a non-negative integer below 2^32 — the same ToUint32
+// exactness sec-array's algorithm already proved before this is
+// reached (ReadArrayConstruction never builds one for a length its own
+// contract row would have thrown on).
+func KnownArrayHoles(length int, grade TrustLevel, dense bool) AbstractValue {
+	lengthClaim := KnownValues([]float64{float64(length)}, PrimitiveNumber, grade)
+	if grade == TrustProved {
+		return AbstractValue{Kind: KindArrayHoles, Inner: &lengthClaim, ElementSet: emptyElementSet, Dense: dense, DenseKnown: true}
+	}
+	return AbstractValue{Kind: KindArrayHoles, Inner: &lengthClaim, ElementSet: emptyElementSet, Grade: grade, Dense: dense, DenseKnown: true}
+}
+
+// LengthOfArrayHoles reads the exact length an array-holes value
+// wears — the KnownValues {n} wrapped in Inner. Callers that already
+// tested the kind read it here rather than re-deriving the KindValues
+// shape themselves.
+func LengthOfArrayHoles(k AbstractValue) (int, bool) {
+	if k.Kind != KindArrayHoles || k.Inner == nil {
+		return 0, false
+	}
+	inner := *k.Inner
+	if inner.Kind != KindValues || len(inner.Values) != 1 {
+		return 0, false
+	}
+	return int(inner.Values[0]), true
 }

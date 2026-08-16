@@ -9,6 +9,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 )
 
 // ReadThisPropertyAccess reads a `this.key` access through the
@@ -75,6 +76,23 @@ func readThisFieldInvariant(ctx *FlowContext, env Env, e *ast.Node, name string)
 		// constructor and the object's life put there — outside this
 		// walk's determination, so the type is everything the file
 		// determines (the provenance survives destructuring)
+		out := abstractdomain.Opaque
+		return &out
+	}
+	// a RECOGNIZED this-parameter function (`function f(this: T)`) has
+	// no class-shaped invariant table to answer through — its `this` is
+	// whatever the CALLER bound, and the walk carries that only inside
+	// env (thisIsObject's own bypass above, or a call-site binding this
+	// site never reached). Answering nil here — the old behavior — let
+	// the property-access dispatcher fall through to a LATER reader that
+	// seeds the field's value from the this-parameter's own STATIC
+	// declared type (typereading/recipes.go's NumberWithNaN for a plain
+	// `number` member): a real-looking possibly-NaN claim about a value
+	// this walk in fact knows nothing about at this call, the same
+	// unsound gap evaluate_expression.go's KindThisKeyword arm closed for
+	// the BARE `this` read. Opaque here puts the property read on the
+	// same honest floor: undetermined, not a wrong number.
+	if dataflowfacts.EnclosingThisParameterFunction(e) != nil {
 		out := abstractdomain.Opaque
 		return &out
 	}

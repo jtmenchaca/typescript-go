@@ -121,6 +121,22 @@ func summarySlotLayoutOf(
 		sorts = append(sorts, slot.Sort)
 		typeofs = append(typeofs, slot.TypeofTag)
 	}
+	// THE WHOLE-PARAMETER RETURN. `return person;`, where `person` is a
+	// record-expanded parameter, carries its members already — one entry
+	// slot per leaf, filled at call entry and left exact by any write the
+	// body makes to them. No slot is allocated here and no statement runs:
+	// the rows alias the parameter's OWN bundle-entry indices, so the exit
+	// summaryMemberResult reads for each key is the same exit a bare
+	// `person.age` read would answer. Tried only where the literal shape
+	// above found nothing — the two are mutually exclusive by construction
+	// (a body cannot return both an object literal and a bare identifier on
+	// every path at once).
+	if retShape == RetShapeNone {
+		if aliasMembers, aliasShape := returnedWholeParameterMembers(body, layout.BundleEntries); aliasShape != RetShapeNone {
+			retMembers = aliasMembers
+			retShape = aliasShape
+		}
+	}
 	if len(bindings) > summarySlotBudget {
 		return slotLayout, "a body past the slot budget", false
 	}

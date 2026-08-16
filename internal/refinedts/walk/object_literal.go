@@ -65,6 +65,13 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 				name, hasName = pa.Name().Text(), true
 			} else if ast.IsStringLiteral(pa.Name()) {
 				name, hasName = pa.Name().Text(), true
+			} else if ast.IsNumericLiteral(pa.Name()) {
+				// ToPropertyKey converts a Number argument through ToString
+				// (sec-topropertykey step 2) — `{ 0: 40 }` writes the STRING
+				// key "0", not a numeric one; the literal's own source
+				// spelling IS that string for every integer literal a
+				// member key can be written as
+				name, hasName = pa.Name().Text(), true
 			}
 			if !hasName {
 				// a SYMBOL-keyed computed property collides with no

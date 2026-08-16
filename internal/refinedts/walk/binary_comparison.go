@@ -107,7 +107,7 @@ func ReadInstanceOf(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 	if primitive {
 		return abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec), true
 	}
-	if left.Kind == abstractdomain.KindValues || left.Kind == abstractdomain.KindList {
+	if left.Kind == abstractdomain.KindValues || left.Kind == abstractdomain.KindList || left.Kind == abstractdomain.KindArrayHoles {
 		// an array the walk built: Array.prototype → Object.prototype
 		v := float64(0)
 		if constructor == "Array" || constructor == "Object" {

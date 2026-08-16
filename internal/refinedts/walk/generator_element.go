@@ -335,20 +335,67 @@ func GeneratorElementOf(ctx *FlowContext, call *ast.Node) (abstractdomain.Abstra
 // value the body yields lands in the array, in order
 // (sec-runtime-semantics-arrayaccumulation, sec-array.from step 6), and
 // the COUNT is whatever the body's own control flow decides, which the
-// element reading does not state. So the answer is the star of what one
-// element admits: these elements, length unknown — exactly what the
-// library iterators' own drain answers.
+// element reading does not state beyond a proven FLOOR (below). So the
+// answer is the star of what one element admits: these elements, length
+// unknown past that floor — exactly what the library iterators' own
+// drain answers.
 //
 // A set-valued element stars into the tuple layer; an element the
 // graph holds — a record, a class instance — stars into the
-// object-star instead. StarOfElement is the one recipe for both, so
-// the two layers do not have to be told apart here.
+// object-star instead. StarOfElementAtLeast is the one recipe for both,
+// so the two layers do not have to be told apart here.
 func GeneratorSequenceOf(ctx *FlowContext, call *ast.Node) (abstractdomain.AbstractValue, bool) {
 	element, ok := GeneratorElementOf(ctx, call)
 	if !ok {
 		return abstractdomain.AbstractValue{}, false
 	}
-	return typereading.StarOfElement(element)
+	declaration := GeneratorDeclarationOf(ctx, call)
+	lo := generatorMinimumYieldCount(declaration)
+	return typereading.StarOfElementAtLeast(element, lo)
+}
+
+// generatorMinimumYieldCount: how many yields a generator body runs
+// through UNCONDITIONALLY before anything could stop it — a sound lower
+// bound on the drained sequence's length, read straight-line from the
+// top of the body.
+//
+// A generator resumes deterministically, one statement at a time
+// (sec-generatorstart's suspended-start context runs the body forward
+// exactly as written). So a leading run of plain `yield e;` expression
+// statements at the body's OWN top level — no block, no branch, no loop
+// ahead of them — each runs before the next, and the count of that run
+// is a floor on the total: the body cannot finish, throw, or loop back
+// without having passed through all of them first. The scan stops at
+// the first statement that is not a bare plain-yield expression
+// statement (a block, an if, a loop, a yield* delegation, a yield
+// nested inside a larger expression) — past that point nothing is
+// proven unconditional anymore, so the count freezes rather than
+// guessing.
+func generatorMinimumYieldCount(declaration *ast.Node) int {
+	if declaration == nil {
+		return 0
+	}
+	body := declaration.Body()
+	if body == nil || !ast.IsBlock(body) {
+		return 0
+	}
+	count := 0
+	for _, statement := range body.AsBlock().Statements.Nodes {
+		if !ast.IsExpressionStatement(statement) {
+			break
+		}
+		expression := statement.AsExpressionStatement().Expression
+		if !ast.IsYieldExpression(expression) {
+			break
+		}
+		if expression.AsYieldExpression().AsteriskToken != nil {
+			// a delegation's own count depends on the inner iterable,
+			// which this straight-line scan does not read
+			break
+		}
+		count++
+	}
+	return count
 }
 
 // GeneratorCallResult: the value a generator CALL has. It is the

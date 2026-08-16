@@ -22,13 +22,16 @@ import (
 )
 
 // contractSignature is readSignature's return shape in the TS source.
-// Yield is the Go tree's own addition: a generator declaration's
-// stated yield position (yield_contract.go), nil everywhere else.
+// Yield and YieldResume are the Go tree's own addition: a generator
+// declaration's stated yield position and its stated resume position
+// (yield_contract.go) — the Y and N of a written `Generator<Y, R, N>`,
+// nil everywhere else, R held in Result.
 type contractSignature struct {
-	Params   []*annotations.DeclaredRefinement
-	Result   *annotations.DeclaredRefinement
-	Yield    *annotations.DeclaredRefinement
-	Grounded bool
+	Params      []*annotations.DeclaredRefinement
+	Result      *annotations.DeclaredRefinement
+	Yield       *annotations.DeclaredRefinement
+	YieldResume *annotations.DeclaredRefinement
+	Grounded    bool
 }
 
 // CompileContractFileFacts is compileContractFileFacts in the TS
@@ -89,13 +92,16 @@ func CompileContractFileFacts(
 		}
 		var result *annotations.DeclaredRefinement
 		var yieldStated *annotations.DeclaredRefinement
+		var yieldResumeStated *annotations.DeclaredRefinement
 		returnType := fn.Type()
 		if returnType != nil {
 			if IsGeneratorDeclaration(fn) {
 				// a generator's written return type names Generator<Y, R, N>:
 				// Y is the yield position, R is what the return statements
-				// judge against — the whole reference states no VALUE position
-				yieldStated, result = generatorStatedPositions(p, returnType, registry, objects, reporting, report)
+				// judge against, N is what the yield EXPRESSION itself reads
+				// as (what next(v) sends back) — the whole reference states
+				// no other VALUE position
+				yieldStated, result, yieldResumeStated = generatorStatedPositions(p, returnType, registry, objects, reporting, report)
 			} else {
 				read := annotations.AnnotationOfType(p, returnType, registry, objects)
 				if read.Stated != nil {
@@ -118,7 +124,10 @@ func CompileContractFileFacts(
 		if !grounded {
 			grounded = positionGrounds(yieldStated)
 		}
-		return contractSignature{Params: params, Result: result, Yield: yieldStated, Grounded: grounded}
+		if !grounded {
+			grounded = positionGrounds(yieldResumeStated)
+		}
+		return contractSignature{Params: params, Result: result, Yield: yieldStated, YieldResume: yieldResumeStated, Grounded: grounded}
 	}
 
 	register := func(nameNode *ast.Node, declaration *ast.Node, signature contractSignature) {
@@ -131,6 +140,7 @@ func CompileContractFileFacts(
 			Params:      signature.Params,
 			Result:      signature.Result,
 			Yield:       signature.Yield,
+			YieldResume: signature.YieldResume,
 			Grounded:    signature.Grounded,
 		}
 		contracts[symbol] = contract
@@ -209,6 +219,53 @@ func CompileContractFileFacts(
 				mergedContracts[alias] = contract
 			}
 		}
+		return nil
+	}, tracing.GrainStep)
+
+	// object-literal PROPERTY aliases of contracted functions: `{ bump:
+	// helperFn }` where helperFn is a separately declared function or
+	// const arrow. The PropertyAssignment case in `collect` above only
+	// registers a property whose OWN initializer IS an arrow/function
+	// expression — a property pointing at an existing name registers
+	// nothing under the property's own symbol, so a call through the
+	// property (`person.bump()`) found no contract at all and fell to
+	// the unmodeled-method tail, which forgets the whole receiver
+	// (readUnmodeledMethod's ForgetThrough) — silently erasing an
+	// object literal's own exact tracked keys on a call that, read
+	// through the aliased function, may only write `this`. Registering
+	// the property's symbol here (mirroring the const-alias pass just
+	// above, keyed by property name instead of variable name) gives
+	// ContractOf a contract to resolve, and objectLiteralMethodWalkTarget
+	// (method_this_writes.go) is what then decides whether the call's
+	// OWN callee resolves to an object-literal property — this pass
+	// only makes the LOOKUP succeed, it does not itself decide binding.
+	tracing.Span("facts.compile.propertyAliases", func() any {
+		var walkProperties func(node *ast.Node)
+		walkProperties = func(node *ast.Node) {
+			if ast.IsPropertyAssignment(node) {
+				assignment := node.AsPropertyAssignment()
+				name := assignment.Name()
+				if assignment.Initializer != nil && ast.IsIdentifier(assignment.Initializer) && name != nil && ast.IsIdentifier(name) {
+					target := symbolAt(p.Checker, assignment.Initializer)
+					if target != nil {
+						if contract, ok := mergedContracts[target]; ok {
+							alias := p.Checker.GetSymbolAtLocation(name)
+							if alias != nil {
+								if _, has := mergedContracts[alias]; !has {
+									contracts[alias] = contract
+									mergedContracts[alias] = contract
+								}
+							}
+						}
+					}
+				}
+			}
+			node.ForEachChild(func(child *ast.Node) bool {
+				walkProperties(child)
+				return false
+			})
+		}
+		walkProperties(file.AsNode())
 		return nil
 	}, tracing.GrainStep)
 

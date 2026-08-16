@@ -253,7 +253,11 @@ func signatureReturnTypeNodeOf(declaration *ast.Node) *ast.Node {
 // (a `this is T` predicate, or a signature this walk cannot read).
 func declaredPredicatePosition(c *checker.Checker, callee *ast.Node, fn *ast.Node, predicateParameter string) int {
 	parametersOf := func(node *ast.Node) []*ast.Node {
-		if node == nil {
+		// a callee symbol's declaration can be ANY shape — a const
+		// binding, an import specifier — and Parameters() dereferences
+		// function-like data that such a node does not carry; a
+		// non-function-like declaration names no parameter positions
+		if node == nil || !ast.IsFunctionLike(node) {
 			return nil
 		}
 		return node.Parameters()

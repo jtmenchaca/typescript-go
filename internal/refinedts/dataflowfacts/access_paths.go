@@ -29,6 +29,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
 // PlaceKey identifies a place: a base binding plus a property path.
@@ -66,6 +67,135 @@ func EnclosingThisClass(site *ast.Node) *ast.Node {
 			return nil
 		}
 		cursor = cursor.Parent
+	}
+	return nil
+}
+
+// EnclosingThisObjectLiteralMethod is the OBJECT-LITERAL method whose
+// own call the walk route binds `this` for — `{ age: 40, bump() {
+// this.age = this.age + 1 } }` — read through the containers that
+// keep the surrounding `this` (arrow functions), the same climb
+// EnclosingThisClass makes; stopped the first time it reaches a
+// method declaration (returning it only when the method's own parent
+// is an object literal, never a class), a function declaration or
+// expression, or a static block — none of those share the object
+// literal's `this`.
+//
+// Nil wherever `site` names no such method: a class method's `this`
+// is EnclosingThisClass's own instance, and a plain function's `this`
+// is its own dynamic receiver. The method-call walk route
+// (ObjectLiteralMethodWalkCall, method_this_writes.go) is the only
+// caller that ever binds "this" in env for a method matching this
+// climb, so a positive answer here is exactly when that binding is
+// live to read.
+func EnclosingThisObjectLiteralMethod(site *ast.Node) *ast.Node {
+	cursor := site
+	for cursor != nil {
+		if ast.IsFunctionDeclaration(cursor) || ast.IsFunctionExpression(cursor) ||
+			ast.IsClassStaticBlockDeclaration(cursor) {
+			return nil
+		}
+		if ast.IsMethodDeclaration(cursor) {
+			if (ast.GetCombinedModifierFlags(cursor) & ast.ModifierFlagsStatic) != 0 {
+				return nil
+			}
+			parent := cursor.Parent
+			if parent != nil && ast.IsObjectLiteralExpression(parent) {
+				return cursor
+			}
+			return nil
+		}
+		if ast.IsConstructorDeclaration(cursor) ||
+			ast.IsGetAccessorDeclaration(cursor) ||
+			ast.IsSetAccessorDeclaration(cursor) ||
+			ast.IsPropertyDeclaration(cursor) {
+			return nil
+		}
+		cursor = cursor.Parent
+	}
+	return nil
+}
+
+// EnclosingThisOwner is the nearest node — through arrow functions,
+// the same climb EnclosingThisClass and EnclosingThisObjectLiteralMethod
+// make — that OWNS `site`'s `this`: the FunctionDeclaration,
+// FunctionExpression, MethodDeclaration, ConstructorDeclaration,
+// GetAccessorDeclaration, or SetAccessorDeclaration `this` dynamically
+// binds to at a call, or nil at a class static block or module top
+// level (neither owns a callable `this`). Unlike the two climbs above
+// — which answer nil unless the owner's OWN static position (an
+// object-literal method, a this-parameter function) already proves
+// what `this` is — this one answers the owner REGARDLESS of position,
+// so a caller can compare it by IDENTITY against a specific
+// declaration node it already knows binds `this` some other way (a
+// property-alias walk route binding "this" to a receiver for exactly
+// ONE declaration, at exactly one call).
+func EnclosingThisOwner(site *ast.Node) *ast.Node {
+	cursor := site
+	for cursor != nil {
+		if ast.IsFunctionDeclaration(cursor) || ast.IsFunctionExpression(cursor) ||
+			ast.IsMethodDeclaration(cursor) || ast.IsConstructorDeclaration(cursor) ||
+			ast.IsGetAccessorDeclaration(cursor) || ast.IsSetAccessorDeclaration(cursor) {
+			return cursor
+		}
+		if ast.IsClassStaticBlockDeclaration(cursor) || ast.IsPropertyDeclaration(cursor) {
+			return nil
+		}
+		cursor = cursor.Parent
+	}
+	return nil
+}
+
+// EnclosingThisParameterFunction is the function-declaration or
+// function-expression whose OWN written `this` parameter `site`
+// reads — `function withThis(this: { age: number }) { return
+// this.age; }`. Read through the containers that keep the
+// surrounding `this` (arrow functions), the same way
+// EnclosingThisClass climbs; stopped the first time it reaches a
+// function declaration or expression, whether or not THAT function
+// itself declares a `this` parameter — a `this` inside a plain,
+// this-less function is its own dynamic receiver, not this site's.
+//
+// Nil wherever `site` names no such function: a class method's
+// `this` is EnclosingThisClass's own instance, never this reading's
+// (a class member's `this` parameter is not TypeScript's own
+// grammar), and a static block or top-level `this` has no enclosing
+// function at all.
+func EnclosingThisParameterFunction(site *ast.Node) *ast.Node {
+	cursor := site
+	for cursor != nil {
+		if ast.IsFunctionDeclaration(cursor) || ast.IsFunctionExpression(cursor) {
+			if declaredThisParameter(cursor) != nil {
+				return cursor
+			}
+			return nil
+		}
+		if ast.IsMethodDeclaration(cursor) || ast.IsConstructorDeclaration(cursor) ||
+			ast.IsGetAccessorDeclaration(cursor) || ast.IsSetAccessorDeclaration(cursor) ||
+			ast.IsClassStaticBlockDeclaration(cursor) {
+			return nil
+		}
+		cursor = cursor.Parent
+	}
+	return nil
+}
+
+// declaredThisParameter is a function-like declaration's own written
+// `this` parameter node — TypeScript's own syntax
+// (function f(this: T, …)) marks it as the first parameter whose
+// name is literally the identifier "this" (sec 3.6.3 of the
+// TypeScript Handbook's this-parameters section; tsgo's own parser
+// recognizes no separate AST node kind for it). Nil where the
+// function declares no such parameter.
+func declaredThisParameter(declaration *ast.Node) *ast.Node {
+	parameters := declaration.Parameters()
+	if len(parameters) == 0 {
+		return nil
+	}
+	first := parameters[0]
+	name := first.AsParameterDeclaration().Name()
+	if name != nil && ast.IsIdentifier(name) && name.Text() == "this" {
+		return first
 	}
 	return nil
 }
@@ -287,6 +417,24 @@ func IndexSegment(slot int) string {
 	return "[" + strconv.Itoa(slot) + "]"
 }
 
+// sourceSpellingOf is a token's own text as the FILE spells it, from
+// the post-trivia token start to the node's end. `.Text()` is not
+// this: the scanner normalizes a numeric literal to its value text.
+// Falls back to `.Text()` where the node reaches no source file (a
+// synthesized node).
+func sourceSpellingOf(node *ast.Node) string {
+	file := ast.GetSourceFileOfNode(node)
+	if file == nil {
+		return node.Text()
+	}
+	start := scanner.GetTokenPosOfNode(node, file, false)
+	text := file.Text()
+	if start < 0 || node.End() > len(text) || start > node.End() {
+		return node.Text()
+	}
+	return text[start:node.End()]
+}
+
 // SameTrackedPlace reports whether two tracked places name the same
 // binding and path.
 func SameTrackedPlace(a, b TrackedPlace) bool {
@@ -394,10 +542,11 @@ func elementSegmentOf(c *checker.Checker, argument *ast.Node) (string, bool) {
 		if err != nil || slot < 0 {
 			return "", false
 		}
-		// the literal has to spell the slot exactly: `xs[01]` and
-		// `xs[1.0]` fail Atoi or fail the round-trip, and a source
-		// spelling this walk cannot reproduce names no segment
-		if strconv.Itoa(slot) != argument.Text() {
+		// the SOURCE has to spell the slot exactly: `.Text()` answers the
+		// scanner's normalized value text ("1" for `01` and `1.0` alike),
+		// so the round-trip reads the file's own spelling — a spelling
+		// this walk cannot reproduce names no segment
+		if strconv.Itoa(slot) != sourceSpellingOf(argument) {
 			return "", false
 		}
 		return IndexSegment(slot), true

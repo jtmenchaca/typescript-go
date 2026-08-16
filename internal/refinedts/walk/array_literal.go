@@ -63,6 +63,28 @@ func EvaluateArrayLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomain
 			if len(lit.Elements.Nodes) == 1 && spread.Kind == abstractdomain.KindSet && spread.SetKindTag == abstractdomain.SetKindTagNone {
 				return spread
 			}
+			// `[...new Array(n)]` alone, n past the materialization
+			// ceiling: sec-runtime-semantics-arrayaccumulation's
+			// `SpreadElement : ... AssignmentExpression` row
+			// (tmp/ecma262/spec.html) drains the receiver's own
+			// GetIterator/IteratorStepValue result at each position — the
+			// ARRAY exotic object's own iterator (%ArrayIteratorPrototype%
+			// .next) yields VALUES by reading Get(array, ToString(index)),
+			// which answers undefined at any own-or-inherited miss
+			// (OrdinaryGet) — so the spread produces n copies of
+			// undefined, the same length and element claim the receiver
+			// itself already carries. The result is DENSE whatever the
+			// receiver was: ArrayAccumulation's SpreadElement row runs
+			// CreateDataPropertyOrThrow at every position
+			// (sec-runtime-semantics-arrayaccumulation), so the copy
+			// affirms density even when a sparse `new Array(n)` fed it —
+			// Object.keys of the spread answers every index.
+			if len(lit.Elements.Nodes) == 1 && spread.Kind == abstractdomain.KindArrayHoles {
+				densified := spread
+				densified.Dense = true
+				densified.DenseKnown = true
+				return densified
+			}
 			// a spread of a BUILT collection materializes its entries in
 			// place, in entry order — a Set's members one apiece, a Map's
 			// [key, value] pairs (collectionSpreadItems and its clauses)
@@ -91,8 +113,34 @@ func EvaluateArrayLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomain
 			// (sec-runtime-semantics-arrayaccumulation). So the element the
 			// star is built over comes from the same reading `.next().value`
 			// takes, and only the LENGTH stays unstated.
-			if spreadElement.Kind == abstractdomain.KindUnknown && !spreadElement.Opaque {
+			//
+			// A GENERATOR call's own evaluated value is deliberately OPAQUE
+			// (GeneratorCallResult, generator_element.go — the call builds
+			// an object, not the body's return value), so spreadElement
+			// reads Opaque here even though builtinIteratorSequenceOf's own
+			// GeneratorSequenceOf arm CAN answer the element by reading the
+			// callee's yields off the CALL NODE, not off this already-opaque
+			// value. Trying the reader whenever the value read nothing
+			// itself — Opaque included — is what lets `[...gen()]` reach
+			// that arm; a plain KindUnknown-but-not-opaque value is not the
+			// only shape a spread's own evaluation can leave unanswered.
+			if spreadElement.Kind == abstractdomain.KindUnknown {
 				if sequence, ok := builtinIteratorSequenceOf(ctx, element.AsSpreadElement().Expression); ok {
+					// `[...gen()]` ALONE is the drained sequence itself, not
+					// merely a position folded through sequenceOfElements —
+					// same reasoning as the `[...xs]`-alone COPY above. That
+					// distinction carries real information here: the drain
+					// may carry a proven LOWER BOUND (GeneratorSequenceOf
+					// stating a generator's leading unconditional yields as
+					// a Repetition, not a bare Star), and folding down to
+					// just spreadElement and re-starring below
+					// (sequenceOfElements's own scalarPositionSet) would
+					// throw that bound away — every fold there rebuilds a
+					// fresh lo=0 star, having no way to see the bound the
+					// per-element read already discarded.
+					if len(lit.Elements.Nodes) == 1 {
+						return sequence
+					}
 					spreadElement = ElementOf(sequence)
 				}
 			}
@@ -142,6 +190,14 @@ func EvaluateArrayLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomain
 // positions of THIS array — the tuple layer concatenates rather than
 // nests. Such an element poses no one-position claim, so it goes quiet
 // with the rest rather than flattening into a false element set.
+//
+// A HOLE element (KindUndef — an elision, or a hole array's spread
+// element) is the one exception the scalar gate carves out on purpose:
+// it poses no set MEMBER, but "this position may be absent" is still a
+// sound per-position claim, so it folds onto the union afterward via
+// abstractdomain.PossiblyUndefined rather than failing the whole
+// literal to unknown (`[...new Array(n), 1]`: every position is either
+// absent or exactly 1).
 func sequenceOfElements(elements []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	// every element GRAPH-shaped: the positions hold records or class
 	// instances, so the claim is the object-star's — the join of what
@@ -154,7 +210,21 @@ func sequenceOfElements(elements []abstractdomain.AbstractValue) abstractdomain.
 	}
 	var union *refinementsets.RefinedSet
 	grade := abstractdomain.TrustProved
+	sawUndef := false
 	for _, element := range elements {
+		// a HOLE position (an elision, or a hole array's own element
+		// read) contributes no set member — undefined is not a member of
+		// the kernel's number/string universe a RefinedSet ranges over —
+		// but it is a legitimate per-position CONTRIBUTION on its own:
+		// the position may simply be absent. Remembered here and folded
+		// onto the whole star claim afterward, the same way
+		// abstractdomain.PossiblyUndefined wraps any other known value
+		// (finding 5: the one way a possibly-absent value is built).
+		if element.Kind == abstractdomain.KindUndef {
+			sawUndef = true
+			grade = abstractdomain.MinTrustLevel(grade, abstractdomain.TrustLevelOf(element))
+			continue
+		}
 		set, ok := scalarPositionSet(element)
 		if !ok {
 			return abstractdomain.UnknownOver(elements)
@@ -168,14 +238,21 @@ func sequenceOfElements(elements []abstractdomain.AbstractValue) abstractdomain.
 		}
 	}
 	if union == nil {
+		// every position was a hole — nothing built a set to wrap, so
+		// there is no star claim PossiblyUndefined could sit around;
+		// stay quiet rather than overclaim
 		return silence.Residue()
 	}
-	return abstractdomain.KnownSet(
+	star := abstractdomain.KnownSet(
 		refinementsets.MakeRefinedSet(refinementsets.Star(*union)),
 		nil,
 		grade,
 		abstractdomain.SetKindTagNone,
 	)
+	if sawUndef {
+		return abstractdomain.PossiblyUndefined(star, "", false, false)
+	}
+	return star
 }
 
 // objectStarOfElements builds the object-star over a literal's

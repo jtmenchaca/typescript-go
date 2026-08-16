@@ -397,6 +397,17 @@ func readMapGroupBy(site MethodCallSite) *abstractdomain.AbstractValue {
 // cannot be the finishing one, so no absence rides on the value and
 // done is exactly false.
 //
+// An ASYNC generator's suspended-start resume (sec-asyncgeneratorresume,
+// RunSuspendedContext) runs the SAME body forward and lands on the SAME
+// CreateIteratorResultObject(value, false) once the first statement's
+// `yield e` suspends it — AsyncGeneratorResume's own algorithm carries
+// no branch that changes what a plain `yield e` hands back, only
+// AsyncGeneratorAwaitReturn wraps the settled record in a Promise the
+// caller's own `await` unwraps before this reading is ever asked to
+// speak. So the claim holds for either generator kind; only the
+// SPELLING that gets it there (a promise around the record) differs,
+// and that spelling is handled where the record is read, not here.
+//
 // The yield's expression is read in the body's own fresh scope, with
 // nothing of the caller in it — the same discipline the yield join
 // takes (generator_element.go generatorYieldElement), including the
@@ -405,11 +416,6 @@ func readMapGroupBy(site MethodCallSite) *abstractdomain.AbstractValue {
 func generatorFirstNextValue(ctx *FlowContext, call *ast.Node) (abstractdomain.AbstractValue, bool) {
 	declaration := GeneratorDeclarationOf(ctx, call)
 	if declaration == nil {
-		return abstractdomain.AbstractValue{}, false
-	}
-	// an ASYNC generator's next() hands back a Promise of the record,
-	// not the record — the synchronous reading does not hold there
-	if ast.GetCombinedModifierFlags(declaration)&ast.ModifierFlagsAsync != 0 {
 		return abstractdomain.AbstractValue{}, false
 	}
 	body := declaration.Body()

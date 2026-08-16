@@ -81,6 +81,20 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 	if globalConstant := ReadGlobalConstantAccess(ctx, e); globalConstant != nil {
 		return globalConstant
 	}
+	// `ClassName.field` — a static field's own invariant
+	// (class_static_field_invariants.go), the constructor-object twin
+	// of the instance field read above. Tried BEFORE the object-key
+	// reader: a bare class reference's own static TYPE carries
+	// construct signatures, so evaluating the receiver for the
+	// object-key reader answers KindHostFunction — a decline
+	// (silence.Residue, but non-nil) that shadows this reader forever
+	// if tried second. Resolving the symbol directly, with no receiver
+	// evaluation, sidesteps that entirely; a receiver that does NOT
+	// name a class declaration answers nil here and falls through
+	// unchanged.
+	if staticField := ReadStaticFieldAccess(ctx, e); staticField != nil {
+		return meetHeldPlaceEntry(ctx.P.Checker, env, e, staticField)
+	}
 	// `this.key` and a known object's key each answer off the receiver,
 	// and the dotted entry speaks about the same value — so the two
 	// meet here rather than the earlier reader shadowing the memory.
@@ -148,6 +162,13 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 				out := abstractdomain.KnownValues([]float64{float64(len(receiver.Items))}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 				return &out
 			}
+			if receiver.Kind == abstractdomain.KindArrayHoles && receiver.Inner != nil {
+				// the length claim {n} IS receiver.Inner — .length hands
+				// back the very AbstractValue the array-holes value already
+				// wraps, the same read a KindList's own length answers
+				out := *receiver.Inner
+				return &out
+			}
 			// an OBJECT-STAR states no count, so its length answers only
 			// what the sort itself guarantees: an array's length is always
 			// a non-negative integer below 2^32 (sec-array-exotic-objects'
@@ -183,10 +204,24 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 				rep, ok := refinementsets.AsRepetition(carrier)
 				if ok {
 					// a string's length counts UTF-16 units — at least one per
-					// scalar, two for astrals — so only the floor survives there
+					// scalar, two for astrals — so the window's own scalar
+					// count (rep.Lo/rep.Hi) only floors .length in general.
+					// The one exception: an EXACT scalar count (lo == hi)
+					// whose element alphabet is PROVEN astral-free (every
+					// member below the astral floor, so scalar count and
+					// UTF-16 unit count coincide) reads back exactly — the
+					// same astral-freedom gate element_access.go's string
+					// index read and sequence_copy_models.go's `.at`/`.slice`
+					// already require before trusting a unit position.
 					stringy := primitives.IsStringKind(ctx.P.Checker, pa.Expression)
 					var set refinementsets.RefinedSet
-					if stringy || rep.Hi == nil {
+					if stringy {
+						if rep.Hi != nil && *rep.Hi == rep.Lo && astralFreeSet(rep.Element) {
+							set = refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{float64(rep.Lo)}))
+						} else {
+							set = refinementsets.MakeRefinedSet(refinementsets.AtLeast(float64(rep.Lo)), refinementsets.Integer)
+						}
+					} else if rep.Hi == nil {
 						set = refinementsets.MakeRefinedSet(refinementsets.AtLeast(float64(rep.Lo)), refinementsets.Integer)
 					} else {
 						set = refinementsets.MakeRefinedSet(refinementsets.AtLeast(float64(rep.Lo)), refinementsets.AtMost(float64(*rep.Hi)), refinementsets.Integer)

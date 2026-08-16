@@ -2,8 +2,11 @@
 //
 // What `new C(args)` holds from the class's own text: each property
 // initializer, overlaid with every value the constructor writes to
-// `this` — all JOINED, so whichever path runs is covered. Incomplete
-// either way — methods and getters are keys too.
+// `this` — all JOINED, so whichever path runs is covered, plus every
+// non-static GET accessor's own return, run once against the fields
+// and constructor writes already collected. Still incomplete — a
+// method is a key too, and a getter chained off another getter's key
+// is not threaded through this pass.
 
 package walk
 
@@ -240,6 +243,23 @@ func constructedInstanceInner(
 				}
 			}
 		}
+		// `super(...)` in the body: EvaluateCallExpression's ordinary
+		// contract resolution never finds one for it — a constructor
+		// declaration never registers as a FunctionContract at all
+		// (contract_file_facts.go's collector registers function
+		// declarations, methods, and arrow/function-expression
+		// properties, never a ConstructorDeclaration) — so the base
+		// constructor's own `this.x = ...` writes never inline through
+		// the ordinary call-expression walk below. Run the base's own
+		// constructor body here instead, its parameters bound from the
+		// super call's evaluated arguments (read against THIS callEnv,
+		// so `super(age)` reads the derived parameter `age` already
+		// bound above), folded into the same candidates this class's own
+		// writes join. Recurses up the chain on its own, so a base whose
+		// constructor itself calls `super(...)` is covered too.
+		if superCall := findSuperCall(body); superCall != nil {
+			superConstructorFieldCandidates(ctx, declaration, superCall, callEnv, addCandidate)
+		}
 		sink := map[string][]abstractdomain.AbstractValue{}
 		silent := *ctx
 		silent.Report = func(assignability.RefinementDiagnostic) {}
@@ -265,5 +285,196 @@ func constructedInstanceInner(
 		}
 		joinedKeys = append(joinedKeys, abstractdomain.ObjectKey{Name: key, Value: joined})
 	}
+	// a GET ACCESSOR is a key too — the header comment above says the
+	// gap outright. A non-static getter with a plain or private-`#name`
+	// identifier and a body runs its own statements once, `this` bound
+	// to the object the fields and constructor already built, its
+	// return collected through ReturnSink exactly as object_literal.go
+	// runs a shorthand-object getter. A getter that reads another
+	// getter-backed key sees this SAME pass's own candidates only for
+	// FIELDS and constructor writes — getter-to-getter chains are not
+	// threaded here, so a getter reading another getter's key falls to
+	// that key's own absence (unknown), same as any field this walk
+	// never determined.
+	if len(classDecl.Members.Nodes) > 0 {
+		soFar := abstractdomain.KnownObject(joinedKeys, nil, false, abstractdomain.TrustProved, false)
+		for _, member := range classDecl.Members.Nodes {
+			if !ast.IsGetAccessorDeclaration(member) {
+				continue
+			}
+			ga := member.AsGetAccessorDeclaration()
+			flags := ast.GetCombinedModifierFlags(member)
+			if flags&ast.ModifierFlagsStatic != 0 {
+				continue
+			}
+			name := ga.Name()
+			if name == nil || (!ast.IsIdentifier(name) && !ast.IsPrivateIdentifier(name)) {
+				continue
+			}
+			if ga.Body == nil {
+				continue
+			}
+			nameText := name.Text()
+			getterEnv := NewEnv()
+			getterEnv.Set("this", soFar)
+			var sink []abstractdomain.AbstractValue
+			silent := *ctx
+			silent.Report = func(assignability.RefinementDiagnostic) {}
+			silent.ReturnSink = &sink
+			silent.ThisWriteSink = nil
+			AnalyzeStatements(&silent, getterEnv, ga.Body.AsBlock().Statements.Nodes, nil)
+			if len(sink) == 0 {
+				continue
+			}
+			joined := sink[0]
+			for _, v := range sink[1:] {
+				joined = abstractdomain.JoinKnown(joined, v)
+			}
+			if _, already := candidates[nameText]; !already {
+				keyOrder = append(keyOrder, nameText)
+				joinedKeys = append(joinedKeys, abstractdomain.ObjectKey{Name: nameText, Value: joined})
+			}
+			candidates[nameText] = append(candidates[nameText], joined)
+		}
+	}
 	return abstractdomain.KnownObject(joinedKeys, nil, false, abstractdomain.TrustProved, false)
+}
+
+// findSuperCall is the first bare `super(...)` call inside a
+// constructor body — a top-level statement in valid TypeScript (a
+// derived constructor must run it before any `this`/`super` use), so
+// one scan finds it. Nested inside a nested function expression is not
+// a real super call for THIS constructor (its own `super` would bind
+// to whatever class contains that nested function, if any), so the
+// scan does not descend into one.
+func findSuperCall(body *ast.Node) *ast.Node {
+	var found *ast.Node
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if found != nil || node == nil {
+			return true
+		}
+		if ast.IsFunctionLike(node) {
+			return true
+		}
+		if ast.IsCallExpression(node) && node.AsCallExpression().Expression.Kind == ast.KindSuperKeyword {
+			found = node
+			return true
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	visit(body)
+	return found
+}
+
+// superConstructorFieldCandidates runs the BASE class's own constructor
+// body for its `this.x = ...` writes and parameter-property fills,
+// folding every one into addCandidate — the same treatment
+// constructedInstanceInner already gives the DERIVED constructor's own
+// body, extended up the heritage chain. `callerEnv` is the calling
+// constructor's own environment (its parameters already bound), which
+// is what the super call's argument expressions read against —
+// `super(age)` names the derived constructor's OWN parameter `age`.
+//
+// Recurses on its own: where the base constructor's body itself calls
+// `super(...)`, that call is found and walked the same way, so a
+// three-level chain (`GrandchildCtor -> ChildCtor -> BaseCtor`) folds
+// every level's writes into the one candidate set the outermost
+// `new` expression reads.
+func superConstructorFieldCandidates(
+	ctx *FlowContext,
+	derivedDeclaration *ast.Node,
+	superCall *ast.Node,
+	callerEnv Env,
+	addCandidate func(name string, v abstractdomain.AbstractValue),
+) {
+	base := BaseClassDeclarationOf(ctx, derivedDeclaration)
+	if base == nil {
+		return
+	}
+	baseClassDecl := base.ClassLikeData()
+	if baseClassDecl == nil {
+		return
+	}
+	var baseConstructor *ast.Node
+	for _, member := range baseClassDecl.Members.Nodes {
+		if ast.IsConstructorDeclaration(member) && member.Body() != nil {
+			baseConstructor = member
+			break
+		}
+	}
+	if baseConstructor == nil {
+		// no constructor of its own: the base's FIELD initializers are
+		// already read by constructedInstanceInner's heritage block, and
+		// there is no constructor body to walk further up for — an
+		// implicit constructor runs nothing this reading can see
+		return
+	}
+	// the super call's own arguments, evaluated against the CALLING
+	// constructor's environment (silently — the derived body's own walk
+	// reports these same argument expressions again when it reaches the
+	// statement, and a second diagnostic for one expression is a false
+	// duplicate)
+	call := superCall.AsCallExpression()
+	var argKnowns []abstractdomain.AbstractValue
+	if call.Arguments != nil {
+		argKnowns = make([]abstractdomain.AbstractValue, len(call.Arguments.Nodes))
+		silentArgs := *ctx
+		silentArgs.Report = func(assignability.RefinementDiagnostic) {}
+		for i, argument := range call.Arguments.Nodes {
+			argKnowns[i] = evaluateExpression(&silentArgs, callerEnv, argument)
+		}
+	}
+	baseEnv := NewEnv()
+	for i, parameter := range baseConstructor.AsConstructorDeclaration().Parameters.Nodes {
+		pd := parameter.AsParameterDeclaration()
+		if !ast.IsIdentifier(pd.Name()) {
+			continue
+		}
+		if i < len(argKnowns) {
+			baseEnv.Set(pd.Name().Text(), argKnowns[i])
+		} else {
+			baseEnv.Set(pd.Name().Text(), abstractdomain.Undef)
+		}
+		// a parameter property on the BASE's own constructor — the same
+		// prelude constructedInstanceInner's own parameter loop runs for
+		// the derived constructor
+		if !isParameterPropertyDeclaration(parameter) {
+			continue
+		}
+		if i < len(argKnowns) && argKnowns[i].Kind != abstractdomain.KindUndef {
+			addCandidate(pd.Name().Text(), argKnowns[i])
+			if argKnowns[i].Kind != abstractdomain.KindPossiblyUndefined || pd.Initializer == nil {
+				continue
+			}
+		}
+		if pd.Initializer != nil {
+			silent := *ctx
+			silent.Report = func(assignability.RefinementDiagnostic) {}
+			addCandidate(pd.Name().Text(), evaluateExpression(&silent, NewEnv(), pd.Initializer))
+		} else if i >= len(argKnowns) || argKnowns[i].Kind == abstractdomain.KindUndef {
+			addCandidate(pd.Name().Text(), abstractdomain.Undef)
+		}
+	}
+	baseBody := baseConstructor.AsConstructorDeclaration().Body
+	// the base's OWN super call, if it extends further — walked before
+	// this level's body so an ancestor's writes join in the same order
+	// constructedInstanceInner's heritage-then-own-body order keeps
+	if nested := findSuperCall(baseBody); nested != nil {
+		superConstructorFieldCandidates(ctx, base, nested, baseEnv, addCandidate)
+	}
+	sink := map[string][]abstractdomain.AbstractValue{}
+	silent := *ctx
+	silent.Report = func(assignability.RefinementDiagnostic) {}
+	silent.ReturnSink = nil
+	silent.ThisWriteSink = sink
+	AnalyzeStatements(&silent, baseEnv, baseBody.AsBlock().Statements.Nodes, nil)
+	for key, writes := range sink {
+		joined := writes[0]
+		for _, v := range writes[1:] {
+			joined = abstractdomain.JoinKnown(joined, v)
+		}
+		addCandidate(key, joined)
+	}
 }

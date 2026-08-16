@@ -157,10 +157,14 @@ func SlotOf(source abstractdomain.AbstractValue, key string) abstractdomain.Abst
 func SlotOfIndex(source abstractdomain.AbstractValue, i int) abstractdomain.AbstractValue {
 	dark := darkSlotOf(source)
 	if source.Kind == abstractdomain.KindValues && source.KindTag == abstractdomain.PrimitiveArray {
+		// an exact primitive-number array's length is as exact as a
+		// KindList's — Values lists every element the array holds, so a
+		// slot past its end is PROVABLY the absent value, the same rule
+		// the KindList branch below already applies to its Items
 		if i < len(source.Values) {
 			return abstractdomain.KnownValues([]float64{source.Values[i]}, abstractdomain.PrimitiveNumber, abstractdomain.TrustLevelOf(source))
 		}
-		return dark
+		return abstractdomain.Undef
 	}
 	if source.Kind == abstractdomain.KindList {
 		// a list's length is exact, so a slot past its end is EXACTLY

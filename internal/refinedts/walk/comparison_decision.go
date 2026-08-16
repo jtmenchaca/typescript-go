@@ -72,7 +72,8 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 		if a.Kind == abstractdomain.KindUndef {
 			other = b
 		}
-		if other.Kind == abstractdomain.KindValues || other.Kind == abstractdomain.KindObject || other.Kind == abstractdomain.KindList {
+		if other.Kind == abstractdomain.KindValues || other.Kind == abstractdomain.KindObject ||
+			other.Kind == abstractdomain.KindList || other.Kind == abstractdomain.KindArrayHoles {
 			return boolAt(op == CompareNe)
 		}
 		return silence.Residue()

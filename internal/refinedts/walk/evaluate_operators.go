@@ -136,6 +136,9 @@ func ReadBinary(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractV
 	if indexed, ok := ReadIndexedWrite(ctx, env, e); ok {
 		return indexed
 	}
+	if indexedCompound, ok := ReadIndexedCompoundWrite(ctx, env, e); ok {
+		return indexedCompound
+	}
 	if forgotten, ok := ReadForgottenAssignment(ctx, env, e); ok {
 		return forgotten
 	}
@@ -189,6 +192,7 @@ func ReadBinary(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractV
 		case leftKnown.Kind == abstractdomain.KindValues:
 			heldBoolean = leftKnown.KindTag == abstractdomain.PrimitiveBoolean
 		case leftKnown.Kind == abstractdomain.KindObject || leftKnown.Kind == abstractdomain.KindList ||
+			leftKnown.Kind == abstractdomain.KindArrayHoles ||
 			leftKnown.Kind == abstractdomain.KindCollection || leftKnown.Kind == abstractdomain.KindDate ||
 			leftKnown.Kind == abstractdomain.KindRegex || leftKnown.Kind == abstractdomain.KindPromise:
 			heldBoolean = false

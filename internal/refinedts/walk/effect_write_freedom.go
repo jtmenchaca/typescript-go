@@ -120,6 +120,39 @@ func inertValue(node *ast.Node) bool {
 	return free
 }
 
+// containsPropertyOrElementRead: does the subtree read a field or
+// element off SOME receiver — `this.#age`, `foo.bar`, `xs[i]` — the
+// shape a stronger route (a bundle slot, a flattened local) might
+// determine exactly if only its own tracking could name the step
+// (a PRIVATE name, an unresolvable receiver). writeAndCallFree alone
+// cannot tell such a read apart from a truly value-free expression
+// (`this` bare, an object literal, a boolean shortcut over calls
+// already declined above) — both move no state — so a caller deciding
+// whether a return is INERT (nothing worth flagging) or OPAQUE
+// (a real value this walk lost) asks this too. The walk stops at a
+// function or class boundary, matching inertValue's own rule: a
+// property read inside a closure the return merely CREATES is not
+// this return's own read.
+func containsPropertyOrElementRead(node *ast.Node) bool {
+	if node == nil {
+		return false
+	}
+	if ast.IsFunctionLike(node) || ast.IsClassLike(node) {
+		return false
+	}
+	if ast.IsPropertyAccessExpression(node) || ast.IsElementAccessExpression(node) {
+		return true
+	}
+	found := false
+	node.ForEachChild(func(child *ast.Node) bool {
+		if !found {
+			found = containsPropertyOrElementRead(child)
+		}
+		return false
+	})
+	return found
+}
+
 // ContainsWrite is containsWrite in the TS source: does the subtree
 // perform any write? A shape mapped to an opaque effect must be
 // write-free, or the lowering's state would miss the write. Shared

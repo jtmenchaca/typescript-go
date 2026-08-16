@@ -53,6 +53,14 @@ func LoopHeadOf(context *LoweringContext, condition *ast.Node) (LoopHead, bool) 
 		}
 		return LoopHead{On: on, TwoSlot: true, OnB: onB, Test: irTestOfCmp2(op)}, true
 	}
+	// a constant-bounded head needs the kernel's narrowing question to
+	// split the condition into its true/false sets; a caller that never
+	// seated one (Narrow nil) gets an honest decline here, the same
+	// shape every other missing-information branch above already
+	// returns, never a nil-function call
+	if context.Narrow == nil {
+		return LoopHead{}, false
+	}
 	answer := context.Narrow(kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindCmp, Op: op, K: k})
 	head := LoopHead{On: on}
 	if answer.WhenTrue != nil {

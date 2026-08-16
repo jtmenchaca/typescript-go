@@ -234,24 +234,26 @@ func TestObjectSlots_TheRecognizerDeclinesAReadOfAnInteriorNode(t *testing.T) {
 	}
 }
 
-// TestObjectSlots_AJoinArmDeclarationsTwoRoutesAndTheirOutcomes pins the
-// ASYMMETRY the two arm-family readers land in today, both halves sound:
+// TestObjectSlots_AJoinArmDeclarationsTwoRoutesAndTheirOutcomes pins
+// where the two arm-family readers land today, both halves sound and
+// both POROUS:
 //
 //   - SPELLED (`make(): Bounds`): the local FLATTENS into p.lo/p.hi
 //     (the recognizer tests above), and the body then settles POROUS at
 //     the "declaration" statement — the lowering has no route that reads
 //     `make() ?? {…}` INTO the flattened leaf slots, so the declaration
 //     havocs the leaves and the body serves nothing.
-//   - INFERRED (`make()` bare): the harness's ctx-less relower never
-//     resolves the return type, the local keeps its whole-name slot, and
-//     the body lowers COMPLETE through the CALL route — make() inlines,
-//     the join lands whole, and `p.lo` answers a sort-only claim (a
-//     number, unconstrained; verified to admit the true value 1).
+//   - INFERRED (`make()` bare): the relower keeps the whole-name slot,
+//     and the body settles POROUS at the member return — the inert
+//     sort-only serving this arm used to settle COMPLETE through was
+//     retired (an unspellable field read now records porous instead of
+//     serving an unconstrained-number claim as if the body determined
+//     it), so this arm now names the same member-wise wall the spelled
+//     one does, at its own statement.
 //
-// Neither half determines p.lo's VALUE. The named next construct is the
-// spelled half's wall: lowering a `call() ?? literal` initializer into
-// the flattened leaf slots member-wise, which would turn the porous row
-// complete AND carry the values.
+// Neither half determines p.lo's VALUE. The named next construct for
+// both is lowering a `call() ?? literal` initializer into leaf slots
+// member-wise, which would turn the rows complete AND carry the values.
 func TestObjectSlots_AJoinArmDeclarationsTwoRoutesAndTheirOutcomes(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
@@ -267,8 +269,8 @@ func TestObjectSlots_AJoinArmDeclarationsTwoRoutesAndTheirOutcomes(t *testing.T)
 		"interface Bounds { lo: number; hi: number }\n"+
 			"function make() { return { lo: 1, hi: 2 }; }\n"+
 			"function f(n: number) { const p = make() ?? { lo: 0, hi: 0 }; return p.lo; }\n")
-	if inferredOutcome != SummaryComplete || inferredConstruct != "" {
-		t.Errorf("the unresolved arm settled outcome=%v construct=%q, want complete through the whole-value call route",
+	if inferredOutcome != SummaryPorous || inferredConstruct != "return (member p.lo)" {
+		t.Errorf("the unresolved arm settled outcome=%v construct=%q, want porous at the member return — the retired inert serving must not come back as a complete row that determines nothing",
 			inferredOutcome, inferredConstruct)
 	}
 }

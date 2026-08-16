@@ -130,6 +130,154 @@ func readsTwiceWithoutEffect(argument *ast.Node) bool {
 	return false
 }
 
+// classMethodWalkTarget is whether a call's callee is a class INSTANCE
+// method (or get accessor) whose receiver resolves — through
+// SummaryCallReceiver, the same read the kernel-summary route and the
+// memo key already take — to a KindObject the walk actually holds
+// field facts for. A plain function call, a static method, an
+// object-literal method (ObjectLiteralMethodWalkCall's own case,
+// checked first so the two routes never both claim one call), and a
+// receiver SummaryCallReceiver could not read without running it
+// (silence.Residue, Kind != KindObject) all decline — the caller falls
+// through to the ordinary walk-route body walk with no `this` binding,
+// exactly as it did before this route existed.
+func classMethodWalkTarget(declaration *ast.Node, receiver abstractdomain.AbstractValue) bool {
+	if declaration == nil {
+		return false
+	}
+	if !ast.IsMethodDeclaration(declaration) && !ast.IsGetAccessorDeclaration(declaration) && !ast.IsSetAccessorDeclaration(declaration) {
+		return false
+	}
+	if declaration.Parent == nil || !ast.IsClassLike(declaration.Parent) {
+		return false
+	}
+	return receiver.Kind == abstractdomain.KindObject
+}
+
+// ClassMethodWalkCall runs a class instance method's body on the walk
+// route — no IR, no kernel — with `this` bound to the RECEIVER'S OWN
+// per-call value (SummaryCallReceiver's reading: the constructed
+// instance's exact field state, not the class's generic invariant
+// FieldInvariantsOf answers). readThisFieldInvariant's own
+// `thisIsObject` bypass (this_property_access.go) is what makes this
+// safe: a `this` bound to a KindObject value steps the invariant
+// reader aside in favor of the general object-key read, so `this.#age`
+// inside `years()` answers this call's OWN 40 or 200 rather than the
+// class-wide join both calls would otherwise share.
+//
+// The pattern is ObjectLiteralMethodWalkCall's, re-rooted at a class
+// receiver instead of an object-literal one: a fresh call environment,
+// the method's own parameters bound the way InlineContractBody binds
+// them, the return collected through ReturnSink, and every
+// `this.key = value` write captured through ThisWriteSink and folded
+// back into the receiver's own tracked object with setObjectKey — so a
+// method that WRITES through `this` still lands its write on the
+// caller's held instance rather than dropping it silently.
+//
+// Declines (ok=false) wherever classMethodWalkTarget declines, or the
+// declaration carries no block body — the caller keeps its own
+// fallback for every shape this function does not recognize.
+func ClassMethodWalkCall(
+	ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, effective EffectiveArguments, receiver abstractdomain.AbstractValue,
+) (abstractdomain.AbstractValue, bool) {
+	if !classMethodWalkTarget(contract.Declaration, receiver) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	body := contract.Declaration.Body()
+	if body == nil || !ast.IsBlock(body) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	callee := CalleeExpressionOf(call)
+	if callee == nil {
+		return abstractdomain.AbstractValue{}, false
+	}
+	// RECURSION GUARD: a method that calls back into itself (through
+	// this receiver or another holding the same declaration) re-enters
+	// this function with the same symbol marked —
+	// accessorReadModifyWriteCore's own discipline, applied to the
+	// method's own name symbol.
+	calleeName := contract.Declaration.Name()
+	if calleeName == nil || !ast.IsIdentifier(calleeName) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	symbol := ctx.P.Checker.GetSymbolAtLocation(calleeName)
+	if symbol == nil {
+		return abstractdomain.AbstractValue{}, false
+	}
+	inlining := ctx.Inlining
+	if inlining == nil {
+		inlining = map[*ast.Symbol]struct{}{}
+	}
+	if _, already := inlining[symbol]; already {
+		return silence.Residue(), true
+	}
+	inlining[symbol] = struct{}{}
+	defer delete(inlining, symbol)
+
+	callEnv := NewEnv()
+	callEnv.Set("this", receiver)
+	for i, parameter := range contract.Declaration.Parameters() {
+		name := parameter.AsParameterDeclaration().Name()
+		if !ast.IsIdentifier(name) {
+			continue
+		}
+		callEnv.Set(name.Text(), BoundParameterKnown(ctx, parameter, i, effective))
+	}
+	var returnSink []abstractdomain.AbstractValue
+	sink := map[string][]abstractdomain.AbstractValue{}
+	silent := *ctx
+	silent.Report = func(assignability.RefinementDiagnostic) {}
+	silent.ReturnSink = &returnSink
+	silent.ThisWriteSink = sink
+	silent.Inlining = inlining
+	AnalyzeStatements(&silent, callEnv, body.AsBlock().Statements.Nodes, nil)
+
+	// fold the method's `this.key = value` writes into the receiver's
+	// own object value — setObjectKey's own rule (index_operators.go),
+	// the same rebuild WriteProperty runs for a `this.key = v` write —
+	// only where the receiver's RECEIVER EXPRESSION is itself a plain
+	// name or `this` the caller tracks (rootOfReceiver); a receiver
+	// SummaryCallReceiver derived from a fresh `new C(...)` construction
+	// names no tracked caller slot to fold back into, so the write
+	// simply lands on the local `receiver` copy and is discarded with
+	// it, exactly as ConstructedInstance's own one-shot read already is.
+	if receiverExpression := receiverExpressionOf(callee); receiverExpression != nil {
+		if name, rooted := rootOfReceiver(receiverExpression); rooted {
+			if _, hasReceiver := env.Get(name); hasReceiver {
+				nextReceiver := receiver
+				for key, writes := range sink {
+					joined := writes[0]
+					for _, w := range writes[1:] {
+						joined = abstractdomain.JoinKnown(joined, w)
+					}
+					nextReceiver = abstractdomain.KnownObject(setObjectKey(nextReceiver.Keys, key, joined), nil, false, abstractdomain.TrustProved, false)
+				}
+				UpdateTrackedEnv(ctx.Aliases, env, name, nextReceiver)
+			}
+		}
+	}
+
+	returned := silence.Residue()
+	if len(returnSink) > 0 {
+		returned = returnSink[0]
+		for _, v := range returnSink[1:] {
+			returned = abstractdomain.JoinKnown(returned, v)
+		}
+	}
+	return AsCalleeResult(*contract, returned), true
+}
+
+// receiverExpressionOf is a call-like node's receiver expression — the
+// property access's own Expression for a method call, nil for a super
+// call or a plain function call (neither names a receiver
+// rootOfReceiver could resolve).
+func receiverExpressionOf(callee *ast.Node) *ast.Node {
+	if callee == nil || !ast.IsPropertyAccessExpression(callee) {
+		return nil
+	}
+	return callee.AsPropertyAccessExpression().Expression
+}
+
 // InlineContractBody is inlineContractBody in the TS source.
 func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, effective EffectiveArguments) abstractdomain.AbstractValue {
 	tracing.Count("inlineContractCall", 0)
@@ -213,6 +361,24 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		return RecursionMarker(symbol)
 	}
 
+	// an OBJECT-LITERAL METHOD call tries its own precise walk-route
+	// BEFORE the memo/kernel-summary routes below: those two both serve
+	// a call that writes a receiver field by FORGETTING the whole
+	// receiver afterward (SummaryReceiverEffects' "served-call forget"
+	// below) — correct for a class instance, whose `this.key` reads
+	// answer through the class's standing field invariant regardless of
+	// any one call's history, but wrong for an object literal, where
+	// `person.age` after `person.bump()` reads the tracked KindObject's
+	// OWN key, and forgetting it is the only place the exact written
+	// value (41) lived. ObjectLiteralMethodWalkCall folds the write back
+	// onto the receiver instead of forgetting it, and declines cleanly
+	// (ok=false) for every callee it does not recognize — a class
+	// method, a bare hand-out, an unresolvable receiver — so this call
+	// changes nothing for any shape besides the one it fixes.
+	if result, handled := ObjectLiteralMethodWalkCall(ctx, env, call, contract, effective); handled {
+		return result
+	}
+
 	// the DETERMINISTIC replay: identical key, identical walk,
 	// identical outcome. A callback argument's behavior is fixed by
 	// its CALL NODE, so the node rides in the key and repeat walks of
@@ -260,7 +426,17 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	// The summary's admitted bodies have no caller-visible effect
 	// beyond the return (KernelSummaryDirect's comment carries the
 	// argument), so the remembered outcome carries no posts.
-	if summarized, ok := KernelSummaryDirectOn(ctx, argKnowns, contract, receiver); ok {
+	//
+	// EXACT (effective.Exact) picks the direct-apply variant that
+	// declines rather than TOP-serves a rest parameter's read over
+	// THIS call's own exact tail (KernelSummaryDirectExactOn's
+	// comment) — an inexact call keeps the plain spelling, since an
+	// unread spread leaves no exact tail to fall back on anyway.
+	kernelSummaryDirect := KernelSummaryDirectOn
+	if effective.Exact {
+		kernelSummaryDirect = KernelSummaryDirectExactOn
+	}
+	if summarized, ok := kernelSummaryDirect(ctx, argKnowns, contract, receiver); ok {
 		tracing.Count("inline.summaryDirect", 0)
 		// THE SERVED-CALL FORGET: a summary whose body writes receiver
 		// fields, writes a parameter bundle's fields, or returns its
@@ -306,14 +482,37 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		}
 		return AsCalleeResult(*contract, summarized)
 	}
+	// the kernel-summary route above declined (no dylib, or the body did
+	// not lower) — a CLASS method call still has a walk-route answer:
+	// `this` bound to THIS CALL'S OWN receiver value (the `receiver`
+	// SummaryCallReceiver already read above, for the memo key and the
+	// kernel-summary route) rather than the class-wide
+	// FieldInvariantsOf join every call used to share —
+	// `new Sealed(40).years()` and `new Sealed(200).years()` must answer
+	// 40 and 200, not one poisoned join of both. Declines
+	// (classMethodWalkTarget) wherever the receiver is not a KindObject
+	// the walk could resolve, which is exactly where the general body
+	// walk below already fell back to the field-invariant reading
+	// through `this` unbound.
+	if result, handled := ClassMethodWalkCall(ctx, env, call, contract, effective, receiver); handled {
+		return result
+	}
 	inlining[symbol] = struct{}{}
 
-	// the callee's own names shadow the caller's
+	// the callee's own names shadow the caller's — a destructured
+	// parameter's own LEAVES shadow too (`[a]`'s `a`), the same names
+	// BindInlineParameter binds below
 	shadowed := map[string]struct{}{}
 	for _, parameter := range contract.Declaration.Parameters() {
 		name := parameter.AsParameterDeclaration().Name()
 		if ast.IsIdentifier(name) {
 			shadowed[name.Text()] = struct{}{}
+			continue
+		}
+		if name != nil && (ast.IsObjectBindingPattern(name) || ast.IsArrayBindingPattern(name)) {
+			for _, leaf := range boundPatternNames(name) {
+				shadowed[leaf] = struct{}{}
+			}
 		}
 	}
 	declaredNames(body, shadowed)
@@ -329,6 +528,11 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	for i, parameter := range contract.Declaration.Parameters() {
 		name := parameter.AsParameterDeclaration().Name()
 		if !ast.IsIdentifier(name) {
+			// a destructured parameter (`[a]`, `{age}`) binds every leaf
+			// its pattern names — BindInlineParameter destructures the
+			// SAME argument value ParameterKnown places at this position,
+			// so `a`/`age` land in callEnv instead of staying unbound
+			BindInlineParameter(ctx, callEnv, parameter, i, effective)
 			continue
 		}
 		// the parameter wears its argument MET WITH ITS OWN DECLARED TYPE.
@@ -482,4 +686,3 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	}
 	return AsCalleeResult(*contract, returned)
 }
-

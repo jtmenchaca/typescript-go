@@ -35,8 +35,22 @@ func countLikeSet() refinementsets.RefinedSet {
 }
 
 // impossible is z.intersection(z.number().max(5), z.number().min(10)) — ∅.
+//
+// Spelled as the empty OneOf, not as the crossed bound pair
+// (AtMost(5) ∧ AtLeast(10)) that its comment describes: the kernel's
+// bottom intercept (boundary/exports.lean's kernelTransfer, gated on
+// readEnclosure/oneOfEnc) only ever sets Enclosure.bot from
+// `OneOf []` (set_functions/enclosure.lean's oneOfEnc, "that branch is
+// bottom's ONLY caller"). `Refinement.encl`'s AtLeast/AtMost arms feed
+// Enclosure.and, which merges bounds with no emptiness check at all —
+// so the crossed-bound spelling denotes ∅ semantically (scalarEmptyB
+// proves it, see TestEmptinessAndDisjointnessOnTheOneTupleLayer) but
+// reaches the transfer boundary as an ordinary (if crossed) window,
+// never as Enclosure.bottom. This is a named, documented precision
+// gap: a semantically-empty-but-not-OneOf-spelled set is NOT
+// bottom-detected at the transfer boundary today.
 func impossibleSet() refinementsets.RefinedSet {
-	return refinementsets.MakeRefinedSet(refinementsets.AtMost(5), refinementsets.AtLeast(10))
+	return refinementsets.MakeRefinedSet(refinementsets.OneOf(nil))
 }
 
 // ints is the integers, bare.
@@ -718,6 +732,35 @@ func TestToInt32TheBitwiseOperatorsAndTheCountProduct(t *testing.T) {
 	}
 	if !kernel.ScalarSubset(bounded.Set, refinementsets.MakeRefinedSet(refinementsets.AtLeast(6), refinementsets.AtMost(6), refinementsets.Integer)) {
 		t.Errorf("bounded.Set ⊆ {6} = false, want true")
+	}
+}
+
+// TestTransferOverAnImpossibleOperandAnswersTheEmptySet exercises the
+// real kernel boundary the way boundary/exports.lean's kernelTransfer
+// takes it: an operand spelled as the empty OneOf (impossibleSet — see
+// its own doc comment for why the crossed-bound spelling this test
+// once used does NOT reach the intercept) decodes to Enclosure.bottom
+// before any arithmetic runs (kernelTransfer's own comment: "A BOTTOM
+// operand … is caught HERE, before any proved transfer function
+// runs"), and the answer crosses back as encodeEnclosure's bottom
+// spelling — {"kind":"set","set":{"forms":[{"form":"oneOf","w":[]}]}} —
+// which this test's own ask1/Answered/DecodeTransferAnswer/DecodeWireSet
+// chain must read back as the same empty OneOf the Go encoder sends.
+// This is the empty-set wire round-trip proven against the live
+// kernel, not merely against the Go encoder's own output.
+func TestTransferOverAnImpossibleOperandAnswersTheEmptySet(t *testing.T) {
+	kernel := loadRoundTripKernel(t)
+	five := refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{5}))
+	got := kernel.Transfer(TransferQuestion{Op: TransferOpAdd, A: impossibleSet(), B: five})
+	if got.Kind != TransferAnswerSet {
+		t.Fatalf("add(impossible, {5}).Kind = %v, want set", got.Kind)
+	}
+	want := refinementsets.MakeRefinedSet(refinementsets.OneOf(nil))
+	if !kernel.ScalarEmpty(got.Set) {
+		t.Errorf("add(impossible, {5}).Set is not scalarEmpty, want the empty set")
+	}
+	if len(got.Set.Forms) != 1 || got.Set.Forms[0].Form != refinementsets.FormOneOf || len(got.Set.Forms[0].W) != 0 {
+		t.Errorf("add(impossible, {5}).Set = %+v, want the empty OneOf %+v", got.Set, want)
 	}
 }
 

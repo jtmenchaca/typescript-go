@@ -99,10 +99,26 @@ func scanBody(ctx *FlowContext, contract FunctionContract) EffectSummary {
 	parameters := map[string]struct{}{}
 	for _, parameter := range contract.Declaration.Parameters() {
 		name := parameter.AsParameterDeclaration().Name()
-		if !ast.IsIdentifier(name) {
-			return impureSummary
+		if ast.IsIdentifier(name) {
+			parameters[name.Text()] = struct{}{}
+			continue
 		}
-		parameters[name.Text()] = struct{}{}
+		// a DESTRUCTURED parameter (`[a]: number[]`, `{age}: Person`)
+		// binds no whole-name identifier at all — its own leaves are
+		// what the body reads (`return a;`), so those are what the
+		// identifier scan below must recognize as "the arguments alone,"
+		// not "something of the caller's world." Bailing to impureSummary
+		// here (the old rule) answered EffectFree=false for EVERY
+		// destructured parameter, whatever its body did — a body reading
+		// only its own bound leaves is exactly the pure, self-contained
+		// shape this function exists to recognize.
+		if ast.IsObjectBindingPattern(name) || ast.IsArrayBindingPattern(name) {
+			for _, leaf := range boundPatternNames(name) {
+				parameters[leaf] = struct{}{}
+			}
+			continue
+		}
+		return impureSummary
 	}
 	locals := map[string]struct{}{}
 	declaredNames(body, locals)
@@ -209,6 +225,23 @@ func scanBody(ctx *FlowContext, contract FunctionContract) EffectSummary {
 					selfContained = false
 				}
 			}
+		}
+		// a `this` read: a METHOD's result can depend on its receiver's
+		// own fields (`this.#age`), which the parameters alone never
+		// name — RecoverPure's own route (recoverPureBody,
+		// function_summaries.go) has no receiver to hand the kernel
+		// summary or the walk-route recovery; it calls SummaryResultIn,
+		// which always fills a method's this-entries from
+		// unknownReceiver() (kernel_summaries.go), TOPPING every field a
+		// real receiver would have named exactly. Marking `this` non-self-
+		// contained routes the call to the full inline instead
+		// (evaluate_call_expression.go's EffectFree branch), whose
+		// InlineContractBody reads the call's own receiver through
+		// SummaryCallReceiver and threads it to KernelSummaryDirectOn /
+		// ClassMethodWalkCall — the routes that answer the receiver's own
+		// field value rather than a class-wide TOP.
+		if node.Kind == ast.KindThisKeyword {
+			selfContained = false
 		}
 		node.ForEachChild(func(child *ast.Node) bool {
 			scan(child)
@@ -440,7 +473,17 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 	// inline walk below. Composition resolves through the walk's own
 	// contract registry, which needs the flow context — not the bare
 	// checker program.
-	if summarized, ok := SummaryResultIn(ctx, contract.Declaration, argKnowns); ok {
+	//
+	// EXACT rides along: this call's own effective arguments are what
+	// SummaryResultExactIn compares a TOP-fed rest parameter against
+	// (its own comment) — an inexact call (an unread spread) never
+	// qualifies, exactly as ParameterKnown itself declines a rest
+	// reading past one.
+	summaryResult := SummaryResultIn
+	if effective.Exact {
+		summaryResult = SummaryResultExactIn
+	}
+	if summarized, ok := summaryResult(ctx, contract.Declaration, argKnowns); ok {
 		if memo != nil && key != "" {
 			recoveryMemoMu.Lock()
 			memo[key] = summarized
@@ -480,6 +523,11 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 	for i, parameter := range contract.Declaration.Parameters() {
 		name := parameter.AsParameterDeclaration().Name()
 		if !ast.IsIdentifier(name) {
+			// a destructured parameter (`[a]`, `{age}`) binds every leaf
+			// its pattern names, the same route the inline body walk
+			// binds through — an identifier-only loop here left `a`
+			// unbound whole, not merely widened to the plain type
+			BindInlineParameter(ctx, callEnv, parameter, i, effective)
 			continue
 		}
 		// the same declared-type meet the inline route binds through: one
@@ -600,15 +648,31 @@ func RecursionMarker(symbol *ast.Symbol) abstractdomain.AbstractValue {
 	return held
 }
 
-// JoinSinkSummarized is the sink joined with pass-through markers
-// dropped; a sink of ONLY markers claims nothing.
+// JoinSinkSummarized is the sink joined with every marker COUNTED as
+// an unknown contribution rather than excluded: a marker means "this
+// branch's own return is still being derived, in the enclosing walk
+// that is inlining it" — `countdown(n-1)` reached from inside
+// `countdown`'s own recursive branch reads exactly this way — and a
+// branch whose value is not yet known joins as unknown the same way
+// any other undetermined operand would, poisoning the result to
+// honest imprecision rather than silently answering as though the
+// recursive branch had contributed nothing at all. Before this, a
+// sink of `[0 (the base case), marker (the recursive branch)]` joined
+// to the base case ALONE — `countdown(depth)` answered the exact
+// literal `0` for every `depth`, including `NaN`/`Infinity`, where the
+// recursive branch genuinely never resolves to 0 or anything else.
+// A sink of ONLY markers still claims nothing (unknown either way, so
+// residue is the same answer this branch would reach by joining unknown
+// with itself).
 func JoinSinkSummarized(sink []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	var bases []abstractdomain.AbstractValue
+	sawMarker := false
 	for _, entry := range sink {
 		if markerKey(entry) != nil {
 			markerMu.Lock()
 			markerDrops++
 			markerMu.Unlock()
+			sawMarker = true
 			continue
 		}
 		bases = append(bases, entry)
@@ -619,6 +683,9 @@ func JoinSinkSummarized(sink []abstractdomain.AbstractValue) abstractdomain.Abst
 	joined := bases[0]
 	for _, b := range bases[1:] {
 		joined = abstractdomain.JoinKnown(joined, b)
+	}
+	if sawMarker {
+		joined = abstractdomain.JoinKnown(joined, silence.Residue())
 	}
 	return joined
 }

@@ -47,6 +47,25 @@ func UnknownSymbol() abstractdomain.AbstractValue {
 // element neither layer holds (an unknown), where no position claim
 // exists to state.
 func StarOfElement(element abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
+	return StarOfElementAtLeast(element, 0)
+}
+
+// StarOfElementAtLeast is StarOfElement with a proven LOWER BOUND on the
+// sequence's length -- lo positions are guaranteed present, past which
+// the count is however many the source's own control flow decides. lo=0
+// is StarOfElement's plain star (Repetition(element, 0, nil) collapses
+// to Star(element) — Repetition's own zero-lo, unbounded-hi case).
+//
+// A caller earns a positive lo by proving the source runs unconditionally
+// at least that many times before anything can stop it -- a generator
+// body's own leading straight-line yields, for instance
+// (generatorMinimumYieldCount, walk/generator_element.go). The bound
+// rides as a Repetition rather than a bare Star so an index proven under
+// the floor (`seq[0]` against lo=1) reads the element outright, with no
+// absence wrapper -- refinementsets.AsRepetition and InBoundsElementOf
+// already read a Repetition's Lo this way; only the BUILD side needed
+// the option to state one.
+func StarOfElementAtLeast(element abstractdomain.AbstractValue, lo int) (abstractdomain.AbstractValue, bool) {
 	nanRides := false
 	inner := element
 	if inner.Kind == abstractdomain.KindPossiblyNaN {
@@ -58,11 +77,14 @@ func StarOfElement(element abstractdomain.AbstractValue) (abstractdomain.Abstrac
 		// an element the tuple layer cannot hold — a record, a class
 		// instance — is a sequence claim all the same: every position
 		// holds that element, at a length the type does not state. The
-		// object-star carries exactly that, and nothing more.
+		// object-star carries exactly that, and nothing more. (A proven
+		// lo is lost here — the object-star form has no length slot to
+		// carry it in; ElementOfObjectStar already answers any position
+		// unconditionally, so the bound would add nothing.)
 		return abstractdomain.KnownObjectStar(inner, abstractdomain.TrustProved)
 	}
 	worn := abstractdomain.KnownSet(
-		refinementsets.MakeRefinedSet(refinementsets.Star(items)),
+		refinementsets.Repetition(items, lo, nil),
 		nil,
 		abstractdomain.TrustProved,
 		abstractdomain.SetKindTagNone,

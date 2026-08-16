@@ -46,10 +46,16 @@ func ContractBySymbol(ctx *FlowContext, callee *ast.Node) *FunctionContract {
 		return nil
 	}
 	var initializer *ast.Node
+	// a PROPERTY'S initializer is a stable identity for the alias
+	// resolution below; a VARIABLE'S is not — a `let` alias may be
+	// reassigned, so only the node-index fallback reads it
+	propertyInitializer := false
 	if ast.IsPropertyAssignment(declaration) {
 		initializer = declaration.AsPropertyAssignment().Initializer
+		propertyInitializer = true
 	} else if ast.IsPropertyDeclaration(declaration) {
 		initializer = declaration.AsPropertyDeclaration().Initializer
+		propertyInitializer = true
 	} else if ast.IsVariableDeclaration(declaration) {
 		initializer = declaration.AsVariableDeclaration().Initializer
 	}
@@ -64,6 +70,23 @@ func ContractBySymbol(ctx *FlowContext, callee *ast.Node) *FunctionContract {
 	if initializer != nil {
 		if held, ok := index[initializer]; ok {
 			return held
+		}
+		// a property that ALIASES an existing function by name
+		// (`{ bump: helperFn }`): the initializer is an identifier, not
+		// a function node, so the node index misses — resolve the named
+		// function's own symbol and answer its contract
+		if propertyInitializer && ast.IsIdentifier(initializer) {
+			target := symbolAt(ctx.P.Checker, initializer)
+			if target != nil {
+				if held, ok := ctx.Contracts[target]; ok {
+					return held
+				}
+				if target.ValueDeclaration != nil {
+					if held, ok := index[target.ValueDeclaration]; ok {
+						return held
+					}
+				}
+			}
 		}
 	}
 	return nil

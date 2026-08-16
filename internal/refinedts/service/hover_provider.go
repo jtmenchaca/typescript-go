@@ -39,6 +39,12 @@ func FormatRefinementAt(
 	if !answer.HasKnown || answer.ShownByHost {
 		return "", false
 	}
+	// a bare function claim only restates the signature line the hover
+	// already shows — `function after(t: Cutoff): number` gains nothing
+	// from `{a function}` after it, so the tooltip drops it
+	if answer.Known == "{a function}" || answer.Known == "a function" {
+		return "", false
+	}
 	return answer.Known, true
 }
 

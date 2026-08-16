@@ -41,6 +41,41 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 	// a declared sequence's element set is an invariant: judge the
 	// written value against it before the tracked value moves
 	WriteElement(ctx, bin.Left, value, bin.Right)
+	// `ta[i] = v` on a TypedArray runs the constructor's own ToXxx
+	// conversion on v before the STORED element changes
+	// (TypedArraySetElement, #sec-typedarraysetelement, oldid
+	// sec-integerindexedelementset — called from TypedArray's own
+	// [[Set]], #sec-typedarray-set): ToUint8 wraps modulo 2^8, ToInt8
+	// wraps signed, ToUint8Clamp clamps to [0, 255]. The ASSIGNMENT
+	// EXPRESSION's own value is unaffected — simple-assignment runtime
+	// semantics (#sec-assignment-operators-runtime-semantics-evaluation)
+	// read `PutValue(leftRef, rightValue); Return rightValue` — the
+	// UNCONVERTED right-hand value, always; the conversion is visible
+	// only to a LATER READ of the element, never to the assignment
+	// expression itself (`x = (ta[i] = 200)` is 200, exactly like a
+	// plain array). The receiver's AbstractValue carries no tag saying
+	// which conversion applies — the checker's own static type at the
+	// receiver expression does (typed_array_models.go's
+	// TypedArrayWriteConversion, the same receiverType.Symbol().Name
+	// reading collection_models.go and date_models.go already use for
+	// their own spec-fixed rows).
+	if convert, isTypedArray := TypedArrayWriteConversion(ctx, elem.Expression); isTypedArray &&
+		receiver.Kind == abstractdomain.KindValues && receiver.KindTag == abstractdomain.PrimitiveArray &&
+		index.Kind == abstractdomain.KindValues && len(index.Values) == 1 &&
+		value.Kind == abstractdomain.KindValues && len(value.Values) == 1 &&
+		value.KindTag == abstractdomain.PrimitiveNumber &&
+		isInteger(index.Values[0]) {
+		// an out-of-range index is a spec no-op (TypedArraySetElement's own
+		// IsValidIntegerIndex guard skips the store, per its note: "no
+		// effect when attempting to write past the end") — the tracked
+		// array is unchanged either way; only an in-bounds index moves it
+		if index.Values[0] >= 0 && int(index.Values[0]) < len(receiver.Values) {
+			next := append([]float64{}, receiver.Values...)
+			next[int(index.Values[0])] = convert(value.Values[0])
+			UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+		}
+		return value, true
+	}
 	if receiver.Kind == abstractdomain.KindValues && receiver.KindTag == abstractdomain.PrimitiveArray &&
 		index.Kind == abstractdomain.KindValues && len(index.Values) == 1 &&
 		value.Kind == abstractdomain.KindValues && len(value.Values) == 1 &&
@@ -105,6 +140,76 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 	}
 	HavocEnv(ctx.Aliases, env, name)
 	return value, true
+}
+
+// ReadIndexedCompoundWrite is ReadIndexedWrite's compound twin:
+// `name[i] OP= e` on a tracked identifier — `+= -= *= /= %=`, the six
+// bitwise/shift compounds, and `**=`, over an EXACT-tuple number array
+// with a pinned in-range index. (AbstractValue{}, false) where the left
+// side is not that form, the receiver is not a plain in-bounds number
+// array, or the index/value are not exact.
+//
+// Before this function existed, a compound through an element access
+// (`ages[0] += 190`) matched no arm in ReadAssignment or ReadIndexedWrite
+// (both gate on ast.KindEqualsToken, or an identifier/property LEFT —
+// never an ElementAccessExpression with a compound token) and fell to
+// ReadForgottenAssignment, which evaluates the right side, forgets the
+// whole receiver, and returns — no judge ever ran, so an out-of-set
+// compound write (`ages[0] += 190` past Age's ceiling) passed silently.
+// This function runs the SAME judge WriteElement already runs for a
+// direct `ages[0] = 200` write (assignments.go), against the COMPUTED
+// value rather than a written literal, and folds the write back through
+// UpdateTrackedEnv exactly as ReadIndexedWrite's own exact-array arm
+// does.
+func ReadIndexedCompoundWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.AbstractValue, bool) {
+	bin := e.AsBinaryExpression()
+	if bin.OperatorToken.Kind < ast.KindFirstCompoundAssignment ||
+		bin.OperatorToken.Kind > ast.KindLastCompoundAssignment ||
+		!ast.IsElementAccessExpression(bin.Left) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	elem := bin.Left.AsElementAccessExpression()
+	if !ast.IsIdentifier(elem.Expression) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	name := elem.Expression.Text()
+	receiver, hasReceiver := env.Get(name)
+	if !hasReceiver {
+		return abstractdomain.AbstractValue{}, false
+	}
+	if receiver.Kind != abstractdomain.KindValues || receiver.KindTag != abstractdomain.PrimitiveArray {
+		return abstractdomain.AbstractValue{}, false
+	}
+	index := evaluateExpression(ctx, env, elem.ArgumentExpression)
+	if index.Kind != abstractdomain.KindValues || len(index.Values) != 1 || !isInteger(index.Values[0]) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	i := index.Values[0]
+	if i < 0 || int(i) >= len(receiver.Values) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	right := evaluateExpression(ctx, env, bin.Right)
+	before := abstractdomain.KnownValues([]float64{receiver.Values[int(i)]}, abstractdomain.PrimitiveNumber, abstractdomain.TrustLevelOf(receiver))
+	next := compoundResult(ctx, bin.Left, bin.Right, bin.OperatorToken.Kind, before, right)
+	// a declared sequence's element set is an invariant: judge the
+	// written value against it before the tracked value moves — the
+	// exact rule WriteElement already applies to a direct `a[i] = v`
+	// write, applied here to the COMPUTED compound result
+	WriteElement(ctx, bin.Left, next, e)
+	if next.Kind == abstractdomain.KindValues && len(next.Values) == 1 && next.KindTag == abstractdomain.PrimitiveNumber {
+		if convert, isTypedArray := TypedArrayWriteConversion(ctx, elem.Expression); isTypedArray {
+			stored := append([]float64{}, receiver.Values...)
+			stored[int(i)] = convert(next.Values[0])
+			UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownValues(stored, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+			return next, true
+		}
+		stored := append([]float64{}, receiver.Values...)
+		stored[int(i)] = next.Values[0]
+		UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownValues(stored, abstractdomain.PrimitiveArray, abstractdomain.TrustProved))
+		return next, true
+	}
+	HavocEnv(ctx.Aliases, env, name)
+	return next, true
 }
 
 func objectKeyIndex(receiver abstractdomain.AbstractValue, name string) (int, bool) {

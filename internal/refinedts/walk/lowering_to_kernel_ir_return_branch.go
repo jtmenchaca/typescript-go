@@ -269,3 +269,206 @@ func shortCircuitLeftSlot(context *LoweringContext, left *ast.Node) (int, bool) 
 	}
 	return effect.Index, true
 }
+
+// isShortCircuitToken is the same three-token gate logicalTokens states
+// (effect_expression.go), asked here of a syntax node's operator rather
+// than a map lookup, since this file works with the AST's own token kind
+// before any effect exists to check a map against.
+func isShortCircuitToken(kind ast.Kind) bool {
+	return kind == ast.KindQuestionQuestionToken || kind == ast.KindAmpersandAmpersandToken || kind == ast.KindBarBarToken
+}
+
+// returnArithmeticOverShortCircuit lowers `return age + (extra ?? 0)` —
+// an ARITHMETIC operator with exactly one short-circuit operand — as a
+// BRANCH whose two arms each compute the WHOLE arithmetic expression,
+// the short-circuit sub-expression narrowed to what that arm's own
+// runtime proves it: the tracked slot itself on the arm where it is
+// defined/truthy, the short circuit's own right operand on the arm
+// where it is not.
+//
+// WHY THE PLAIN EFFECT GRAMMAR IS NOT ENOUGH. `RhsEffect`/`EffectOf`
+// already lowers `age + (extra ?? 0)` as `add(var(age), join(var(extra),
+// const(0)))` — sound, but LoopEffectJoin admits BOTH operands' sets at
+// once (effect_expression.go's own doc on logicalTokens: "the join of
+// both admits every run"), so the add's right side reads as possibly
+// absent-flagged whenever `extra` might be, even on the runs where `??`
+// itself guarantees a defined result. Composing the SAME add inside a
+// branch, once per arm, lets each arm's `extra` reading be the exact
+// narrowed value that arm's runtime actually has — the join happens
+// AFTER the arithmetic, at the branch's own exit, not before it.
+//
+// THIS LOWERING IS EXACT ONLY UNDER A KERNEL WHOSE JOIN TREATS AN
+// EMPTY-SET ARM AS IDENTITY. A prior attempt at this shape was removed
+// because the THEN-current kernel had no bottom/unreachable enclosure:
+// `oneOfEnc([])` fell through to `Enclosure.top` (unbounded), so the
+// arm narrowed to the provably-unreachable branch (e.g. `extra` proved
+// absent on the defined-tested arm of some OTHER read) contributed
+// UNBOUNDED arithmetic to `KnownState.join`, widening the whole answer
+// back to unknown. This restoration depends on the sibling kernel fix
+// (`oneOfEnc [] = bottom`, arithmetic transfers absorbing bottom,
+// `KnownState.join` treating a bottom/empty state as identity) — the
+// KERNEL ARTIFACTS MUST BE REBUILT (`pnpm kernel` then `pnpm
+// kernel:native`) before the judge reflects this lowering; against a
+// stale dylib the empty arm still reads top and the join still widens,
+// exactly the failure this lowering was pulled for.
+//
+// Gated on `sort == BindingKindNumber`: string concatenation over a
+// short-circuit operand stays with the plain `RhsEffect`/`SequenceEffectOf`
+// route above (lowering_to_kernel_ir_return.go), which already composes
+// a string join correctly — this route only tightens the NUMERIC
+// arithmetic reading, where the kernel's or-absent flag is the thing
+// costing precision.
+func returnArithmeticOverShortCircuit(
+	context *LoweringContext,
+	expression *ast.Node,
+	sort BindingKind,
+	raise kernelbridge.IrStatement,
+) ([]kernelbridge.IrStatement, bool) {
+	if context == nil || context.Result == nil || expression == nil || sort != BindingKindNumber {
+		return nil, false
+	}
+	head := Unwrapped(expression)
+	if !ast.IsBinaryExpression(head) {
+		return nil, false
+	}
+	bin := head.AsBinaryExpression()
+	if _, arithmetic := binOps[bin.OperatorToken.Kind]; !arithmetic {
+		return nil, false
+	}
+	// EXACTLY ONE operand is a short circuit: two would need two
+	// branches nested inside one arithmetic read, which this route does
+	// not attempt, and neither would leave nothing for this lowering to
+	// tighten over the plain effect grammar's own answer.
+	leftHead := Unwrapped(bin.Left)
+	rightHead := Unwrapped(bin.Right)
+	leftIsShort := ast.IsBinaryExpression(leftHead) && isShortCircuitToken(leftHead.AsBinaryExpression().OperatorToken.Kind)
+	rightIsShort := ast.IsBinaryExpression(rightHead) && isShortCircuitToken(rightHead.AsBinaryExpression().OperatorToken.Kind)
+	if leftIsShort == rightIsShort {
+		return nil, false
+	}
+	shortNode := rightHead
+	if leftIsShort {
+		shortNode = leftHead
+	}
+	shortBin := shortNode.AsBinaryExpression()
+	kind := shortBin.OperatorToken.Kind
+	on, tracked := shortCircuitLeftSlot(context, shortBin.Left)
+	if !tracked {
+		return nil, false
+	}
+	// the short circuit's OWN right operand, read as an ordinary
+	// arithmetic effect — this is what the outer expression reads on the
+	// arm where the left operand did not carry
+	rightOperandEffect, rightOperandOk := RhsEffect(context, sort, shortBin.Right)
+	if !rightOperandOk {
+		return nil, false
+	}
+	// the two composed readings of the OUTER arithmetic, one per arm:
+	// definedArm substitutes the tracked slot itself for the short
+	// circuit's whole value (sound on the arm the test proved it
+	// defined/truthy); absentArm substitutes the short circuit's own
+	// right operand (sound on the arm the test proved it absent/falsy)
+	definedEffect, definedOk := composedArithmeticEffect(context, sort, bin, shortNode, varEffect(on))
+	if !definedOk {
+		return nil, false
+	}
+	absentEffect, absentOk := composedArithmeticEffect(context, sort, bin, shortNode, rightOperandEffect)
+	if !absentOk {
+		return nil, false
+	}
+	assign := func(effect kernelbridge.LoopEffect) []kernelbridge.IrStatement {
+		return []kernelbridge.IrStatement{
+			{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: effect},
+			raise,
+		}
+	}
+	// which test picks the side, and which arm is "defined" versus
+	// "absent" — the SAME rule returnShortCircuitStatements states: `??`
+	// asks definedness; `&&`/`||` ask truthiness under the slot's sort,
+	// falling to the untested branch where neither sort applies.
+	test := kernelbridge.IrTestDefined
+	tested := true
+	if kind != ast.KindQuestionQuestionToken {
+		switch context.Sorts[on] {
+		case BindingKindNumber:
+			test = kernelbridge.IrTestTruthyNum
+		case BindingKindString:
+			test = kernelbridge.IrTestTruthyStr
+		default:
+			tested = false
+		}
+	}
+	// `a && b`: the defined/truthy arm evaluates to `b`, so the outer
+	// arithmetic on THAT arm reads the short circuit's right operand,
+	// and the other arm reads the tracked slot — the reverse of `??`
+	// and `||`, exactly as returnShortCircuitStatements' own then/els
+	// swap states.
+	then, els := assign(definedEffect), assign(absentEffect)
+	if kind == ast.KindAmpersandAmpersandToken {
+		then, els = assign(absentEffect), assign(definedEffect)
+	}
+	if !tested {
+		return []kernelbridge.IrStatement{{
+			Kind: kernelbridge.IrStatementBranchBoth,
+			Then: then,
+			Else: els,
+		}}, true
+	}
+	return []kernelbridge.IrStatement{{
+		Kind: kernelbridge.IrStatementBranch,
+		On:   on,
+		Test: test,
+		Then: then,
+		Else: els,
+	}}, true
+}
+
+// composedArithmeticEffect reads the OUTER arithmetic binary `outer` as
+// an effect, except at `target` — the short circuit sub-node exactly —
+// where it splices in `substitute` instead of recursing further. This
+// is the one-node substitution the branch's two arms need: the outer
+// shape lowers through the ordinary arithmetic recursion everywhere
+// else, and only the short circuit's own contribution differs per arm.
+//
+// Recurses only through further arithmetic binaries and paren/cast
+// wrappers — the same shapes `binOps` and `LowerEffectExpression`'s own
+// unwrap arm admit — so a target buried under, say, a nested ternary
+// never reaches here (returnBranchStatements' ternary arm is a
+// different route entirely). Every other leaf reads through the
+// ordinary `RhsEffect`, so a name, a literal, a call hoist, or any
+// other operand this file already knows how to read composes exactly
+// as it would outside a branch.
+func composedArithmeticEffect(
+	context *LoweringContext,
+	sort BindingKind,
+	outer *ast.BinaryExpression,
+	target *ast.Node,
+	substitute kernelbridge.LoopEffect,
+) (kernelbridge.LoopEffect, bool) {
+	var walkNode func(node *ast.Node) (kernelbridge.LoopEffect, bool)
+	walkNode = func(node *ast.Node) (kernelbridge.LoopEffect, bool) {
+		head := Unwrapped(node)
+		if head == target {
+			return substitute, true
+		}
+		if ast.IsBinaryExpression(head) {
+			bin := head.AsBinaryExpression()
+			if op, arithmetic := binOps[bin.OperatorToken.Kind]; arithmetic {
+				a, aOk := walkNode(bin.Left)
+				b, bOk := walkNode(bin.Right)
+				if !aOk || !bOk {
+					return kernelbridge.LoopEffect{}, false
+				}
+				return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectBinary, Op: op, A: &a, B: &b}, true
+			}
+		}
+		return RhsEffect(context, sort, node)
+	}
+	left, leftOk := walkNode(outer.Left)
+	right, rightOk := walkNode(outer.Right)
+	if !leftOk || !rightOk {
+		return kernelbridge.LoopEffect{}, false
+	}
+	op := binOps[outer.OperatorToken.Kind]
+	return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectBinary, Op: op, A: &left, B: &right}, true
+}

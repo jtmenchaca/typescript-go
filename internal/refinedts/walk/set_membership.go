@@ -207,21 +207,16 @@ func checkSetMembershipOfArm(
 
 	reported := checkSetMembershipQuestions(ctx, known, target, node, what, stringy, quoted, spelledTarget, temporal, boundsStated, spelledSet, oneArmOf)
 	if !reported.decided {
-		// the kernel declined the question — nothing is proven here, and
-		// the decline NAMES the bound it hit (a decline is an outcome)
-		message := assignability.AlertText
-		if reported.declineMessage != "" {
-			message += " The question was declined — " + reported.declineMessage + "."
-		} else {
-			message += " The question was declined."
-		}
-		ctx.Report(assignability.At(node, 7002, message))
+		// the kernel could not be asked at this position — a decline is
+		// an outcome, stated in the tree's own plain sentence, never the
+		// raw Go panic text (a nil kernel, an out-of-range wire) that
+		// caused it
+		ctx.Report(assignability.At(node, 7002, KernelDeclinedAlertText))
 	}
 }
 
 type setMembershipOutcome struct {
-	decided        bool
-	declineMessage string
+	decided bool
 }
 
 // checkSetMembershipQuestions is the TS source's try/catch wrapping
@@ -244,13 +239,8 @@ func checkSetMembershipQuestions(
 ) (outcome setMembershipOutcome) {
 	outcome.decided = true
 	defer func() {
-		if r := recover(); r != nil {
+		if recover() != nil {
 			outcome.decided = false
-			if err, ok := r.(error); ok {
-				outcome.declineMessage = err.Error()
-			} else if s, ok := r.(string); ok {
-				outcome.declineMessage = s
-			}
 		}
 	}()
 	if known.Kind == abstractdomain.KindValues {

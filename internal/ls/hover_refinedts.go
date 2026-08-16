@@ -31,12 +31,23 @@ func (l *LanguageService) refinementSpellingAt(ctx context.Context, program *com
 	return spelled
 }
 
+// bareFunctionSpelling is the ENTIRE hover value FormatAbstractValue
+// produces for a plain function value with no refinement beyond its
+// sort (abstractdomain/format_abstract_values.go's KindHostFunction,
+// top position). The declared signature already says "this is a
+// function" — appending this exact spelling repeats that and nothing
+// more, so the splice below drops it rather than appending it.
+const bareFunctionSpelling = "{a function}"
+
 // spliceRefinementSpelling applies the plugin's rendering rule: a
 // spelling that opens with a brace is a suffix — it appends after the
 // host type; anything else REPLACES the right-hand side, everything
-// after the last `=` or `:`.
+// after the last `=` or `:`. A suffix that says nothing past the sort
+// the signature already shows (bareFunctionSpelling) is dropped
+// entirely — refinement-bearing spellings ("{a function, or absent}",
+// any {...} with real content) still append as before.
 func spliceRefinementSpelling(quickInfo string, spelled string) string {
-	if spelled == "" {
+	if spelled == "" || spelled == bareFunctionSpelling {
 		return quickInfo
 	}
 	if !refinementsets.ReplacesHostType(spelled) {
