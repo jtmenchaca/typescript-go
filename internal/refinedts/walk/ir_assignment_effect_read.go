@@ -4,6 +4,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -118,6 +119,23 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			// `s.length` on a STATED string receiver — the code-unit
 			// count. Ahead of the hoist for the same reason as indexOf.
 			if held, ok := stringLengthEffect(context, node); ok {
+				return held, true
+			}
+			// `this.<field>.size` on a once-assigned Map/Set field: a
+			// PROPERTY read, not a call, so thisFieldMapCallOf's own
+			// CallExpression gate never sees it. Ahead of the hoist for
+			// the same reason as indexOf — a non-negative integer is
+			// exact regardless of contents, and reading it moves nothing.
+			if held, ok := onceAssignedMapFieldSizeEffect(context, node); ok {
+				return held, true
+			}
+			// `this.<field>.keys().next().value` (LRUCache.ts:26) — a
+			// CHAINED ITERATOR READ off a once-assigned Map/Set field.
+			// Ahead of the hoist, which has no reading for a two-call
+			// chain at all (HoistCallEffect reads one CallExpression
+			// node, and neither `.keys()` nor `.next()` resolves a
+			// callee for InlineCall to inline).
+			if held, ok := onceAssignedMapFieldIteratorReadEffect(context, node); ok {
 				return held, true
 			}
 			// `a.indexOf(v)` / `a.lastIndexOf(v)` / `a.includes(v)` /
@@ -331,4 +349,171 @@ func stringLengthEffect(context *LoweringContext, node *ast.Node) (kernelbridge.
 		Kind: kernelbridge.LoopEffectConst,
 		Set:  refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(0), refinementsets.AtMost(stringMaxLength)),
 	}, true
+}
+
+// onceAssignedMapFieldSizeEffect reads `this.<field>.size` where `field`
+// is a once-assigned `this`-scoped Map/Set field (onceAssignedMapField,
+// ir_summary_field_map_calls.go — the same field this file's
+// thisFieldMapCallStatement recognizes for `.get`/`.has`/`.delete`/
+// `.set`/`.clear`) and answers a NUMBER: a non-negative integer, exactly
+// what Map's/Set's own `size` accessor claims regardless of contents
+// (sec-map.prototype.size / sec-set.prototype.size, both defined as "the
+// number of elements" — always ≥ 0, since a count cannot be negative).
+//
+// The claim is SORT-ONLY, not exact: nothing here tracks the field's
+// CONTENTS (thisFieldMapCallOf's own header states this plainly for the
+// method calls, and a property read shares the same gap), so no upper
+// bound narrower than the field's own numeric sort is available. That
+// still excludes the absent value, NaN, and every negative or
+// non-integer number — a real determination.
+//
+// Havoc-free for the identical reason thisFieldMapCallStatement is:
+// reading `.size` moves nothing this lowering tracks, so no write
+// accompanies this reader — it only ever contributes a value.
+func onceAssignedMapFieldSizeEffect(context *LoweringContext, node *ast.Node) (kernelbridge.LoopEffect, bool) {
+	if context == nil || context.Flow == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	head := Unwrapped(node)
+	if !ast.IsPropertyAccessExpression(head) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	access := head.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil || !ast.IsIdentifier(access.Name()) || access.Name().Text() != "size" {
+		return kernelbridge.LoopEffect{}, false
+	}
+	fieldAccess := Unwrapped(access.Expression)
+	if !ast.IsPropertyAccessExpression(fieldAccess) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	inner := fieldAccess.AsPropertyAccessExpression()
+	if inner.QuestionDotToken != nil || inner.Expression.Kind != ast.KindThisKeyword || !ast.IsIdentifier(inner.Name()) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	classLike := dataflowfacts.EnclosingThisClass(head)
+	if classLike == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if !onceAssignedMapField(context.Flow, classLike, inner.Name().Text()) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	return kernelbridge.LoopEffect{
+		Kind: kernelbridge.LoopEffectConst,
+		Set:  refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(0)),
+	}, true
+}
+
+// mapIteratorMethods is the set of Map/Set methods that hand back an
+// ITERATOR object — `.keys()`, `.values()`, `.entries()` — the family
+// onceAssignedMapFieldIteratorReadEffect reads `.next().value` off of.
+// `fieldMapMethods` (ir_summary_field_map_calls.go) does not carry these:
+// they answer an ITERATOR, not a value/boolean/statement-only result, so
+// they need their own table rather than a new kind string in that one.
+var mapIteratorMethods = map[string]bool{
+	"keys":    true,
+	"values":  true,
+	"entries": true,
+}
+
+// onceAssignedMapFieldIteratorReadEffect reads
+// `this.<field>.keys().next().value` (LRUCache.ts:26,
+// `this.cache.keys().next().value`) — and its `.values()`/`.entries()`
+// siblings — where `field` is a once-assigned `this`-scoped Map/Set
+// field (onceAssignedMapField, the same gate the `.size` and
+// `.get`/`.has`/`.delete`/`.set`/`.clear` readers share) and answers
+// UNKNOWN, havoc-free.
+//
+// THE SHAPE, and why each step is checked. `.keys()`/`.values()`/
+// `.entries()` (sec-map.prototype.keys et al.) each return a fresh
+// Iterator object over the collection's own entries, in insertion
+// order. `.next()` (the Iterator/IteratorResult protocol,
+// sec-%iteratorprototype%) advances it one step and answers
+// `{ value, done }` — `value` is undefined once `done` is true, and
+// otherwise the collection's own key/value/[key,value] at that
+// position. `.value` reads that result's own `value` field.
+//
+// WHY UNKNOWN IS THE RIGHT (AND ONLY SOUND) CLAIM. Nothing in this
+// lowering tracks a Map/Set field's CONTENTS — the same gap
+// thisFieldMapCallOf's own header states for `.get`/`.has`/`.delete`.
+// `.next().value` reads one of those untracked contents (or undefined,
+// on an empty/exhausted iterator), so no narrower claim than "any value
+// this program could have put in, or undefined" is available — which is
+// exactly what leaving the read UNKNOWN (never a claimed absence) says.
+//
+// HAVOC-FREE for the same reason the sibling readers are: constructing
+// an iterator and stepping it once mutates the ITERATOR's own internal
+// position, not the collection, and this lowering allocates no slot for
+// an iterator object in the first place (it is a temporary, read once
+// and discarded, exactly as `firstKey`'s own fixture line uses it) — so
+// no write accompanies this reader, and no slot needs forgetting.
+//
+// THE CHAIN IS MATCHED EXACTLY: `<root>.<method>().next().value`, with
+// `<root>` the once-assigned field access. A `.next(arg)` call (the
+// iterator protocol admits an optional resume argument, unused by a
+// Map/Set iterator but syntactically legal) is refused rather than
+// silently accepted, mirroring stringIndexOfEffect's own "declines
+// rather than guess" rule for an unread argument shape; the FIELD
+// receiver of `.keys()` is checked the identical way
+// thisFieldMapCallOf's own inner PropertyAccessExpression is.
+func onceAssignedMapFieldIteratorReadEffect(context *LoweringContext, node *ast.Node) (kernelbridge.LoopEffect, bool) {
+	if context == nil || context.Flow == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	head := Unwrapped(node)
+	if !ast.IsPropertyAccessExpression(head) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	valueAccess := head.AsPropertyAccessExpression()
+	if valueAccess.QuestionDotToken != nil || !ast.IsIdentifier(valueAccess.Name()) || valueAccess.Name().Text() != "value" {
+		return kernelbridge.LoopEffect{}, false
+	}
+	nextCallHead := Unwrapped(valueAccess.Expression)
+	if !ast.IsCallExpression(nextCallHead) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	nextCall := nextCallHead.AsCallExpression()
+	if nextCall.Arguments != nil && len(nextCall.Arguments.Nodes) != 0 {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if !ast.IsPropertyAccessExpression(nextCall.Expression) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	nextAccess := nextCall.Expression.AsPropertyAccessExpression()
+	if nextAccess.QuestionDotToken != nil || !ast.IsIdentifier(nextAccess.Name()) || nextAccess.Name().Text() != "next" {
+		return kernelbridge.LoopEffect{}, false
+	}
+	iteratorCallHead := Unwrapped(nextAccess.Expression)
+	if !ast.IsCallExpression(iteratorCallHead) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	iteratorCall := iteratorCallHead.AsCallExpression()
+	if iteratorCall.Arguments != nil && len(iteratorCall.Arguments.Nodes) != 0 {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if !ast.IsPropertyAccessExpression(iteratorCall.Expression) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	iteratorAccess := iteratorCall.Expression.AsPropertyAccessExpression()
+	if iteratorAccess.QuestionDotToken != nil || !ast.IsIdentifier(iteratorAccess.Name()) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if !mapIteratorMethods[iteratorAccess.Name().Text()] {
+		return kernelbridge.LoopEffect{}, false
+	}
+	fieldAccess := Unwrapped(iteratorAccess.Expression)
+	if !ast.IsPropertyAccessExpression(fieldAccess) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	inner := fieldAccess.AsPropertyAccessExpression()
+	if inner.QuestionDotToken != nil || inner.Expression.Kind != ast.KindThisKeyword || !ast.IsIdentifier(inner.Name()) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	classLike := dataflowfacts.EnclosingThisClass(head)
+	if classLike == nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if !onceAssignedMapField(context.Flow, classLike, inner.Name().Text()) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	return unknownEffect, true
 }

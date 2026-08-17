@@ -563,3 +563,358 @@ func TestCallbackReturn_TextTsxCalculateDeclinesAtTheDestructuredSecondParameter
 		t.Errorf("Text.tsx's calculate reduce lowered — want a decline: the destructured second parameter `{ word, width }` closes the arrow-conversion gate")
 	}
 }
+
+// ── the census tail: return (object literal) (task 3) ──────────────────
+
+func TestReturnedLiteralShape_AnArrowValuedMemberNoLongerRefusesTheWholeShape(t *testing.T) {
+	// tmp/recharts-src/src/util/scale/RechartsScale.ts:96's own shape,
+	// reduced: `return { domain: () => src.domain(), label: name };` — an
+	// arrow-VALUED member calls nothing to BUILD (constructing a closure
+	// runs none of its body), which is exactly the question inertValue
+	// answers and writeAndCallFree used to answer wrong by walking into
+	// the arrow's own body and tripping on its call.
+	statements := loweringParse(t, `function f(src: { domain(): number }, name: string) {
+		return { domain: () => src.domain(), label: name };
+	}`)
+	body := statements[0].AsFunctionDeclaration().Body
+	slots, shape := returnedLiteralShape(body)
+	if shape != RetShapeObject {
+		t.Fatalf("shape = %v, want RetShapeObject — the arrow-valued member must no longer refuse the whole shape", shape)
+	}
+	names := map[string]bool{}
+	for _, slot := range slots {
+		names[retMemberNameOfSlot(slot.Name)] = true
+	}
+	if !names["domain"] || !names["label"] {
+		t.Errorf("slots = %+v, want both domain and label members allocated", slots)
+	}
+}
+
+func TestReturnedLiteralShape_AMemberThatActuallyCallsAtEvaluationTimeStillRefuses(t *testing.T) {
+	// unlike the arrow-valued member above, `x: f()` CALLS at evaluation
+	// time — inertValue must still catch this exactly as writeAndCallFree
+	// did, or the widening would be unsound rather than merely wider.
+	statements := loweringParse(t, `function f() {
+		return { x: g() };
+	}
+	function g(): number { return 1; }`)
+	body := statements[0].AsFunctionDeclaration().Body
+	_, shape := returnedLiteralShape(body)
+	if shape != RetShapeNone {
+		t.Errorf("shape = %v, want RetShapeNone — a member that calls at evaluation time still refuses the whole shape", shape)
+	}
+}
+
+func TestReturnedLiteralShape_AWriteInsideAnArrowMemberStillCarriesNoObligationAtTheLayout(t *testing.T) {
+	// an arrow member whose BODY writes a name this function tracks is
+	// still inert to BUILD — the write only happens if and when the
+	// closure is later CALLED, which is a fact about the RETURN
+	// STATEMENT's own obligations (returnMemberStatements, a sibling's
+	// file, closureWritesTracked), not about whether a slot exists for
+	// this member at all. The layout only allocates a slot here; it
+	// never writes an effect, so there is nothing for this test to prove
+	// wrong — it pins that the shape still allocates, and leaves the
+	// write-obligation question where it belongs.
+	statements := loweringParse(t, `function f(n: number) {
+		let counter = 0;
+		return { bump: () => { counter += n; } };
+	}`)
+	body := statements[0].AsFunctionDeclaration().Body
+	_, shape := returnedLiteralShape(body)
+	if shape != RetShapeObject {
+		t.Errorf("shape = %v, want RetShapeObject — building the closure is still inert regardless of what it writes when called", shape)
+	}
+}
+
+// ── callback return shapes: the accumulator-flattens-and-returns-itself
+//    pair alias (task 2) ─────────────────────────────────────────────────
+
+func TestReturnedWholeArrayMembers_TheBareAccumulatorReturnAliasesItsOwnLenElemPair(t *testing.T) {
+	// the Text.tsx `calculate` shape, reduced to its own return gate:
+	// `{ result.push(x); return result; }` — every return is a bare read
+	// of the SAME array-flattened name, so the pair aliases rather than
+	// allocating: "#ret.len"/"#ret.elem" point straight at the slots the
+	// body's own `.push` already wrote through.
+	statements := loweringParse(t, `function f(x: number) {
+		function cb(result: number[], y: number) {
+			result.push(y);
+			return result;
+		}
+		return cb;
+	}`)
+	inner := statements[0].AsFunctionDeclaration().Body.AsBlock().Statements.Nodes[0]
+	body := inner.AsFunctionDeclaration().Body
+	members, shape := returnedWholeArrayMembers(body, "result", 3, 4)
+	if shape != RetShapeArray {
+		t.Fatalf("shape = %v, want RetShapeArray", shape)
+	}
+	if len(members) != 2 {
+		t.Fatalf("len(members) = %d, want 2 (len, elem)", len(members))
+	}
+	if members[0].Name != "len" || members[0].Index != 3 {
+		t.Errorf("members[0] = %+v, want {Name: \"len\", Index: 3}", members[0])
+	}
+	if members[1].Name != "elem" || members[1].Index != 4 {
+		t.Errorf("members[1] = %+v, want {Name: \"elem\", Index: 4}", members[1])
+	}
+}
+
+func TestReturnedWholeArrayMembers_ABranchingReturnOfADifferentValueDeclines(t *testing.T) {
+	// one path returns the flattened array bare, the other returns
+	// something else — no single pair stands for the whole body.
+	statements := loweringParse(t, `function cb(result: number[], y: number) {
+		if (y > 0) { result.push(y); return result; }
+		return [];
+	}`)
+	body := statements[0].AsFunctionDeclaration().Body
+	_, shape := returnedWholeArrayMembers(body, "result", 3, 4)
+	if shape != RetShapeNone {
+		t.Errorf("shape = %v, want RetShapeNone — a branch returns something other than the bare array", shape)
+	}
+}
+
+func TestReturnedWholeArrayMembers_APropertyReadOffTheArrayIsNotABareReturn(t *testing.T) {
+	// `return result.length` names the array but is not a BARE read of
+	// it — the pair this reader aliases is the whole array's own two
+	// slots, not a derived scalar, so this declines rather than
+	// misreading a length read as the array itself.
+	statements := loweringParse(t, `function cb(result: number[]) {
+		return result.length;
+	}`)
+	body := statements[0].AsFunctionDeclaration().Body
+	_, shape := returnedWholeArrayMembers(body, "result", 3, 4)
+	if shape != RetShapeNone {
+		t.Errorf("shape = %v, want RetShapeNone — result.length is not a bare array read", shape)
+	}
+}
+
+func TestReturnedWholeArrayMembers_NoReturnsDeclines(t *testing.T) {
+	statements := loweringParse(t, `function cb(result: number[]) {
+		result.push(1);
+	}`)
+	body := statements[0].AsFunctionDeclaration().Body
+	_, shape := returnedWholeArrayMembers(body, "result", 3, 4)
+	if shape != RetShapeNone {
+		t.Errorf("shape = %v, want RetShapeNone — a body with no return at all names nothing to alias", shape)
+	}
+}
+
+// ── destructured callback parameters (task 1) ──────────────────────────
+
+func TestCallbackRecognition_ArrowParameterNamesNowAdmitsAnObjectPatternAsAValidityGate(t *testing.T) {
+	// arrowParameterNames used to decline ANY non-identifier parameter
+	// unconditionally. Both its own callers (convertArrow's two sites)
+	// only ever asked it "is this arrow shaped like something a call
+	// site could fill", discarding the names — so widening it to admit
+	// a plain-identifier-elements object pattern (no defaults, no rest,
+	// no computed keys, no nested patterns) as a VALID position, without
+	// yet saying how it fills, changes nothing at either call site's own
+	// gates.
+	arrow := callbackArrowOf(t, `xs.map((acc, { a }) => acc);`)
+	if _, ok := arrowParameterNames(arrow); !ok {
+		t.Fatalf("arrowParameterNames declined an object-pattern parameter — want it admitted as a valid position")
+	}
+}
+
+func TestCallbackRecognition_AWriteToABoundPatternLeafScansCleanLikeAnyOtherLocal(t *testing.T) {
+	// arrowBoundNames' new pattern arm is what makes this scan clean: `a`
+	// is parameter-bound, so writing it is an ordinary bound-name
+	// mutation — scanFreeNames' write gate only declines a write to a
+	// name the arrow did NOT bind (a captured write), never a write to
+	// one of its own locals. Before the arrowBoundNames widening, `a`
+	// would have read as unbound and this write would have declined the
+	// whole scan for the wrong reason (a free name that happens to share
+	// a spelling with a pattern leaf, not a genuine capture).
+	arrow := callbackArrowOf(t, `xs.map((acc, { a }) => { a = 1; return acc; });`)
+	scan := scanFreeNames(arrow)
+	if !scan.Ok {
+		t.Fatalf("scanFreeNames declined a write to a's own bound pattern leaf — want it treated as an ordinary local write")
+	}
+	// `acc` is the arrow's OWN first parameter — also bound, so reading it
+	// is not a free read either; the whole body has no capture at all
+	if len(scan.Reads) != 0 {
+		t.Errorf("free reads = %v, want none — both `acc` and `a` are parameter-bound", scan.Reads)
+	}
+}
+
+func TestCallbackRecognition_APatternLeafReadInsideTheBodyIsBoundNotFree(t *testing.T) {
+	// `a` and `width` are parameter-bound by the pattern, not captures —
+	// the free-name scan must report neither as a read.
+	arrow := callbackArrowOf(t, `xs.map(({ a, width: w }) => a + w);`)
+	scan := scanFreeNames(arrow)
+	if !scan.Ok {
+		t.Fatalf("scanFreeNames declined — a plain-identifier pattern with a rename should scan clean")
+	}
+	if len(scan.Reads) != 0 {
+		t.Errorf("free reads = %v, want none — `a` and `w` are both parameter-bound", scan.Reads)
+	}
+}
+
+// memberElementCallbackReturnContext is callbackReturnContext widened
+// with per-member element slots laid out under "<array>.elem.<member>" —
+// the spelling ir_array_slots.go's ElementMembers lays out for a
+// record-element array parameter, which this harness stands in for by
+// hand (no checker/program is needed to pin the CONVERSION-side gates,
+// only the slot vector itself).
+func memberElementCallbackReturnContext(array string, members map[string]BindingKind, scalars []string, scalarSorts []BindingKind) *LoweringContext {
+	bindings := []string{array + arrayLenSuffix}
+	sorts := []BindingKind{BindingKindNumber}
+	for member, sort := range members {
+		bindings = append(bindings, array+arrayElemSuffix+"."+member)
+		sorts = append(sorts, sort)
+	}
+	bindings = append(bindings, scalars...)
+	sorts = append(sorts, scalarSorts...)
+	return loweringResultContext(bindings, sorts)
+}
+
+func TestCallbackConvert_ReduceElementPatternEntriesResolvesEachLeafAgainstTheReceiversElementMembers(t *testing.T) {
+	// the PLUMBING this agent built, isolated from convertArrowWithEntryLayout's
+	// further gates (context.Flow, then lowerArrowSummary's own body-layout
+	// wall — TestCallbackConvert_ConvertReduceArrowElementPatternStillDeclinesThroughTheLayoutWall
+	// below pins that outer decline separately): xs.reduce((acc: number, {
+	// a }) => acc + a, 0) over an xs whose element member "a" is hand-laid
+	// at "xs.elem.a" — standing in for what arrayParamSlotsIn's
+	// ElementMembers would lay out for a real `xs: { a: number }[]`
+	// parameter (ir_array_parameters.go, a sibling-adjacent read-only
+	// reader, not this agent's territory). No kernel needed: entry
+	// building reads syntax and the slot vector alone.
+	context := memberElementCallbackReturnContext(
+		"xs", map[string]BindingKind{"a": BindingKindNumber}, nil, nil)
+	statements := loweringParse(t, `xs.reduce((acc: number, { a }) => acc + a, 0);`)
+	call := Unwrapped(statements[0].AsExpressionStatement().Expression)
+	reduceSource, _, readOk := reduceCallOf(call)
+	if !readOk {
+		t.Fatalf("reduceCallOf declined the two-argument reduce")
+	}
+	accumulator := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: nonNegativeIntegerSet()}
+	entries, parameterSorts, ok := reduceElementPatternEntries(
+		context, reduceSource.Callback, "xs.elem",
+		accumulator, BindingKindNumber, TypeofTagNumber,
+	)
+	if !ok {
+		t.Fatalf("reduceElementPatternEntries declined — want the pattern's one leaf to resolve against xs.elem.a")
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2 — the accumulator and the pattern's one bound leaf", len(entries))
+	}
+	if len(parameterSorts) != 2 {
+		t.Fatalf("len(parameterSorts) = %d, want 2 — one row per DECLARED parameter", len(parameterSorts))
+	}
+	wantSlot, found := slotIndexOfName(context, "xs.elem.a")
+	if !found {
+		t.Fatalf("the harness's own xs.elem.a slot did not resolve")
+	}
+	if entries[1].Effect.Kind != kernelbridge.LoopEffectVarState || entries[1].Effect.Index != wantSlot {
+		t.Errorf("entries[1].Effect = %+v, want a whole-state copy of slot %d (xs.elem.a)", entries[1].Effect, wantSlot)
+	}
+	if entries[1].Sort != BindingKindNumber {
+		t.Errorf("entries[1].Sort = %q, want %q — xs.elem.a's own sort", entries[1].Sort, BindingKindNumber)
+	}
+}
+
+func TestCallbackConvert_ReduceElementPatternEntriesDeclinesAMemberTheReceiverDoesNotCarry(t *testing.T) {
+	// a bound leaf naming a member absent from the receiver's own element
+	// slots declines the whole pattern — the callback would read a leaf
+	// no caller value ever fills.
+	context := memberElementCallbackReturnContext(
+		"xs", map[string]BindingKind{"a": BindingKindNumber}, nil, nil)
+	statements := loweringParse(t, `xs.reduce((acc: number, { missing }) => acc, 0);`)
+	call := Unwrapped(statements[0].AsExpressionStatement().Expression)
+	reduceSource, _, readOk := reduceCallOf(call)
+	if !readOk {
+		t.Fatalf("reduceCallOf declined the two-argument reduce")
+	}
+	accumulator := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: nonNegativeIntegerSet()}
+	if _, _, ok := reduceElementPatternEntries(
+		context, reduceSource.Callback, "xs.elem",
+		accumulator, BindingKindNumber, TypeofTagNumber,
+	); ok {
+		t.Errorf("resolved a pattern naming a member the receiver does not carry — want a decline")
+	}
+}
+
+func TestCallbackConvert_ConvertReduceArrowElementPatternStillDeclinesThroughTheLayoutWall(t *testing.T) {
+	// the full conversion route, entries built correctly (proved above)
+	// but still declining ONE layer further in — inside
+	// convertArrowWithEntryLayout's own call to lowerArrowSummary, whose
+	// body-layout (summaryParameterEntries, NOT this agent's file) has
+	// no annotation on `{ a }` to expand. This is the same wall
+	// TestCallbackReturn_ScalarDestructuredElementReduceStillDeclinesAtTheLayoutSideGate
+	// names for the full return-position route; this pin isolates it at
+	// the convert function itself.
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	context := memberElementCallbackReturnContext(
+		"xs", map[string]BindingKind{"a": BindingKindNumber}, nil, nil)
+	context.Narrow = kernel.Narrow
+	context.Flow = &FlowContext{}
+	context.SummaryTable = &SummaryTableBuilder{}
+	statements := loweringParse(t, `xs.reduce((acc: number, { a }) => acc + a, 0);`)
+	call := Unwrapped(statements[0].AsExpressionStatement().Expression)
+	reduceSource, _, readOk := reduceCallOf(call)
+	if !readOk {
+		t.Fatalf("reduceCallOf declined the two-argument reduce")
+	}
+	accumulator := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: nonNegativeIntegerSet()}
+	if _, ok := convertReduceArrowElementPattern(
+		context, reduceSource.Callback, "xs.elem",
+		accumulator, BindingKindNumber, TypeofTagNumber,
+	); ok {
+		t.Errorf("convertReduceArrowElementPattern compiled a blob — want a decline until the layout-side hook lands (summaryParameterEntries has no annotation on `{ a }` to expand)")
+	}
+}
+
+func TestCallbackReturn_ScalarDestructuredElementReduceStillDeclinesAtTheLayoutSideGate(t *testing.T) {
+	// the outstanding wall, named precisely: `xs.reduce((acc: number, {
+	// a }) => acc + a, 0)` over `xs: { a: number }[]` now clears every
+	// gate this agent's own files own — arrowParameterNames admits the
+	// pattern, arrowBoundNames treats `a` as bound so the arrow's own
+	// arithmetic scans clean, and convertReduceArrowElementPattern (just
+	// pinned above) resolves the one leaf against the receiver's element
+	// members and builds a correctly-widened entry vector.
+	//
+	// SummaryCallbackReturnOf itself has no route that calls
+	// convertReduceArrowElementPattern yet — reduceSlotStatements
+	// (ir_callback_return.go, this agent's file) tries
+	// reduceArrayAccumulatorSlotStatements (the array-accumulator shape)
+	// then falls to the plain scalar path (reduceStatements' shared
+	// core), neither of which is the record-ELEMENT shape this pin
+	// exercises. Wiring that in is a small addition to this agent's own
+	// files and is NOT the wall — the actual wall sits one layer deeper:
+	// lowerArrowSummary's own body-layout call
+	// (summaryParameterEntries, ir_summary_body_lowering_parameters.go —
+	// NOT this agent's territory) resolves a binding-pattern parameter's
+	// members through SummaryParameterEntriesIn, which reads the
+	// PARAMETER's OWN type annotation (recordParamMembersIn's pd.Type) —
+	// and `{ a }` carries none; the member shape lives on xs's array
+	// type, never on the callback parameter itself. That function
+	// declines on pd.Type == nil before its own site-sort gate
+	// (`index < len(parameterSorts)`) is ever reached, and no
+	// parameterSorts vector any caller builds changes that outcome:
+	// parameterSlotSort (ir_summary_body.go) carries one Sort/TypeofTag
+	// pair per declared position, with no field for "this position is a
+	// pattern with N leaf sorts."
+	//
+	// The hook: widen parameterSlotSort with a per-leaf sort list (a
+	// PatternLeaves []parameterSlotSort field, or similar), and teach
+	// summaryParameterEntries' own binding-pattern arm
+	// (ir_summary_body_lowering_parameters.go) to read member sorts from
+	// that list — keyed by the SAME Key/Bound pairing
+	// objectPatternElementBindings (this agent's file,
+	// ir_callback_recognition.go) already reads — rather than declining
+	// outright whenever a site sort is present. Both files sit outside
+	// this agent's exclusive territory.
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	context := memberElementCallbackReturnContext(
+		"xs", map[string]BindingKind{"a": BindingKindNumber}, nil, nil)
+	context.Narrow = kernel.Narrow
+	context.Flow = &FlowContext{}
+	context.SummaryTable = &SummaryTableBuilder{}
+	statements := loweringParse(t, `return xs.reduce((acc: number, { a }) => acc + a, 0);`)
+	head := Unwrapped(statements[0].AsReturnStatement().Expression)
+	if _, ok := SummaryCallbackReturnOf(context, head); ok {
+		t.Errorf("the scalar destructured-element reduce lowered — want a decline until the layout-side hook above lands (SummaryCallbackReturnOf has no route to convertReduceArrowElementPattern yet, and that route would itself still hit lowerArrowSummary's body-layout wall)")
+	}
+}

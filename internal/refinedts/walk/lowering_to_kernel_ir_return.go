@@ -122,6 +122,33 @@ func lowerReturnStatement(
 			return out, true
 		}
 		dropHoists()
+		// `return this.<field>.has(k)` / `return S.has(k)`: a MODEL CALL
+		// on a once-assigned Map/Set field or module const — no
+		// FunctionContract resolves for either, so InlineCall's own
+		// route below would never reach them anyway; tried here, ahead
+		// of it, the same way SummaryCallOrHavocNamed tries these two
+		// recognizers ahead of its blob tier for an ordinary statement.
+		// Both recognizers answer their own IrStatement directly against
+		// a caller-supplied TARGET slot — context.Result.Ret is exactly
+		// that target for a return in value position, so this return's
+		// value writes straight into the same statement thisFieldMapCallOf/
+		// moduleSetCallOf already model would have written for an
+		// intermediate `const ok = …; return ok;` — the direct-return
+		// spelling and the assign-then-return spelling now serve
+		// identically. Neither recognizer's kind == "none" branch (Map's
+		// own `.set`/`.clear`) can reach target >= 0, since neither
+		// yields a readable result to return.
+		returnHead := Unwrapped(rs.Expression)
+		if statement, ok := thisFieldMapCallStatement(context, returnHead, context.Result.Ret); ok {
+			out = flush(out)
+			out = append(out, statement, raise)
+			return out, true
+		}
+		if statement, ok := moduleSetCallStatement(context, returnHead, context.Result.Ret); ok {
+			out = flush(out)
+			out = append(out, statement, raise)
+			return out, true
+		}
 		// `return await f(…)`: the ret-as-inner convention means the
 		// callee's ret slot already holds the SETTLED value, so this
 		// is exactly the `return f(…)` call lowering with the await

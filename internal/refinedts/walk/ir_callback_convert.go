@@ -395,6 +395,118 @@ func convertReduceArrow(
 	return convertArrow(context, argument, entries)
 }
 
+// convertReduceArrowElementPattern converts a callback under REDUCE's
+// entry layout where the ELEMENT parameter (declared position 1) is a
+// DESTRUCTURED object pattern (`{ word, width }`) rather than a plain
+// identifier — Text.tsx's `calculate` shape reduced to its parameter
+// gate:
+//
+//	words.reduce((result: Array<W>, { word, width }) => { … }, [])
+//
+// Each bound leaf resolves against the RECEIVER's own element-member
+// slots ("words.elem.word", "words.elem.width" — the same
+// "<name>.elem.<member>" spelling ir_array_slots.go's ElementMembers
+// lays out, resolved here through leafSlotsUnder rather than a fresh
+// reader, since the layout already flattened them into the context's
+// slot vector by the time a callback converts). A member the receiver's
+// element does not carry declines the whole pattern — the callback
+// would read a leaf no caller value fills.
+//
+// THE ENTRY VECTOR widens by exactly one leaf per bound name in place of
+// the single scalar entry declared position 1 would otherwise take — the
+// same "one declared position, several effect positions" shape
+// convertReduceArrowArray already uses for an array-shaped accumulator,
+// applied to a record-shaped element instead of an array-shaped
+// accumulator.
+//
+// STILL BLOCKED past this function's own return: lowerArrowSummary's
+// body-layout call (summaryParameterEntries,
+// ir_summary_body_lowering_parameters.go — not this agent's file) reads
+// the pattern parameter's OWN type annotation through
+// SummaryParameterEntriesIn, and `{ word, width }` carries none — the
+// member shape lives on the RECEIVER's array type, never on the
+// parameter itself, so recordParamMembersIn(ctx, parameter) declines on
+// pd.Type == nil before the pattern arm's own site-sort gate
+// (`index < len(parameterSorts)`) is ever reached. No parameterSorts
+// vector this function could build changes that outcome, since
+// parameterSlotSort carries one Sort/TypeofTag pair per declared
+// position and has no per-leaf carrier for a pattern position at all.
+// Widening that struct and summaryParameterEntries' own pattern arm to
+// accept a site-supplied per-leaf sort list is the hook that closes the
+// remaining gap; this function builds everything on the CALL side that
+// hook would need to consume.
+func convertReduceArrowElementPattern(
+	context *LoweringContext,
+	argument *ast.Node,
+	elementHolder string,
+	accumulator kernelbridge.LoopEffect,
+	accumulatorSort BindingKind,
+	accumulatorTypeof TypeofTag,
+) (convertedArrow, bool) {
+	entries, parameterSorts, ok := reduceElementPatternEntries(
+		context, argument, elementHolder, accumulator, accumulatorSort, accumulatorTypeof)
+	if !ok {
+		return convertedArrow{}, false
+	}
+	return convertArrowWithEntryLayout(context, argument, entries, parameterSorts)
+}
+
+// reduceElementPatternEntries is convertReduceArrowElementPattern's own
+// entry-building half, split out so the LEAF RESOLUTION (does the
+// pattern's every bound name find a member slot under elementHolder) is
+// checkable on its own, independent of convertArrowWithEntryLayout's
+// further gates (context.Flow, then lowerArrowSummary's own body-layout
+// wall — this function's caller's own doc names it).
+func reduceElementPatternEntries(
+	context *LoweringContext,
+	argument *ast.Node,
+	elementHolder string,
+	accumulator kernelbridge.LoopEffect,
+	accumulatorSort BindingKind,
+	accumulatorTypeof TypeofTag,
+) ([]callbackEntry, []parameterSlotSort, bool) {
+	arrow := callbackFunctionOf(context, argument)
+	if arrow == nil || len(arrow.Parameters()) < 2 {
+		return nil, nil, false
+	}
+	elementParameter := arrow.Parameters()[1].AsParameterDeclaration()
+	bindings, isPattern := objectPatternElementBindings(elementParameter.Name())
+	if !isPattern {
+		return nil, nil, false
+	}
+	leaves, hasLeaves := leafSlotsUnder(context, elementHolder)
+	if !hasLeaves {
+		return nil, nil, false
+	}
+	slotOfMember := map[string]int{}
+	for _, leaf := range leaves {
+		slotOfMember[leaf.Path] = leaf.Index
+	}
+	declared := len(arrow.Parameters())
+	parameterSorts := make([]parameterSlotSort, declared)
+	parameterSorts[0] = parameterSlotSort{Sort: accumulatorSort, TypeofTag: accumulatorTypeof}
+	// the pattern's own declared position (index 1) takes no SINGLE sort —
+	// unknown is the honest placeholder, since a pattern position's real
+	// shape is N leaf sorts, which parameterSlotSort has no field for
+	// (convertReduceArrowElementPattern's own doc names the widening that
+	// would fix it).
+	parameterSorts[1] = parameterSlotSort{Sort: BindingKindUnknown, TypeofTag: TypeofTagNone}
+	var entries []callbackEntry
+	entries = append(entries, callbackEntry{Effect: accumulator, Sort: accumulatorSort, Typeof: accumulatorTypeof})
+	for _, binding := range bindings {
+		slot, found := slotOfMember[binding.Key]
+		if !found {
+			return nil, nil, false
+		}
+		entries = append(entries, slotCallbackEntry(context, slot))
+	}
+	for index := 2; index < declared; index++ {
+		entries = append(entries, absentCallbackEntry())
+		parameterSorts[index] = parameterSlotSort{Sort: BindingKindUnknown, TypeofTag: TypeofTagNone}
+	}
+	return entries, parameterSorts, true
+}
+
 // convertReduceArrowArray converts a callback under REDUCE's entry
 // layout where the ACCUMULATOR (declared parameter 0) is itself
 // ARRAY-shaped — the len/elem PAIR ir_array_slots.go's local carries,

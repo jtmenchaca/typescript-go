@@ -147,13 +147,32 @@ func callbackFunctionOf(context *LoweringContext, argument *ast.Node) *ast.Node 
 }
 
 // arrowParameterNames is an arrow's declared parameter names, or
-// declines: a default, a rest, or a binding pattern is not one entry
-// the call site can fill.
+// declines: a default, a rest is not one entry the call site can fill.
+//
+// An OBJECT-BINDING-PATTERN parameter (`{ word, width }`) is no longer an
+// outright decline here — it names no single identifier, so its own slot
+// contributes an empty string rather than refusing the whole arrow. The
+// pattern's bound names are read separately, by
+// arrowParameterElementBindings below, wherever a caller needs to fill
+// its individual leaves from a record-shaped element (an array whose
+// ElementMembers the site's receiver expands). A caller that has no such
+// per-member source still cannot fill a pattern parameter — that refusal
+// happens at capturesOf/convert time, not here.
 func arrowParameterNames(arrow *ast.Node) ([]string, bool) {
 	var names []string
 	for _, parameter := range arrow.Parameters() {
 		pd := parameter.AsParameterDeclaration()
-		if !ast.IsIdentifier(pd.Name()) || pd.Initializer != nil || pd.DotDotDotToken != nil {
+		if pd.Initializer != nil || pd.DotDotDotToken != nil {
+			return nil, false
+		}
+		if ast.IsObjectBindingPattern(pd.Name()) {
+			if _, ok := objectPatternElementBindings(pd.Name()); !ok {
+				return nil, false
+			}
+			names = append(names, "")
+			continue
+		}
+		if !ast.IsIdentifier(pd.Name()) {
 			return nil, false
 		}
 		names = append(names, pd.Name().Text())
@@ -161,16 +180,81 @@ func arrowParameterNames(arrow *ast.Node) ([]string, bool) {
 	return names, true
 }
 
+// patternElementBinding is one leaf an object-binding-pattern parameter
+// binds: the BOUND local name, and the MEMBER KEY it reads from the
+// element's own shape — the pattern's PropertyName where a rename
+// spells one (`{ width: w }` binds "w" from member "width"), the bound
+// name itself otherwise (`{ width }` binds "width" from member
+// "width").
+type patternElementBinding struct {
+	Bound string
+	Key   string
+}
+
+// objectPatternElementBindings reads a `{ a, b: renamed }`-shaped
+// binding-pattern NAME (a ParameterDeclaration's own Name node) as one
+// binding per element — plain identifier elements only, no defaults, no
+// rest, no computed keys, no nested patterns. Any of those declines the
+// whole pattern, the same total-or-decline stance
+// SummaryParameterEntriesIn's own pattern arm takes for a record
+// parameter's binding pattern.
+func objectPatternElementBindings(name *ast.Node) ([]patternElementBinding, bool) {
+	if name == nil || !ast.IsObjectBindingPattern(name) {
+		return nil, false
+	}
+	var bindings []patternElementBinding
+	seen := map[string]struct{}{}
+	for _, element := range name.AsBindingPattern().Elements.Nodes {
+		binding := element.AsBindingElement()
+		if binding.DotDotDotToken != nil || binding.Initializer != nil ||
+			binding.Name() == nil || !ast.IsIdentifier(binding.Name()) {
+			return nil, false
+		}
+		key := binding.Name().Text()
+		if binding.PropertyName != nil {
+			if !ast.IsIdentifier(binding.PropertyName) {
+				return nil, false
+			}
+			key = binding.PropertyName.Text()
+		}
+		bound := binding.Name().Text()
+		if _, duplicate := seen[bound]; duplicate {
+			return nil, false
+		}
+		seen[bound] = struct{}{}
+		bindings = append(bindings, patternElementBinding{Bound: bound, Key: key})
+	}
+	if len(bindings) == 0 {
+		return nil, false
+	}
+	return bindings, true
+}
+
 // arrowBoundNames is every name bound INSIDE the arrow's body: its
 // parameters, and every local it declares (including the names an
 // object binding pattern binds). A read of one of these is not a free
 // name, so the capture scan skips it.
+//
+// A destructured parameter (`{ word, width }`) binds each of ITS OWN
+// leaf names too — a body read of `word` is a parameter read, not a
+// free capture, whether or not the pattern goes on to convert (a
+// pattern this reader admits but capturesOf/convert time cannot fill is
+// still a bound name; it just leaves the whole arrow declining
+// elsewhere, never here).
 func arrowBoundNames(arrow *ast.Node) map[string]struct{} {
 	bound := map[string]struct{}{}
 	for _, parameter := range arrow.Parameters() {
 		pd := parameter.AsParameterDeclaration()
 		if ast.IsIdentifier(pd.Name()) {
 			bound[pd.Name().Text()] = struct{}{}
+			continue
+		}
+		if ast.IsObjectBindingPattern(pd.Name()) {
+			if elements, ok := objectPatternElementBindings(pd.Name()); ok {
+				for _, element := range elements {
+					bound[element.Bound] = struct{}{}
+				}
+			}
 		}
 	}
 	body := arrow.Body()

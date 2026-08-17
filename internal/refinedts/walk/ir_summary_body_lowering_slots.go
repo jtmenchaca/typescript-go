@@ -137,6 +137,32 @@ func summarySlotLayoutOf(
 			retShape = aliasShape
 		}
 	}
+	// THE WHOLE-ARRAY RETURN — returnedWholeParameterMembers' array twin
+	// (returnedWholeArrayMembers' own doc): `return result;` where every
+	// return is the same array-flattened name aliases "#ret.len"/
+	// "#ret.elem" onto that name's own pair, no new slot, no new effect.
+	if retShape == RetShapeNone {
+		if returned := returnedExpressionsOf(body); len(returned) > 0 && returned[0] != nil {
+			if head := Unwrapped(returned[0]); head != nil && ast.IsIdentifier(head) {
+				name := head.Text()
+				lenIndex, elemIndex := -1, -1
+				for at, binding := range bindings {
+					switch binding {
+					case name + ".len":
+						lenIndex = at
+					case name + ".elem":
+						elemIndex = at
+					}
+				}
+				if lenIndex >= 0 && elemIndex >= 0 {
+					if aliasMembers, aliasShape := returnedWholeArrayMembers(body, name, lenIndex, elemIndex); aliasShape != RetShapeNone {
+						retMembers = aliasMembers
+						retShape = aliasShape
+					}
+				}
+			}
+		}
+	}
 	if len(bindings) > summarySlotBudget {
 		return slotLayout, "a body past the slot budget", false
 	}

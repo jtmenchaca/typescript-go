@@ -120,14 +120,38 @@ func returnedLiteralShape(body *ast.Node) ([]bodySlot, RetShapeKind) {
 		// A LITERAL THAT RUNS CODE allocates nothing, and this is the rule
 		// the whole shape rests on rather than a precision choice. The
 		// return lowering writes members as EFFECTS, which have no room for
-		// a statement, so a literal whose evaluation calls or writes cannot
+		// a statement, so a literal whose EVALUATION calls or writes cannot
 		// write its own members — it falls to the floor and leaves the
 		// member slots holding whatever came before. Were the shape still
 		// allocated, that arm's exits would read as "the returned object has
 		// no such key" for a path that in fact returned every key: a WRONG
 		// answer, not a weak one. Refusing the shape for the whole body
 		// keeps every path's answer the unknown it is today.
-		if !writeAndCallFree(head) {
+		//
+		// inertValue, not writeAndCallFree: an object literal member whose
+		// VALUE is an arrow (`{ domain: () => d3Scale.domain() }`,
+		// tmp/recharts-src/src/util/scale/RechartsScale.ts:96) BUILDS a
+		// closure, which runs nothing — writeAndCallFree used to walk INTO
+		// the arrow's own body and trip on `d3Scale.domain()`'s call,
+		// refusing the whole shape for a call that never runs at
+		// evaluation time. This is the same gap
+		// nest-delta-queue.md's D6/D11 diagnosed and inertValue was built
+		// to close (effect_write_freedom.go) — every OTHER caller in this
+		// package already reads inertValue for exactly this question
+		// (effect_expression.go, ir_assignment_const_reads.go); this gate
+		// was the one left on the old predicate.
+		//
+		// The layout decision here only ALLOCATES the member slot as
+		// unknown-sorted — it writes no effect itself. The actual member
+		// value is written later by returnMemberStatements
+		// (lowering_to_kernel_ir_return_members.go, a sibling's file, not
+		// this agent's), which keeps its OWN writeAndCallFree gate for now:
+		// a body this reader now shapes may still fall through that
+		// sibling gate to the opaque floor, which is sound (a wider
+		// layout serving a narrower writer costs nothing — the extra slot
+		// sits unused) but leaves the corpus row unfixed until that
+		// sibling gate widens to inertValue too, mirroring this one.
+		if !inertValue(head) {
 			return nil, RetShapeNone
 		}
 		switch {
@@ -340,6 +364,54 @@ func returnedWholeParameterMembers(body *ast.Node, bundleEntries []BundleEntry) 
 		return nil, RetShapeNone
 	}
 	return members, RetShapeObject
+}
+
+// returnedWholeArrayMembers is returnedWholeParameterMembers' own ARRAY
+// twin: a body whose EVERY return is a bare read of the SAME
+// array-flattened name — reduce's Text.tsx shape, reduced to its
+// callback:
+//
+//	(result: WordsWithWidth[], w) => {
+//	  if (…) { result.push(newLine); } else { currentLine.words.push(word); }
+//	  return result;
+//	}
+//
+// carries its length and element already, in "result.len"/"result.elem"
+// — the same two slots ir_array_slots.go's flattening lays out for any
+// array local or parameter whose every USE the scan there admits
+// (`.push`, an index write, a for-of — usesAreAllArrayForms,
+// ir_array_use_scan.go, read-only here). No new slot is allocated and no
+// new effect is written: the pair slots already carry every push/index
+// write the body lowered, at entry AND at any later exit, so the return
+// maps them onto "#ret.len"/"#ret.elem" verbatim — the same alias-by-
+// index move returnedWholeParameterMembers makes for a record parameter,
+// one array wide instead of one member wide.
+//
+// The rule mirrors both siblings' own: one shape for the whole body. A
+// body returning `result` on one path and a different name (even a
+// second array-flattened one) on another has no single pair to alias,
+// and keeps the scalar #ret alone.
+func returnedWholeArrayMembers(body *ast.Node, arrayName string, lenIndex int, elemIndex int) ([]RetMemberEntry, RetShapeKind) {
+	if body == nil || arrayName == "" {
+		return nil, RetShapeNone
+	}
+	returns := returnedExpressionsOf(body)
+	if len(returns) == 0 {
+		return nil, RetShapeNone
+	}
+	for _, returned := range returns {
+		head := Unwrapped(returned)
+		if head == nil || !ast.IsIdentifier(head) || head.Text() != arrayName {
+			// a return of anything but the SAME flattened array's own bare
+			// name — a different name, a property/element read off it, an
+			// expression — has no single pair this reader aliases
+			return nil, RetShapeNone
+		}
+	}
+	return []RetMemberEntry{
+		{Name: "len", Index: lenIndex},
+		{Name: "elem", Index: elemIndex},
+	}, RetShapeArray
 }
 
 // arrayRetMembersOf answers the ".len"/".elem" pair for a body whose

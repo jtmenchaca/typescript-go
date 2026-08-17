@@ -51,8 +51,13 @@ func returnMemberStatements(
 	}
 	// the members' values are read as EFFECTS, which have no room for a
 	// statement — so a literal that runs code keeps the floor that covers
-	// what it ran
-	if !writeAndCallFree(head) {
+	// what it ran. inertValue, not writeAndCallFree: CREATING a function
+	// literal runs nothing, so a member whose value is an arrow with calls
+	// INSIDE it is still inert to evaluate here (the arrow-valued member's
+	// own slot takes unknown through the effect grammar) — the same
+	// function-boundary-aware reading returnedLiteralShape now takes, so
+	// the shape layer and this writer admit the same literals.
+	if !inertValue(head) {
 		return nil, false
 	}
 	switch context.RetShape {

@@ -204,6 +204,16 @@ func SummaryCallOrHavocNamed(context *LoweringContext, call *ast.Node, target in
 	if closed, ok := closureCallHavocNamed(context, call, target, construct); ok {
 		return withMethodWrites(withReceiverBundleHavoc(context, call, closed))
 	}
+	// a call through a BARE IMPORTED IDENTIFIER whose declaration this
+	// lowering never reads — a React/redux hook, a module function
+	// pulled in from elsewhere. Tried here, BELOW every tier above: the
+	// blob/summary and closure tiers own a callee that resolves to a
+	// contract or a local closure this lowering CAN read, and must keep
+	// first refusal on it. Only a callee those tiers already declined on
+	// (an import with no reachable body) reaches this recognizer.
+	if hooked, ok := importedHookCallStatement(context, call, target); ok {
+		return withMethodWrites(hooked, true)
+	}
 	if construct == "" {
 		havocked, ok := OpaqueCallHavoc(context, call, target)
 		if !ok {

@@ -83,14 +83,13 @@ func TestThisFieldMapCallStatement_LRUCacheGetCompletes(t *testing.T) {
 	}
 }
 
-// TestThisFieldMapCallStatement_LRUCacheSetCompletes pins LRUCache's
-// `set` body: `this.cache.has`, `.delete`, `.size` (a PROPERTY read,
-// not a call — this test pins whether it already serves on its own),
-// `.keys().next().value` (a chained call this recognizer does not
-// cover — the `.keys()` call itself has no resolvable callee and no
-// fieldMapMethods entry), and `.set`. `.size`/`.keys()...` are expected
-// to be the remaining gaps; this pin states which construct the body
-// declines at, if any.
+// TestThisFieldMapCallStatement_LRUCacheSetOutcome pins LRUCache's
+// full `set` body: `this.cache.has`, `.delete`, `.size` (a property
+// read in a comparison), `.keys().next().value` (the chained iterator
+// read, served by ir_assignment_effect_read.go's once-assigned-map-
+// field arm), and `.set`. Every construct now serves — the body is
+// COMPLETE. (This pin originally asserted the porous pre-fix state and
+// carried its own instruction to flip when the chained read landed.)
 func TestThisFieldMapCallStatement_LRUCacheSetOutcome(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
@@ -119,9 +118,8 @@ func TestThisFieldMapCallStatement_LRUCacheSetOutcome(t *testing.T) {
 	if !recorded {
 		t.Fatalf("no outcome recorded for LRUCache.set")
 	}
-	t.Logf("LRUCache.set lowered ok=%v, outcome=%q, construct=%q", ok, outcome, construct)
-	if outcome != SummaryPorous || construct != "declaration" {
-		t.Errorf("outcome/construct drifted to %q/%q — the isolation test below needs re-checking against the new blocker", outcome, construct)
+	if !ok || outcome != SummaryComplete {
+		t.Errorf("outcome = %q (construct %q, ok %v), want SummaryComplete — has/delete/size-compare/keys().next().value/set all serve", outcome, construct, ok)
 	}
 }
 

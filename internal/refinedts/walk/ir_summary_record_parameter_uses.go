@@ -263,6 +263,21 @@ func recordParameterUseOf(
 // as "always truthy" there — this classification is position-only and
 // intentionally blind to optionality, exactly like every other arm here.
 //
+// READ-WHOLE also covers an EQUALITY OR IDENTITY TEST — the node stands
+// as an operand of `===`, `!==`, `==`, or `!=` (`p === q`, `p == null`).
+// IsStrictlyEqual and IsLooselyEqual (sec-isstrictlyequal,
+// sec-abstract-equality-comparison, tmp/ecma262/spec.html) read both
+// operand VALUES and answer a fresh boolean; neither algorithm stores
+// either operand anywhere, so the position hands out no reference the
+// body could write through — the same argument the truthiness test
+// makes, one level narrower (two operands instead of one implicit
+// ToBoolean coercion).
+//
+// READ-WHOLE also covers a `typeof` OPERAND — the node stands as the
+// Expression of a TypeOfExpression (`typeof p`). The typeof operator
+// (sec-typeof-operator) reads the operand's value and answers a fresh
+// string tag; the operand itself never escapes.
+//
 // MEMBERS-ONLY, a DECLARATION DESTRUCTURING THE WHOLE PARAMETER —
 // `const { lo } = p;` (Sankey.tsx's `const { targetNodes } = curNode;`
 // is this shape). The parameter's own name never denotes a slot after
@@ -315,6 +330,12 @@ func wholeRecordUseAt(node *ast.Node, declared map[string]struct{}) recordParame
 	if isTruthinessTestPosition(node, parent) {
 		return recordParameterReadWhole
 	}
+	if isEqualityTestOperand(node, parent) {
+		return recordParameterReadWhole
+	}
+	if isTypeofOperand(node, parent) {
+		return recordParameterReadWhole
+	}
 	return recordParameterUnreadable
 }
 
@@ -348,6 +369,33 @@ func isTruthinessTestPosition(node *ast.Node, parent *ast.Node) bool {
 		return parent.AsConditionalExpression().Condition == node
 	}
 	return false
+}
+
+// isEqualityTestOperand answers whether NODE stands as an operand of
+// `===`, `!==`, `==`, or `!=`. IsStrictlyEqual/the abstract equality
+// comparison (sec-isstrictlyequal, sec-abstract-equality-comparison,
+// tmp/ecma262/spec.html) read both operand values and answer a fresh
+// boolean — neither algorithm stores an operand anywhere, so this
+// position hands out no reference the body could write through, the
+// same argument isTruthinessTestPosition makes for ToBoolean.
+func isEqualityTestOperand(node *ast.Node, parent *ast.Node) bool {
+	if !ast.IsBinaryExpression(parent) {
+		return false
+	}
+	bin := parent.AsBinaryExpression()
+	kind := bin.OperatorToken.Kind
+	isEqualityKind := kind == ast.KindEqualsEqualsEqualsToken || kind == ast.KindExclamationEqualsEqualsToken ||
+		kind == ast.KindEqualsEqualsToken || kind == ast.KindExclamationEqualsToken
+	return isEqualityKind && (bin.Left == node || bin.Right == node)
+}
+
+// isTypeofOperand answers whether NODE is the operand of a
+// TypeOfExpression (`typeof p`). The typeof operator
+// (sec-typeof-operator, tmp/ecma262/spec.html) reads the operand's
+// value and answers a fresh string tag; the operand itself never
+// escapes.
+func isTypeofOperand(node *ast.Node, parent *ast.Node) bool {
+	return ast.IsTypeOfExpression(parent) && parent.AsTypeOfExpression().Expression == node
 }
 
 // destructuresOnlyDeclaredMembers says whether a binding NAME is an
