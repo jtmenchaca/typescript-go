@@ -496,11 +496,43 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 		for _, written := range sink[name] {
 			joined = abstractdomain.JoinKnown(joined, written)
 		}
+		joined = widenInvariantCollections(joined)
 		if joined.Kind != abstractdomain.KindUnknown {
 			invariants[name] = joined
 		}
 	}
 	return invariants
+}
+
+// widenInvariantCollections sheds a collection invariant's pinned
+// CONTENTS while keeping its identity. The collection above reads field
+// REASSIGNMENTS (`this.cache = …`) — a content mutation
+// (`this.cache.set(k, v)`, `.delete`, `.clear`) is a method call on the
+// field's value, which the write sink never records. So "the field
+// always holds its initializer" is true of the REFERENCE and false of
+// the CONTENTS: a `private cache = new Map()` whose methods fill it
+// would otherwise enter every method as a provably-EMPTY map, and
+// `this.cache.get(k)` would answer exactly-undefined — the wrong answer
+// the LRUCache dead-branch fires showed. Identity survives (it IS a
+// Map, and stays one); Entries and Complete do not. A wrapper's inner
+// value widens the same way, so `Map | undefined` fields cannot smuggle
+// the pinned contents through.
+func widenInvariantCollections(value abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	if value.Kind == abstractdomain.KindCollection && (len(value.Entries) > 0 || value.Complete) {
+		widened := value
+		widened.Entries = nil
+		widened.Complete = false
+		return widened
+	}
+	if value.Inner != nil {
+		inner := widenInvariantCollections(*value.Inner)
+		if !abstractdomain.SameKnown(inner, *value.Inner) {
+			widened := value
+			widened.Inner = &inner
+			return widened
+		}
+	}
+	return value
 }
 
 // InitialThisStateOf is what `this` provably holds at `site`: an

@@ -353,6 +353,12 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 			}
 			result = joined
 		}
+		// the instance-field rule, verbatim (widenInvariantCollections,
+		// class_field_invariants.go): the collection reads field
+		// REASSIGNMENTS, so a collection-valued static keeps its identity
+		// and sheds its pinned contents — `Registry.cache.set(k, v)` in a
+		// static method is a content mutation no write sink records
+		result = widenInvariantCollections(result)
 		if result.Kind != abstractdomain.KindUnknown {
 			invariants[name] = result
 		}
