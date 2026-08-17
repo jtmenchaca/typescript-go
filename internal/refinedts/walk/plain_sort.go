@@ -65,14 +65,25 @@ func mustJSON(v any) string {
 // already say.
 func AddsNothingSet(set refinementsets.RefinedSet) bool {
 	for _, form := range set.Forms {
-		// LAZY, matching the TS `||`: an atLeast(-Infinity) form never
-		// reaches mustJSON below — encoding/json panics on ±Inf/NaN
-		// (unlike JS's JSON.stringify, which prints `null`; PORT.md's
-		// convention), so evaluating every branch eagerly (as this
-		// file did before) crashed on exactly the form this first
-		// branch exists to short-circuit past.
+		// the whole-line rays admit every element of ℝ̄ and say nothing:
+		// atLeast(-∞) and atMost(+∞). The STRICT rays are not among them —
+		// above(-∞) and below(+∞) each EXCLUDE their own infinite
+		// endpoint, which ℝ̄ admits as an element, so they narrow.
 		if form.Form == refinementsets.FormAtLeast && math.IsInf(form.A, -1) {
 			continue
+		}
+		if form.Form == refinementsets.FormAtMost && math.IsInf(form.A, 1) {
+			continue
+		}
+		// a form carrying a non-finite number anywhere else is never the
+		// (finite) string ground, and encoding/json panics on ±Inf/NaN
+		// (unlike JS's JSON.stringify, which prints `null`; PORT.md's
+		// convention) — so it answers WITHOUT the round-trip
+		if formCarriesNonFinite(form) {
+			if form.Form == refinementsets.FormStar && form.A_ != nil && AddsNothingSet(*form.A_) {
+				continue
+			}
+			return false
 		}
 		if mustJSON(form) == stringGroundFormJSON {
 			continue
@@ -83,6 +94,31 @@ func AddsNothingSet(set refinementsets.RefinedSet) bool {
 		return false
 	}
 	return true
+}
+
+// formCarriesNonFinite reports whether the form holds ±Inf or NaN in
+// any numeric field, at any nesting depth — the shapes encoding/json
+// refuses.
+func formCarriesNonFinite(form refinementsets.Refinement) bool {
+	if math.IsInf(form.A, 0) || math.IsNaN(form.A) {
+		return true
+	}
+	for _, w := range form.W {
+		if math.IsInf(w, 0) || math.IsNaN(w) {
+			return true
+		}
+	}
+	for _, nested := range []*refinementsets.RefinedSet{form.A_, form.B} {
+		if nested == nil {
+			continue
+		}
+		for _, inner := range nested.Forms {
+			if formCarriesNonFinite(inner) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // StatedSetWords is statedSetWords in the TS source: the stated set

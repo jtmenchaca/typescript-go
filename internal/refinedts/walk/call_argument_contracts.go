@@ -72,6 +72,15 @@ func CheckContractArguments(ctx *FlowContext, contract *FunctionContract, effect
 			continue
 		}
 		argKnown := argKnowns[i]
+		// the argument's OWN static type already inside the stated set —
+		// including the maybe wrap on both sides — is tsc's proof for
+		// every value this position can pass (static_type_within.go).
+		// Judged HERE, before the maybe peel below: after the peel the
+		// escape would see an absence-admitting static type against the
+		// bare inner statement and rightly refuse.
+		if StaticTypeWithinTarget(ctx, argument, *stated) {
+			continue
+		}
 		// a maybe position admits absence outright; present
 		// knowledge judges against the inner statement
 		if stated.Kind == annotations.DeclaredPossiblyUndefined {

@@ -251,10 +251,10 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			tracing.Count("inlineSkipped", 0)
 			if summary.SelfContained && !superRooted {
 				recovered := RecoverPure(ctx, e, *contract, effective, true)
-				if statedResult == nil {
-					return recovered
+				if statedResult != nil {
+					recovered = abstractdomain.MeetKnown(recovered, *statedResult)
 				}
-				return abstractdomain.MeetKnown(recovered, *statedResult)
+				return wornReturnTypeIfUnknown(ctx, e, recovered)
 			}
 			// effect-free but reads the caller's world: fall through to
 			// the full inline, whose copied environment keeps captures
@@ -265,13 +265,13 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			if statedResult != nil {
 				return *statedResult
 			}
-			return silence.Residue()
+			return wornReturnTypeIfUnknown(ctx, e, silence.Residue())
 		}
 		recovered := InlineContractCall(ctx, env, e, contract, effective)
-		if statedResult == nil {
-			return recovered
+		if statedResult != nil {
+			recovered = abstractdomain.MeetKnown(recovered, *statedResult)
 		}
-		return abstractdomain.MeetKnown(recovered, *statedResult)
+		return wornReturnTypeIfUnknown(ctx, e, recovered)
 	}
 	// a body-less callee (an ambient declaration): reference
 	// arguments forget — the implementation is outside the checked
@@ -325,4 +325,38 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 		}
 	}
 	return UnmodeledCallResult(ctx, env, e)
+}
+
+// wornReturnTypeIfUnknown: an inline or recovery answer that
+// determined NOTHING still wears the call's declared return ground.
+// The callee's body is in reach on every path that lands here, so the
+// declared return type is a claim tsc itself checked that body
+// against — the same standing unmodeled_call_result.go's own
+// body-in-reach arm rests on — and a weaker true claim beats the
+// unknown. The stated-annotation reading runs first (the Map.get
+// precedent above), the sort ground second. An answer that
+// determined SOMETHING rides through untouched.
+//
+// An UNINSTANTIATED type variable counts as determining nothing: a
+// generic callee's stated `T | undefined` meets the recovery as a
+// bare variable, but no checked position can relate that T to its
+// own stated set — the call site's RESOLVED type IS the
+// instantiation (recharts' useAppSelector<T> handing back
+// `PolarLayout | undefined` at one site and `LayoutType | undefined`
+// at another), so the ground outranks the variable.
+func wornReturnTypeIfUnknown(ctx *FlowContext, e *ast.Node, result abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	bare := result
+	if bare.Kind == abstractdomain.KindPossiblyUndefined {
+		bare = *bare.Inner
+	}
+	if bare.Kind != abstractdomain.KindUnknown && bare.Kind != abstractdomain.KindVariable {
+		return result
+	}
+	if worn := AnnotationOfReturnType(ctx, e); worn != nil {
+		return *worn
+	}
+	if ground := ReturnTypeGround(ctx, e); ground != nil {
+		return *ground
+	}
+	return result
 }

@@ -81,6 +81,24 @@ func UnmodeledCallResult(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.
 			})
 		}
 	}
+	// the opaque readings below still wear the sort ground the call's
+	// RESOLVED return type states cleanly, at LIBRARY grade — the
+	// claim is the declaration's, the same standing the
+	// stated-annotation reading above and the parametric rule both
+	// rest on, and a refutation through it still refutes. An imported
+	// `useAppSelector` typed to hand back its selector's own literal
+	// union wears that union whether the binding entered the
+	// environment opaque or the callee spells no body. A return type
+	// the ground reader cannot spell keeps the opaque reading: the
+	// value entered from outside the file's determination, so reads
+	// through it stay opaque (join.ts OPAQUE) instead of counting as
+	// the walk's gap.
+	opaqueWorn := func() abstractdomain.AbstractValue {
+		if ground := ReturnTypeGround(ctx, e); ground != nil {
+			return abstractdomain.AtTrustLevel(*ground, abstractdomain.TrustLibrary)
+		}
+		return abstractdomain.Opaque
+	}
 	// a call through an OPAQUE value — a function held in a binding
 	// that entered from outside, or a member of one (`date[key](…)`):
 	// the function itself is outside the file's determination, so its
@@ -93,7 +111,7 @@ func UnmodeledCallResult(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.
 	}
 	if ast.IsIdentifier(calleeRoot) {
 		if held, ok := env.Get(calleeRoot.Text()); ok && held.Kind == abstractdomain.KindUnknown && held.Opaque {
-			return abstractdomain.Opaque
+			return opaqueWorn()
 		}
 	}
 	// a call rooted at `super` — `super.m(…)` or a derived
@@ -114,14 +132,13 @@ func UnmodeledCallResult(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.
 	// first, so a super call whose return type spells an annotation
 	// wears it rather than reaching here.
 	if calleeRoot.Kind == ast.KindSuperKeyword {
-		return abstractdomain.Opaque
+		return opaqueWorn()
 	}
 	// a callee with NO BODY anywhere in reach — a .d.ts signature, or
-	// an import from an unresolved module: its result ENTERS from
-	// outside the file's determination, so reads through it stay
-	// opaque (join.ts OPAQUE) instead of counting as the walk's gap
+	// an import from an unresolved module: the same worn-or-opaque
+	// reading (opaqueWorn's own doc)
 	if BodilessCallee(ctx, call.Expression) && !CalleeInDefaultLib(ctx, call.Expression) {
-		return abstractdomain.Opaque
+		return opaqueWorn()
 	}
 	// the call that reached HERE has a BODY in reach — no model read it,
 	// no contract held it, no inline replayed it — so its declared

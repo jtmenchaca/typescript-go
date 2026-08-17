@@ -136,6 +136,24 @@ func CheckAssignabilityOfArm(
 			!target.Unread && AddsNothingSet(*target.Set) {
 			return
 		}
+		// a VARIABLE target whose bound is not grounded states no set of
+		// its own — only a grounded bound is ever checked against
+		// (declared_refinement.go's rule) — so the position's whole
+		// content is tsc's shape check, and unknown knowledge against it
+		// alerts nowhere: the same "adds nothing" verdict, for the bare
+		// generic spellings (`T`, `ReadonlyArray<T>`, `ChartData` whose
+		// element defaults to unknown)
+		if target.Kind == annotations.DeclaredVariable && !target.Unread &&
+			!target.BoundGrounded && target.BoundObject == nil {
+			return
+		}
+		// the position's OWN static type already lies within the stated
+		// set: tsc proved membership for every value this position can
+		// hold, so the row is determined by the host's own check
+		// (static_type_within.go's doc) — no alert
+		if StaticTypeWithinTarget(ctx, node, target) {
+			return
+		}
 		fix, hasFix := GuardFix(node, target)
 		messageText := assignability.AlertText
 		if ContainsPow(node) {

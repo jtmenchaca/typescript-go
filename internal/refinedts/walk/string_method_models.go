@@ -99,7 +99,10 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 	// sentinel: indexOf answers an integer at least −1, and a slice
 	// built on the not-found −1 silently reads from the wrong place —
 	// the guard `!== −1` is what discharges it (the findIndex sentinel
-	// class, at the read side)
+	// class, at the read side). A FINDING, not an undetermined verdict:
+	// the read's value still determines (a slice of a string is a
+	// string, whatever the window), so the sort rows below keep
+	// serving — this row only names the unguarded sentinel.
 	if method == "slice" || method == "substring" {
 		for _, argument := range argKnowns {
 			if argument.Kind != abstractdomain.KindSet || argument.SetKindTag != abstractdomain.SetKindTagNone {
@@ -108,9 +111,9 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 			window := RangeOfSet(argument.Set)
 			if window != nil && window.Int && window.Lo == -1 {
 				ctx.Report(assignability.At(
-					e, 7002,
+					e, 7001,
 					"an index may be a search's -1 (not found) — guard it with "+
-						"!== -1 before "+method+". "+assignability.AlertText,
+						"!== -1 before "+method,
 				))
 				break
 			}

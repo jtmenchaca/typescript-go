@@ -219,7 +219,15 @@ func MapValueAnnotation(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractV
 // OVER, which is the element, and the element is read through the yield
 // walk and the drain routes instead (generator_element.go).
 func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
-	t := ctx.P.Checker.GetTypeAtLocation(e)
+	return typeGroundOf(ctx, ctx.P.Checker.GetTypeAtLocation(e), e)
+}
+
+// typeGroundOf is ReturnTypeGround's part-walk over an ALREADY-HELD
+// type — the same reading, callable where the type comes from
+// somewhere other than a call's own location (a checked position's
+// static type). `e` anchors the resolved-type reader's constructed
+// arms.
+func typeGroundOf(ctx *FlowContext, t *checker.Type, e *ast.Node) *abstractdomain.AbstractValue {
 	parts := typePartsOf(t)
 	sawAbsent := false
 	var words []string

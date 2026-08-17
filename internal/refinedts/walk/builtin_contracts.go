@@ -109,7 +109,25 @@ func CheckBuiltinContracts(ctx *FlowContext, env Env, e *ast.Node) {
 		resolvesToDefaultLib(ctx, callee) && len(args) == 1 && !ast.IsSpreadElement(args[0]) {
 		length := evaluateExpression(ctx, env, args[0])
 		if numberSorted(length) {
-			CheckAssignability(ctx, length, annotations.DeclaredRefinement{
+			// an UNDETERMINED length is a FINDING at this row, not the
+			// generic undetermined sentence: the row judges a THROW
+			// contract, so a window still admitting a negative, a
+			// fraction, or 2^32-and-up names a construction that may
+			// throw a RangeError — the hazard is the row's own, and the
+			// guard is the reader's next move. A refutation (an exact
+			// bad length) rides through unchanged.
+			contractCtx := *ctx
+			contractCtx.Report = func(d assignability.RefinementDiagnostic) {
+				if d.Code == 7002 {
+					d = assignability.At(
+						args[0], 7001,
+						"the array length is not pinned to a whole number in [0, 4294967295] — "+
+							"Array(length) throws a RangeError on anything else; guard or clamp the count",
+					)
+				}
+				ctx.Report(d)
+			}
+			CheckAssignability(&contractCtx, length, annotations.DeclaredRefinement{
 				Kind: annotations.DeclaredSet,
 				Set:  setPtr(refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(0), refinementsets.AtMost(4294967295))),
 			}, args[0], "the array length", nil)
