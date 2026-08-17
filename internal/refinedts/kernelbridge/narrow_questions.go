@@ -92,25 +92,31 @@ type NarrowAnswer struct {
 
 // KnownStateWire is a knowledge state on the wire — the kernel's flat
 // normal form of the checker's scalar knowledge: no knowledge at all
-// (Top), or a refined set with an or-absent flag, an or-NaN flag, and
-// an or-THROWN flag.
+// (Top), or a refined set with the two absent admissions (whether the
+// position may hold undefined, and whether it may hold null), an
+// or-NaN flag, and an or-THROWN flag.
 //
-// Thrown is the third flag, and it says something the other two do
-// not: whether a run could have left this position by THROWING rather
-// than completing. A thrown exit is not the absent value — absence is
-// a value a run produced, a thrown exit is no completion at all — and
-// keeping them apart is what lets a body that guards with
-// `if (x) throw` serve its plain returned value.
+// Undef and Null are the split of the old conflated absent flag:
+// undefined and null are distinct runtime values that answer the
+// strict tests differently, so the wire carries WHICH one a state
+// admits — the split that lets `=== undefined` and `=== null` decide.
 //
-// The flag is OPTIONAL on the wire in both directions, and its absence
+// Thrown says something the value flags do not: whether a run could
+// have left this position by THROWING rather than completing. A
+// thrown exit is not an absent value — absence is a value a run
+// produced, a thrown exit is no completion at all — and keeping them
+// apart is what lets a body that guards with `if (x) throw` serve its
+// plain returned value.
+//
+// Thrown is OPTIONAL on the wire in both directions, and its absence
 // means false, which is what every wire written before it existed
-// meant. So an older kernel and an older checker interoperate with
-// this one unchanged.
+// meant.
 type KnownStateWire struct {
 	Top bool
 
 	Set    refinementsets.RefinedSet
-	Absent bool
+	Undef  bool
+	Null   bool
 	Nan    bool
 	Thrown bool
 }
@@ -124,11 +130,12 @@ func StateWire(s KnownStateWire) string {
 	}
 	if s.Thrown {
 		return fmt.Sprintf(
-			`{"set":%s,"absent":%v,"nan":%v,"thrown":true}`,
-			EncodeSet(s.Set), s.Absent, s.Nan,
+			`{"set":%s,"undef":%v,"null":%v,"nan":%v,"thrown":true}`,
+			EncodeSet(s.Set), s.Undef, s.Null, s.Nan,
 		)
 	}
-	return fmt.Sprintf(`{"set":%s,"absent":%v,"nan":%v}`, EncodeSet(s.Set), s.Absent, s.Nan)
+	return fmt.Sprintf(`{"set":%s,"undef":%v,"null":%v,"nan":%v}`,
+		EncodeSet(s.Set), s.Undef, s.Null, s.Nan)
 }
 
 // DecodeWireState is decodeWireState in the TS source. Panics when raw
@@ -147,12 +154,20 @@ func DecodeWireState(raw any) KnownStateWire {
 		return KnownStateWire{Top: true}
 	}
 	set, setHeld := o["set"]
-	absent, absentOK := o["absent"].(bool)
 	nan, nanOK := o["nan"].(bool)
 	thrown, _ := o["thrown"].(bool)
-	if setHeld && set != nil && absentOK && nanOK {
+	undef, undefOK := o["undef"].(bool)
+	null, nullOK := o["null"].(bool)
+	if !undefOK || !nullOK {
+		// a wire written before the null/undefined split carries one
+		// conflated absent bool, which meant both admissions
+		if absent, absentOK := o["absent"].(bool); absentOK {
+			undef, null, undefOK, nullOK = absent, absent, true, true
+		}
+	}
+	if setHeld && set != nil && undefOK && nullOK && nanOK {
 		return KnownStateWire{
-			Set: DecodeWireSet(set), Absent: absent, Nan: nan, Thrown: thrown,
+			Set: DecodeWireSet(set), Undef: undef, Null: null, Nan: nan, Thrown: thrown,
 		}
 	}
 	panic(fmt.Sprintf("kernel answered an unexpected knowledge state: %v", raw))

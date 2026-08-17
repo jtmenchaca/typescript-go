@@ -98,9 +98,23 @@ func returnedLiteralShape(body *ast.Node) ([]bodySlot, RetShapeKind) {
 	}
 	objects := 0
 	arrays := 0
+	arrayCalls := 0
 	for _, returned := range returns {
 		head := Unwrapped(returned)
 		if head == nil {
+			continue
+		}
+		// an ARRAY-PRODUCING COLLECTION CALL — `return children.map(cb)`
+		// / `.filter(cb)` — is the one code-running return the shape may
+		// admit: its members are written by STATEMENTS (the callback
+		// conversion's own arm in SummaryCallbackReturnOf), not by the
+		// effect-only literal writer the refusal below protects. The arm
+		// itself still declines the sites it cannot serve, and a declined
+		// return falls to the opaque floor with the pair holding its
+		// absent entry state — which the join reads as "this path said
+		// nothing", the same claim an unallocated shape made.
+		if isArrayProducingCollectionCall(head) {
+			arrayCalls++
 			continue
 		}
 		// A LITERAL THAT RUNS CODE allocates nothing, and this is the rule
@@ -127,10 +141,67 @@ func returnedLiteralShape(body *ast.Node) ([]bodySlot, RetShapeKind) {
 	if objects == len(returns) {
 		return objectRetMembersOf(returns)
 	}
-	if arrays == len(returns) {
-		return arrayRetMembersOf(returns)
+	if arrays+arrayCalls == len(returns) && arrays+arrayCalls > 0 {
+		if arrayCalls == 0 {
+			return arrayRetMembersOf(returns)
+		}
+		// any call-shaped return allocates the plain pair; a literal
+		// return beside it still writes the pair through its own arm
+		for _, returned := range returns {
+			head := Unwrapped(returned)
+			if head != nil && ast.IsArrayLiteralExpression(head) {
+				for _, element := range head.AsArrayLiteralExpression().Elements.Nodes {
+					if ast.IsSpreadElement(element) {
+						return nil, RetShapeNone
+					}
+				}
+			}
+		}
+		return []bodySlot{
+			{Name: retLenSlotName(), Sort: BindingKindNumber, TypeofTag: TypeofTagNumber},
+			{Name: retElemSlotName(), Sort: BindingKindUnknown, TypeofTag: TypeofTagNone},
+		}, RetShapeArray
 	}
 	return nil, RetShapeNone
+}
+
+// isArrayProducingCollectionCall: `xs.map(cb)` / `xs.filter(cb)` — the
+// two collection calls whose result IS an array the ".len"/".elem"
+// pair can spell, recognized by the same reader the callback arms use —
+// and `xs.reduce(cb, seed)` where the ACCUMULATOR itself is an array.
+// A reduce's result is its accumulator, so bare `reduce` is never
+// evidence of an array: only an array-literal seed or a first callback
+// parameter annotated as an array says the pair can spell the result.
+// A scalar-accumulator reduce keeps the scalar ret alone, as before.
+func isArrayProducingCollectionCall(head *ast.Node) bool {
+	if source, ok := collectionCallOf(head); ok {
+		return source.Method == "map" || source.Method == "filter"
+	}
+	if source, seed, isReduce := reduceCallOf(head); isReduce {
+		return reduceAccumulatorSpellsArray(source.Callback, seed)
+	}
+	return false
+}
+
+// reduceAccumulatorSpellsArray: the seed is an array literal, or the
+// callback's own first parameter carries an array-type annotation
+// (`T[]`, `Array<T>`, `ReadonlyArray<T>` — elementTypeNodeOf's own
+// unwrapping). Either is the source's own word that the accumulator,
+// and so the reduce's result, is an array.
+func reduceAccumulatorSpellsArray(callback *ast.Node, seed *ast.Node) bool {
+	if seed != nil && ast.IsArrayLiteralExpression(Unwrapped(seed)) {
+		return true
+	}
+	head := Unwrapped(callback)
+	if head == nil || (!ast.IsArrowFunction(head) && !ast.IsFunctionExpression(head)) {
+		return false
+	}
+	parameters := head.Parameters()
+	if len(parameters) == 0 {
+		return false
+	}
+	annotation := parameters[0].AsParameterDeclaration().Type
+	return annotation != nil && elementTypeNodeOf(annotation) != nil
 }
 
 // objectRetMembersOf reads every returned object literal's keys as the

@@ -77,7 +77,7 @@ func TestAwaitedOperandOf_ThePeelReachesTheCallThroughParensAndCasts(t *testing.
 
 func TestAwaitStatement_AwaitOfATrackedScalarAssignsTheIdentityRead(t *testing.T) {
 	// `await s` on a non-promise settles to the value itself, so the
-	// right side is exactly the slot's own var
+	// right side is exactly the slot's own verbatim copy
 	context := awaitScalarContext()
 	statements := awaitParse(t, `x = await s;`)
 	lowered, ok := AwaitStatementOf(context, statements[0])
@@ -93,8 +93,8 @@ func TestAwaitStatement_AwaitOfATrackedScalarAssignsTheIdentityRead(t *testing.T
 	if lowered[0].Target != 0 {
 		t.Errorf("lowered[0].Target = %d, want 0 (x)", lowered[0].Target)
 	}
-	if lowered[0].Effect.Kind != kernelbridge.LoopEffectVar {
-		t.Errorf("lowered[0].Effect.Kind = %v, want var", lowered[0].Effect.Kind)
+	if lowered[0].Effect.Kind != kernelbridge.LoopEffectVarState {
+		t.Errorf("lowered[0].Effect.Kind = %v, want varState", lowered[0].Effect.Kind)
 	}
 	if lowered[0].Effect.Index != 1 {
 		t.Errorf("lowered[0].Effect.Index = %d, want 1 (s)", lowered[0].Effect.Index)
@@ -135,8 +135,8 @@ func TestAwaitStatement_AwaitOfPromiseResolveOfATrackedScalarReadsTheScalar(t *t
 		t.Fatalf("AwaitStatementOf(x = await Promise.resolve(s)) ok = false, want true")
 	}
 	if len(lowered) != 1 || lowered[0].Kind != kernelbridge.IrStatementAssign ||
-		lowered[0].Target != 0 || lowered[0].Effect.Kind != kernelbridge.LoopEffectVar || lowered[0].Effect.Index != 1 {
-		t.Errorf("lowered = %+v, want one assign of s's var (slot 1) to x (slot 0)", lowered)
+		lowered[0].Target != 0 || lowered[0].Effect.Kind != kernelbridge.LoopEffectVarState || lowered[0].Effect.Index != 1 {
+		t.Errorf("lowered = %+v, want one assign of s's verbatim copy (slot 1) to x (slot 0)", lowered)
 	}
 	// bare, the value is dropped and nothing lowers
 	bare := awaitParse(t, `await Promise.resolve(s);`)

@@ -150,7 +150,7 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 			if !ok {
 				return InlineCallResult{}, false
 			}
-			argAssigns = append(argAssigns, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: effect})
+			argAssigns = append(argAssigns, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: asVarStateEffect(effect)})
 		}
 	}
 	// the callee's locals lay out exactly as the summary route's do: a
@@ -216,6 +216,18 @@ func InlineCall(context *LoweringContext, call *ast.Node) (InlineCallResult, boo
 	if !ok {
 		return InlineCallResult{}, false
 	}
+	// POROSITY IS TRANSITIVE THROUGH THE INLINE. The inlined body's
+	// statements lowered onto a FRESH context, so a havoc noted inside
+	// (an opaque return over a static field read, an unreadable
+	// statement's floor) landed on `inner` and died with it — the
+	// CALLER's body then recorded COMPLETE around a lost read, and
+	// applySummary's serving rule TOP-served that unknown instead of
+	// declining to the walk route, which reads the value correctly (a
+	// static field invariant two call hops deep answered nothing while
+	// the same read one hop deep answered 40). The caller's outcome
+	// must carry the inlined body's first havoc exactly as it carries
+	// its own.
+	NoteFirstHavoc(context, inner.FirstHavoc)
 	stmts := append([]kernelbridge.IrStatement{}, argAssigns...)
 	stmts = append(stmts, kernelbridge.IrStatement{
 		Kind:   kernelbridge.IrStatementAssign,
@@ -267,7 +279,7 @@ func CallAssignmentOf(context *LoweringContext, s *ast.Node) ([]kernelbridge.IrS
 	out = append(out, kernelbridge.IrStatement{
 		Kind:   kernelbridge.IrStatementAssign,
 		Target: target,
-		Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: inlined.RetIndex},
+		Effect: varStateEffect(inlined.RetIndex),
 	})
 	return out, true
 }

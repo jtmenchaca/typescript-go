@@ -70,9 +70,50 @@ func ArrayElementSlotOf(context *LoweringContext, node *ast.Node) (int, bool) {
 }
 
 // varEffect is a slot read as an effect — the one-liner every array
-// and record lowering below reaches for.
+// and record lowering below reaches for. This is the NUMERIC/coercing
+// read (walk.lean's flagged-read rule): an absent or NaN source reads
+// flagged here. Use it for anything that becomes an OPERAND of another
+// effect (A/B of a binary, join, concat, or-absent, …) — never wrap
+// this one in asVarStateEffect.
 func varEffect(index int) kernelbridge.LoopEffect {
 	return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: index}
+}
+
+// varStateEffect is a slot read as its WHOLE state, verbatim — set,
+// absent admissions, and the NaN flag alike, with no numeric coercion.
+// This is what a plain copy (`lo = p.lo`, a destructuring leaf read, a
+// whole-record reassignment) means at the RUNTIME level: the copy
+// carries whatever the source held, including an admission a numeric
+// read would launder into the NaN flag.
+//
+// ONLY safe where the result becomes the WHOLE Effect of an
+// IrStatementAssign standing alone — never nested inside another
+// effect's operand (A/B of un/bin/concat/join/orAbsent), and never fed
+// to SubstituteVars/FoldBody's loop-effect folding, which re-nests a
+// binding's current effect into LATER statements' operands. The kernel
+// proof is explicit about this (set_functions/walk.lean's
+// effectReadsFlagged/seqSetOf/readEnclosure `.varState _ =>
+// none`/unreachable arms): a copy in operand position answers nothing,
+// by design — the adapter must never emit one there.
+func varStateEffect(index int) kernelbridge.LoopEffect {
+	return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVarState, Index: index}
+}
+
+// asVarStateEffect upgrades a bare identity-copy read (LoopEffectVar)
+// to the verbatim whole-state copy (LoopEffectVarState) — same Index,
+// nothing else changes. Effects of any other kind pass through
+// unchanged (a const, join, arithmetic build, etc. already carries
+// whatever ride-alongs it needs, or is itself something a copy
+// upgrade does not apply to).
+//
+// Call this ONLY at a site where the result becomes the WHOLE Effect
+// of an IrStatementAssign — see varStateEffect's doc for the operand
+// restriction this must never violate.
+func asVarStateEffect(e kernelbridge.LoopEffect) kernelbridge.LoopEffect {
+	if e.Kind == kernelbridge.LoopEffectVar {
+		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVarState, Index: e.Index}
+	}
+	return e
 }
 
 // joinEffect pairs two effects into the effect grammar's join — what a

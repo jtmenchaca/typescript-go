@@ -113,7 +113,7 @@ func TestLoweringToKernelIR_AParsedWhileLoopLowersThroughTheKernelsNarrowingAndC
 	exit := kernel.Walk(
 		[]kernelbridge.KnownStateWire{
 			{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0}))},
-			{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{7})), Absent: true},
+			{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{7})), Undef: true, Null: true},
 		},
 		stmts,
 	)
@@ -135,8 +135,8 @@ func TestLoweringToKernelIR_AParsedWhileLoopLowersThroughTheKernelsNarrowingAndC
 	if x.Top {
 		t.Fatalf("x.Top = true, want false")
 	}
-	if !x.Absent {
-		t.Errorf("x.Absent = false, want true")
+	if !x.Undef || !x.Null {
+		t.Errorf("x admissions (undef=%v null=%v), want both", x.Undef, x.Null)
 	}
 	if !kernel.Member(loweringSetOf(t, x), []float64{7}) {
 		t.Errorf("member(x, [7]) = false, want true")
@@ -229,8 +229,9 @@ func TestLoweringToKernelIR_AStringBindingBranchesOnItsOwnKindTagEqualityPinsThe
 	exit := kernel.Walk(
 		[]kernelbridge.KnownStateWire{
 			{
-				Set:    refinementsets.MakeRefinedSet(refinementsets.Union(refinementsets.StringTuple("ok"), refinementsets.StringTuple("no"))),
-				Absent: true,
+				Set:   refinementsets.MakeRefinedSet(refinementsets.Union(refinementsets.StringTuple("ok"), refinementsets.StringTuple("no"))),
+				Undef: true,
+				Null:  true,
 			},
 		},
 		stmts,
@@ -239,8 +240,8 @@ func TestLoweringToKernelIR_AStringBindingBranchesOnItsOwnKindTagEqualityPinsThe
 	if s.Top {
 		t.Fatalf("s.Top = true, want false")
 	}
-	if !s.Absent {
-		t.Errorf("s.Absent = false, want true")
+	if !s.Undef || !s.Null {
+		t.Errorf("s admissions (undef=%v null=%v), want both", s.Undef, s.Null)
 	}
 	set := loweringSetOf(t, s)
 	if !kernel.Member(set, loweringCodePoints("yes")) {

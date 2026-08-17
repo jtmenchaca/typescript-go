@@ -124,6 +124,22 @@ func SummaryCallOrHavoc(context *LoweringContext, call *ast.Node, target int) ([
 // construct RUNNING the call is. An empty `construct` is
 // SummaryCallOrHavoc's own behavior, unchanged.
 func SummaryCallOrHavocNamed(context *LoweringContext, call *ast.Node, target int, construct string) ([]kernelbridge.IrStatement, bool) {
+	// a `this.<field>.<method>` call on a once-assigned Map/Set field has
+	// no resolvable callee at all (summaryCalleeOf would decline it below
+	// regardless), so this recognizer is tried first — it costs nothing on
+	// every call this shape does not match, and turns a body that used to
+	// go porous at "call this.m.get" into a completed one.
+	if statement, ok := thisFieldMapCallStatement(context, call, target); ok {
+		return []kernelbridge.IrStatement{statement}, true
+	}
+	// the module-const twin of the same recognizer: `<name>.has(x)` /
+	// `.delete(x)` where name resolves to a top-level `const` initialized
+	// to a bare `new Map(…)`/`new Set(…)` and never reassigned in the
+	// file (ir_summary_module_set_calls.go). Same cost argument: a
+	// module-const receiver has no resolvable FunctionContract either.
+	if statement, ok := moduleSetCallStatement(context, call, target); ok {
+		return []kernelbridge.IrStatement{statement}, true
+	}
 	// a NEW takes the blob tier alone: an unresolvable or declining
 	// constructor falls back to the caller's own routes and floor, whose
 	// havoc enumeration reads calls. The instance value itself has no

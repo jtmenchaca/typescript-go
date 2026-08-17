@@ -9,6 +9,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/bundled"
 	"github.com/microsoft/typescript-go/internal/compiler"
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/vfs/vfstest"
 )
@@ -125,5 +126,49 @@ func TestTypeReadsSilentResultCoversJoinsOnly(t *testing.T) {
 	}
 	if TypeReadsSilentResult(prop) {
 		t.Fatal("typeReadsSilentResult(prop) should be false")
+	}
+}
+
+// TestNullKeywordEvaluatesToExactlyNull pins the producer split (KindNull
+// vs KindUndef): a bare `null` literal in an expression position is the
+// runtime null value, not the undefined value — evaluateExpression's own
+// ast.KindNullKeyword arm answers abstractdomain.Null.
+func TestNullKeywordEvaluatesToExactlyNull(t *testing.T) {
+	p := entryEnvTestProgram(t, "null;")
+	statements := p.Entry.Statements.Nodes
+	if len(statements) != 1 || !ast.IsExpressionStatement(statements[0]) {
+		t.Fatalf("expected one expression statement, got %d statements", len(statements))
+	}
+	ctx := superArrayContracts(t, p)
+	value := evaluateExpression(ctx, NewEnv(), statements[0].AsExpressionStatement().Expression)
+	if value.Kind != abstractdomain.KindNull {
+		spelled, _ := abstractdomain.FormatAbstractValue(value)
+		t.Errorf("evaluateExpression(null) Kind = %v (%q), want KindNull", value.Kind, spelled)
+	}
+}
+
+// TestLiteralKnownNullEvaluatesToExactlyNull is TestNullKeywordEvaluates
+// ToExactlyNull's twin for the OTHER null-literal reader: a `const x =
+// null;` declarator is read by literalKnown (type_seed_answer.go), the
+// last-reader path LiteralConstClaim/TypeSeedAnswer fall back to at a
+// silent exit — it must answer the same exact null value, not undefined.
+func TestLiteralKnownNullEvaluatesToExactlyNull(t *testing.T) {
+	p := entryEnvTestProgram(t, "const x = null;")
+	statements := p.Entry.Statements.Nodes
+	if len(statements) != 1 || !ast.IsVariableStatement(statements[0]) {
+		t.Fatalf("expected one variable statement, got %d statements", len(statements))
+	}
+	declarations := statements[0].AsVariableStatement().DeclarationList.AsVariableDeclarationList().Declarations.Nodes
+	if len(declarations) != 1 {
+		t.Fatalf("expected one declarator, got %d", len(declarations))
+	}
+	initializer := declarations[0].AsVariableDeclaration().Initializer
+	value, ok := literalKnown(p, initializer, 0)
+	if !ok {
+		t.Fatalf("literalKnown(null) ok = false, want true")
+	}
+	if value.Kind != abstractdomain.KindNull {
+		spelled, _ := abstractdomain.FormatAbstractValue(value)
+		t.Errorf("literalKnown(null) Kind = %v (%q), want KindNull", value.Kind, spelled)
 	}
 }

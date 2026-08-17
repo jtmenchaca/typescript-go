@@ -193,7 +193,12 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 		// an exact string matched against an exact regex: the match
 		// semantics are transcribed (sec-string.prototype.match via
 		// RegExp.prototype[@@match]), so the host computes the exact
-		// result — null becomes the absent marker
+		// result — a miss answers exactly the NULL value (RegExp.prototype
+		// [%Symbol.match%] step 5.a delegates the non-global case to
+		// RegExpExec, whose own clause — sec-regexp.prototype.exec —
+		// states "returns an Array... or *null* if string did not match";
+		// the global case's own repeat loop, step 6.d.i, returns the
+		// literal "*null*" directly on the first no-match)
 		if method == "match" && len(argKnowns) == 1 {
 			pattern := argKnowns[0]
 			// a STICKY pattern reads the regex object's mutable
@@ -209,7 +214,7 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 				}
 				result := compiled.FindStringSubmatch(text)
 				if result == nil {
-					out := abstractdomain.AtTrustLevel(abstractdomain.Undef, oracleGrade)
+					out := abstractdomain.AtTrustLevel(abstractdomain.Null, oracleGrade)
 					return &out
 				}
 				words := make([]abstractdomain.AbstractValue, len(result))

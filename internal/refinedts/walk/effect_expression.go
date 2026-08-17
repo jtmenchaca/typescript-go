@@ -298,6 +298,21 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 		if _, isBoolean := booleanBinaryTokens[bin.OperatorToken.Kind]; isBoolean && writeAndCallFree(e) {
 			return booleanPairEffect(), true
 		}
+		// `entry && b` where `entry` is a NON-OPTIONAL RECORD PARAMETER's
+		// own bare name: the value is always an object (ToBoolean answers
+		// true for every Object, sec-toboolean, tmp/ecma262/spec.html), so
+		// the whole is always `b` — not a join of both operands' sets, the
+		// EXACT reading, and it needs no slot for `entry` at all (there is
+		// none — recordParameterUseOf's expansion leaves the whole-name
+		// spelling with no tracked place). Tried before the join below,
+		// which would otherwise widen this to "unconstrained" the moment
+		// `entry` fails to resolve as its own operand (LowerEffectExpression
+		// has no reading for a bare record-parameter identifier, its slots
+		// all being its MEMBERS' — "entry.value", never "entry").
+		if bin.OperatorToken.Kind == ast.KindAmpersandAmpersandToken &&
+			truthyRecordParameterName(Unwrapped(bin.Left)) != "" {
+			return LowerEffectExpression(bin.Right, reader)
+		}
 		// a SHORT-CIRCUIT operator's value is one of its operands, so the
 		// join of both admits every run. A side that does not lower falls
 		// to Opaque — again the operator's old path.

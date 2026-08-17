@@ -21,6 +21,28 @@ import (
 
 const absentFlags = checker.TypeFlagsUndefined | checker.TypeFlagsNull | checker.TypeFlagsVoid
 
+// hostTypeDepthLimit is the ONE recursion budget the type-parameter/
+// conditional/indexed-access peel, the union branch, and the object/
+// intersection branch all share ("one limit, one answer" — a record
+// inside a union inside a record must not read differently depending
+// on which branch reaches it first).
+//
+// 5, not 3: an ORDINARY two-level-nested record whose leaf member is
+// a maybe-absent array of a literal union — `{ a: { b: T[] |
+// undefined } }`, no recursion or pathological width involved —
+// already costs FOUR hops under the unified counter: the `a` member
+// (object, +1), the `b` member (object, +1), the `T[] | undefined`
+// union's present arm (union, +1), the array's own element type
+// (array-like, +1). A limit of 3 cut that arm before it ever read
+// `T`, which silently degraded a plain nested maybe-array member to
+// "not determined" for a shape with nothing recursive or wide about
+// it. Every gated branch is still ONE shared counter — the invariant
+// "a record inside a union inside a record reads the same wherever it
+// sits" is unchanged, only the shared ceiling moved to cover the
+// ordinary case above (plus the literal union at THAT array's element
+// position, the fifth hop).
+const hostTypeDepthLimit = 5
+
 // readHostTypeUncached is readHostType in the TS source. Callers go
 // through ReadHostType (host_type_memo.go), which remembers each
 // (type, depth) answer per checker — the recursive calls below go
@@ -102,7 +124,7 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 		}
 		return abstractdomain.KnownSet(set, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone), true
 	}
-	if (flags&(checker.TypeFlagsTypeParameter|checker.TypeFlagsConditional|checker.TypeFlagsIndexedAccess|checker.TypeFlagsSubstitution)) != 0 && depth < 3 {
+	if (flags&(checker.TypeFlagsTypeParameter|checker.TypeFlagsConditional|checker.TypeFlagsIndexedAccess|checker.TypeFlagsSubstitution)) != 0 && depth < hostTypeDepthLimit {
 		constrained := c.GetConstraintOfType(t)
 		if constrained == nil || constrained == t {
 			return abstractdomain.AbstractValue{}, false
@@ -124,7 +146,7 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 			}
 		}
 	}
-	if (flags&checker.TypeFlagsUnion) != 0 && depth < 3 {
+	if (flags&checker.TypeFlagsUnion) != 0 && depth < hostTypeDepthLimit {
 		var arms []abstractdomain.AbstractValue
 		sawAbsent := false
 		for _, part := range t.Types() {
@@ -151,11 +173,11 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 		}
 		return PresentUnion(arms, sawAbsent)
 	}
-	// depth 3, the union branch's own limit: a record inside a union
-	// inside a record used to be cut by the tighter of the two, so the
-	// same value read nothing depending on which branch reached it
-	// first. One limit, one answer.
-	if (flags&(checker.TypeFlagsObject|checker.TypeFlagsIntersection)) != 0 && depth < 3 {
+	// hostTypeDepthLimit is the union branch's own limit too: a record
+	// inside a union inside a record used to be cut by the tighter of
+	// the two, so the same value read nothing depending on which
+	// branch reached it first. One limit, one answer.
+	if (flags&(checker.TypeFlagsObject|checker.TypeFlagsIntersection)) != 0 && depth < hostTypeDepthLimit {
 		if len(c.GetCallSignatures(t)) > 0 || len(c.GetConstructSignatures(t)) > 0 {
 			return abstractdomain.HostFunction, true
 		}
@@ -171,6 +193,50 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 		// + getTypeArguments pairing provides implicitly; without it
 		// this reads as "not determined", the same answer an
 		// unrecognized array-like shape already falls through to below.
+		// a FIXED tuple (`[10, 20]`) is a stronger claim than the general
+		// array-like branch below can state: each position holds its OWN
+		// element type exactly, at an exact length, not the JOIN of every
+		// element at an unstated length. Read positionally first — only
+		// where every element is ElementFlagsRequired (no `?`, `...T[]`,
+		// or `...T` slot, which cost the exact length/position pairing
+		// the general branch already gives up on). GetTypeArguments
+		// (tsgo's getTypeArguments) returns the tuple's own element
+		// types IN ORDER for a TypeReference over an ObjectFlagsTuple
+		// target — the same call the general branch below makes, read
+		// per-position here instead of joined.
+		if t.IsTupleType() && (t.ObjectFlags()&checker.ObjectFlagsReference) != 0 {
+			tuple := t.TargetTupleType()
+			elementFlags := tuple.ElementFlags()
+			allRequired := len(elementFlags) > 0
+			for _, f := range elementFlags {
+				if f != checker.ElementFlagsRequired {
+					allRequired = false
+					break
+				}
+			}
+			if allRequired {
+				slots := c.GetTypeArguments(t)
+				if len(slots) == len(elementFlags) {
+					items := make([]abstractdomain.AbstractValue, len(slots))
+					every := true
+					for i, slot := range slots {
+						inner, ok := readHostTypeMemoized(c, slot, at, depth+1, usedAt)
+						if !ok {
+							every = false
+							break
+						}
+						items[i] = inner
+					}
+					if every {
+						return abstractdomain.KnownList(items, abstractdomain.TrustProved), true
+					}
+				}
+			}
+			// an empty, optional, rest, or variadic tuple — or one whose
+			// element type the reader could not spell — falls to the
+			// general array-like branch's star reading below, the same
+			// answer it always gave a tuple before this branch existed
+		}
 		if c.IsArrayLikeType(t) && (t.ObjectFlags()&checker.ObjectFlagsReference) != 0 {
 			slots := c.GetTypeArguments(t)
 			if len(slots) == 0 {

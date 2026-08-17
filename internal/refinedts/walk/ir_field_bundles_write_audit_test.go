@@ -132,21 +132,94 @@ func TestWriteAudit_AComputedReadStillAllowsTheBundle(t *testing.T) {
 	}
 }
 
-// A WRITE-ONLY field carries no entry (nothing for the caller to fill),
-// and the layout must not silently give it one — an entry the call
-// sites do not fill would take another field's value.
-func TestWriteAudit_AWriteOnlyFieldCarriesNoEntry(t *testing.T) {
+// A WRITE-ONLY field takes an entry AND is named written: the row is
+// what the write-back rides, and without it the caller's own slot kept
+// its stale value across a call that changed it. The entry is safe to
+// lay out because every call site fills every this-entry — from the
+// caller's slot of the same spelling, or with unknown where it holds
+// none (bundleRetsAndArgs, accessorCallStatement) — so no entry ever
+// takes another field's value. The literal arm stated this first
+// (literalThisBundleOf); the class arm now lays out the same rows.
+func TestWriteAudit_AWriteOnlyFieldTakesAnEntryAndARow(t *testing.T) {
 	layout := bundleLayoutOf(t,
 		"class C { count: number; other: number; m(n: number) { this.count = n; return this.other; } }")
 	if layout.Escaped {
 		t.Fatalf("the body escaped unexpectedly: %+v", layout)
 	}
+	held := false
 	for _, entry := range layout.Entries {
 		if entry.Name == "this.count" {
-			t.Errorf("entries = %+v — a write-only field took an entry the caller never fills", layout.Entries)
+			held = true
 		}
+	}
+	if !held {
+		t.Errorf("entries = %+v — the write-only field has no row for its write-back to ride", layout.Entries)
 	}
 	if _, named := layout.Written["this.count"]; !named {
 		t.Errorf("Written = %v, want it to name the write-only field", layout.Written)
+	}
+}
+
+// A SETTER-BACKED store (`this.age = n` where the class declares `set
+// age`) folds the setter's own census into the layout: the setter's
+// written backing field takes an entry and a written row in the METHOD's
+// layout, so the embedded setter call statement has a slot to thread its
+// write-back onto — the e-411 privateSetterWrite shape.
+func TestWriteAudit_ASetterBackedStoreLaysOutTheBackingField(t *testing.T) {
+	layout := bundleLayoutOf(t,
+		"class C { #held = 0; set age(n: number) { this.#held = n; } m(n: number) { this.age = n; } }")
+	if layout.Escaped {
+		t.Fatalf("the body escaped — the accessor fold must resolve `set age` instead: %+v", layout)
+	}
+	held := false
+	for _, entry := range layout.Entries {
+		if entry.Name == "this.#held" {
+			held = true
+		}
+	}
+	if !held {
+		t.Errorf("entries = %+v — the setter's backing field has no slot", layout.Entries)
+	}
+	if _, named := layout.Written["this.#held"]; !named {
+		t.Errorf("Written = %v, want it to name this.#held — the setter's body stores into it", layout.Written)
+	}
+}
+
+// A store through a name that resolves to NO accessor of the class
+// keeps the refusal the escape used to make.
+func TestWriteAudit_AStoreIntoANeverDeclaredMemberStaysEscaped(t *testing.T) {
+	layout := bundleLayoutOf(t,
+		"class C { count: number; m(n: number) { (this as any).ghost = n; } }")
+	if !layout.Escaped {
+		t.Errorf("layout = %+v, want Escaped — nothing declares ghost, as field or accessor", layout)
+	}
+}
+
+// The census itself DEFERS an undeclared store instead of escaping: the
+// name is reported in AccessorStores and Believable refuses it, so every
+// consumer without the fold keeps exactly the old refusal.
+func TestWriteAudit_TheCensusDefersAnUndeclaredStoreToItsConsumer(t *testing.T) {
+	statements := bundleParse(t,
+		"class C { #held = 0; set age(n: number) { this.#held = n; } m(n: number) { this.age = n; } }")
+	class := statements[0].AsClassDeclaration()
+	var body *ast.Node
+	for _, member := range class.Members.Nodes {
+		if ast.IsMethodDeclaration(member) {
+			body = member.Body()
+		}
+	}
+	if body == nil {
+		t.Fatalf("no method body")
+	}
+	fields, _ := ClassFieldsOf(nil, statements[0])
+	census := FieldCensusOf(body, "this", BundleFieldsAs("this", fields))
+	if census.Escapes {
+		t.Fatalf("census = %+v, want the store deferred, not escaped", census)
+	}
+	if !contains(census.AccessorStores, "age") {
+		t.Errorf("AccessorStores = %v, want it to name age", census.AccessorStores)
+	}
+	if census.Believable() {
+		t.Errorf("Believable() = true — a deferred accessor store must refuse every consumer without the fold")
 	}
 }

@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
 /* ── the recipe ──────────────────────────────────────────────────── */
@@ -153,6 +155,118 @@ func TestAccessorCalls_AnOrdinaryFieldIsNotAnAccessor(t *testing.T) {
 		"}\n")
 	if _, _, ok := AccessorDeclarationsOf(ctx, accessorAccessIn(t, p, "run", "store")); ok {
 		t.Errorf("a plain field resolved as an accessor — it is a SLOT, and the census owns it")
+	}
+}
+
+// privateAccessorAccessIn is accessorAccessIn's own private-name
+// twin: the FIRST `this.#<name>` property access inside the named
+// method's body. accessorAccessIn itself only ever matches a plain
+// ast.IsIdentifier property name, which a PrivateIdentifier node
+// (`this.#age`, a DIFFERENT AST kind from `this.age`) never is — this
+// finder is separate rather than widening the shared one, since every
+// OTHER existing caller of accessorAccessIn wants the plain-name
+// behavior unchanged.
+func privateAccessorAccessIn(t *testing.T, p *program.CheckerProgram, method string, name string) *ast.Node {
+	t.Helper()
+	var found *ast.Node
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if found != nil || node == nil {
+			return true
+		}
+		if ast.IsPropertyAccessExpression(node) {
+			accessed := node.AsPropertyAccessExpression().Name()
+			if accessed != nil && ast.IsPrivateIdentifier(accessed) && accessed.Text() == name {
+				found = node
+				return true
+			}
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	visit(methodNamed(t, p, method).Body())
+	if found == nil {
+		t.Fatalf("no `.%s` private property access in %s's body", name, method)
+	}
+	return found
+}
+
+// TestAccessorCalls_APrivateSetterResolvesThroughItsPrivateIdentifierName
+// pins the e-class-and-function.ts privateSetterWrite row's own gap:
+// `this.#age = value` inside an ordinary (non-private) method names
+// its accessor through a PrivateIdentifier node, a different AST kind
+// from the plain Identifier `this.value` (accessorSource's own shape)
+// exercises. Before the fix, AccessorDeclarationsOf's OWN top-level
+// name gate admitted only ast.IsIdentifier, so a private accessor's
+// ACCESS SITE declined before the declaration loop ever ran — even
+// though accessorUsable, right below it in the same file, already
+// tolerated a private-named DECLARATION.
+func TestAccessorCalls_APrivateSetterResolvesThroughItsPrivateIdentifierName(t *testing.T) {
+	ctx, p := accessorCtx(t, "class PrivateSetterBox {\n"+
+		"  #held = 0;\n"+
+		"  set #age(value: number) { this.#held = value; }\n"+
+		"  write(value: number): void { this.#age = value; }\n"+
+		"  read(): number { return this.#held; }\n"+
+		"}\n")
+	access := privateAccessorAccessIn(t, p, "write", "#age")
+	getter, setter, ok := AccessorDeclarationsOf(ctx, access)
+	if !ok {
+		t.Fatalf("`this.#age` did not resolve — a private setter's access site must resolve the same way a plain one does")
+	}
+	if setter == nil {
+		t.Fatalf("`this.#age` resolved with no setter — the class declares set #age(value)")
+	}
+	if getter != nil {
+		t.Errorf("a set-only private property answered a getter — no such declaration exists")
+	}
+}
+
+// TestAccessorCalls_APrivateSetterWriteThroughAnOrdinaryMethodCarriesTheValue
+// is the end-to-end pin behind e-class-and-function.ts's
+// privateSetterWrite row: `over.write(200)` runs `this.#age = value`
+// (a plain write through a PRIVATE setter, value=200), which the
+// setter's own body folds into `this.#held`; `over.read()` must then
+// answer exactly 200 — not KindUnknown — so the row's own
+// @refinedts-expect-error at the out-of-range read has a real
+// determined value to fire against.
+func TestAccessorCalls_APrivateSetterWriteThroughAnOrdinaryMethodCarriesTheValue(t *testing.T) {
+	kernel := yieldContractKernel(t)
+	source := "class PrivateSetterBox {\n" +
+		"  #held = 0;\n" +
+		"  set #age(value: number) { this.#held = value; }\n" +
+		"  write(value: number): void { this.#age = value; }\n" +
+		"  read(): number { return this.#held; }\n" +
+		"}\n" +
+		"function caller(): number {\n" +
+		"  const over = new PrivateSetterBox();\n" +
+		"  over.write(200);\n" +
+		"  return over.read();\n" +
+		"}\n"
+	contract, ctx, _ := yieldContractOf(t, source, "caller")
+	ctx.Kernel = kernel
+	SetEngineKernel(kernel)
+
+	var sink []abstractdomain.AbstractValue
+	ctx.ReturnSink = &sink
+	AnalyzeFunction(ctx, contract, nil)
+	if len(sink) == 0 {
+		t.Fatalf("caller's body recorded no return value")
+	}
+	returned := JoinSinkSummarized(sink)
+	// exactly 200, in either exact spelling: the walk route answers the
+	// singleton SET the kernel's exit state carries, the values route a
+	// KindValues — both are the same one-member claim
+	exact := false
+	switch returned.Kind {
+	case abstractdomain.KindValues:
+		exact = len(returned.Values) == 1 && returned.Values[0] == 200
+	case abstractdomain.KindSet:
+		exact = len(returned.Set.Forms) == 1 &&
+			returned.Set.Forms[0].Form == refinementsets.FormOneOf &&
+			len(returned.Set.Forms[0].W) == 1 && returned.Set.Forms[0].W[0] == 200
+	}
+	if !exact {
+		t.Fatalf("over.write(200) then over.read() determined %+v, want exactly 200 — the private setter's write carried through", returned)
 	}
 }
 

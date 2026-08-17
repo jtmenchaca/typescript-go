@@ -2,8 +2,11 @@
 //
 // Indexed writes on a tracked name, and the index-order test used by
 // sorted-sequence subtraction. An exact tuple with a pinned in-range
-// index takes the write in place; a key-typed index over a tracked
-// object writes exactly one of its candidate keys.
+// index takes the write in place; a SINGLE exactly-known key (a
+// literal, or an index expression whose static type has one
+// string-literal member) adds or replaces that key exactly like a
+// property write; a key-typed index carrying several CANDIDATE keys
+// writes only the ones already present, joined with the new value.
 
 package walk
 
@@ -94,15 +97,33 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 		if ast.IsStringLiteral(argument) || ast.IsNoSubstitutionTemplateLiteral(argument) {
 			literal, hasLiteral = argument.Text(), true
 		}
-		if hasLiteral {
-			_, hasKey := objectKeyIndex(receiver, literal)
-			if hasKey {
-				keys := setObjectKey(receiver.Keys, literal, value)
-				UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
-				return value, true
+		// a SINGLE exactly-known key — spelled literally in source, or the
+		// only member of the index expression's own static type (`key:
+		// "age"`, the element type Object.keys(defaults).reduce binds a
+		// key parameter to when `defaults` has one key) — writes exactly
+		// like a property access `acc.age = v` does (WriteProperty,
+		// assignments.go): add the key when it is absent, replace it when
+		// present. There is no ambiguity about WHICH key moved, so this
+		// needs no presence gate and no join with a value the key may
+		// never have held.
+		var indexType *checker.Type
+		if !hasLiteral {
+			indexType = ctx.P.Checker.GetTypeAtLocation(argument)
+			if !indexType.IsUnion() && indexType.IsStringLiteral() {
+				if lit, ok := indexType.AsLiteralType().Value().(string); ok {
+					literal, hasLiteral = lit, true
+				}
 			}
 		}
-		indexType := ctx.P.Checker.GetTypeAtLocation(argument)
+		if hasLiteral {
+			keys := setObjectKey(receiver.Keys, literal, value)
+			UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
+			return value, true
+		}
+		// a UNION of candidate keys (`key: "a" | "b"`): which one the
+		// runtime actually wrote is unknown, so a key the receiver does
+		// not already carry cannot be safely invented — only a candidate
+		// ALREADY present can be joined with the new value, same as before.
 		var candidates []*checker.Type
 		if indexType.IsUnion() {
 			candidates = indexType.Types()
@@ -110,7 +131,7 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 			candidates = []*checker.Type{indexType}
 		}
 		var written []string
-		readable := len(candidates) > 0
+		readable := len(candidates) > 1
 		for _, candidate := range candidates {
 			if candidate.IsStringLiteral() {
 				lit, _ := candidate.AsLiteralType().Value().(string)

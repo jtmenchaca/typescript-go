@@ -223,7 +223,7 @@ func reduceStatements(
 	return []kernelbridge.IrStatement{
 		// the slot starts at the seed, so the join above reads a value the
 		// reduce actually had rather than the slot's entry state
-		{Kind: kernelbridge.IrStatementAssign, Target: targetSlot, Effect: seedEffect},
+		{Kind: kernelbridge.IrStatementAssign, Target: targetSlot, Effect: asVarStateEffect(seedEffect)},
 		call,
 	}, true
 }

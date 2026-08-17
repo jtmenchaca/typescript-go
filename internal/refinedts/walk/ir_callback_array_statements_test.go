@@ -70,12 +70,12 @@ func TestCallbackStatement_MapEmitsTheLengthCopyThenTheCall(t *testing.T) {
 	if stmts[0].Kind != kernelbridge.IrStatementAssign {
 		t.Fatalf("stmts[0].Kind = %q, want %q", stmts[0].Kind, kernelbridge.IrStatementAssign)
 	}
-	// map preserves length: ys.len := var xs.len
+	// map preserves length: ys.len := a verbatim copy of xs.len
 	if stmts[0].Target != 2 {
 		t.Errorf("the length write's target = %d, want 2 (ys.len)", stmts[0].Target)
 	}
-	if stmts[0].Effect.Kind != kernelbridge.LoopEffectVar || stmts[0].Effect.Index != 0 {
-		t.Errorf("the length write's effect = %+v, want var of slot 0 (xs.len)", stmts[0].Effect)
+	if stmts[0].Effect.Kind != kernelbridge.LoopEffectVarState || stmts[0].Effect.Index != 0 {
+		t.Errorf("the length write's effect = %+v, want a verbatim copy of slot 0 (xs.len)", stmts[0].Effect)
 	}
 	if stmts[1].Kind != kernelbridge.IrStatementCall {
 		t.Fatalf("stmts[1].Kind = %q, want %q", stmts[1].Kind, kernelbridge.IrStatementCall)
@@ -85,8 +85,8 @@ func TestCallbackStatement_MapEmitsTheLengthCopyThenTheCall(t *testing.T) {
 	if len(stmts[1].Args) == 0 {
 		t.Fatalf("the call carries no entries")
 	}
-	if stmts[1].Args[0].Kind != kernelbridge.LoopEffectVar || stmts[1].Args[0].Index != 1 {
-		t.Errorf("the call's first entry = %+v, want var of slot 1 (xs.elem)", stmts[1].Args[0])
+	if stmts[1].Args[0].Kind != kernelbridge.LoopEffectVarState || stmts[1].Args[0].Index != 1 {
+		t.Errorf("the call's first entry = %+v, want a whole-state copy of slot 1 (xs.elem)", stmts[1].Args[0])
 	}
 	// the callback's ret lands in the result's element slot
 	if stmts[1].Rets[len(stmts[1].Rets)-1] != 3 {
@@ -119,11 +119,11 @@ func TestCallbackStatement_AMapWithACaptureBindsTheExtraEntryAfterTheParameter(t
 	}
 	// entry 0 is the declared parameter, entry 1 the one capture — the
 	// layout the summary was compiled under
-	if call.Args[0].Kind != kernelbridge.LoopEffectVar || call.Args[0].Index != 1 {
-		t.Errorf("entry 0 = %+v, want var of slot 1 (xs.elem)", call.Args[0])
+	if call.Args[0].Kind != kernelbridge.LoopEffectVarState || call.Args[0].Index != 1 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of slot 1 (xs.elem)", call.Args[0])
 	}
-	if call.Args[1].Kind != kernelbridge.LoopEffectVar || call.Args[1].Index != 4 {
-		t.Errorf("entry 1 = %+v, want var of slot 4 (factor) — the capture rides after the parameter", call.Args[1])
+	if call.Args[1].Kind != kernelbridge.LoopEffectVarState || call.Args[1].Index != 4 {
+		t.Errorf("entry 1 = %+v, want a whole-state copy of slot 4 (factor) — the capture rides after the parameter", call.Args[1])
 	}
 }
 
@@ -147,8 +147,8 @@ func TestCallbackStatement_FilterCopiesTheElementAndLosesTheLength(t *testing.T)
 	if stmts[0].Target != 3 {
 		t.Errorf("the element write's target = %d, want 3 (ys.elem)", stmts[0].Target)
 	}
-	if stmts[0].Effect.Kind != kernelbridge.LoopEffectVar || stmts[0].Effect.Index != 1 {
-		t.Errorf("the element write's effect = %+v, want var of slot 1 (xs.elem)", stmts[0].Effect)
+	if stmts[0].Effect.Kind != kernelbridge.LoopEffectVarState || stmts[0].Effect.Index != 1 {
+		t.Errorf("the element write's effect = %+v, want a verbatim copy of slot 1 (xs.elem)", stmts[0].Effect)
 	}
 	// the length is an integer at least 0 and no more — the honest loss
 	if stmts[1].Target != 2 {
@@ -265,8 +265,8 @@ func TestCallbackEntries_AnArrayCallbacksSecondParameterIsTheIndex(t *testing.T)
 	if len(entries) != 3 {
 		t.Fatalf("len(entries) = %d, want 3", len(entries))
 	}
-	if entries[0].Effect.Kind != kernelbridge.LoopEffectVar || entries[0].Effect.Index != 1 {
-		t.Errorf("entry 0 = %+v, want var of slot 1 (xs.elem)", entries[0].Effect)
+	if entries[0].Effect.Kind != kernelbridge.LoopEffectVarState || entries[0].Effect.Index != 1 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of slot 1 (xs.elem)", entries[0].Effect)
 	}
 	// the index enters a CONSTANT SET, not absent — every concrete index
 	// is a non-negative integer
@@ -325,8 +325,8 @@ func TestCallbackStatement_AMapWhoseCallbackReadsTheIndexLowers(t *testing.T) {
 	if len(call.Args) < 2 {
 		t.Fatalf("the call carries %d entries, want at least 2", len(call.Args))
 	}
-	if call.Args[0].Kind != kernelbridge.LoopEffectVar || call.Args[0].Index != 1 {
-		t.Errorf("entry 0 = %+v, want var of slot 1 (xs.elem)", call.Args[0])
+	if call.Args[0].Kind != kernelbridge.LoopEffectVarState || call.Args[0].Index != 1 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of slot 1 (xs.elem)", call.Args[0])
 	}
 	if call.Args[1].Kind != kernelbridge.LoopEffectConst {
 		t.Errorf("entry 1 kind = %q, want %q — the index rides as the integer ray",

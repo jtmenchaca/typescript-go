@@ -54,9 +54,11 @@ func TestRecordArgumentEffects_AnObjectLiteralArgumentLowersEachMemberByName(t *
 	if effects[0].Kind != kernelbridge.LoopEffectConst {
 		t.Errorf("effect 0 kind = %v, want the constant 4 that lo was given", effects[0].Kind)
 	}
-	// effect 1 fills "p.hi" — a var of n's slot
-	if effects[1].Kind != kernelbridge.LoopEffectVar || effects[1].Index != 0 {
-		t.Errorf("effect 1 = %+v, want a var of slot 0 (n)", effects[1])
+	// effect 1 fills "p.hi" — the whole-state copy of n's slot: this
+	// effect becomes a WHOLE args-vector entry at the call boundary, never
+	// another effect's operand
+	if effects[1].Kind != kernelbridge.LoopEffectVarState || effects[1].Index != 0 {
+		t.Errorf("effect 1 = %+v, want a whole-state copy of slot 0 (n)", effects[1])
 	}
 }
 
@@ -75,11 +77,11 @@ func TestRecordArgumentEffects_AFlattenedRecordLocalArgumentLowersEachLeafSlotsV
 	if len(effects) != 2 {
 		t.Fatalf("len(effects) = %d, want 2", len(effects))
 	}
-	if effects[0].Kind != kernelbridge.LoopEffectVar || effects[0].Index != 1 {
-		t.Errorf("effect 0 = %+v, want a var of q.lo's slot 1", effects[0])
+	if effects[0].Kind != kernelbridge.LoopEffectVarState || effects[0].Index != 1 {
+		t.Errorf("effect 0 = %+v, want a whole-state copy of q.lo's slot 1", effects[0])
 	}
-	if effects[1].Kind != kernelbridge.LoopEffectVar || effects[1].Index != 0 {
-		t.Errorf("effect 1 = %+v, want a var of q.hi's slot 0", effects[1])
+	if effects[1].Kind != kernelbridge.LoopEffectVarState || effects[1].Index != 0 {
+		t.Errorf("effect 1 = %+v, want a whole-state copy of q.hi's slot 0", effects[1])
 	}
 }
 

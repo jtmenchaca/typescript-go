@@ -155,10 +155,10 @@ func closureCallStatement(
 		if !ok {
 			return kernelbridge.IrStatement{}, false
 		}
-		args = append(args, effect)
+		args = append(args, asVarStateEffect(effect))
 	}
 	for _, slot := range captureSlots {
-		args = append(args, varEffect(slot))
+		args = append(args, varStateEffect(slot))
 	}
 	for len(args) < lowered.SlotCount {
 		if len(args) == lowered.DoneIndex {

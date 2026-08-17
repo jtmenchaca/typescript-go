@@ -54,26 +54,51 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 	if a.Kind == abstractdomain.KindNaN || b.Kind == abstractdomain.KindNaN {
 		return boolAt(op == CompareNe)
 	}
-	// null and undefined loose-equal each other and nothing else; the
-	// absent marker CONFLATES the two, so strict absent-vs-absent stays
-	// unknown (null === undefined is false, undefined === undefined
-	// true) while absent-vs-value decides
-	if a.Kind == abstractdomain.KindUndef || b.Kind == abstractdomain.KindUndef {
+	// KindUndef now means exactly-undefined and KindNull exactly-null (the
+	// domain's AbsentMark split); a KindPossiblyUndefined wrapper is the
+	// only value still admitting both flavors at once (PossiblyUndefined's
+	// own comment: a wrapper with Inner.Kind == KindNull states "null or
+	// undefined" and does not collapse). Flavored rows below therefore
+	// gate on the EXACT kinds only — a wrapper or KindUnknown on either
+	// side must fall through undecided rather than be read as one flavor.
+	aExactAbsent := a.Kind == abstractdomain.KindUndef || a.Kind == abstractdomain.KindNull
+	bExactAbsent := b.Kind == abstractdomain.KindUndef || b.Kind == abstractdomain.KindNull
+	if aExactAbsent || bExactAbsent {
 		if op != CompareEq && op != CompareNe {
 			return silence.Residue()
 		}
-		if a.Kind == abstractdomain.KindUndef && b.Kind == abstractdomain.KindUndef {
+		if aExactAbsent && bExactAbsent {
+			// sec-isstrictlyequal step 1: SameType false -> false;
+			// sec-islooselyequal steps 2-3: null/undefined cross-flavor
+			// -> true; same-flavor case (SameType true) defers to
+			// IsStrictlyEqual (islooselyequal step 1), which for a
+			// non-Number SameType pair is SameValueNonNumber
+			// (sec-samevaluenonnumber step 2: "If x is either undefined
+			// or null, return true").
+			sameFlavor := a.Kind == b.Kind
 			if strict {
-				return silence.Residue()
+				return boolAt(sameFlavor == (op == CompareEq))
 			}
+			// loose: same-flavor -> true (via strict), cross-flavor ->
+			// true (islooselyequal steps 2-3) — every combination of
+			// exact null/undefined loose-equals every other
 			return boolAt(op == CompareEq)
 		}
+		// exactly one side is an exact absent kind (Undef or Null); the
+		// other side is some non-absent value
 		other := a
-		if a.Kind == abstractdomain.KindUndef {
+		if aExactAbsent {
 			other = b
 		}
 		if other.Kind == abstractdomain.KindValues || other.Kind == abstractdomain.KindObject ||
 			other.Kind == abstractdomain.KindList || other.Kind == abstractdomain.KindArrayHoles {
+			// sec-isstrictlyequal step 1: SameType(absent, non-absent)
+			// is false -> IsStrictlyEqual false, so === is false and
+			// !== is true regardless of strict/loose — a non-absent
+			// exact value is never null/undefined at runtime, and
+			// IsLooselyEqual's own null/undefined steps (2-3) only
+			// fire when the OTHER side is itself null or undefined, so
+			// the loose reading agrees with the strict one here too
 			return boolAt(op == CompareNe)
 		}
 		return silence.Residue()

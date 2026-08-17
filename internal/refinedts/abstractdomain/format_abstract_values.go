@@ -344,6 +344,12 @@ func formatAbstractValueAt(known AbstractValue, top bool) (string, bool) {
 		}
 		return "absent", true
 
+	case KindNull:
+		if top {
+			return "{null}", true
+		}
+		return "null", true
+
 	case KindNaN:
 		if top {
 			return "{NaN}", true
@@ -355,10 +361,23 @@ func formatAbstractValueAt(known AbstractValue, top bool) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		if !top {
-			return inner + ", or absent", true
+		// the wrapper's own absent side speaks its flavor where the
+		// checker has proved one: UndefOnly says "or undefined", NullOnly
+		// says "or null" — AbsentFlavorConflated (the zero value, every
+		// wrapper built before this field existed) keeps the original
+		// "or absent" spelling unchanged, so no existing pinned hover
+		// string moves.
+		absentWord := "or absent"
+		switch known.AbsentSide {
+		case AbsentFlavorUndefOnly:
+			absentWord = "or undefined"
+		case AbsentFlavorNullOnly:
+			absentWord = "or null"
 		}
-		return "{" + bareOf(inner) + ", or absent}", true
+		if !top {
+			return inner + ", " + absentWord, true
+		}
+		return "{" + bareOf(inner) + ", " + absentWord + "}", true
 
 	case KindPossiblyNaN:
 		inner, ok := formatAbstractValueAt(*known.Inner, top)

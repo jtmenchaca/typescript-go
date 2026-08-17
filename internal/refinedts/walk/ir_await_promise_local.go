@@ -107,7 +107,7 @@ func promiseLocalDeclarationOf(context *LoweringContext, statement *ast.Node) ([
 			return nil, false
 		}
 		holdPromiseInnerSlot(context, name, slot)
-		return []kernelbridge.IrStatement{{Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: effect}}, true
+		return []kernelbridge.IrStatement{{Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: asVarStateEffect(effect)}}, true
 	}
 	if !ast.IsCallExpression(initializer) {
 		return nil, false

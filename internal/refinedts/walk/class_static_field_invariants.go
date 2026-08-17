@@ -104,7 +104,13 @@ func staticWriteTargetName(className string, node *ast.Node) (name string, isPla
 // name from unconditional (once cleared, never re-set), falling back
 // to the existing join-based reading, which is sound wherever the
 // write might not run.
-func scanStaticWrites(className string, node *ast.Node, sink map[string][]*ast.Node, poisoned map[string]struct{}, unconditional map[string]bool) {
+// runsAtClassEvaluation says whether the scanned body RUNS when the
+// class evaluates: true only for a static BLOCK. A static method's or
+// accessor's body runs when something CALLS it — maybe never — so its
+// straight-line writes must JOIN the invariant, never replace it: the
+// last-write-wins fold below is only sound for a write that provably
+// ran after the initializer.
+func scanStaticWrites(className string, node *ast.Node, sink map[string][]*ast.Node, poisoned map[string]struct{}, unconditional map[string]bool, runsAtClassEvaluation bool) {
 	var visitStraightLine func(n *ast.Node)
 	var visitConditional func(n *ast.Node)
 	markWrite := func(n *ast.Node, straightLine bool) bool {
@@ -211,7 +217,11 @@ func scanStaticWrites(className string, node *ast.Node, sink map[string][]*ast.N
 			return false
 		})
 	}
-	visitStraightLine(node)
+	if runsAtClassEvaluation {
+		visitStraightLine(node)
+		return
+	}
+	visitConditional(node)
 }
 
 // computeStaticFieldInvariants collects a class's static field
@@ -234,6 +244,15 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 
 	var candidateOrder []string
 	candidates := map[string]abstractdomain.AbstractValue{}
+	// sealed: the LANGUAGE keeps outside text from touching the field —
+	// a `#` name (tsc refuses every access outside the class body) or
+	// the `private` modifier (tsc refuses outside writes in every file
+	// it checks). A PUBLIC static is writable by any holder of the class
+	// name, so its invariant survives only when the FILE's own text
+	// outside the class neither writes it nor lets the class object
+	// escape (the census below — the static twin of the instance side's
+	// public-field seal).
+	sealed := map[string]bool{}
 	silent := *ctx
 	silent.Report = func(assignability.RefinementDiagnostic) {}
 
@@ -242,7 +261,8 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 			continue
 		}
 		pd := member.AsPropertyDeclaration()
-		if ast.GetCombinedModifierFlags(member)&ast.ModifierFlagsStatic == 0 {
+		flags := ast.GetCombinedModifierFlags(member)
+		if flags&ast.ModifierFlagsStatic == 0 {
 			continue
 		}
 		name := pd.Name()
@@ -260,20 +280,32 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 			candidateOrder = append(candidateOrder, nameText)
 		}
 		candidates[nameText] = value
+		sealed[nameText] = ast.IsPrivateIdentifier(name) || flags&ast.ModifierFlagsPrivate != 0
 	}
 	if len(candidates) == 0 {
 		return map[string]abstractdomain.AbstractValue{}
 	}
+	outsideWritten, classEscapes := publicStaticOutsideCensus(className, declaration)
 
 	sink := map[string][]*ast.Node{}
 	poisoned := map[string]struct{}{}
 	unconditional := map[string]bool{}
 	for _, member := range members {
 		var body *ast.Node
+		runsAtClassEvaluation := false
 		switch {
 		case ast.IsClassStaticBlockDeclaration(member):
 			body = member.AsClassStaticBlockDeclaration().Body
+			runsAtClassEvaluation = true
 		case ast.IsMethodDeclaration(member) && ast.GetCombinedModifierFlags(member)&ast.ModifierFlagsStatic != 0:
+			body = member.Body()
+		// a static GET/SET accessor's body is class text like a static
+		// method's — a setter storing its parameter into the backing
+		// field is a write this collection MUST see (its value joins as
+		// unknown, which is what keeps the backing field's invariant from
+		// claiming the initializer alone while a setter can move it)
+		case (ast.IsGetAccessorDeclaration(member) || ast.IsSetAccessorDeclaration(member)) &&
+			ast.GetCombinedModifierFlags(member)&ast.ModifierFlagsStatic != 0:
 			body = member.Body()
 		default:
 			continue
@@ -281,13 +313,25 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 		if body == nil {
 			continue
 		}
-		scanStaticWrites(className, body, sink, poisoned, unconditional)
+		scanStaticWrites(className, body, sink, poisoned, unconditional, runsAtClassEvaluation)
 	}
 
 	invariants := map[string]abstractdomain.AbstractValue{}
 	for _, name := range candidateOrder {
 		if _, isPoisoned := poisoned[name]; isPoisoned {
 			continue
+		}
+		// an unsealed field with an outside write, or any unsealed field
+		// of a class whose object escapes, keeps NO invariant: module
+		// text can move it and this collection reads only the class's own
+		// text, so the claim would be stale exactly when it matters
+		if !sealed[name] {
+			if classEscapes {
+				continue
+			}
+			if _, written := outsideWritten[name]; written {
+				continue
+			}
 		}
 		var result abstractdomain.AbstractValue
 		if unconditional[name] && len(sink[name]) > 0 {
@@ -316,12 +360,101 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 	return invariants
 }
 
+// publicStaticOutsideCensus walks the class's SOURCE FILE outside the
+// class declaration for what module text does with the class object:
+// which static fields it WRITES through the class name (a plain or
+// compound assignment, `++`/`--`, `delete`), and whether the class
+// object ESCAPES — any mention of the name that is not the receiver of
+// a property access hands the object somewhere this census cannot
+// follow (an alias, an argument, an export list), after which any
+// unsealed field may be written under a name the file never spells.
+func publicStaticOutsideCensus(className string, classDeclaration *ast.Node) (written map[string]struct{}, escapes bool) {
+	written = map[string]struct{}{}
+	if className == "" {
+		return written, true
+	}
+	file := ast.GetSourceFileOfNode(classDeclaration)
+	if file == nil {
+		return written, true
+	}
+	noteTarget := func(target *ast.Node) bool {
+		target = Unwrapped(target)
+		if target == nil || !ast.IsPropertyAccessExpression(target) {
+			return false
+		}
+		access := target.AsPropertyAccessExpression()
+		receiver := Unwrapped(access.Expression)
+		if receiver == nil || !ast.IsIdentifier(receiver) || receiver.Text() != className {
+			return false
+		}
+		if field := access.Name(); field != nil && (ast.IsIdentifier(field) || ast.IsPrivateIdentifier(field)) {
+			written[field.Text()] = struct{}{}
+			return true
+		}
+		return false
+	}
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if node == classDeclaration {
+			return false
+		}
+		if ast.IsBinaryExpression(node) {
+			be := node.AsBinaryExpression()
+			op := be.OperatorToken.Kind
+			if op >= ast.KindFirstAssignment && op <= ast.KindLastAssignment {
+				if noteTarget(be.Left) {
+					be.Right.ForEachChild(visit)
+					visit(be.Right)
+					return false
+				}
+			}
+		}
+		if ast.IsPostfixUnaryExpression(node) {
+			if noteTarget(node.AsPostfixUnaryExpression().Operand) {
+				return false
+			}
+		}
+		if ast.IsPrefixUnaryExpression(node) {
+			operator := node.AsPrefixUnaryExpression().Operator
+			if (operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken) &&
+				noteTarget(node.AsPrefixUnaryExpression().Operand) {
+				return false
+			}
+		}
+		if ast.IsDeleteExpression(node) {
+			if noteTarget(node.AsDeleteExpression().Expression) {
+				return false
+			}
+		}
+		// a READ receiver (`C.total` in value position) consumes the
+		// mention; a bare mention of the name anywhere else escapes
+		if ast.IsPropertyAccessExpression(node) {
+			access := node.AsPropertyAccessExpression()
+			receiver := Unwrapped(access.Expression)
+			if receiver != nil && ast.IsIdentifier(receiver) && receiver.Text() == className {
+				return false
+			}
+		}
+		if ast.IsIdentifier(node) && node.Text() == className && !isPropertyStepName(node) {
+			escapes = true
+			return true
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	file.AsNode().ForEachChild(visit)
+	return written, escapes
+}
+
 // ReadStaticFieldAccess reads `ClassName.field` through the class's
 // own static field invariants — the constructor-object twin of
-// ReadThisPropertyAccess/ReadObjectKeyAccess's instance reads. Nil
-// wherever the receiver does not name a class declaration in reach,
-// or the field carries no invariant (no candidate, or poisoned).
-func ReadStaticFieldAccess(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
+// ReadThisPropertyAccess/ReadObjectKeyAccess's instance reads — and
+// `ClassName.prop` where prop is a static GET accessor trivially
+// fronting a backing field (static_accessor_backing.go: the flow's
+// place entry first, the backing invariant second). Nil wherever the
+// receiver does not name a class declaration in reach, or the member
+// carries no answer (no candidate, poisoned, an untrivial accessor).
+func ReadStaticFieldAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.AbstractValue {
 	if !ast.IsPropertyAccessExpression(e) {
 		return nil
 	}
@@ -329,28 +462,25 @@ func ReadStaticFieldAccess(ctx *FlowContext, e *ast.Node) *abstractdomain.Abstra
 	if !ast.IsIdentifier(pa.Expression) {
 		return nil
 	}
-	c := checkerOf(ctx)
-	if c == nil {
-		return nil
-	}
-	symbol := symbolAt(c, pa.Expression)
-	if symbol == nil || symbol.ValueDeclaration == nil {
-		return nil
-	}
-	declaration := symbol.ValueDeclaration
-	if !ast.IsClassDeclaration(declaration) || ast.GetSourceFileOfNode(declaration).IsDeclarationFile {
+	declaration := staticClassDeclarationOf(ctx, pa.Expression)
+	if declaration == nil {
 		return nil
 	}
 	nameNode := pa.Name()
 	if nameNode == nil || !(ast.IsIdentifier(nameNode) || ast.IsPrivateIdentifier(nameNode)) {
 		return nil
 	}
+	// the flow's own place entry first — a write this walk already made
+	// (`C.total = 200`, WriteStaticAccessorBacking) is newer than any
+	// class-text invariant
+	if held, has := env.Get(pa.Expression.Text() + "." + nameNode.Text()); has {
+		return &held
+	}
 	invariants := StaticFieldInvariantsOf(ctx, declaration)
-	if invariants == nil {
-		return nil
+	if invariants != nil {
+		if v, ok := invariants[nameNode.Text()]; ok {
+			return &v
+		}
 	}
-	if v, ok := invariants[nameNode.Text()]; ok {
-		return &v
-	}
-	return nil
+	return readStaticAccessorBacking(ctx, env, declaration, pa.Expression, nameNode.Text())
 }

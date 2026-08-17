@@ -73,6 +73,28 @@ func (s *fieldCensusScan) noteWrite(name string) bool {
 	return true
 }
 
+// noteAccessorStore / noteAccessorRead record a receiver member the
+// field set never declared — the spelling an accessor is used by — once
+// each, in first-mention order. The census defers the ruling to the
+// consumer (Believable's comment).
+func (s *fieldCensusScan) noteAccessorStore(name string) {
+	for _, held := range s.census.AccessorStores {
+		if held == name {
+			return
+		}
+	}
+	s.census.AccessorStores = append(s.census.AccessorStores, name)
+}
+
+func (s *fieldCensusScan) noteAccessorRead(name string) {
+	for _, held := range s.census.AccessorReads {
+		if held == name {
+			return
+		}
+	}
+	s.census.AccessorReads = append(s.census.AccessorReads, name)
+}
+
 // noteDirectMethodCall records a receiver method the body calls in
 // plain statement position, once, in first-mention order. The name is
 // a dotted step's own identifier or a symbol-keyed member's `#sym:`

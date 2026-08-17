@@ -71,9 +71,16 @@ func (s *fieldCensusScan) noteStoreTarget(target *ast.Node, alsoReads bool) bool
 			s.census.Computed = true
 			s.census.ComputedWrite = true
 		default:
-			// a member the field set never declared: no slot holds it, and
-			// writing it moves state the census cannot name
-			s.census.Escapes = true
+			// a member the field set never declared: the spelling a SET
+			// ACCESSOR is written by. The name is reported, not ruled on —
+			// the consumer that resolves it to a setter declaration folds
+			// that body's own census in, and every other consumer refuses
+			// through Believable, exactly as the escape refused before. A
+			// compound or update form also runs the GETTER first.
+			s.noteAccessorStore(name)
+			if alsoReads {
+				s.noteAccessorRead(name)
+			}
 		}
 		s.consumed[target] = struct{}{}
 		consumeReceiver(s.consumed, target)

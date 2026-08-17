@@ -64,12 +64,23 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 	}
 	iterates := []Env{candidate.Clone()}
 	stable := len(input.Fixpointed) == 0
+	simplifier := kernelSimplificationAdapter{ctx.Kernel}
 	for i := 0; i < loopSettleIterations && !stable; i++ {
 		stepped := input.StepImage(candidate, input.Silent)
 		next := candidate.Clone()
 		changed := false
 		for _, name := range input.Fixpointed {
 			joined := abstractdomain.JoinKnown(envOrResidue(candidate, name), envOrResidue(stepped, name))
+			// each iterate's join is said PLAINLY before it becomes the
+			// next candidate — the join spells a fresh union layer every
+			// round, so a semantically stabilized binding never compared
+			// sameKnown-equal and the loop kept iterating: the kernel then
+			// received candidates one union layer deeper per round, whose
+			// DNF walk squares per layer (createCategoricalInverse.ts's
+			// bisect hung the whole recharts wall this way). Simplified
+			// only where the kernel proves the two spellings equal — the
+			// same rule the settle's own exit applies.
+			joined = plainlySaid(simplifier, joined)
 			if !sameKnown(joined, envOrResidue(candidate, name)) {
 				changed = true
 			}
@@ -243,7 +254,9 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 			if envOrResidue(candidate, name).Kind != abstractdomain.KindSet {
 				continue
 			}
-			next := abstractdomain.JoinKnown(envOrResidue(env, name), envOrResidue(stepOnce, name))
+			// the tightening join is said plainly on the same terms the
+			// iterate joins are (the comment there)
+			next := plainlySaid(simplifier, abstractdomain.JoinKnown(envOrResidue(env, name), envOrResidue(stepOnce, name)))
 			if next.Kind == abstractdomain.KindUnknown {
 				continue
 			}
@@ -278,8 +291,8 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 	// the body's walk, everything downstream of the loop, and any hover
 	// over either all read it. Replaced only where the kernel proved
 	// the two equal, so this changes how the facts read and never
-	// which facts they are.
-	simplifier := kernelSimplificationAdapter{ctx.Kernel}
+	// which facts they are. (The simplifier is the one the iterate
+	// joins above already speak through.)
 	candidate.Range(func(name string, known abstractdomain.AbstractValue) bool {
 		if known.Kind != abstractdomain.KindSet {
 			return true
@@ -293,6 +306,24 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 		return true
 	})
 	return candidate
+}
+
+// plainlySaid is one fixpoint value spoken through the simplifier: a
+// KindSet's spelling replaced where the kernel proves a plainer set
+// equal, every other kind untouched. The iterate and tightening joins
+// call it so a candidate never grows a union layer the kernel already
+// proves redundant.
+func plainlySaid(simplifier kernelSimplificationAdapter, known abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	if known.Kind != abstractdomain.KindSet {
+		return known
+	}
+	plainer := refinementsets.SimplifyScalar(simplifier, known.Set)
+	if kernelbridge.EncodeSet(plainer) == kernelbridge.EncodeSet(known.Set) {
+		return known
+	}
+	out := known
+	out.Set = plainer
+	return out
 }
 
 // kernelSimplificationAdapter satisfies refinementsets.SimplificationKernel

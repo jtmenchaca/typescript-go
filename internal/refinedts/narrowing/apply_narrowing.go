@@ -241,7 +241,12 @@ func meetShape(held, shape abstractdomain.AbstractValue) abstractdomain.Abstract
 // nothing is the honest unknown).
 func excludeKind(known abstractdomain.AbstractValue, kind string) abstractdomain.AbstractValue {
 	if known.Kind == abstractdomain.KindPossiblyUndefined {
-		return abstractdomain.PossiblyUndefined(excludeKind(*known.Inner, kind), "", false, known.ProvedAbsent)
+		// PossiblyAbsent, not PossiblyUndefined: the rebuild must keep
+		// the wrapper's own AbsentSide (NullOnly/UndefOnly/conflated) —
+		// PossiblyUndefined always builds conflated, which would silently
+		// widen a flavored wrapper's absent side back to "either" on
+		// every excludeKind call.
+		return abstractdomain.PossiblyAbsent(excludeKind(*known.Inner, kind), known.AbsentSide, "", false, known.ProvedAbsent)
 	}
 	if known.Kind != abstractdomain.KindKindUnion {
 		return known
@@ -413,7 +418,8 @@ func armWordsOf(arm abstractdomain.AbstractValue) ([][]float64, bool) {
 // wrapper stays.
 func dropWordSet(known abstractdomain.AbstractValue, excluded [][]float64) abstractdomain.AbstractValue {
 	if known.Kind == abstractdomain.KindPossiblyUndefined {
-		return abstractdomain.PossiblyUndefined(dropWordSet(*known.Inner, excluded), "", false, known.ProvedAbsent)
+		// Same AbsentSide-preserving rebuild excludeKind uses above.
+		return abstractdomain.PossiblyAbsent(dropWordSet(*known.Inner, excluded), known.AbsentSide, "", false, known.ProvedAbsent)
 	}
 	if known.Kind == abstractdomain.KindSet && known.SetKindTag == abstractdomain.SetKindTagNone {
 		words, ok := refinementsets.WordTuplesOf(known.Set)

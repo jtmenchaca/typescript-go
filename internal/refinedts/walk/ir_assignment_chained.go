@@ -4,7 +4,6 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
-	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
 
 // ChainedAssignmentsOf lowers `x1 = x2 = e` — an assignment whose RIGHT
@@ -16,14 +15,17 @@ import (
 // assignment per link, innermost first, each outer link reading the slot
 // the link inside it just wrote:
 //
-//	x1 = x2 = data.coordinate  ⇒  x2 := data.coordinate ; x1 := var x2
+//	x1 = x2 = data.coordinate  ⇒  x2 := data.coordinate ; x1 := varState x2
 //
 // Reading the INNER SLOT rather than re-reading the right side is what
 // keeps the two links tied: the kernel then knows x1 and x2 hold the
 // same value, which is the whole content of the chain. (Re-lowering the
 // expression twice would give two independent readings of one
 // evaluation, and for a right side with any width the two links would
-// drift apart.)
+// drift apart.) Each outer link is a pure copy of the slot inside it, so
+// it rides the verbatim whole-state copy (varStateEffect) rather than
+// the numeric var read — a copy must not launder an absent value into
+// the NaN flag.
 //
 // Only a plain `=` at every link is a chain. A compound (`x1 = x2 += e`)
 // evaluates its target first and belongs to the compound rule, which
@@ -71,14 +73,11 @@ func ChainedAssignmentsOf(context *LoweringContext, e *ast.Node) ([]AssignmentTa
 			}
 			// innermost first, then each outer link copying the slot inside it
 			out := make([]AssignmentTarget, 0, len(targets))
-			out = append(out, AssignmentTarget{Target: innermost, Effect: effect})
+			out = append(out, AssignmentTarget{Target: innermost, Effect: asVarStateEffect(effect)})
 			for index := len(targets) - 2; index >= 0; index-- {
 				out = append(out, AssignmentTarget{
 					Target: targets[index],
-					Effect: kernelbridge.LoopEffect{
-						Kind:  kernelbridge.LoopEffectVar,
-						Index: targets[index+1],
-					},
+					Effect: varStateEffect(targets[index+1]),
 				})
 			}
 			return out, true

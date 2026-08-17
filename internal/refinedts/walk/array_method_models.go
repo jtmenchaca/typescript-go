@@ -537,6 +537,67 @@ func sliceFloat64(values []float64, window []float64) []float64 {
 	return out
 }
 
+// readFreshArrayFill answers `.fill(value)` (no start/end) called
+// directly on a FRESH array value — one this walk just built and holds
+// no tracked name for, like `Array(2).fill(41)` — rather than on a
+// tracked identifier. sec-array.prototype.fill (spec.html) sets every
+// slot [0, length) through Set with no other observable effect
+// (step 9a), so an exact receiver's OWN VALUE composes to the same
+// exact array with every slot replaced by the fill value; there is no
+// env binding to update since the receiver expression names nothing
+// tracked; the caller (an enclosing spread, element read, or
+// `.length`) reads the returned value directly off the call
+// expression's own evaluation. Distinct from readArrayWriteMethods
+// below, which owns the TRACKED-name case (push/pop/shift/unshift/
+// splice/fill through UpdateTrackedEnv, including the tracked
+// `.fill()` mutation) — this reader fires only where NO tracked name
+// exists to update, so the two never compete over the same call.
+func readFreshArrayFill(site MethodCallSite) *abstractdomain.AbstractValue {
+	ctx, env, e, receiver, method := site.Ctx, site.Env, site.E, site.Receiver, site.Method
+	if method != "fill" || site.HasTrackedName {
+		return nil
+	}
+	call := e.AsCallExpression()
+	var arguments []*ast.Node
+	if call.Arguments != nil {
+		arguments = call.Arguments.Nodes
+	}
+	// only the one-argument form (no start/end) — a partial window
+	// still sets every slot it covers to the SAME value, but the
+	// window bounds would need their own exact-integer reading before
+	// this reader could compose a sound per-slot result
+	if len(arguments) != 1 {
+		return nil
+	}
+	value := evaluateExpression(ctx, env, arguments[0])
+	switch receiver.Kind {
+	case abstractdomain.KindList:
+		next := make([]abstractdomain.AbstractValue, len(receiver.Items))
+		for i := range next {
+			next[i] = value
+		}
+		grade := abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(receiver), abstractdomain.TrustLevelOf(value))
+		out := abstractdomain.KnownList(next, grade)
+		return &out
+	case abstractdomain.KindValues:
+		if receiver.KindTag != abstractdomain.PrimitiveArray {
+			return nil
+		}
+		if !(value.Kind == abstractdomain.KindValues && value.KindTag == abstractdomain.PrimitiveNumber && len(value.Values) == 1) {
+			return nil
+		}
+		next := make([]float64, len(receiver.Values))
+		for i := range next {
+			next[i] = value.Values[0]
+		}
+		grade := abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(receiver), abstractdomain.TrustLevelOf(value))
+		out := abstractdomain.KnownValues(next, abstractdomain.PrimitiveArray, grade)
+		return &out
+	default:
+		return nil
+	}
+}
+
 // readArrayWriteMethods is readArrayWriteMethods in the TS source: the
 // writing array methods over an exact tuple with exact operands — the
 // tracked class updates in place, no havoc, the new tuple is known.

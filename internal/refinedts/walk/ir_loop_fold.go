@@ -13,7 +13,8 @@ import (
 // substitution budget.
 func EffectNodes(e kernelbridge.LoopEffect) int {
 	switch e.Kind {
-	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectConst,
+	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectVarState,
+		kernelbridge.LoopEffectConst,
 		kernelbridge.LoopEffectConstState, kernelbridge.LoopEffectUnknown:
 		return 1
 	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent,
@@ -35,6 +36,16 @@ func SubstituteVars(e kernelbridge.LoopEffect, current []kernelbridge.LoopEffect
 		if e.Index >= 0 && e.Index < len(current) {
 			return current[e.Index]
 		}
+		return e
+	// LoopEffectVarState never reaches here in practice — every producer
+	// of a verbatim copy (destructuring, record reassignment, chained
+	// assignment, summary ret threading) builds statements outside
+	// AssignmentOf/AssignmentOfExpression, the only readers FoldBody
+	// calls — but if one ever does, it is left unchanged rather than
+	// substituted as a live binding reference: unlike `var i`, a
+	// `varState i` already names a SPECIFIC resolved source slot's whole
+	// state, not "whatever this pass currently holds for i".
+	case kernelbridge.LoopEffectVarState:
 		return e
 	case kernelbridge.LoopEffectConst, kernelbridge.LoopEffectConstState,
 		kernelbridge.LoopEffectUnknown:
@@ -122,12 +133,12 @@ func effectsEqual(a, b kernelbridge.LoopEffect) bool {
 		return false
 	}
 	switch a.Kind {
-	case kernelbridge.LoopEffectVar:
+	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectVarState:
 		return a.Index == b.Index
 	case kernelbridge.LoopEffectConst:
 		return setsEqualForFold(a.Set, b.Set)
 	case kernelbridge.LoopEffectConstState:
-		return a.Absent == b.Absent && a.Nan == b.Nan && setsEqualForFold(a.Set, b.Set)
+		return a.Undef == b.Undef && a.Null == b.Null && a.Nan == b.Nan && setsEqualForFold(a.Set, b.Set)
 	case kernelbridge.LoopEffectUnknown:
 		return true
 	case kernelbridge.LoopEffectUnary, kernelbridge.LoopEffectOrAbsent,

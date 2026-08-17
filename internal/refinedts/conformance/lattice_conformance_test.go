@@ -27,9 +27,13 @@ func stateOfKnown(k abstractdomain.AbstractValue) (kernelbridge.KnownStateWire, 
 	case abstractdomain.KindUnknown:
 		return kernelbridge.KnownStateWire{Top: true}, true
 	case abstractdomain.KindUndef:
-		return kernelbridge.KnownStateWire{Set: emptySet, Absent: true, Nan: false}, true
+		// mirrors production's walk/kernel_delegation.go StateOfKnown: the
+		// producer audit closed — every exact KindUndef site means
+		// exactly the undefined value, never null — so the wire claims
+		// Undef alone.
+		return kernelbridge.KnownStateWire{Set: emptySet, Undef: true, Null: false, Nan: false}, true
 	case abstractdomain.KindNaN:
-		return kernelbridge.KnownStateWire{Set: emptySet, Absent: false, Nan: true}, true
+		return kernelbridge.KnownStateWire{Set: emptySet, Undef: false, Null: false, Nan: true}, true
 	case abstractdomain.KindPossiblyUndefined:
 		inner, ok := stateOfKnown(*k.Inner)
 		if !ok {
@@ -39,7 +43,24 @@ func stateOfKnown(k abstractdomain.AbstractValue) (kernelbridge.KnownStateWire, 
 		if inner.Top {
 			return kernelbridge.KnownStateWire{Top: true}, true
 		}
-		inner.Absent = true
+		// mirrors production's by-flavor send: an UndefOnly/NullOnly
+		// wrapper's own absent side admits exactly the one flag its
+		// flavor names; AbsentFlavorConflated (the zero value) keeps
+		// sending both, unchanged. The bare-KindUndef arm above no
+		// longer sends both flags on its own, so a row whose join
+		// produces a FLAVORED wrapper (e.g. abstractdomain.Undef joined
+		// with a plain value, AbsentFlavorUndefOnly) must read its own
+		// flavor here too, or the checker's re-encoded join would claim
+		// an admission the kernel's own JoinState never granted.
+		switch k.AbsentSide {
+		case abstractdomain.AbsentFlavorUndefOnly:
+			inner.Undef = true
+		case abstractdomain.AbsentFlavorNullOnly:
+			inner.Null = true
+		default:
+			inner.Undef = true
+			inner.Null = true
+		}
 		return inner, true
 	case abstractdomain.KindPossiblyNaN:
 		inner, ok := stateOfKnown(*k.Inner)
@@ -62,7 +83,7 @@ func stateOfKnown(k abstractdomain.AbstractValue) (kernelbridge.KnownStateWire, 
 		if !ok {
 			return kernelbridge.KnownStateWire{}, false
 		}
-		return kernelbridge.KnownStateWire{Set: set, Absent: false, Nan: false}, true
+		return kernelbridge.KnownStateWire{Set: set, Undef: false, Null: false, Nan: false}, true
 	default:
 		return kernelbridge.KnownStateWire{}, false
 	}
@@ -74,7 +95,7 @@ func sameState(kernel *kernelbridge.RefinedTSKernel, a, b kernelbridge.KnownStat
 	if a.Top || b.Top {
 		return a.Top && b.Top
 	}
-	return a.Absent == b.Absent && a.Nan == b.Nan &&
+	return a.Undef == b.Undef && a.Null == b.Null && a.Nan == b.Nan &&
 		kernel.ScalarSubset(a.Set, b.Set) && kernel.ScalarSubset(b.Set, a.Set)
 }
 

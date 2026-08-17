@@ -57,12 +57,12 @@ func TestReturnArithmeticOverShortCircuit_PickYearsEndToEnd(t *testing.T) {
 	}
 
 	// pickYears(40): age is exactly 40, extra is UNPASSED — the
-	// provably-absent state, the same {Set: emptySet, Absent: true}
+	// provably-absent state, the same {Set: emptySet, Undef: true, Null: true}
 	// shape kernel_delegation.go's own StateOfKnown answers for
 	// abstractdomain.KindUndef. #done and #ret start unwritten (top).
 	entry := []kernelbridge.KnownStateWire{
 		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{40}))},
-		{Set: emptySet, Absent: true},
+		{Set: emptySet, Undef: true, Null: true},
 		{Top: true},
 		{Top: true},
 	}
@@ -118,7 +118,7 @@ func TestReturnArithmeticOverShortCircuit_PadYearsOrEndToEnd(t *testing.T) {
 	// satisfy IrTestTruthyNum). #done and #ret start unwritten (top).
 	entry := []kernelbridge.KnownStateWire{
 		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{40}))},
-		{Set: emptySet, Absent: true},
+		{Set: emptySet, Undef: true, Null: true},
 		{Top: true},
 		{Top: true},
 	}

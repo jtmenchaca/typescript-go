@@ -157,6 +157,49 @@ func arrayReadMethodCallOf(node *ast.Node, name string) (method string, argument
 	return method, call.Arguments.Nodes[0], true
 }
 
+// concatCallOf is `a.concat(x, …)` with one or more plain arguments —
+// the SAME shape pushCallOf admits, on the read side rather than the
+// mutating one: `a` is consumed WHOLE (concat never writes `a` back),
+// and the result is a NEW array whose length is `a`'s plus the
+// arguments' own contribution and whose elements are the join of both.
+// A concat with NO argument still consumes `a` — `a.concat()` is a
+// legal copy — so, unlike pushCallOf, zero arguments are admitted.
+//
+// A SPREAD argument names no fixed count, so neither the length step
+// nor the element join can be spelled, mirroring pushCallOf's own
+// spread refusal.
+func concatCallOf(node *ast.Node, name string) ([]*ast.Node, bool) {
+	if !ast.IsCallExpression(node) {
+		return nil, false
+	}
+	call := node.AsCallExpression()
+	if call.QuestionDotToken != nil {
+		return nil, false
+	}
+	if !ast.IsPropertyAccessExpression(call.Expression) {
+		return nil, false
+	}
+	access := call.Expression.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return nil, false
+	}
+	if !ast.IsIdentifier(access.Expression) || access.Expression.Text() != name {
+		return nil, false
+	}
+	if !ast.IsIdentifier(access.Name()) || access.Name().Text() != "concat" {
+		return nil, false
+	}
+	if call.Arguments == nil {
+		return nil, true
+	}
+	for _, argument := range call.Arguments.Nodes {
+		if ast.IsSpreadElement(argument) {
+			return nil, false
+		}
+	}
+	return call.Arguments.Nodes, true
+}
+
 // arrayShrinkCallOf is `a.pop()` / `a.shift()` — the zero-argument
 // shrinking calls ir_array_pop_shift.go converts.
 func arrayShrinkCallOf(node *ast.Node, name string) (string, bool) {
@@ -312,6 +355,14 @@ func usesAreAllArrayFormsFrom(body *ast.Node, declarationName *ast.Node, name st
 		// `a.push(v, …)` — the arguments still have to be scanned (any of
 		// them could mention a), the callee half is consumed here
 		if arguments, isPush := pushCallOf(node, name); isPush {
+			for _, argument := range arguments {
+				visitIfPresent(argument)
+			}
+			return false
+		}
+		// `a.concat(v, …)` — `a` read whole (never written back), the
+		// arguments still scanned exactly as push's are
+		if arguments, isConcat := concatCallOf(node, name); isConcat {
 			for _, argument := range arguments {
 				visitIfPresent(argument)
 			}

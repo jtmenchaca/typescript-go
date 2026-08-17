@@ -39,9 +39,10 @@ func TestStateWireDecodeWireStateRoundTrip(t *testing.T) {
 	}
 
 	known := KnownStateWire{
-		Set:    refinementsets.MakeRefinedSet(refinementsets.AtLeast(0), refinementsets.Integer),
-		Absent: false,
-		Nan:    true,
+		Set:   refinementsets.MakeRefinedSet(refinementsets.AtLeast(0), refinementsets.Integer),
+		Undef: false,
+		Null:  false,
+		Nan:   true,
 	}
 	got = DecodeWireState(parseWire(t, StateWire(known)))
 	if !reflect.DeepEqual(got, known) {

@@ -91,6 +91,18 @@ type FieldCensus struct {
 	// (the direct route) or decline the composed call (the statement
 	// route) — LoweredSummary.ReturnsReceiver carries the requirement.
 	ReturnsSelf bool
+	// AccessorStores / AccessorReads: receiver members the body stores
+	// into / reads that the field set never DECLARED as fields — the
+	// spelling a get/set ACCESSOR is used by (`this.#age = v` where the
+	// class declares `set #age`). The census cannot see the class, so it
+	// reports the names instead of ruling; the one consumer that can
+	// resolve them to accessor declarations (thisBundleOf, through
+	// accessorCensusFold) folds those bodies' own censuses in, and every
+	// consumer without that machinery refuses through Believable —
+	// exactly the escape these occurrences used to be. Deduplicated, in
+	// first-mention order.
+	AccessorStores []string
+	AccessorReads  []string
 }
 
 // FieldCensusOf scans a body for what it does with `receiverName` —
@@ -179,6 +191,9 @@ func (census FieldCensus) Believable() bool {
 	// can compute the captured methods' transitive write set (and havoc
 	// those fields at every call statement) admits it through its own
 	// gate — every consumer without that machinery refuses, exactly as
-	// it refused when the shape was an escape.
-	return !census.Escapes && !census.ComputedWrite && len(census.CapturedMethodCalls) == 0
+	// it refused when the shape was an escape. An ACCESSOR store or read
+	// is the same deferral: only the consumer that folds the accessor's
+	// own census in may admit it.
+	return !census.Escapes && !census.ComputedWrite && len(census.CapturedMethodCalls) == 0 &&
+		len(census.AccessorStores) == 0 && len(census.AccessorReads) == 0
 }

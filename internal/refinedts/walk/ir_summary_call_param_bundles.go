@@ -89,7 +89,7 @@ func bundleParamRetsAndArgs(
 				args[entry.Index] = unknownEffect
 				continue
 			}
-			args[entry.Index] = varEffect(slot)
+			args[entry.Index] = varStateEffect(slot)
 			if entry.Written && entry.Index < len(rets) {
 				rets[entry.Index] = slot
 			}
@@ -235,7 +235,7 @@ func recordArgumentEffects(
 			if !ok {
 				return nil, false
 			}
-			out = append(out, effect)
+			out = append(out, asVarStateEffect(effect))
 		}
 		return out, true
 	}
@@ -262,7 +262,7 @@ func recordArgumentEffects(
 			if !has {
 				return nil, false
 			}
-			out = append(out, varEffect(slot))
+			out = append(out, varStateEffect(slot))
 		}
 		return out, true
 	}

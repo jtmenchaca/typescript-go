@@ -120,6 +120,15 @@ func MultiDeclarationAssignmentsOf(context *LoweringContext, statement *ast.Node
 		if !ok {
 			return nil, false
 		}
+		// declaratorAssignments/declaratorAssignment are ALSO reached
+		// through the single-declarator route AssignmentOf shares with
+		// FoldBody's loop-effect folding, so the copy-to-varState upgrade
+		// cannot live inside them (see AssignmentOf's own call site in
+		// lowering_to_kernel_ir_flattening.go for the full reason). Safe
+		// here: this route's own output never feeds SubstituteVars.
+		for i := range assignments {
+			assignments[i].Effect = asVarStateEffect(assignments[i].Effect)
+		}
 		out = append(out, assignments...)
 	}
 	return out, true

@@ -35,8 +35,8 @@ func TestIrRecordLowering_ANestedLiteralWritesOneAssignmentPerLeafPath(t *testin
 	if stmts[0].Target != 0 || stmts[1].Target != 1 {
 		t.Errorf("targets = %d, %d, want 0 (p.lo), 1 (p.inner.deep)", stmts[0].Target, stmts[1].Target)
 	}
-	if stmts[1].Effect.Kind != kernelbridge.LoopEffectVar || stmts[1].Effect.Index != 2 {
-		t.Errorf("nested leaf effect = %+v, want a var read of n", stmts[1].Effect)
+	if stmts[1].Effect.Kind != kernelbridge.LoopEffectVarState || stmts[1].Effect.Index != 2 {
+		t.Errorf("nested leaf effect = %+v, want a verbatim copy of n", stmts[1].Effect)
 	}
 }
 
@@ -178,27 +178,89 @@ func TestIrRecordLowering_ADestructuringDefaultLowersExactly(t *testing.T) {
 		[]string{"p.lo", "lo"},
 		[]BindingKind{BindingKindNumber, BindingKindNumber})
 	// `const { lo = 3 } = p` from a flattened holder: the leaf read into
-	// the bound name, then the definedness branch — only an undefined
-	// leaf takes the default, exactly the runtime's rule
+	// the bound name, then the eqUndef branch — KeyedBindingInitialization
+	// (tmp/ecma262/spec.html:10111, "If |Initializer| is present and _v_
+	// is *undefined*") fires the default on EXACTLY undefined, never on
+	// null, so the default sits on eqUndef's Then arm, not on
+	// IrTestDefined's Else.
 	stmts, ok := LowerStatements(context, loweringParse(t, `const { lo = 3 } = p;`))
 	if !ok {
 		t.Fatalf("a destructuring default declined outright")
 	}
 	if len(stmts) != 2 {
-		t.Fatalf("stmts = %+v, want the leaf read then the definedness branch", stmts)
+		t.Fatalf("stmts = %+v, want the leaf read then the eqUndef branch", stmts)
 	}
 	if stmts[0].Kind != kernelbridge.IrStatementAssign || stmts[0].Target != 1 ||
-		stmts[0].Effect.Kind != kernelbridge.LoopEffectVar || stmts[0].Effect.Index != 0 {
-		t.Errorf("stmts[0] = %+v, want lo := p.lo", stmts[0])
+		stmts[0].Effect.Kind != kernelbridge.LoopEffectVarState || stmts[0].Effect.Index != 0 {
+		t.Errorf("stmts[0] = %+v, want lo := p.lo, a verbatim copy", stmts[0])
 	}
 	branch := stmts[1]
 	if branch.Kind != kernelbridge.IrStatementBranch || branch.On != 1 ||
-		branch.Test != kernelbridge.IrTestDefined {
-		t.Fatalf("stmts[1] = %+v, want a definedness branch on lo", branch)
+		branch.Test != kernelbridge.IrTestEqUndef {
+		t.Fatalf("stmts[1] = %+v, want an eqUndef branch on lo", branch)
 	}
-	if len(branch.Else) != 1 || branch.Else[0].Target != 1 ||
-		branch.Else[0].Effect.Kind != kernelbridge.LoopEffectConst {
-		t.Errorf("the else arm = %+v, want lo := {3}", branch.Else)
+	if len(branch.Then) != 1 || branch.Then[0].Target != 1 ||
+		branch.Then[0].Effect.Kind != kernelbridge.LoopEffectConst {
+		t.Errorf("the then arm = %+v, want lo := {3}", branch.Then)
+	}
+	if len(branch.Else) != 0 {
+		t.Errorf("the else arm = %+v, want empty — a null or supplied lo keeps its own value", branch.Else)
+	}
+}
+
+// TestIrRecordLowering_ADestructuringDefaultDoesNotFireOnNull walks the
+// SAME lowered statements through the kernel with p.lo entering as
+// NULL-only. The runtime claim — a null p.lo never takes the default —
+// is carried by the LOWERING (eqUndef with the default on Then, pinned
+// above) and is now PROVEN by the walk too: the leaf read `lo := p.lo`
+// lowers as the verbatim whole-state copy (varStateEffect), which hands
+// the null admission through untouched rather than laundering it into
+// the NaN flag (walk.lean's varState case, evalIr), and the kernel's
+// eqUndef branch is INPUT-GATED — an entry that cannot be undefined
+// prunes the Then arm from the join entirely (the gated-join follow-on
+// named below is now landed). So the exit excludes the default's 3
+// outright, and lo's admissions read exactly what the copy carried:
+// Null true, Undef false, Nan false.
+func TestIrRecordLowering_ADestructuringDefaultDoesNotFireOnNull(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	context := recordLoweringContext(kernel,
+		[]string{"p.lo", "lo"},
+		[]BindingKind{BindingKindNumber, BindingKindNumber})
+	stmts, ok := LowerStatements(context, loweringParse(t, `const { lo = 3 } = p;`))
+	if !ok {
+		t.Fatalf("a destructuring default declined outright")
+	}
+	if stmts[0].Effect.Kind != kernelbridge.LoopEffectVarState {
+		t.Fatalf("stmts[0].Effect.Kind = %q, want %q — the leaf read is a pure copy",
+			stmts[0].Effect.Kind, kernelbridge.LoopEffectVarState)
+	}
+	// slot 0 is p.lo (the source leaf the assign reads before the
+	// branch); slot 1 is lo (the branch's own target, overwritten by the
+	// leading assign regardless of its entry state). {Set: emptySet,
+	// Null: true} is the exact-null wire shape kernel_delegation.go's own
+	// StateOfKnown answers for abstractdomain.KindNull.
+	entry := []kernelbridge.KnownStateWire{
+		{Set: emptySet, Null: true},
+		{Top: true},
+	}
+	exit := kernel.Walk(entry, stmts)
+	if len(exit) != 2 {
+		t.Fatalf("len(exit) = %d, want 2", len(exit))
+	}
+	lo := exit[1]
+	// the input-gated join now PRUNES the Then arm — a null-only entry
+	// cannot be undefined, so the default's {3} never joins in
+	if kernel.Member(lo.Set, []float64{3}) {
+		t.Errorf("lo includes 3: %+v — the gated eqUndef join should prune the unreachable Then arm", lo.Set)
+	}
+	if !lo.Null {
+		t.Errorf("lo.Null = false, want true — the verbatim copy hands the source's null admission through untouched")
+	}
+	if lo.Undef {
+		t.Errorf("lo.Undef = true, want false — a null-only source carries no undefined admission")
+	}
+	if lo.Nan {
+		t.Errorf("lo.Nan = true, want false — the copy does not launder the admission into NaN")
 	}
 }
 

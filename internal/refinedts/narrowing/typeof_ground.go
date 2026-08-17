@@ -25,12 +25,18 @@ func GroundOfTypeofWord(word string) (abstractdomain.AbstractValue, bool) {
 	case "boolean":
 		return abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec), true
 	case "object":
-		// arrays answer "object" too, and nothing here pins the brand
+		// arrays answer "object" too, and nothing here pins the brand.
+		// sec-typeof-operator-runtime-semantics-evaluation: step 5 sends
+		// null to "object" (the historical quirk), step 4 sends undefined
+		// to "undefined" — so `typeof x === "object"` proves x is an
+		// object OR exactly null, never undefined (typeof undefined is
+		// its own, different word). The wrapper's own absent side is
+		// therefore NullOnly, not the pre-flavor conflated claim.
 		ground := abstractdomain.KnownObject(nil, nil, false, abstractdomain.TrustSpec, false)
 		if ground.Kind == abstractdomain.KindObject {
 			ground.MaybeArray = true
 		}
-		return abstractdomain.PossiblyUndefined(ground, "", false, false), true
+		return abstractdomain.PossiblyAbsent(ground, abstractdomain.AbsentFlavorNullOnly, "", false, false), true
 	case "symbol":
 		// a symbol of unknown identity — the sort IS the claim
 		return abstractdomain.AbstractValue{Kind: abstractdomain.KindSymbol, Grade: abstractdomain.TrustSpec}, true

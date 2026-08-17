@@ -58,11 +58,14 @@ func AwaitedOperandOf(e *ast.Node) (*ast.Node, bool) {
 
 // awaitIdentityEffect is `await s` where s is a tracked SCALAR slot:
 // awaiting a non-promise settles to the value itself, so the read is the
-// slot's own var. Also answers for `await p` where p is a recognized
-// promise-held local — that reads the flattened "p.inner" slot; for
-// `await Promise.resolve(e)`, where e's own reading stands in for the
-// settled value; and for `await Promise.race([…])`, the join of every
-// element's own reading.
+// slot's own verbatim copy — every caller consumes this result as the
+// WHOLE Effect of a bare IrStatementAssign, never as another effect's
+// operand, so the identity/inner-slot reads ride varStateEffect rather
+// than the numeric var read. Also answers for `await p` where p is a
+// recognized promise-held local — that reads the flattened "p.inner"
+// slot; for `await Promise.resolve(e)`, where e's own reading stands in
+// for the settled value; and for `await Promise.race([…])`, the join of
+// every element's own reading.
 //
 // Declines for anything else, including an await of a plain call: a
 // plain call has statements to emit that this effect-only reader has no
@@ -77,18 +80,18 @@ func awaitIdentityEffect(context *LoweringContext, e *ast.Node) (kernelbridge.Lo
 	}
 	if ast.IsIdentifier(operand) {
 		if slot, held := promiseInnerSlotOf(context, operand.Text()); held {
-			return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: slot}, true
+			return varStateEffect(slot), true
 		}
 	}
 	// a tracked scalar: the identity read
 	if slot, tracked := IndexOf(context, operand); tracked {
-		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: slot}, true
+		return varStateEffect(slot), true
 	}
 	// `await Promise.resolve(e)` — e's own reading stands in for the
 	// settled value, gated on e's own shape ruling out a thenable
 	if inner, isResolve := promiseResolveArgumentOf(operand); isResolve {
 		if effect, ok := RhsEffect(context, BindingKindUnknown, inner); ok {
-			return effect, true
+			return asVarStateEffect(effect), true
 		}
 	}
 	// `await Promise.race([a, b, …])` — the join of every element's own

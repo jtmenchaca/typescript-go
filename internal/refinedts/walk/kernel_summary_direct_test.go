@@ -416,21 +416,78 @@ func TestKernelSummaryDirect_AWholeRecordParameterUseDeclinesTheBody(t *testing.
 	}
 }
 
-func TestKernelSummaryDirect_ACallArgumentHandOverDeclinesTheBody(t *testing.T) {
+func TestKernelSummaryDirect_ACallArgumentHandOverLowersWithWrittenHavockedLeaves(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
-	// `g(p)` hands the object to code that may store into it, and no
-	// write-back carries that out to the caller's own leaves
+	// `g(p)` hands the object over — served now by the havoc-and-
+	// write-back reading (recordParameterHandedOver): every leaf goes
+	// out Written and joins HandOverHavocNames, and the interior call
+	// itself decides completeness — here g is UNRESOLVABLE, so the body
+	// lowers POROUS naming the call, never wrongly complete and never
+	// the old whole-body decline.
 	declaration := summaryDeclarationOf(t,
 		"function f(p: { lo: number }) { g(p); return p.lo; }")
 	ClearResolvedRecordMembers()
 	ClearSummaryOutcomes()
-	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); ok {
-		t.Fatalf("a record handed whole to a callee lowered")
+	summary, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
+	if !ok {
+		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("a handed-over record no longer lowers at all (%q / %q) — the hand-over serving is the point", outcome, construct)
 	}
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
-	if outcome != SummaryDeclined || construct != "a whole-record parameter use" {
-		t.Errorf("outcome = %q / construct = %q, want declined naming the whole-record use", outcome, construct)
+	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	if !recorded || outcome != SummaryPorous {
+		t.Errorf("outcome = %q / construct = %q, want porous — g is unresolvable, so the interior call is the honest hole", outcome, construct)
+	}
+	row, has := bundleEntryNamed(summary, "p.lo")
+	if !has {
+		t.Fatalf("no bundle row for p.lo — BundleEntries = %+v", summary.BundleEntries)
+	}
+	if !row.Written {
+		t.Errorf("p.lo Written = false, want true — a handed-over leaf's exit must ride out")
+	}
+}
+
+func TestKernelSummaryDirect_ADeclaredLeafWriteLowersComplete(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	// `p.lo = 5` writes a DECLARED leaf: the slot takes the assignment,
+	// the row goes out Written, and the body is COMPLETE — the
+	// class-typed bundle's own treatment, now on the type-literal route
+	declaration := summaryDeclarationOf(t,
+		"function f(p: { lo: number }): number { p.lo = 5; return p.lo; }")
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	summary, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
+	if !ok {
+		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("a declared-leaf write declined (%q / %q)", outcome, construct)
+	}
+	if outcome, _, recorded := SummaryOutcomeOf(declaration); !recorded || outcome != SummaryComplete {
+		t.Errorf("outcome = %q, want complete — every statement lowered", outcome)
+	}
+	row, has := bundleEntryNamed(summary, "p.lo")
+	if !has {
+		t.Fatalf("no bundle row for p.lo — BundleEntries = %+v", summary.BundleEntries)
+	}
+	if !row.Written {
+		t.Errorf("p.lo Written = false, want true — the body stores into it")
+	}
+}
+
+func TestKernelSummaryDirect_AnUndeclaredMemberWriteStillDeclines(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	// `p.mid = 1` writes a member the annotation never declared — no
+	// slot holds it, and the refusal stands exactly as before
+	declaration := summaryDeclarationOf(t,
+		"function f(p: { lo: number }) { p.mid = 1; return p.lo; }")
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); ok {
+		t.Fatalf("an undeclared-member write lowered")
+	}
+	if outcome, construct, _ := SummaryOutcomeOf(declaration); outcome != SummaryDeclined || construct != "a whole-record parameter use" {
+		t.Errorf("outcome = %q / construct = %q, want the standing refusal", outcome, construct)
 	}
 }
 
@@ -932,20 +989,35 @@ func TestKernelSummaryDirect_ARenamedBindingPatternElementFillsFromItsOwnMember(
 	}
 }
 
-func TestKernelSummaryDirect_ABindingPatternOverANonRecordAnnotationStillDeclines(t *testing.T) {
+func TestKernelSummaryDirect_ABindingPatternOverAnUnknownSortedMemberStillLowers(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearResolvedRecordMembers()
 	ClearSummaryOutcomes()
-	// the members must be scalars the entries can wear; an unreadable
-	// member leaves the pattern with nothing to bind from
+	// a richer-typed member (`number[]`) binds unknown-sorted rather than
+	// refusing the whole pattern — the same precedent the REST-parameter
+	// arm already sets for its own single unknown-sorted entry: reads of
+	// `lo` answer nothing, which is exactly what is known, and the body
+	// no longer refuses over a member no route reads here anyway.
 	declaration := summaryDeclarationOf(t, "function f({ lo }: { lo: number[] }) { return 1; }")
-	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); ok {
-		t.Fatalf("a binding pattern over an unreadable member lowered")
+	lowered, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
+	if !ok {
+		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		t.Fatalf("a binding pattern over an unknown-sorted member declined (%q / %q)", outcome, construct)
+	}
+	if lowered.ParamCount != 1 {
+		t.Errorf("ParamCount = %d, want 1 — the one bound name", lowered.ParamCount)
+	}
+	entries, entriesOk := SummaryParameterEntries(declaration.Parameters()[0])
+	if !entriesOk || len(entries) != 1 {
+		t.Fatalf("entries = %v (ok %v), want the one bound name", entries, entriesOk)
+	}
+	if entries[0].Name != "lo" || entries[0].Key != "lo" || entries[0].Sort != BindingKindUnknown || entries[0].TypeofTag != TypeofTagNone {
+		t.Errorf("entry = %+v, want name lo filled from member lo, sort unknown, typeof none", entries[0])
 	}
 	outcome, construct, _ := SummaryOutcomeOf(declaration)
-	if outcome != SummaryDeclined || construct != "a binding-pattern parameter" {
-		t.Errorf("outcome = %q / construct = %q, want declined naming the binding pattern", outcome, construct)
+	if outcome != SummaryComplete {
+		t.Errorf("outcome = %q (construct %q), want complete", outcome, construct)
 	}
 }
 
@@ -1080,10 +1152,12 @@ func TestKernelSummaryDirect_TheBundleRowsRideOutOnTheSummaryWithTheirSlotIndice
 		_, construct, _ := SummaryOutcomeOf(declaration)
 		t.Fatalf("the body declined at %q", construct)
 	}
-	// one declared parameter, then the read this-field: a is read, b is
-	// write-only and carries no entry state for the caller to fill
-	if summary.ParamCount != 2 {
-		t.Fatalf("ParamCount = %d, want 2 — the declared parameter plus one read this-entry", summary.ParamCount)
+	// one declared parameter, then BOTH this-fields: a is read, and the
+	// write-only b takes a row too — the row is what its write-back
+	// rides (the caller's own b slot kept a stale value across the call
+	// when the write had no row; thisBundleOf's write-only-entry comment)
+	if summary.ParamCount != 3 {
+		t.Fatalf("ParamCount = %d, want 3 — the declared parameter plus the read AND the written this-entries", summary.ParamCount)
 	}
 	entry, has := bundleEntryNamed(summary, "this.a")
 	if !has {
@@ -1094,6 +1168,16 @@ func TestKernelSummaryDirect_TheBundleRowsRideOutOnTheSummaryWithTheirSlotIndice
 	}
 	if entry.Written {
 		t.Errorf("this.a Written = true, want false — only b is written")
+	}
+	written, hasWritten := bundleEntryNamed(summary, "this.b")
+	if !hasWritten {
+		t.Fatalf("no bundle row for the write-only this.b — BundleEntries = %+v", summary.BundleEntries)
+	}
+	if written.Index != 2 {
+		t.Errorf("this.b index = %d, want 2 — after the read entry", written.Index)
+	}
+	if !written.Written {
+		t.Errorf("this.b Written = false, want true — the body stores into it")
 	}
 }
 
@@ -1215,8 +1299,8 @@ func TestKernelSummaryDirect_AReceiversFieldKnowledgeFillsTheThisEntries(t *test
 			continue
 		}
 		state := states[entry.Index]
-		if state.Top || state.Absent {
-			t.Errorf("%q entered top=%v absent=%v, want the receiver's own field state", held.path, state.Top, state.Absent)
+		if state.Top || state.Undef || state.Null {
+			t.Errorf("%q entered top=%v undef=%v null=%v, want the receiver's own field state", held.path, state.Top, state.Undef, state.Null)
 			continue
 		}
 		if !kernel.Member(state.Set, []float64{held.value}) {
@@ -1252,7 +1336,7 @@ func TestKernelSummaryDirect_AReceiverWithoutTheFieldFillsThatEntryTop(t *testin
 	if !states[missing.Index].Top {
 		t.Errorf("this.b entered top=false, want TOP — the receiver does not name it")
 	}
-	if states[missing.Index].Absent {
+	if states[missing.Index].Undef || states[missing.Index].Null {
 		t.Errorf("this.b entered ABSENT — absent would claim the field is undefined, which no receiver said")
 	}
 }
@@ -1276,7 +1360,7 @@ func TestKernelSummaryDirect_ANonObjectReceiverFillsEveryThisEntryTop(t *testing
 		if !states[entry.Index].Top {
 			t.Errorf("%q entered top=false on an unknown receiver, want TOP", entry.Path)
 		}
-		if states[entry.Index].Absent {
+		if states[entry.Index].Undef || states[entry.Index].Null {
 			t.Errorf("%q entered ABSENT on an unknown receiver, want TOP", entry.Path)
 		}
 	}

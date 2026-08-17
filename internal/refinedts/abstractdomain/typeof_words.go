@@ -129,6 +129,12 @@ func TypeofWordOfKnown(k AbstractValue) string {
 		return "function"
 	case KindObject, KindObjectStar, KindList, KindArrayHoles, KindCollection, KindPromise, KindDate, KindRegex:
 		return "object"
+	case KindNull:
+		// sec-typeof-operator: typeof null is "object" (the historical
+		// spec quirk) — unlike KindUndef, which conflates two DIFFERENT
+		// typeof words and so answers "" below, KindNull is exactly-null
+		// and pins one word cleanly.
+		return "object"
 	case KindPossiblyNaN:
 		// NaN is a number, so the ride changes nothing when the inner
 		// claim already answers "number"

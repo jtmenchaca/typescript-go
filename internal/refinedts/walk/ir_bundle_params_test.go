@@ -408,7 +408,7 @@ func TestBundleParams_EntryStatesReadEachFieldOffAnObjectArgument(t *testing.T) 
 // it holds exactly one — what an entry filled from an exact-valued field
 // spells.
 func bundleParamExactOf(state kernelbridge.KnownStateWire) (float64, bool) {
-	if state.Top || state.Absent || state.Nan {
+	if state.Top || state.Undef || state.Null || state.Nan {
 		return 0, false
 	}
 	if len(state.Set.Forms) != 1 || state.Set.Forms[0].Form != refinementsets.FormOneOf {
@@ -436,7 +436,7 @@ func TestBundleParams_AFieldTheArgumentDoesNotNameEntersTopNotAbsent(t *testing.
 	if !states[1].Top {
 		t.Errorf("the unnamed field entered %+v, want {Top:true}", states[1])
 	}
-	if states[1].Absent {
+	if states[1].Undef || states[1].Null {
 		t.Errorf("the unnamed field entered ABSENT — no caller claimed the field is undefined")
 	}
 }
@@ -465,7 +465,7 @@ func TestBundleParams_ANonObjectArgumentTopsEveryEntryRatherThanKillingTheCall(t
 			if !state.Top {
 				t.Errorf("%s: entry %d = %+v, want {Top:true}", name, index, state)
 			}
-			if state.Absent {
+			if state.Undef || state.Null {
 				t.Errorf("%s: entry %d entered ABSENT", name, index)
 			}
 		}

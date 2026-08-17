@@ -3,6 +3,8 @@
 package walk
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -26,6 +28,16 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 	}
 	blob, has := SummaryBlobFor(context.Flow, callee)
 	if !has {
+		return kernelbridge.IrStatement{}, false
+	}
+	// SummaryBlobFor's "has" answers COMPILE success only — a porous
+	// body still compiles a blob, and "porous blobs no longer answer
+	// calls" (applySummary's top-level serving rule) is the guard an
+	// EMBEDDED call needs too: splicing a porous callee's blob into
+	// this body's statements would compose that callee's weakened ret
+	// while this body still records itself complete. The same gate
+	// HoistCallEffect enforces, at the statement-route embed.
+	if outcome, _, recorded := SummaryOutcomeOf(callee); !recorded || outcome != SummaryComplete {
 		return kernelbridge.IrStatement{}, false
 	}
 	outIndex, shapeOk := SummaryOutShapeFor(context.Flow, callee)
@@ -139,20 +151,60 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 			args = append(args, leafEffects...)
 			continue
 		}
-		// an ARRAY-TYPED parameter's two entries take the caller's own
-		// flattened array slots, "<argument>.len" and "<argument>.elem",
+		// an ARRAY-TYPED parameter's entries take the caller's own
+		// flattened array slots — "<argument>.len" and "<argument>.elem",
+		// or, where the element type expands as a record (ElementMembers),
+		// "<argument>.len" plus one "<argument>.elem.<member>" per member —
 		// where the argument is a bare name the caller flattened the same
 		// way. Anything else — a literal, a call's result, a name the
-		// caller kept whole — fills both UNKNOWN rather than absent: the
-		// callee is passed a real array, and absent would claim it is
-		// undefined. Two effects go out either way, which is what keeps
-		// this vector the same length the layout laid out.
-		if _, flattened := arrayParamSlotsIn(context.Flow, parameter); flattened {
+		// caller kept whole — fills every entry UNKNOWN rather than absent:
+		// the callee is passed a real array, and absent would claim it is
+		// undefined. The effect count always matches the entry width the
+		// layout emitted (1+len(ElementMembers), or 2 for the scalar pair),
+		// which is what keeps this vector the same length the layout laid
+		// out — a narrower count would slide every later parameter's
+		// entries by the difference (kernel_summaries.go's
+		// summaryEntryStates states the same rule for the TOP-fill seam).
+		if local, flattened := arrayParamSlotsIn(context.Flow, parameter); flattened {
+			if len(local.ElementMembers) > 0 {
+				effects := make([]kernelbridge.LoopEffect, 1+len(local.ElementMembers))
+				for at := range effects {
+					effects[at] = unknownEffect
+				}
+				if index < len(callArguments) {
+					if head := Unwrapped(callArguments[index]); ast.IsIdentifier(head) {
+						name := head.Text()
+						if lenSlot, hasLen := slotIndexOfName(context, name+".len"); hasLen {
+							// each leaf is resolved by the CALLEE member's own
+							// path under the caller's spelling, so entry k can
+							// only ever take the caller leaf that names it —
+							// and all-or-nothing, since a partial match would
+							// mix resolved leaves with unknowns of a shape the
+							// callee's entry order no longer separates
+							resolved := []kernelbridge.LoopEffect{varStateEffect(lenSlot)}
+							complete := true
+							for _, member := range local.ElementMembers {
+								leaf, hasLeaf := slotIndexOfName(context, name+".elem."+strings.Join(member.Path, "."))
+								if !hasLeaf {
+									complete = false
+									break
+								}
+								resolved = append(resolved, varStateEffect(leaf))
+							}
+							if complete {
+								effects = resolved
+							}
+						}
+					}
+				}
+				args = append(args, effects...)
+				continue
+			}
 			lenEffect, elemEffect := unknownEffect, unknownEffect
 			if index < len(callArguments) {
 				if head := Unwrapped(callArguments[index]); ast.IsIdentifier(head) {
 					if lenSlot, elemSlot, isArray := arraySlotsOf(context, head.Text()); isArray {
-						lenEffect, elemEffect = varEffect(lenSlot), varEffect(elemSlot)
+						lenEffect, elemEffect = varStateEffect(lenSlot), varStateEffect(elemSlot)
 					}
 				}
 			}
@@ -196,7 +248,7 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 		if !ok {
 			return kernelbridge.IrStatement{}, false
 		}
-		args = append(args, effect)
+		args = append(args, asVarStateEffect(effect))
 	}
 	for len(args) < calleeShape.SlotCount {
 		if len(args) == calleeShape.DoneIndex {

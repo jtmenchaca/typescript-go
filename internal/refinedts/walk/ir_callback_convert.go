@@ -56,7 +56,43 @@ type convertedArrow struct {
 //
 // The blob is remembered under the arrow NODE, not in the declaration-
 // keyed registry: an arrow belongs to its one site.
+//
+// One entry per declared parameter — arrowParameterSorts reads the
+// parameter sorts straight off entries, which is only true where the
+// count agrees. convertArrowWithEntryLayout is the general core this
+// wraps, for a site (the reduce accumulator) whose entry vector runs
+// wider than the declared parameter count and supplies its own sorts.
 func convertArrow(context *LoweringContext, argument *ast.Node, entries []callbackEntry) (convertedArrow, bool) {
+	arrow := callbackFunctionOf(context, argument)
+	if arrow == nil {
+		return convertedArrow{}, false
+	}
+	if _, ok := arrowParameterNames(arrow); !ok {
+		return convertedArrow{}, false
+	}
+	if len(entries) != len(arrow.Parameters()) {
+		return convertedArrow{}, false
+	}
+	return convertArrowWithEntryLayout(context, argument, entries, arrowParameterSorts(entries))
+}
+
+// convertArrowWithEntryLayout is convertArrow's shared core: the site
+// hands in BOTH the flattened entry vector (one callbackEntry per
+// EFFECT position, which convertArrow's own arg loop appends verbatim)
+// and the DECLARED-parameter-indexed sort vector
+// (lowerArrowSummary/summaryParameterEntries reads it by declaration
+// position, never by entry position) — the two run the same length only
+// where every parameter fills one entry, which convertArrow enforces
+// before calling in. A site whose accumulator parameter is array-shaped
+// (convertReduceArrow) supplies a wider entries vector (len/elem pair)
+// beside the NARROWER, declared-length parameterSorts (one row per
+// parameter, Array marking the pair), and calls this directly.
+func convertArrowWithEntryLayout(
+	context *LoweringContext,
+	argument *ast.Node,
+	entries []callbackEntry,
+	parameterSorts []parameterSlotSort,
+) (convertedArrow, bool) {
 	arrow := callbackFunctionOf(context, argument)
 	if arrow == nil {
 		return convertedArrow{}, false
@@ -67,14 +103,13 @@ func convertArrow(context *LoweringContext, argument *ast.Node, entries []callba
 	if _, ok := arrowParameterNames(arrow); !ok {
 		return convertedArrow{}, false
 	}
-	if len(entries) != len(arrow.Parameters()) {
+	if len(parameterSorts) != len(arrow.Parameters()) {
 		return convertedArrow{}, false
 	}
 	captures, captureSlots, ok := capturesOf(context, scanFreeNames(arrow))
 	if !ok {
 		return convertedArrow{}, false
 	}
-	parameterSorts := arrowParameterSorts(entries)
 	arrowBlobsMu.Lock()
 	held, has := arrowBlobs[arrow]
 	arrowBlobsMu.Unlock()
@@ -199,11 +234,16 @@ func arrowCallStatement(
 		return kernelbridge.IrStatement{}, false
 	}
 	lowered := converted.Lowered
-	declared := len(converted.Node.Parameters())
-	if declared != len(converted.Entries) {
-		return kernelbridge.IrStatement{}, false
-	}
-	if declared+len(converted.CaptureSlots) > lowered.ParamCount {
+	// entries run ONE PER SLOT the declared parameters fill, not one per
+	// declared parameter — an array-shaped accumulator (convertReduceArrowArray)
+	// widens its own declared position into a len/elem pair, so entries
+	// can outrun converted.Node.Parameters() by exactly as many pairs as
+	// the compile itself laid out. lowered.ParamCount is the layout's own
+	// count of those slots (ir_summary_body_lowering.go's ParamCount
+	// comment), so it — not the declared count — is what entries must
+	// agree with.
+	filled := len(converted.Entries)
+	if filled+len(converted.CaptureSlots) != lowered.ParamCount {
 		return kernelbridge.IrStatement{}, false
 	}
 	args := make([]kernelbridge.LoopEffect, 0, lowered.SlotCount)
@@ -216,7 +256,7 @@ func arrowCallStatement(
 	}
 	// the capture entries, in the scan's order
 	for _, slot := range converted.CaptureSlots {
-		args = append(args, varEffect(slot))
+		args = append(args, varStateEffect(slot))
 	}
 	for len(args) < lowered.SlotCount {
 		if len(args) == lowered.DoneIndex {
@@ -241,6 +281,64 @@ func arrowCallStatement(
 		Args:   args,
 		Rets:   rets,
 	}, true
+}
+
+// arrowCallStatementArrayResult is arrowCallStatement for a converted
+// arrow whose OWN return is array-shaped (converted.Lowered.RetShape ==
+// RetShapeArray, laid out by the arrow body's own returnedLiteralShape
+// reading) — the accumulator update `acc.concat(x)` inside a REDUCE
+// callback over an array-typed accumulator, whose result is itself a
+// length and a joined element rather than one scalar.
+//
+// Where arrowCallStatement maps the callback's scalar #ret onto one
+// target slot, this maps the callback's OWN "#ret.len"/"#ret.elem" out-
+// states onto the caller's targetLen/targetElem — Rets is keyed by
+// callee OUT-STATE slot index (kernelbridge.IrStatement's own doc: "per
+// callee out-state, the caller binding it writes"), so each of the
+// callback's three exits (scalar #ret, #ret.len, #ret.elem) maps to its
+// own caller slot independently; the scalar #ret is left unmapped (-1)
+// since nothing here reads it.
+func arrowCallStatementArrayResult(
+	context *LoweringContext,
+	converted convertedArrow,
+	targetLen int,
+	targetElem int,
+) (kernelbridge.IrStatement, bool) {
+	if converted.Lowered.RetShape != RetShapeArray {
+		return kernelbridge.IrStatement{}, false
+	}
+	lenIndex, lenOk := RetMemberSlotOfLowered(converted.Lowered, "len")
+	elemIndex, elemOk := RetMemberSlotOfLowered(converted.Lowered, "elem")
+	if !lenOk || !elemOk {
+		return kernelbridge.IrStatement{}, false
+	}
+	call, callOk := arrowCallStatement(context, converted, -1)
+	if !callOk {
+		return kernelbridge.IrStatement{}, false
+	}
+	top := lenIndex
+	if elemIndex > top {
+		top = elemIndex
+	}
+	for len(call.Rets) <= top {
+		call.Rets = append(call.Rets, -1)
+	}
+	call.Rets[lenIndex] = targetLen
+	call.Rets[elemIndex] = targetElem
+	return call, true
+}
+
+// RetMemberSlotOfLowered is RetMemberSlotOf read off a COMPILED
+// LoweredSummary's own RetMembers rather than a live LoweringContext's —
+// the callback's row list, read by the OUTER call statement that splices
+// its blob, not by a lowering still building one.
+func RetMemberSlotOfLowered(lowered LoweredSummary, member string) (int, bool) {
+	for _, entry := range lowered.RetMembers {
+		if entry.Name == member {
+			return entry.Index, true
+		}
+	}
+	return 0, false
 }
 
 // convertArrayArrow converts a callback under the ARRAY entry layout —
@@ -295,4 +393,60 @@ func convertReduceArrow(
 		}
 	}
 	return convertArrow(context, argument, entries)
+}
+
+// convertReduceArrowArray converts a callback under REDUCE's entry
+// layout where the ACCUMULATOR (declared parameter 0) is itself
+// ARRAY-shaped — the len/elem PAIR ir_array_slots.go's local carries,
+// not one scalar. The element and index entries shift exactly as
+// convertReduceArrow's do; only entry 0 widens, into two.
+//
+// accumulatorLen/accumulatorElem are the two effects entry 0 splits
+// into — the join the caller already built for each half (mirroring
+// convertReduceArrow's single accumulator join, one join per slot).
+// elementSort/elementTypeof describe the ELEM half only; the len half
+// is always number (ir_array_slots.go's own convention — every
+// flattened array's length slot is number-sorted).
+func convertReduceArrowArray(
+	context *LoweringContext,
+	argument *ast.Node,
+	elementSlot int,
+	accumulatorLen kernelbridge.LoopEffect,
+	accumulatorElem kernelbridge.LoopEffect,
+	elementSort BindingKind,
+	elementTypeof TypeofTag,
+) (convertedArrow, bool) {
+	arrow := callbackFunctionOf(context, argument)
+	if arrow == nil {
+		return convertedArrow{}, false
+	}
+	declared := len(arrow.Parameters())
+	if declared == 0 {
+		// reduce always declares at least the accumulator — an arrow with
+		// none has no position for the pair to fill
+		return convertedArrow{}, false
+	}
+	parameterSorts := make([]parameterSlotSort, declared)
+	parameterSorts[0] = parameterSlotSort{Sort: elementSort, TypeofTag: elementTypeof, Array: true}
+	var entries []callbackEntry
+	entries = append(entries,
+		callbackEntry{Effect: accumulatorLen, Sort: BindingKindNumber, Typeof: TypeofTagNumber},
+		callbackEntry{Effect: accumulatorElem, Sort: elementSort, Typeof: elementTypeof},
+	)
+	for index := 1; index < declared; index++ {
+		switch index {
+		case 1:
+			entries = append(entries, slotCallbackEntry(context, elementSlot))
+			parameterSorts[index] = parameterSlotSort{
+				Sort: context.Sorts[elementSlot], TypeofTag: context.Typeofs[elementSlot],
+			}
+		case 2:
+			entries = append(entries, indexCallbackEntry())
+			parameterSorts[index] = parameterSlotSort{Sort: BindingKindNumber, TypeofTag: TypeofTagNumber}
+		default:
+			entries = append(entries, absentCallbackEntry())
+			parameterSorts[index] = parameterSlotSort{Sort: BindingKindUnknown, TypeofTag: TypeofTagNone}
+		}
+	}
+	return convertArrowWithEntryLayout(context, argument, entries, parameterSorts)
 }

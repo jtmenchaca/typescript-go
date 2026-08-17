@@ -102,10 +102,41 @@ in full before touching code.`
   guard.
 - **The one syntax-decline table** is walk/syntax_models.go; per-site
   decline sentences are `ReasonNote`s (assignability/decline_reasons
-  twin). New models answer BEFORE the unmodeled tail
-  (walk/unmodeled_method_havoc.go), which havocs receivers.
-- **Builtin dispatch** is a chain in walk/builtin_models.go — add new
-  readers as one chain insertion; each reader declines with nil.
+  twin).
+- **Walk-route `()` / tagged-template org chart** is
+  `walk/CALLS.md` — six questions (who / args / allowed / what runs /
+  world / value), products Value∥World, Prepare → obligations →
+  DetermineCallProducts → ApplyWorldUpdate. Not a plugin cascade; not
+  “library / body / declared” as the spine (that legend sits under Q6
+  only). World apply order is WriteBacks → Forgets → Havocs. After any
+  effectful eval, Admission uses prepared values — never
+  `!ok → AdmitCall(site)` re-walk. Schema `.parse` 7001 lives with the
+  library arm that runs `EvaluateParseOutcome`, not in the static Q3
+  door. Target end state: library rows return `*CallProducts` or nil;
+  `readUnmodeledMethod` declines (residue is Admission’s). Until that
+  rewrite lands, today’s fall-through spine is still
+  `evaluate_call_expression.go`.
+- **Builtin dispatch** (today) is a chain in walk/builtin_models.go —
+  add new readers as one chain insertion; each reader declines with
+  nil. Under CALLS.md end state these become library-row products
+  behind `WhatRunsNow`, not a competing call cascade.
+- **The comparison decider lives at walk/comparison_decision.go** (package walk) —
+  there is NO internal/refinedts/comparison/ directory; the placeholder package named
+  in older docs was deleted at integration.
+- **TestOf** (walk/ir_guard_single_head.go) has NO arm for loose `!=` at all — only
+  `===`/`!==`/`==` are read; loose `== null`/`!= null` deliberately never lower to a
+  flavored test (true of both absent values).
+- **TypeofRead** (walk/ir_guard_typeof_read.go) distinguishes quoting `"undefined"`
+  (`IsUndefinedQuote` — lowers eqUndef; typeof null is `"object"`) from quoting the
+  slot's own tag (lowers `IrTestDefined`, correct there).
+- **Destructuring defaults and function parameter defaults** fire on exactly-undefined,
+  never null (spec.html ~10111 "If |Initializer| is present and _v_ is *undefined*") —
+  their lowerings use `IrTestEqUndef` with the default on the Then arm
+  (ir_object_slots_destructuring.go, ir_summary_body_lowering_default_prelude.go). The
+  `??` lowerings correctly stay `IrTestDefined` (`CoalesceExpression` is either-absent).
+- **walk/ sort and state-admission are orthogonal**: a `BindingKindNumber`/`String` slot's
+  kernel state can still carry a null/undef admission — never argue soundness from "the
+  sort excludes absence".
 
 ## Compound-assignment facts
 
@@ -228,6 +259,44 @@ in full before touching code.`
   needs the same split (a resolve-only pre-check, then evaluate-once)
   or it inherits this double-eval risk silently.
 
+## Type-reading facts
+
+- **Fixed tuple types read positionally** (typereading/host_type.go's
+  tuple branch, before the general array-like branch): every element
+  `ElementFlagsRequired` → an exact `KnownList`; optional/rest/variadic
+  tuples fall to the general branch (today, a refusal — never claim an
+  exact list for a partial tuple). Public accessors needed:
+  `IsTupleType()`, `TargetTupleType()`, `ElementFlags()` — all exported
+  by `checker.TupleType`, no internal/checker edit needed (PORT.md's
+  method list omits the latter two).
+- **`hostTypeDepthLimit` (host_type.go) is the ONE recursion budget**
+  shared by the peel/union/object gates — do not widen it for a single
+  fixture; a chain that refuses usually refuses for SHAPE (e.g. a
+  readonly-array-of-words member has no star-over-words reading), not
+  depth. Verify by raising the limit temporarily before blaming it.
+- **The null/undefined split is DECIDED in comparison_decision.go's strict
+  absent-vs-absent rule**: exact `KindUndef`/`KindNull` now decide strict and
+  loose equality (spec-cited rows in walk/comparison_decision.go). An exactly-
+  undefined read `=== undefined` resolves true; an exactly-null read `=== undefined`
+  resolves false. Do not open this rule again.
+- **`declaredParamSort`/`declaredParamTypeof` (kernel_summaries.go)
+  recognize only keyword types.** Widening them to literal unions
+  changes WHICH bodies lower and serve — a previously-declining switch
+  starts serving its entry-quantified join, and an EXACT-argument call
+  then reads the whole union (a wrong answer, worse than the decline).
+  Any sort widening there must land together with per-call entry
+  narrowing, or not at all.
+- **`Object.keys/values/entries` exact answers** live in
+  object_static_models.go's `isObjectReceiver` block (complete objects
+  → exact key/value lists); `WordTuplesOf`
+  (refinementsets/codepoint_sets.go) is the general finite-word-set
+  reader (word-union `.length` reads through it in
+  evaluate_property_access.go).
+- **typereading's absence conflation pattern**: type_node.go/host_type.go build the
+  maybe wrapper through `sawAbsent`/`absentFlags` and recipes.go's `PresentUnion` —
+  wrappers there are conflated by design; the null TYPE reads as `abstractdomain.Null`,
+  undefined/void types as `Undef`.
+
 ## Kernel bridge facts
 
 - **`LoadKernel` returns `*kernelbridge.RefinedTSKernel`** (a struct of
@@ -237,9 +306,32 @@ in full before touching code.`
 - **Wire forms**: kernelbridge/wire_format.go (encode) and
   wire_decode.go (decode) must match the Lean decoder byte-for-byte;
   read both sides together before adding any form.
+- **KnownStateWire carries split Undef/Null bools**: the send/read seam is
+  walk/kernel_delegation.go's `StateOfKnown`/`KnownOfState` (flavored wrappers map to
+  single flags; `KindNull` sends Null-only; `KindUndef` sends Undef-only — its producer
+  audit is complete, and single-flag-over-∅ wires read back as the exact kind). The kernel
+  state wire is `{"set","undef","null","nan","thrown"?}`; a legacy `{"absent": bool}`
+  decodes as both admissions. The effect wire's `constState` carries the same
+  `"undef"`/`"null"` pair (`AbsentConst()` = undef-only, `NullConst()` = null-only), and
+  `{"varState": i}` is the verbatim whole-state copy — sound ONLY as an assign's whole
+  effect, never as an operand.
 - **Capture/pattern languages compile through
   `refinementsets.FormatGrammar("^"+src+"$", flags)`** — anchor
   sub-patterns yourself; FormatGrammar alone pads substring-anywhere.
+- **kernelbridge IrBranchTest**: new no-operand tests must be added to `StmtWire`'s
+  w-suppression guard (the else-if chain at the branch tail of the function, ~line 833
+  area) or they emit a spurious "w" field. `IrTestEqUndef` ("eqUndef") and
+  `IrTestEqNull` ("eqNull") exist; their true arm is "the slot IS that absent value".
+- **Kernel question wire tracing** (kernel_trace.go): every question funnels through
+  `KernelFromCalls`'s `ask1`/`ask2` closures (ask_kernel.go) into one shared `timed`
+  seam — call `kernelbridge.TraceKernelTo(func(line string) { t.Logf("%s", line) })`
+  (returns a restore closure; `SetKernelTraceWriter` is the same hook without the
+  restore) in a test to read exact wires instead of writing a probe test. Three line
+  shapes stream, each already newline-terminated by the writer's own call: `refinedts-kernel Q <op> <request-wire>` before the dylib call, `refinedts-kernel A <op> <answer-wire>` after (the raw JSON wire, unreformatted); a cache hit (AskCached, question_cache.go) that never reaches `timed` emits `refinedts-kernel C <op> <key, newlines flattened to " | "> => <cached answer>` — the disk-persisted cache otherwise hides every wire of a question any earlier run asked.
+  The CLI carries the same hook: `refinedts-check-bin -kernel-trace <file.ts>` streams
+  the lines to stderr LIVE — for a HANG, the diagnosis line is the last Q with no A
+  (that is the question the kernel never answered; `sample <pid> 5` then names the
+  spinning kernel function).
 
 ## Test-harness idioms (walk package)
 
@@ -257,9 +349,24 @@ in full before touching code.`
   `AfterReaders`** (they ask `GetTypeAtLocation`); use a real program.
 - **FlowContext for tests** needs Registry/Objects/Contracts/Report/
   Aliases/Declared populated (empty maps + swallowed report sink).
+- **Test-file conventions**: walk/ model files mix pure and program-based tests per file;
+  files with zero direct coverage (evaluate_expression.go, type_seed_answer.go) get their
+  tests in the nearest model-file test (e.g. syntax_models_test.go); `CompareKnown`'s
+  tests live in walk/comparison_decision_test.go with the `FlowContext{}` zero-value idiom
+  (the Undef/Null paths never touch `ctx.Kernel`).
 
 ## Abstract-domain facts
 
+- **Null/undefined vocabulary** (post-split): `abstractdomain.KindNull/Null` = exactly null;
+  `KindUndef/Undef` = exactly undefined (missing keys, OOB reads, void, uninitialized, the
+  undefined literal). The maybe wrapper carries `AbsentSide` (`AbsentFlavor`: zero value =
+  conflated, `AbsentFlavorUndefOnly`, `AbsentFlavorNullOnly`) built via `PossiblyAbsent(...)`;
+  `PossiblyUndefined` delegates with the conflated flavor. A wrapper with `Inner=Null` means
+  "null or undefined".
+- **Null-flavor producers with spec cites**: the null literal (walk/evaluate_expression.go,
+  walk/type_seed_answer.go) and `String.prototype.match`'s no-match branch
+  (walk/string_method_models.go) produce `abstractdomain.Null`; `.exec`'s null rides
+  inside a `PossiblyUndefined` wrapper (walk/regex_exec_capture.go).
 - **`KindObjectStar` and `array_construction.go` are Go-native — there
   is NO TS counterpart.** `abstract_domain/abstract_value.ts` (the
   PORT.md source of truth) has no `"objectStar"` arm and there is no
@@ -282,6 +389,10 @@ in full before touching code.`
   `default` cases degrade to unknown, not a wrong answer) but leaves a
   silent capability gap — check each one rather than assuming the
   default is what you want.
+- **A new FIELD on AbstractValue touches a checklist, not one file**: `SameKnown`,
+  `JoinKnown`/`MeetKnown`, `memo_spell.go`, format (maybe), plus every call site that
+  rebuilds a wrapper from `.Inner` (search `KindPossiblyUndefined` tree-wide) — the
+  mirror of the existing new-Kind checklist.
 - **The grammar already spells the EMPTY SET — `OneOf []`
   (refinements/grammar.lean:35 + denotation.lean:36) — satisfied by no
   tuple, and emptiness is a canonical decided set function

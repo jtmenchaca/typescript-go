@@ -56,7 +56,12 @@ func TraceStop() TraceResult {
 	recordsMu.Unlock()
 	result := TraceResult{Root: held, Counters: counters}
 	SetRoot(nil)
-	SetTreeCurrent(nil)
+	// Drop every goroutine's span stack with the root it pointed into,
+	// so a later trace never opens nodes under a tree this one returned.
+	// The worker window is NOT cleared here: EmitTraceReport runs after
+	// TraceStop (cmd/refinedts-check/main.go), and the self-time column
+	// it prints is divided out of that window.
+	closeScopes()
 	return result
 }
 

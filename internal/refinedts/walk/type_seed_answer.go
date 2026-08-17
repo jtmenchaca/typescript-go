@@ -248,7 +248,7 @@ func literalKnown(p *program.CheckerProgram, e *ast.Node, depth int) (abstractdo
 		return abstractdomain.AbstractValue{Kind: abstractdomain.KindBigints, BigintValues: []int64{bigIntFromString(text)}}, true
 	}
 	if e.Kind == ast.KindNullKeyword {
-		return abstractdomain.Undef, true
+		return abstractdomain.Null, true
 	}
 	if ast.IsIdentifier(e) && e.Text() == "undefined" {
 		return abstractdomain.Undef, true

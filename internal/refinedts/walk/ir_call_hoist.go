@@ -101,6 +101,23 @@ func HoistCallEffect(context *LoweringContext, call *ast.Node) (kernelbridge.Loo
 	if _, has := SummaryBlobFor(context.Flow, callee); !has {
 		return kernelbridge.LoopEffect{}, false
 	}
+	// SummaryBlobFor's own "Ok" answers COMPILE success only — a body
+	// that lowered whole but havocked some construct along the way
+	// (summary_outcome.go's SummaryPorous) still compiles a blob, and
+	// "Porous blobs still count coverage; they no longer answer calls"
+	// (kernel_summaries.go's applySummary, the TOP-LEVEL serving rule)
+	// is exactly the guard a NESTED call site needs too: hoisting a
+	// call into a porous callee's blob would splice that callee's own
+	// weakened (possibly TOP) ret into THIS body's statements while
+	// this body's own lowering still reports itself complete — the
+	// composed answer is porous, but nothing said so. Requiring the
+	// callee's own SummaryOutcomeOf to have settled COMPLETE before
+	// hoisting is the same rule applySummary already enforces one call
+	// up, moved to where a callee's blob gets EMBEDDED rather than
+	// SERVED.
+	if outcome, _, recorded := SummaryOutcomeOf(callee); !recorded || outcome != SummaryComplete {
+		return kernelbridge.LoopEffect{}, false
+	}
 	// (2) the ordering gate, asked BEFORE the temp is allocated so a
 	// refusal leaves the slot vector exactly as it stood
 	if !hoistingIsOrderSafe(context, head, callee) {

@@ -75,9 +75,10 @@ var selfConstCompiler func(ctx *FlowContext, declaration *ast.Node, selfBlob ker
 // a constant summary should say about slots it does not write; the ret
 // out-state is R for every entry, which is the constant claim itself.
 //
-// The state rides as a constState effect so R's ABSENT and NaN
-// ride-alongs travel with it: a plain const effect carries only the
-// set, and an R that admits undefined or NaN would silently lose them.
+// The state rides as a constState effect so R's UNDEF, NULL and NaN
+// ride-alongs travel with it, each its own flag: a plain const effect
+// carries only the set, and an R that admits undefined, null, or NaN
+// would silently lose them.
 func askConstSummary(arity int, retIndex int, state kernelbridge.KnownStateWire) (kernelbridge.SummaryBlob, bool) {
 	if state.Top {
 		// no constant claim to make — top is what the havoc floor already says
@@ -97,10 +98,11 @@ func askConstSummary(arity int, retIndex int, state kernelbridge.KnownStateWire)
 				Kind:   kernelbridge.IrStatementAssign,
 				Target: slot,
 				Effect: kernelbridge.LoopEffect{
-					Kind:   kernelbridge.LoopEffectConstState,
-					Set:    state.Set,
-					Absent: state.Absent,
-					Nan:    state.Nan,
+					Kind:  kernelbridge.LoopEffectConstState,
+					Set:   state.Set,
+					Undef: state.Undef,
+					Null:  state.Null,
+					Nan:   state.Nan,
 				},
 			})
 			continue
@@ -236,7 +238,9 @@ func joinStates(a, b kernelbridge.KnownStateWire) kernelbridge.KnownStateWire {
 	if a.Top || b.Top {
 		return kernelbridge.KnownStateWire{Top: true}
 	}
-	flags := kernelbridge.KnownStateWire{Absent: a.Absent || b.Absent, Nan: a.Nan || b.Nan}
+	flags := kernelbridge.KnownStateWire{
+		Undef: a.Undef || b.Undef, Null: a.Null || b.Null, Nan: a.Nan || b.Nan,
+	}
 	// two sides that SPELL the same need no union: `A ∪ A` is A, and
 	// writing it as a union would grow the candidate's syntax every round
 	// and keep the iteration from ever reading as stable
@@ -305,9 +309,10 @@ func widenState(
 		return kernelbridge.KnownStateWire{Top: true}
 	}
 	return kernelbridge.KnownStateWire{
-		Set:    refinementsets.MakeRefinedSet(forms...),
-		Absent: previous.Absent || current.Absent,
-		Nan:    previous.Nan || current.Nan,
+		Set:   refinementsets.MakeRefinedSet(forms...),
+		Undef: previous.Undef || current.Undef,
+		Null:  previous.Null || current.Null,
+		Nan:   previous.Nan || current.Nan,
 	}
 }
 
@@ -417,7 +422,7 @@ func sameProposedState(a, b kernelbridge.KnownStateWire) bool {
 	if a.Top {
 		return true
 	}
-	return a.Absent == b.Absent && a.Nan == b.Nan &&
+	return a.Undef == b.Undef && a.Null == b.Null && a.Nan == b.Nan &&
 		kernelbridge.StateWire(a) == kernelbridge.StateWire(b)
 }
 
@@ -513,7 +518,10 @@ func certifyConstant(
 		return false
 	}
 	// the ride-alongs: R has to admit whatever the answer may be
-	if answered.Absent && !candidate.Absent {
+	if answered.Undef && !candidate.Undef {
+		return false
+	}
+	if answered.Null && !candidate.Null {
 		return false
 	}
 	if answered.Nan && !candidate.Nan {

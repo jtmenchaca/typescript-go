@@ -5,6 +5,7 @@ package walk
 import (
 	"testing"
 
+	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
 
@@ -172,5 +173,136 @@ func TestLoweringToKernelIR_ABareThisReturnStaysInert(t *testing.T) {
 	}
 	if context.FirstHavoc != "" {
 		t.Errorf("FirstHavoc = %q, want \"\" — a bare `this` carries no field read to lose", context.FirstHavoc)
+	}
+}
+
+// TestLoweringToKernelIR_IsWellBehavedNumberTaskDiagnosis pins TASK 3(a):
+// recharts' util/isWellBehavedNumber.ts:6, `isPositiveNumber`'s body —
+// `typeof n === 'number' && n > 0 && Number.isFinite(n)` — census row
+// "return (binary &&)".
+//
+// This is a plain BOOLEAN-shaped return (a chain of `&&` over comparisons
+// and a typeof test), which the return route's TestShaped/LowerGuard arm
+// (lowering_to_kernel_ir_return.go, tried ahead of the branch/member/inert
+// arms) is built for. It lowers COMPLETE today — the census row's own
+// label is what needs re-reading, not this construct: `&&` over
+// comparison operands is exactly the guard machinery's home shape.
+func TestLoweringToKernelIR_IsWellBehavedNumberTaskDiagnosis(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	context := loweringResultContext([]string{"n"}, []BindingKind{BindingKindNumber})
+	context.Narrow = kernel.Narrow
+	stmts, ok := LowerStatements(context, loweringParse(t,
+		`return typeof n === 'number' && n > 0 && Number.isFinite(n);`))
+	if !ok {
+		t.Fatalf("isPositiveNumber's body declined outright")
+	}
+	if context.FirstHavoc != "" {
+		t.Errorf("FirstHavoc = %q, want \"\" (COMPLETE) — a boolean-valued && chain over a typeof test, a comparison, and Number.isFinite is the guard route's own shape", context.FirstHavoc)
+	}
+	t.Logf("stmts=%+v firstHavoc=%q", stmts, context.FirstHavoc)
+}
+
+// TestLoweringToKernelIR_GlobalParseIsSsrTaskDiagnosis pins TASK 3(b):
+// recharts' util/Global.ts:1-2 — `!(typeof window !== 'undefined' &&
+// window.document && Boolean(window.document.createElement) &&
+// window.setTimeout)` — census row "return (! binary &&)".
+//
+// EXPECTED honestly external: every operand reads a bare `window` global
+// (`typeof window`, `window.document`, `window.setTimeout`) this walk
+// package tracks nothing for — no parameter, no local, no import
+// resolves the name "window" to any slot. Pinned here as a program-level
+// body (loweringResultContext alone has no notion of an unresolved global
+// read; SeededBinding/AfterReaders need a real checker) to confirm the
+// classification rather than assume it.
+func TestLoweringToKernelIR_GlobalParseIsSsrTaskDiagnosis(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	context := loweringResultContext(nil, nil)
+	context.Narrow = kernel.Narrow
+	stmts, ok := LowerStatements(context, loweringParse(t,
+		`return !(typeof window !== 'undefined' && window.document && Boolean(window.document.createElement) && window.setTimeout);`))
+	if !ok {
+		t.Fatalf("parseIsSsrByDefault's body declined outright — the free `window` name still has to resolve to SOMETHING for the parser to accept it bare; report exactly this")
+	}
+	t.Logf("stmts=%+v firstHavoc=%q", stmts, context.FirstHavoc)
+	if context.FirstHavoc == "" {
+		t.Errorf("FirstHavoc = \"\" (COMPLETE) — unexpected: a bare `window` global should have nothing to read it as, and this pin exists to confirm that, not assume it")
+	}
+}
+
+// TestLoweringToKernelIR_SankeyGetValueTaskDiagnosis pins TASK 3(c) and
+// 3(d) together: Sankey.tsx line 46's own body IS the task's stated
+// pin fixture, verbatim — `const getValue = (entry) => (entry &&
+// entry.value) || 0;`.
+//
+// PREMISE-VERIFY refuted the brief's own count: Sankey.tsx has exactly
+// ONE `&&`-shaped return in the whole file (grepped every literal "&&" —
+// four hits total: line 46 here, an `if` guard at line 150, an `if`
+// guard at line 497, an `if` guard at line 1268 in an unrelated ref
+// callback — none of the other three sits in a return position). The
+// brief's "two 'return (binary &&)' bodies" does not hold against the
+// file as it stands; this pin records the one real body and reports the
+// count mismatch rather than inventing a second.
+//
+// getValue's outer operator is also `||`, not `&&` — `(entry &&
+// entry.value) || 0` nests the `&&` inside the LEFT operand of an outer
+// `||`. Whatever census bucket produced "return (binary &&)" for this
+// row is naming the INNER shape, not the outer AST node's own token.
+func TestLoweringToKernelIR_SankeyGetValueTaskDiagnosis(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	context := loweringResultContext([]string{"entry"}, []BindingKind{BindingKindUnknown})
+	context.Narrow = kernel.Narrow
+	stmts, ok := LowerStatements(context, loweringParse(t,
+		`return (entry && entry.value) || 0;`))
+	t.Logf("ok=%v stmts=%+v firstHavoc=%q", ok, stmts, context.FirstHavoc)
+	if !ok {
+		t.Fatalf("getValue's body declined outright")
+	}
+}
+
+// TestLoweringToKernelIR_GetValueWithADefinedHolderTaskDiagnosis pins
+// TASK 3(d) exactly as stated: `function h(entry: { value: number })
+// { return (entry && entry.value) || 0; }` — a DEFINED (non-optional)
+// object-typed parameter, unlike getValue's own `| undefined` receiver.
+//
+// Goes through the full summary lowering (RelowerSummaryBody, this
+// package's own idiom for a declaration-level pin — kernel_summary_direct_test.go's
+// summaryDeclarationOf/RelowerSummaryBody pattern).
+//
+// FORMERLY DECLINED outright, construct "a whole-record parameter use":
+// `entry && entry.value` read `entry` ITSELF as a value (the `&&` test's
+// left operand) before drilling into `.value` — the record-parameter
+// reader expanded `entry` to its declared leaf entries (`entry.value`)
+// and had no slot for the record'S OWN identity.
+//
+// NOW COMPLETE: a whole-name occurrence consumed only as a truthiness
+// test (`!`/`&&`/`||` operand, an `if`/`while`/ternary condition) is
+// member-safe — it hands out no reference the body could store through
+// (recordParameterUseOf's wholeRecordUseAt, ir_summary_record_parameter_uses.go).
+// `entry`'s declared type excludes undefined/null, so `entry && X` is
+// always exactly `X` (ToBoolean answers true for every Object,
+// sec-toboolean, tmp/ecma262/spec.html) — the fold lives at
+// effect_expression.go's `&&` composition (truthyRecordParameterName,
+// ir_guard_truthy_record.go) plus LowerGuard's own constant-fold
+// (ir_guard.go) for the `if`/ternary condition position. See
+// ir_summary_record_parameter_truthy_test.go for the full pin set,
+// value-precision pins included.
+func TestLoweringToKernelIR_GetValueWithADefinedHolderTaskDiagnosis(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	declaration := summaryDeclarationOf(t,
+		"function h(entry: { value: number }) { return (entry && entry.value) || 0; }")
+	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
+	_, ok := RelowerSummaryBody(ctx, declaration)
+	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	if !ok {
+		t.Fatalf("h's body declined: outcome=%q construct=%q", outcome, construct)
+	}
+	if outcome != SummaryComplete {
+		t.Errorf("outcome=%q construct=%q, want SummaryComplete", outcome, construct)
 	}
 }

@@ -131,8 +131,9 @@ var (
 // absentState is ABSENT in the TS source: the definitely-undefined
 // entry state — no real value, absent.
 var absentState = kernelbridge.KnownStateWire{
-	Set:    refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)),
-	Absent: true,
+	Set:   refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)),
+	Undef: true,
+	Null:  true,
 }
 
 // doneDownState is DONE_DOWN in the TS source: the done flag's entry
@@ -550,7 +551,7 @@ func applySummary(
 	// assignable" symptom on an in-set leg, and a decline gate that
 	// never got the chance to run because answer.Kind was never
 	// KindUnknown to begin with.
-	answer := KnownOfState(kernelbridge.KnownStateWire{Top: returned.Top, Set: returned.Set, Absent: false, Nan: returned.Nan})
+	answer := KnownOfState(kernelbridge.KnownStateWire{Top: returned.Top, Set: returned.Set, Undef: false, Null: false, Nan: returned.Nan})
 	if answer.Kind == abstractdomain.KindUnknown {
 		// a COMPLETE body serving a TOP ret answers SILENCE, which is what
 		// "the return value is unconstrained" spells — and the route still
@@ -577,7 +578,7 @@ func applySummary(
 	}
 	// a path may fall off the end (the flag can still be down at exit):
 	// the return is undefined on it
-	allReturned := !doneExit.Top && !doneExit.Absent && !mayContainZero(doneExit.Set)
+	allReturned := !doneExit.Top && !doneExit.Undef && !doneExit.Null && !mayContainZero(doneExit.Set)
 	if !allReturned {
 		answer = abstractdomain.PossiblyUndefined(answer, "", false, false)
 	}
@@ -685,7 +686,7 @@ func summaryMemberResult(
 ) (abstractdomain.AbstractValue, bool) {
 	// every path returned, or the value is sometimes undefined — which
 	// these rows have no arm for
-	if doneExit.Top || doneExit.Absent || mayContainZero(doneExit.Set) {
+	if doneExit.Top || doneExit.Undef || doneExit.Null || mayContainZero(doneExit.Set) {
 		return abstractdomain.AbstractValue{}, false
 	}
 	memberValue := func(index int) (abstractdomain.AbstractValue, bool) {
@@ -773,6 +774,78 @@ func SummaryReceiverEffects(ctx *FlowContext, declaration *ast.Node) (receiverTo
 	return receiverTouched, writtenArguments
 }
 
+// SummaryWrittenThisExits answers the EXIT VALUES of a served summary's
+// written this-fields, keyed by bare field name — what the callee's
+// body left in each receiver field it wrote, computed by the same
+// compile-once/apply-per-call ask applySummary makes (the question
+// cache makes the repeated ask free). The serving seam folds these onto
+// the caller's tracked receiver object in place of the whole-receiver
+// forget (foldWrittenReceiverExits), which is what carries
+// `over.write(200)`'s 200 into the caller's `over.#held` instead of
+// wiping everything the caller knew.
+//
+// (nil, false) — the caller keeps the forget — wherever the summary is
+// not COMPLETE, the body returns its receiver (the alias moves
+// knowledge no exit spells), any written exit is TOP or rides a thrown
+// path, or an exit state converts to no value.
+func SummaryWrittenThisExits(
+	ctx *FlowContext,
+	declaration *ast.Node,
+	argKnowns []abstractdomain.AbstractValue,
+	receiver abstractdomain.AbstractValue,
+) (map[string]abstractdomain.AbstractValue, bool) {
+	if EngineKernelHeld() == nil {
+		return nil, false
+	}
+	summary, lowered := LowerSummaryBody(ctx, declaration)
+	if !lowered || summary.ReturnsReceiver {
+		return nil, false
+	}
+	if outcome, _, recorded := SummaryOutcomeOf(declaration); !recorded || outcome != SummaryComplete {
+		return nil, false
+	}
+	blob, hasBlob := SummaryBlobFor(ctx, declaration)
+	if !hasBlob {
+		return nil, false
+	}
+	states, statesOk := summaryEntryStates(ctx, declaration, summary, argKnowns, receiver)
+	if !statesOk {
+		return nil, false
+	}
+	for len(states) < summary.SlotCount {
+		states = append(states, absentState)
+	}
+	states[summary.DoneIndex] = doneDownState
+	exits, ok := kernelbridge.AskApplySummary(blob, states)
+	if !ok {
+		return nil, false
+	}
+	floor := summaryTrustFloor(ctx, declaration, summary, argKnowns, receiver)
+	out := map[string]abstractdomain.AbstractValue{}
+	for _, entry := range summary.BundleEntries {
+		if !entry.Written {
+			continue
+		}
+		field, isThis := thisFieldNameOf(entry.Path)
+		if !isThis {
+			continue
+		}
+		if entry.Index < 0 || entry.Index >= len(exits) {
+			return nil, false
+		}
+		exit := exits[entry.Index]
+		if exit.Top || exit.Thrown {
+			return nil, false
+		}
+		value := KnownOfState(kernelbridge.KnownStateWire{Set: exit.Set, Undef: exit.Undef, Null: exit.Null, Nan: exit.Nan})
+		if value.Kind == abstractdomain.KindUnknown {
+			return nil, false
+		}
+		out[field] = abstractdomain.AtTrustLevel(value, floor)
+	}
+	return out, len(out) > 0
+}
+
 // constEffectState reads a CONST or CONSTSTATE effect as the entry
 // state it spells — the only two effect kinds whose meaning does not
 // depend on any binding space, which is what lets a callee's lowered
@@ -782,7 +855,9 @@ func constEffectState(effect kernelbridge.LoopEffect) (kernelbridge.KnownStateWi
 	case kernelbridge.LoopEffectConst:
 		return kernelbridge.KnownStateWire{Set: effect.Set}, true
 	case kernelbridge.LoopEffectConstState:
-		return kernelbridge.KnownStateWire{Set: effect.Set, Absent: effect.Absent, Nan: effect.Nan}, true
+		// the effect's Undef/Null pair maps directly to the state wire's
+		// own pair — no conflation, each admission crosses on its own flag
+		return kernelbridge.KnownStateWire{Set: effect.Set, Undef: effect.Undef, Null: effect.Null, Nan: effect.Nan}, true
 	}
 	return kernelbridge.KnownStateWire{}, false
 }
@@ -900,18 +975,25 @@ func summaryEntryStates(
 			states = append(states, kernelbridge.KnownStateWire{Top: true})
 			continue
 		}
-		// an ARRAY-TYPED parameter carries TWO entries, a length and the
-		// join of the elements — the pair the layout emitted. Both enter
-		// TOP: the direct apply reads an argument's abstract value, which
-		// carries no length and no element join this route can spell, and
-		// TOP is what the entry quantifier already covers. Never absent,
-		// which would claim an array the caller passed is undefined; never
-		// one state, which would slide every later entry by one.
-		if _, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
-			states = append(states,
-				kernelbridge.KnownStateWire{Top: true},
-				kernelbridge.KnownStateWire{Top: true},
-			)
+		// an ARRAY-TYPED parameter carries the entries the layout emitted:
+		// a length plus either one scalar elem entry, or — where the
+		// element itself expands as a record (ElementMembers, step 1/2 of
+		// the records-as-array-elements build) — one "xs.elem.<member>"
+		// entry per member, in place of the single scalar one. Every entry
+		// enters TOP: the direct apply reads an argument's abstract value,
+		// which carries no length, no element join, and no per-member
+		// join this route can spell, and TOP is what the entry quantifier
+		// already covers. Never absent, which would claim an array the
+		// caller passed is undefined; never a narrower count, which would
+		// slide every later parameter's entries by the difference —
+		// reading the SAME local arrayParamSlotsIn's memo already resolved
+		// (rather than counting members again here) is what keeps this
+		// seam and the layout seam pushing entries of one agreed width.
+		if local, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
+			count := 1 + max(1, len(local.ElementMembers))
+			for i := 0; i < count; i++ {
+				states = append(states, kernelbridge.KnownStateWire{Top: true})
+			}
 			continue
 		}
 		// a BINDING-PATTERN parameter: one state per bound entry, each

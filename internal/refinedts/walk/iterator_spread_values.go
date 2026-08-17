@@ -16,6 +16,10 @@
 //     clauses.
 //   - readMapGroupBy: the grouped map Map.groupBy builds, its callback
 //     run once per exact item through the inline seam.
+//   - readObjectGroupBy: the null-prototype object Object.groupBy
+//     builds, readMapGroupBy's own grouping loop rebuilt as OBJECT
+//     KEYS instead of Map entries (Object.groupBy coerces the
+//     callback's result through ToPropertyKey, not SameValueZero).
 //   - generatorFirstNextValue: the first next() of a directly-called
 //     generator whose body opens with a plain yield — that yield's
 //     value, with no absence arm.
@@ -383,6 +387,107 @@ func readMapGroupBy(site MethodCallSite) *abstractdomain.AbstractValue {
 		Entries:          entries,
 		Complete:         true,
 	}
+	return &out
+}
+
+// readObjectGroupBy is `Object.groupBy(items, callback)` with the walk
+// holding the items exactly and an inline callback. GroupBy(items,
+// callback, ~property~) (sec-groupby) calls the callback once per
+// element in ascending order and coerces each returned key through
+// ToPropertyKey — sec-object.groupby then builds a null-prototype
+// object (OrdinaryObjectCreate(*null*)) with one own data property per
+// distinct key, CreateDataPropertyOrThrow(obj, group.Key,
+// CreateArrayFromList(group.Elements)). The grouping loop mirrors
+// readMapGroupBy's exactly; only the RESULT SHAPE differs — an object
+// with bareProto (no %Object.prototype% chain, matching
+// OrdinaryObjectCreate(null)) instead of a KindCollection Map, and a
+// STRING key (collectionKey's own primitive-exact gate, narrowed to
+// PrimitiveString since a property key never carries the number/
+// boolean primitives collectionKey otherwise admits — ToPropertyKey of
+// a non-string, non-symbol callback result still produces a string,
+// sec-topropertykey step 3 calling ToString, so a proved-string key is
+// exactly what this model can place).
+//
+// When the items or a key do not read exactly, the answer declines to
+// residue rather than nil — the items argument was already evaluated
+// here, and a nil would have the unmodeled tail walk it a second
+// time. The decline still forgets what the callback body writes: the
+// runtime runs the callback per element whether or not this model can
+// follow the keys.
+func readObjectGroupBy(site MethodCallSite) *abstractdomain.AbstractValue {
+	ctx, env, e, receiverExpression, method := site.Ctx, site.Env, site.E, site.ReceiverExpression, site.Method
+	if !(method == "groupBy" && ast.IsIdentifier(receiverExpression) && receiverExpression.Text() == "Object" &&
+		resolvesToDefaultLib(ctx, receiverExpression)) {
+		return nil
+	}
+	call := e.AsCallExpression()
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 2 {
+		return nil
+	}
+	callbackArgument := call.Arguments.Nodes[1]
+	if !ast.IsArrowFunction(callbackArgument) && !ast.IsFunctionExpression(callbackArgument) {
+		return nil
+	}
+	source := evaluateExpression(ctx, env, call.Arguments.Nodes[0])
+	var items []abstractdomain.AbstractValue
+	exact := false
+	if source.Kind == abstractdomain.KindList {
+		items = source.Items
+		exact = true
+	} else if source.Kind == abstractdomain.KindValues && source.KindTag == abstractdomain.PrimitiveArray {
+		grade := abstractdomain.TrustLevelOf(source)
+		for _, v := range source.Values {
+			items = append(items, abstractdomain.KnownValues([]float64{v}, abstractdomain.PrimitiveNumber, grade))
+		}
+		exact = true
+	}
+	decline := func() *abstractdomain.AbstractValue {
+		written := map[string]struct{}{}
+		if body := callbackArgument.Body(); body != nil {
+			AssignedNames(ctx.P.Checker, body, written)
+		}
+		for name := range written {
+			if _, ok := env.Get(name); ok {
+				HavocEnv(ctx.Aliases, env, name)
+			}
+		}
+		NoteUnmodeledCall(ctx, e)
+		out := silence.Residue()
+		return &out
+	}
+	if !exact {
+		return decline()
+	}
+	var keyOrder []string
+	groups := map[string][]abstractdomain.AbstractValue{}
+	for i, item := range items {
+		index := abstractdomain.KnownValues([]float64{float64(i)}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+		key := InlineCallback(ctx, env, callbackArgument, item, LoopAnalyzers{
+			AnalyzeStatement:   AnalyzeStatement,
+			EvaluateExpression: evaluateExpression,
+			IterationElement:   IterationElementOf,
+		}, &index)
+		// only a proved-exact STRING key names a group this model can
+		// place as an object property — ToPropertyKey's own result sort
+		// (sec-topropertykey), narrower than collectionKey's general
+		// primitive-exact gate
+		if key.Kind != abstractdomain.KindValues || key.KindTag != abstractdomain.PrimitiveString {
+			return decline()
+		}
+		name := stringOf(key.Values)
+		if symbolSlotKey(name) {
+			return decline()
+		}
+		if _, seen := groups[name]; !seen {
+			keyOrder = append(keyOrder, name)
+		}
+		groups[name] = append(groups[name], item)
+	}
+	var keys []abstractdomain.ObjectKey
+	for _, name := range keyOrder {
+		keys = setObjectKey(keys, name, abstractdomain.KnownList(groups[name], abstractdomain.TrustProved))
+	}
+	out := abstractdomain.KnownObject(keys, nil, true, abstractdomain.TrustProved, true)
 	return &out
 }
 

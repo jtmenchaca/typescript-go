@@ -13,19 +13,37 @@ var typeofWords = map[string]struct{}{
 
 // TypeofReadResult is the union TS return type of typeofRead:
 // {kind:"test",...} | {kind:"constant",...} | null.
+//
+// IsUndefinedQuote separates the two shapes that both set IsTest:
+// quoting "undefined" is an EXACTLY-UNDEFINED claim (sec-typeof-
+// operator: `typeof null` answers "object", never "undefined" —
+// tmp/ecma262/spec.html:20589-20590), so its caller must lower it as
+// the flavored eqUndef test, which alone keeps null off the
+// undefined-triggered arm. Quoting the slot's OWN known tag
+// ("number"/"string"/"boolean") is a different claim — "this value
+// carries this specific non-undefined tag" — which happens to
+// coincide with plain definedness (IrTestDefined's either-admission
+// split) because no scalar tag is ever "object" or "undefined": a
+// slot's tag matching means present, and every other case (a
+// different tag, undefined, OR null) means absent from this test's
+// point of view. That coincidence is particular to the tag branch;
+// it does not make the "undefined"-quote branch equivalent.
 type TypeofReadResult struct {
-	IsTest     bool
-	On         int
-	Positive   bool
-	IsConstant bool
-	Value      bool
+	IsTest           bool
+	On               int
+	Positive         bool
+	IsUndefinedQuote bool
+	IsConstant       bool
+	Value            bool
 }
 
 // TypeofRead is typeofRead in the TS source: a `typeof x === "…"` /
 // `!==` head on a tracked slot. Under the slot's typeof evidence the
-// test collapses: quoting "undefined" IS the definedness test under
-// any evidence; quoting the slot's own tag is definedness too (every
-// defined value answers the tag); any other valid quote can never
+// test collapses: quoting "undefined" IS the exactly-undefined test
+// under any evidence; quoting the slot's own tag is definedness
+// (every defined value answers the tag, and no tag is ever "object"
+// or "undefined", so a tag match means present and every miss —
+// including null — means absent); any other valid quote can never
 // hold (values answer the tag, absence answers "undefined") — a
 // constant. No evidence, no claim.
 func TypeofRead(context *LoweringContext, head *ast.Node) (TypeofReadResult, bool) {
@@ -64,7 +82,7 @@ func TypeofRead(context *LoweringContext, head *ast.Node) (TypeofReadResult, boo
 	}
 	quoted := litSide.AsStringLiteral().Text
 	if quoted == "undefined" {
-		return TypeofReadResult{IsTest: true, On: on, Positive: ne}, true
+		return TypeofReadResult{IsTest: true, On: on, Positive: ne, IsUndefinedQuote: true}, true
 	}
 	var tag TypeofTag
 	if context.Typeofs != nil && on < len(context.Typeofs) {

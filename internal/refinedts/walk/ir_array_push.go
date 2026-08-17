@@ -73,9 +73,9 @@ func pushReceiverOf(call *ast.Node) (string, bool) {
 //
 // push ANSWERS the array's new length, which is exactly what the len
 // slot holds after the step — so the value form lowers as the push's own
-// two slot writes followed by `n := var a.len`, reading the length the
-// two writes just established. The assignments emit in order, so the
-// read lands after the step.
+// two slot writes followed by `n := a verbatim copy of a.len`, reading
+// the length the two writes just established. The assignments emit in
+// order, so the read lands after the step.
 func ArrayPushAssignmentsOf(context *LoweringContext, statement *ast.Node) ([]AssignmentTarget, bool) {
 	// `a.push(v);` — the return value discarded
 	if ast.IsExpressionStatement(statement) {
@@ -117,8 +117,8 @@ func ArrayPushAssignmentsOf(context *LoweringContext, statement *ast.Node) ([]As
 
 // pushValueAssignmentsOf is a push whose RESULT is written into the
 // spelled target name: the push's own slot writes, then the target
-// taking the len slot's var — the new length, which is what push
-// answers.
+// taking a verbatim copy of the len slot — the new length, which is
+// what push answers.
 //
 // Declines where the target has no slot of its own, or where its sort is
 // not the number sort the length is read as.
@@ -141,5 +141,5 @@ func pushValueAssignmentsOf(context *LoweringContext, value *ast.Node, target st
 	if context.Sorts[targetSlot] != BindingKindNumber {
 		return nil, false
 	}
-	return append(assignments, AssignmentTarget{Target: targetSlot, Effect: varEffect(lenSlot)}), true
+	return append(assignments, AssignmentTarget{Target: targetSlot, Effect: varStateEffect(lenSlot)}), true
 }

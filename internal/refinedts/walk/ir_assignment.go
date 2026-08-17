@@ -30,10 +30,15 @@ func RhsEffect(context *LoweringContext, targetSort BindingKind, e *ast.Node) (k
 	if copy, ok := IndexOf(context, e); ok {
 		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: copy}, true
 	}
-	// `x = null` / `return undefined`: the absent outcome, which no set
-	// can hold — it rides in the state constant's flag instead. Under
-	// any target sort: absence is neither a number nor a word.
+	// `x = null` / `return undefined`: an absent outcome, which no set
+	// can hold — it rides in the state constant's own flag. Under any
+	// target sort: absence is neither a number nor a word. Each
+	// keyword carries EXACTLY its own flavor, which is what lets a
+	// later `=== null` / `=== undefined` decide.
 	if IsAbsentKeyword(e) {
+		if Unwrapped(e).Kind == ast.KindNullKeyword {
+			return kernelbridge.NullConst(), true
+		}
 		return kernelbridge.AbsentConst(), true
 	}
 	if ast.IsStringLiteral(e) && targetSort == BindingKindString {

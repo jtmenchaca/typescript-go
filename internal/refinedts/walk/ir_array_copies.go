@@ -205,10 +205,11 @@ func copiedArrayLocalOf(body *ast.Node, declaration *ast.Node, sources flattened
 }
 
 // copiedArrayDeclarationAssignmentsOf is the array COPY's lowering:
-// `const b = [...a]` writes `b.len := var a.len` and `b.elem := var
-// a.elem`. Two ordinary slot reads — the copy holds exactly what the
-// source held, so every later `b.length`, `b[i]`, `b.push(v)` and for-of
-// over `b` reads the same shapes it would over a literal-built array.
+// `const b = [...a]` writes `b.len := a verbatim copy of a.len` and
+// `b.elem := a verbatim copy of a.elem`. Two whole-state copies — the
+// copy holds exactly what the source held, so every later `b.length`,
+// `b[i]`, `b.push(v)` and for-of over `b` reads the same shapes it
+// would over a literal-built array.
 //
 // The syntax alone decides here, as everywhere in the lowering: the
 // recognizer's admission is already recorded in the slot vector, so the
@@ -236,7 +237,7 @@ func copiedArrayDeclarationAssignmentsOf(context *LoweringContext, declaration *
 		return nil, false
 	}
 	return []AssignmentTarget{
-		{Target: lenSlot, Effect: varEffect(sourceLen)},
-		{Target: elemSlot, Effect: varEffect(sourceElem)},
+		{Target: lenSlot, Effect: varStateEffect(sourceLen)},
+		{Target: elemSlot, Effect: varStateEffect(sourceElem)},
 	}, true
 }

@@ -540,35 +540,35 @@ func declaredJoinUncached(
 	var directCalls []*ast.Node
 	var callbackCalls []*ast.Node
 	escapes := false
-	var visit func(node *ast.Node)
-	visit = func(node *ast.Node) {
-		if ast.IsIdentifier(node) && node.Text() == name.Text() && node != name && symbolAt(p.Checker, node) == target {
-			parent := node.Parent
-			if ast.IsCallExpression(parent) && parent.AsCallExpression().Expression == node {
-				directCalls = append(directCalls, parent)
-			} else if ast.IsCallExpression(parent) {
-				parentCallExpr := parent.AsCallExpression()
-				if parentCallExpr.Arguments != nil && len(parentCallExpr.Arguments.Nodes) > 0 && parentCallExpr.Arguments.Nodes[0] == node &&
-					ast.IsPropertyAccessExpression(parentCallExpr.Expression) {
-					_, isArrayCallback := ArrayCallbackMethods[parentCallExpr.Expression.AsPropertyAccessExpression().Name().Text()]
-					if isArrayCallback {
-						callbackCalls = append(callbackCalls, parent)
-					} else {
-						escapes = true
-					}
+	// the entry's identifier uses are indexed once per program
+	// (identifier_use_index.go) — this reads the bucket for THIS name
+	// instead of re-walking the whole file per declaration. The symbol
+	// test below is unchanged, so a different symbol spelling the same
+	// name still fails it and contributes nothing.
+	for _, node := range identifierUsesOf(p, name.Text()) {
+		if node == name || symbolAt(p.Checker, node) != target {
+			continue
+		}
+		parent := node.Parent
+		if ast.IsCallExpression(parent) && parent.AsCallExpression().Expression == node {
+			directCalls = append(directCalls, parent)
+		} else if ast.IsCallExpression(parent) {
+			parentCallExpr := parent.AsCallExpression()
+			if parentCallExpr.Arguments != nil && len(parentCallExpr.Arguments.Nodes) > 0 && parentCallExpr.Arguments.Nodes[0] == node &&
+				ast.IsPropertyAccessExpression(parentCallExpr.Expression) {
+				_, isArrayCallback := ArrayCallbackMethods[parentCallExpr.Expression.AsPropertyAccessExpression().Name().Text()]
+				if isArrayCallback {
+					callbackCalls = append(callbackCalls, parent)
 				} else {
 					escapes = true
 				}
 			} else {
 				escapes = true
 			}
+		} else {
+			escapes = true
 		}
-		node.ForEachChild(func(child *ast.Node) bool {
-			visit(child)
-			return false
-		})
 	}
-	visit(p.Entry.AsNode())
 	if escapes || len(directCalls)+len(callbackCalls) == 0 {
 		return nil, false
 	}

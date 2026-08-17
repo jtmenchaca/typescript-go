@@ -101,7 +101,7 @@ func objectReturnMemberStatements(
 			// the member's own slot sort decides the reading, the way the
 			// scalar ret's sort decides the whole-value one
 			if read, ok := RhsEffect(context, context.Sorts[slot], value); ok {
-				effect = read
+				effect = asVarStateEffect(read)
 			}
 		}
 		out = append(out, kernelbridge.IrStatement{
@@ -206,7 +206,7 @@ func elementJoinAssignments(
 			return kernelbridge.AbsentConst()
 		}
 		if read, ok := RhsEffect(context, context.Sorts[elemSlot], element); ok {
-			return read
+			return asVarStateEffect(read)
 		}
 		return unknownEffect
 	}

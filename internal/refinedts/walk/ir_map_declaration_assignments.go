@@ -3,7 +3,7 @@
 // What `const m = new Map(…)` / `new Set(…)` writes into the slots: the
 // seed's row count into the size slot and the join of the seed's
 // effects into the value and key slots, or — for a copy — the sibling's
-// own three slots read var for var.
+// own three slots copied verbatim, whole-state for whole-state.
 
 package walk
 
@@ -74,11 +74,12 @@ func MapDeclarationAssignmentsOf(context *LoweringContext, statement *ast.Node) 
 }
 
 // copiedDeclarationAssignmentsOf is the COPY's lowering: `const n = new
-// Map(m)` writes `n.size := var m.size`, `n.vals := var m.vals`, and —
-// for a Map — `n.keys := var m.keys`. Three ordinary slot reads: the new
-// collection holds exactly what the old one held, so every later
-// `n.size`, `n.get(k)`, `n.set(k, v)` and iteration over `n` reads the
-// same shapes it would over a seeded collection.
+// Map(m)` writes `n.size := a verbatim copy of m.size`, `n.vals := a
+// verbatim copy of m.vals`, and — for a Map — `n.keys := a verbatim
+// copy of m.keys`. Three whole-state copies: the new collection holds
+// exactly what the old one held, so every later `n.size`, `n.get(k)`,
+// `n.set(k, v)` and iteration over `n` reads the same shapes it would
+// over a seeded collection.
 //
 // The syntax alone decides here, as everywhere in the lowering: the
 // recognizer's admission is already recorded in the slot vector, so the
@@ -101,11 +102,11 @@ func copiedDeclarationAssignmentsOf(context *LoweringContext, seed *ast.Node, si
 		return nil, false
 	}
 	out := []AssignmentTarget{
-		{Target: sizeSlot, Effect: varEffect(sourceSize)},
-		{Target: valsSlot, Effect: varEffect(sourceVals)},
+		{Target: sizeSlot, Effect: varStateEffect(sourceSize)},
+		{Target: valsSlot, Effect: varStateEffect(sourceVals)},
 	}
 	if keysOk {
-		out = append(out, AssignmentTarget{Target: keysSlot, Effect: varEffect(sourceKeys)})
+		out = append(out, AssignmentTarget{Target: keysSlot, Effect: varStateEffect(sourceKeys)})
 	}
 	return out, true
 }
@@ -167,6 +168,15 @@ func joinedSeedEffect(context *LoweringContext, slot int, entries []*ast.Node) (
 			continue
 		}
 		joined = joinEffect(joined, effect)
+	}
+	// a SINGLE-entry seed never reaches the join above, so `joined` may
+	// still be the bare per-entry read RhsEffect answered — the whole-
+	// state copy, not the join's operand shape, since this function's own
+	// answer becomes a WHOLE AssignmentTarget.Effect at both call sites
+	// (the vals slot and, for a Map, the keys slot), never another
+	// effect's operand.
+	if len(entries) == 1 {
+		joined = asVarStateEffect(joined)
 	}
 	return joined, true
 }

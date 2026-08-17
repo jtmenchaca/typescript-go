@@ -35,12 +35,13 @@ func TestAccessorCalls_TheBuilderFillsKnownUnknownAndWrittenBundleRowsByTheWaveF
 	if !built {
 		t.Fatalf("the builder declined a well-shaped accessor callee")
 	}
-	if statement.Args[0].Kind != kernelbridge.LoopEffectVar || statement.Args[0].Index != 1 {
-		t.Errorf("entry 0 = %+v, want the value effect the caller lowered", statement.Args[0])
+	if statement.Args[0].Kind != kernelbridge.LoopEffectVarState || statement.Args[0].Index != 1 {
+		t.Errorf("entry 0 = %+v, want the value effect the caller lowered, whole-state", statement.Args[0])
 	}
-	// a field the caller HAS: a var of that slot, and its write rides back
-	if statement.Args[1].Kind != kernelbridge.LoopEffectVar || statement.Args[1].Index != 0 {
-		t.Errorf("the known field's entry = %+v, want a var of the caller's this.store slot 0", statement.Args[1])
+	// a field the caller HAS: a whole-state copy of that slot, and its
+	// write rides back
+	if statement.Args[1].Kind != kernelbridge.LoopEffectVarState || statement.Args[1].Index != 0 {
+		t.Errorf("the known field's entry = %+v, want a whole-state copy of the caller's this.store slot 0", statement.Args[1])
 	}
 	if statement.Rets[1] != 0 {
 		t.Errorf("rets[1] = %d, want the caller's this.store slot 0 — the setter moves it", statement.Rets[1])

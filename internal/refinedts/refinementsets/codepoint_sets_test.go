@@ -33,6 +33,34 @@ func TestTheCodepointSetCarriesTheSurrogateGap(t *testing.T) {
 	}
 }
 
+// A CONJUNCTION carrying a finite word union beside another conjunct —
+// the shape a summary-served return wears after the meet with its
+// declared type — answers the TIGHTEST readable conjunct's word list.
+func TestWordTuplesOfConjunction_ReadsTheTightestConjunct(t *testing.T) {
+	three := MakeRefinedSet(Union(
+		MakeRefinedSet(Union(StringTuple("insideStart"), StringTuple("insideEnd"))),
+		StringTuple("end"),
+	))
+	four := MakeRefinedSet(Union(three, StringTuple("outside")))
+	met := RefinedSet{Forms: append(append([]Refinement{}, four.Forms...), three.Forms...)}
+	words, ok := WordTuplesOfConjunction(met)
+	if !ok {
+		t.Fatalf("a two-conjunct word set answered no word list")
+	}
+	if len(words) != 3 {
+		t.Errorf("len(words) = %d, want 3 — the tighter conjunct's list", len(words))
+	}
+	// a single-form set keeps WordTuplesOf's own reading
+	single, singleOk := WordTuplesOfConjunction(three)
+	if !singleOk || len(single) != 3 {
+		t.Errorf("single-form reading = %v (%v), want the same three words", single, singleOk)
+	}
+	// a conjunction with NO readable word conjunct answers nothing
+	if _, none := WordTuplesOfConjunction(MakeRefinedSet(Integer, AtLeast(0))); none {
+		t.Errorf("a numeric conjunction answered a word list")
+	}
+}
+
 func TestStringTupleAndThePatternSets(t *testing.T) {
 	if StringTuple("").Forms[0].Form != FormEmptyTuple {
 		t.Errorf("StringTuple(\"\").Forms[0].Form mismatch")

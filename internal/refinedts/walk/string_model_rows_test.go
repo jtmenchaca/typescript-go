@@ -8,14 +8,20 @@
 // numeric Array.prototype.join (sec-array.prototype.join with each
 // element spelled by sec-numeric-types-number-tostring), and the
 // concatenation transfer `+` and `+=` share
-// (sec-applystringornumericbinaryoperator). Every test here exercises
-// the pure computation directly — no kernel, no checker program.
+// (sec-applystringornumericbinaryoperator). Most tests here exercise
+// the pure computation directly — no kernel, no checker program — with
+// one exception: String.prototype.match's no-match branch is read off
+// a real CallExpression node (readStringMethods dereferences site.E),
+// so it goes through entryEnvTestProgram/superArrayContracts, the
+// canonical program-from-source recipe (AGENT-BRIEF.md), still with no
+// kernel.
 package walk
 
 import (
 	"math"
 	"testing"
 
+	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -239,5 +245,25 @@ func TestStringModelRows_TheConcatenationTransferIsExactOnTwoWords(t *testing.T)
 	number := abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 	if out := readStringConcatenation(nil, nil, nil, number, number); out != nil {
 		t.Errorf("readStringConcatenation(number, number) = %+v, want nil", out)
+	}
+}
+
+// TestStringModelRows_MatchOnAMissReadsExactlyNull pins the producer
+// split (KindNull vs KindUndef): a plain regex against a string it does
+// not match answers the NULL value, not undefined — RegExp.prototype
+// [%Symbol.match%]'s non-global branch delegates to RegExpExec
+// (sec-regexp.prototype.exec: "returns an Array... or *null* if string
+// did not match").
+func TestStringModelRows_MatchOnAMissReadsExactlyNull(t *testing.T) {
+	p := entryEnvTestProgram(t, "function f(): RegExpMatchArray | null {\n"+
+		"  return \"abc\".match(/xyz/);\n"+
+		"}\n")
+	ctx := superArrayContracts(t, p)
+	fn := entryEnvFunctionNamed(t, p, "f")
+	returned := superArrayFirstNode(t, fn.Body(), "return statement", ast.IsReturnStatement)
+	value := evaluateExpression(ctx, NewEnv(), returned.AsReturnStatement().Expression)
+	if value.Kind != abstractdomain.KindNull {
+		spelled, _ := abstractdomain.FormatAbstractValue(value)
+		t.Errorf(`"abc".match(/xyz/) Kind = %v (%q), want KindNull`, value.Kind, spelled)
 	}
 }

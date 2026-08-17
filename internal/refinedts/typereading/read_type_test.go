@@ -226,6 +226,46 @@ func TestReadHostType_ADepthCutUnionArmJoinsAtItsSortGround(t *testing.T) {
 	}
 }
 
+func TestReadHostType_AMaybeArrayTwoMembersDeepStillReadsItsElement(t *testing.T) {
+	// state.options.list: object -> object -> union(present/absent) ->
+	// array-like -> element union — five hops under the shared depth
+	// counter, an ordinary shape with nothing recursive about it
+	p := programFromSource(t, `export function f(state: {
+		options: { list: ReadonlyArray<"axis" | "item"> | undefined };
+	}): void { console.log(state); }
+	`)
+	worn, ok := hostAt(p, identifierIn(t, p, "state", 1))
+	if !ok {
+		t.Fatalf("expected a value")
+	}
+	if worn.Kind != abstractdomain.KindObject {
+		t.Fatalf("Kind = %v, want object", worn.Kind)
+	}
+	var optionsValue abstractdomain.AbstractValue
+	found := false
+	for _, k := range worn.Keys {
+		if k.Name == "options" {
+			optionsValue = k.Value
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Keys = %v, want an options member", worn.Keys)
+	}
+	if optionsValue.Kind != abstractdomain.KindObject {
+		t.Fatalf("options Kind = %v, want object — the depth gate cut the read before this", optionsValue.Kind)
+	}
+	listFound := false
+	for _, k := range optionsValue.Keys {
+		if k.Name == "list" {
+			listFound = true
+		}
+	}
+	if !listFound {
+		t.Errorf("options Keys = %v, want a list member", optionsValue.Keys)
+	}
+}
+
 func TestReadHostType_AnArmNamingNoSortStillDissolvesItsUnion(t *testing.T) {
 	// a record arm has no widest sort reading, and the union of a
 	// stated set with the unknown IS the unknown
@@ -253,6 +293,72 @@ func TestReadHostType_ALibDeclaredRecordSeedsItsReadableKeys(t *testing.T) {
 	}
 	if !seen["message"] || !seen["name"] {
 		t.Errorf("Keys = %v, want message and name among them", worn.Keys)
+	}
+}
+
+// TestReadHostType_AFixedTupleReadsEachPositionExactly pins the gap
+// behind c-reads-and-values.ts's ternarySpreadCopiesNullableArray
+// (item: [10, 20] | null): before this fix, a fixed tuple type fell
+// into the SAME IsArrayLikeType branch a plain `number[]` uses — every
+// element type joined into ONE star claim (length unstated, every
+// position possibly either member). A tuple's own per-position
+// exactness (`item[0]` is ALWAYS 10, never 20) was lost, so narrowing
+// `item` under `!= null` and spreading it left the copy only a star,
+// not the exact two-item list. The new branch (host_type.go, checked
+// before the general array-like one) reads a tuple whose every element
+// is ElementFlagsRequired positionally instead, building an exact
+// KindList.
+func TestReadHostType_AFixedTupleReadsEachPositionExactly(t *testing.T) {
+	p := programFromSource(t, "export function f(item: [10, 20]): void { console.log(item); }\n")
+	worn, ok := hostAt(p, identifierIn(t, p, "item", 1))
+	if !ok {
+		t.Fatalf("expected a value")
+	}
+	if worn.Kind != abstractdomain.KindList {
+		t.Fatalf("Kind = %v, want list (an exact per-position tuple)", worn.Kind)
+	}
+	if len(worn.Items) != 2 {
+		t.Fatalf("Items = %v, want exactly 2 positions", worn.Items)
+	}
+	if worn.Items[0].Kind != abstractdomain.KindValues || len(worn.Items[0].Values) != 1 || worn.Items[0].Values[0] != 10 {
+		t.Errorf("Items[0] = %v, want the exact scalar 10", worn.Items[0])
+	}
+	if worn.Items[1].Kind != abstractdomain.KindValues || len(worn.Items[1].Values) != 1 || worn.Items[1].Values[0] != 20 {
+		t.Errorf("Items[1] = %v, want the exact scalar 20", worn.Items[1])
+	}
+}
+
+// TestReadHostType_AFixedTupleBehindNullReadsExactlyOnceNarrowed pins
+// the exact fixture shape: a `[10, 20] | null` parameter reads as the
+// maybe-wrapped exact tuple, not a maybe-wrapped star — the wrapper's
+// Inner is what a `!= null` guard hands back (narrowAt's "defined"
+// case, apply_narrowing.go), and only an exact Inner lets the spread
+// that follows carry the exact per-position values through.
+func TestReadHostType_AFixedTupleBehindNullReadsExactlyOnceNarrowed(t *testing.T) {
+	p := programFromSource(t, "export function f(item: [10, 20] | null): void { console.log(item); }\n")
+	worn, ok := hostAt(p, identifierIn(t, p, "item", 1))
+	if !ok {
+		t.Fatalf("expected a value")
+	}
+	if worn.Kind != abstractdomain.KindPossiblyUndefined || worn.Inner == nil {
+		t.Fatalf("Kind = %v, want the maybe-absent wrapper (null in the union)", worn.Kind)
+	}
+	if worn.Inner.Kind != abstractdomain.KindList || len(worn.Inner.Items) != 2 {
+		t.Fatalf("Inner = %v, want an exact 2-item list, not a star", *worn.Inner)
+	}
+}
+
+// TestReadHostType_ATupleWithAnOptionalElementClaimsNoExactList pins
+// the fallback: a tuple that is NOT every-position-required (an
+// optional, rest, or variadic slot) must never read as an exact
+// per-position list — the new branch only strengthens the fully-fixed
+// case, and a partial tuple keeps whatever the general array-like
+// reading answered before it existed (today, a refusal).
+func TestReadHostType_ATupleWithAnOptionalElementClaimsNoExactList(t *testing.T) {
+	p := programFromSource(t, "export function f(item: [number, number?]): void { console.log(item); }\n")
+	worn, ok := hostAt(p, identifierIn(t, p, "item", 1))
+	if ok && worn.Kind == abstractdomain.KindList {
+		t.Errorf("a partial tuple read as an exact list — the branch must not claim positions it cannot prove")
 	}
 }
 

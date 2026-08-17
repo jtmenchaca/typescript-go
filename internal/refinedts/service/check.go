@@ -563,6 +563,12 @@ func runRefinements(p *program.CheckerProgram, shape []*ast.Diagnostic, kernel *
 	detail := tracing.BeginFileDetail(p.Entry.FileName())
 	tracing.BindFileDetail(detail)
 	defer tracing.BindFileDetail(nil)
+	// this entry's spans nest against THIS goroutine's own stack: the
+	// sweep walks entries on several goroutines at once, and one shared
+	// span stack credited a worker's elapsed as child time to whatever
+	// frame another worker had open (tracing/span_scope.go)
+	closeSpanScope := tracing.BeginSpanScope()
+	defer closeSpanScope()
 	entryStarted := time.Now()
 	defer func() {
 		tracing.EndFileDetail(detail, float64(time.Since(entryStarted))/float64(time.Millisecond))

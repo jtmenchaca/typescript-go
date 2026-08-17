@@ -22,11 +22,19 @@ func TestAPlainConstEffectStillWiresWithoutFlags(t *testing.T) {
 	}
 }
 
-func TestAStateConstantCarriesTheAbsentAndNanFlagsBesideItsSet(t *testing.T) {
+func TestAStateConstantCarriesTheUndefNullAndNanFlagsBesideItsSet(t *testing.T) {
 	got := EffectWire(AbsentConst())
-	want := `{"set":{"forms":[{"form":"oneOf","w":[]}]},"absent":true,"nan":false}`
+	want := `{"set":{"forms":[{"form":"oneOf","w":[]}]},"undef":true,"null":false,"nan":false}`
 	if got != want {
 		t.Errorf("EffectWire(AbsentConst) = %q, want %q", got, want)
+	}
+}
+
+func TestAVarStateEffectWiresTheVerbatimCopyByIndex(t *testing.T) {
+	got := EffectWire(LoopEffect{Kind: LoopEffectVarState, Index: 3})
+	want := `{"varState":3}`
+	if got != want {
+		t.Errorf("EffectWire(varState) = %q, want %q", got, want)
 	}
 }
 
@@ -107,6 +115,27 @@ func TestAnOpaqueBranchWithNoElseArmWiresAnEmptyElseList(t *testing.T) {
 	want := `{"branchBoth":{"thn":[],"els":[]}}`
 	if got != want {
 		t.Errorf("StmtWire(branchBoth, empty) = %q, want %q", got, want)
+	}
+}
+
+func TestTheEqUndefAndEqNullBranchTestsWireBareWithNoWOperand(t *testing.T) {
+	gotUndef := StmtWire(IrStatement{
+		Kind: IrStatementBranch,
+		On:   0,
+		Test: IrTestEqUndef,
+	})
+	wantUndef := `{"branch":{"on":0,"test":"eqUndef","then":[],"else":[]}}`
+	if gotUndef != wantUndef {
+		t.Errorf("StmtWire(eqUndef) = %q, want %q", gotUndef, wantUndef)
+	}
+	gotNull := StmtWire(IrStatement{
+		Kind: IrStatementBranch,
+		On:   1,
+		Test: IrTestEqNull,
+	})
+	wantNull := `{"branch":{"on":1,"test":"eqNull","then":[],"else":[]}}`
+	if gotNull != wantNull {
+		t.Errorf("StmtWire(eqNull) = %q, want %q", gotNull, wantNull)
 	}
 }
 

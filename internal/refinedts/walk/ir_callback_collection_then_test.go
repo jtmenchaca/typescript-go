@@ -45,8 +45,8 @@ func TestCallbackStatement_MapForEachCallsAtTheValuesSlot(t *testing.T) {
 		t.Fatalf("the call carries no entries")
 	}
 	// slot 1 is "m.vals" — the join of every value the collection holds
-	if call.Args[0].Kind != kernelbridge.LoopEffectVar || call.Args[0].Index != 1 {
-		t.Errorf("entry 0 = %+v, want var of slot 1 (m.vals)", call.Args[0])
+	if call.Args[0].Kind != kernelbridge.LoopEffectVarState || call.Args[0].Index != 1 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of slot 1 (m.vals)", call.Args[0])
 	}
 	// forEach's own value is undefined; nothing rides back
 	for index, ret := range call.Rets {
@@ -71,12 +71,12 @@ func TestCallbackStatement_AMapForEachsSecondParameterIsTheKey(t *testing.T) {
 	if len(call.Args) < 2 {
 		t.Fatalf("the call carries %d entries, want at least 2", len(call.Args))
 	}
-	if call.Args[0].Kind != kernelbridge.LoopEffectVar || call.Args[0].Index != 1 {
-		t.Errorf("entry 0 = %+v, want var of slot 1 (m.vals)", call.Args[0])
+	if call.Args[0].Kind != kernelbridge.LoopEffectVarState || call.Args[0].Index != 1 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of slot 1 (m.vals)", call.Args[0])
 	}
 	// slot 2 is "m.keys" — a Map calls back with (value, key, map)
-	if call.Args[1].Kind != kernelbridge.LoopEffectVar || call.Args[1].Index != 2 {
-		t.Errorf("entry 1 = %+v, want var of slot 2 (m.keys)", call.Args[1])
+	if call.Args[1].Kind != kernelbridge.LoopEffectVarState || call.Args[1].Index != 2 {
+		t.Errorf("entry 1 = %+v, want a whole-state copy of slot 2 (m.keys)", call.Args[1])
 	}
 }
 
@@ -97,11 +97,11 @@ func TestCallbackStatement_ASetForEachsSecondParameterIsTheValueAgain(t *testing
 	if len(call.Args) < 2 {
 		t.Fatalf("the call carries %d entries, want at least 2", len(call.Args))
 	}
-	if call.Args[0].Kind != kernelbridge.LoopEffectVar || call.Args[0].Index != 1 {
-		t.Errorf("entry 0 = %+v, want var of slot 1 (s.vals)", call.Args[0])
+	if call.Args[0].Kind != kernelbridge.LoopEffectVarState || call.Args[0].Index != 1 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of slot 1 (s.vals)", call.Args[0])
 	}
-	if call.Args[1].Kind != kernelbridge.LoopEffectVar || call.Args[1].Index != 1 {
-		t.Errorf("entry 1 = %+v, want var of slot 1 (s.vals) again — a Set has no key",
+	if call.Args[1].Kind != kernelbridge.LoopEffectVarState || call.Args[1].Index != 1 {
+		t.Errorf("entry 1 = %+v, want a whole-state copy of slot 1 (s.vals) again — a Set has no key",
 			call.Args[1])
 	}
 }
@@ -188,8 +188,8 @@ func TestCallbackStatement_ABareThenCallsAtTheInnerSlotWithNoRet(t *testing.T) {
 		t.Fatalf("the call carries no entries")
 	}
 	// slot 0 is "p.inner" — what p settles to
-	if call.Args[0].Kind != kernelbridge.LoopEffectVar || call.Args[0].Index != 0 {
-		t.Errorf("entry 0 = %+v, want var of slot 0 (p.inner)", call.Args[0])
+	if call.Args[0].Kind != kernelbridge.LoopEffectVarState || call.Args[0].Index != 0 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of slot 0 (p.inner)", call.Args[0])
 	}
 	for index, ret := range call.Rets {
 		if ret != -1 {

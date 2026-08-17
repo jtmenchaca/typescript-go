@@ -113,6 +113,83 @@ func typeNodeSort(typeNode *ast.Node) BindingKind {
 	return BindingKindUnknown
 }
 
+// arrayParameterElementMembers reads a parameter's declared array TYPE
+// NODE and answers the RECORD member list its ELEMENT expands to — one
+// member per property, spelled "xs.elem.a"/"xs.elem.b" — or declines
+// where the element is not a record shape.
+//
+// Two element-annotation shapes expand, mirroring recordParamMembersIn's
+// own two cases at the PARAMETER level, applied here to the array's
+// element instead:
+//
+//	(a) a SYNTACTIC TYPE LITERAL element (`{ a: number, b: number }[]`) —
+//	    read straight off the element type node, no context needed;
+//	(b) a TYPE REFERENCE element naming an interface or a type alias of a
+//	    type literal (`SankeyNode[]`) — resolved through namedTypeMembersOf
+//	    exactly as a record parameter's own annotation resolves.
+//
+// `elemHolder` is the elem slot's own name ("xs.elem") — passing it as
+// the holder to the member reader means every returned member's SlotName
+// already reads "xs.elem.<member>", with no further joining needed by
+// any caller.
+//
+// A scalar element (number, string), a union, an unresolvable reference,
+// or any other non-record shape answers (nil, false): the array keeps
+// its plain scalar elem slot, exactly as before this reader existed.
+func arrayParameterElementMembers(
+	ctx *FlowContext, c *checker.Checker, elementTypeNode *ast.Node, elemHolder string,
+) ([]recordParamMember, bool) {
+	if elementTypeNode == nil {
+		return nil, false
+	}
+	node := Unwrapped(elementTypeNode)
+	if node.Kind == ast.KindParenthesizedType {
+		node = node.AsParenthesizedTypeNode().Type
+	}
+	if ast.IsTypeLiteralNode(node) {
+		return scalarMemberListWithCheckerIn(c, elemHolder, node.AsTypeLiteralNode().Members.Nodes, nil, true, nil)
+	}
+	return namedTypeMembersOf(ctx, elemHolder, node)
+}
+
+// elementTypeNodeOf reads an ARRAY type node's own element type node —
+// `number[]`'s `number`, `Array<{a: number}>`'s `{a: number}` — through
+// the same readonly/paren/Array<T> unwrapping arrayTypeNodeElementSort
+// uses to decide WHETHER a node is an array type at all. Returns nil
+// where the node is not an array type by that same syntax.
+func elementTypeNodeOf(typeNode *ast.Node) *ast.Node {
+	node := typeNode
+	if node.Kind == ast.KindTypeOperator {
+		operator := node.AsTypeOperatorNode()
+		if operator.Operator != ast.KindReadonlyKeyword {
+			return nil
+		}
+		node = operator.Type
+	}
+	if node.Kind == ast.KindParenthesizedType {
+		node = node.AsParenthesizedTypeNode().Type
+	}
+	switch {
+	case node.Kind == ast.KindArrayType:
+		return node.AsArrayTypeNode().ElementType
+	case node.Kind == ast.KindTypeReference:
+		reference := node.AsTypeReferenceNode()
+		if !ast.IsIdentifier(reference.TypeName) {
+			return nil
+		}
+		switch reference.TypeName.Text() {
+		case "Array", "ReadonlyArray":
+		default:
+			return nil
+		}
+		if reference.TypeArguments == nil || len(reference.TypeArguments.Nodes) != 1 {
+			return nil
+		}
+		return reference.TypeArguments.Nodes[0]
+	}
+	return nil
+}
+
 // checkedElementSort reads an array TYPE NODE's element sort through the
 // host checker, under the same flag masking LocalSortResolved uses.
 func checkedElementSort(c *checker.Checker, typeNode *ast.Node) BindingKind {
@@ -159,7 +236,13 @@ func checkedElementSort(c *checker.Checker, typeNode *ast.Node) BindingKind {
 // DEFAULT declines: a pattern binds names one level down that no slot
 // spells, a rest holds the remainder rather than one declared array, and
 // a default is an initializer the entry state does not run.
-func ArrayParameterOf(c *checker.Checker, body *ast.Node, parameter *ast.Node) (ArrayLocal, bool) {
+//
+// `ctx` is optional (nil is the reading every caller with no context
+// took before ElementMembers existed) — it is asked ONLY to resolve a
+// NAMED-TYPE element (`SankeyNode[]`) to its member list; a syntactic
+// type-literal element (`{a: number}[]`) resolves with no context, same
+// as `c` (the checker) already did for the plain element SORT.
+func ArrayParameterOf(ctx *FlowContext, c *checker.Checker, body *ast.Node, parameter *ast.Node) (ArrayLocal, bool) {
 	if body == nil || parameter == nil || !ast.IsParameterDeclaration(parameter) {
 		return ArrayLocal{}, false
 	}
@@ -179,14 +262,20 @@ func ArrayParameterOf(c *checker.Checker, body *ast.Node, parameter *ast.Node) (
 	if !usesAreAllArrayFormsFrom(body, name, spelled) {
 		return ArrayLocal{}, false
 	}
-	return ArrayLocal{
+	local := ArrayLocal{
 		Declaration:         parameter,
 		Name:                spelled,
 		LenSlotName:         spelled + arrayLenSuffix,
 		ElemSlotName:        spelled + arrayElemSuffix,
 		Parameter:           true,
 		DeclaredElementSort: sort,
-	}, true
+	}
+	if elementType := elementTypeNodeOf(declared.Type); elementType != nil {
+		if members, isRecord := arrayParameterElementMembers(ctx, c, elementType, local.ElemSlotName); isRecord {
+			local.ElementMembers = members
+		}
+	}
+	return local, true
 }
 
 // ArrayParametersOf runs the parameter recognizer over a body's
@@ -203,7 +292,7 @@ func ArrayParametersOf(
 ) map[*ast.Node]ArrayLocal {
 	out := map[*ast.Node]ArrayLocal{}
 	for _, parameter := range parameters {
-		local, ok := ArrayParameterOf(c, body, parameter)
+		local, ok := ArrayParameterOf(nil, c, body, parameter)
 		if !ok {
 			continue
 		}

@@ -250,9 +250,20 @@ func writtenNamesIn(node *ast.Node) map[string]struct{} {
 // freeNameScan is what the scan reports: the free names read, in SOURCE
 // ORDER OF FIRST READ (the order the capture entries are laid out in),
 // and whether the arrow left the convertible subset at all.
+//
+// CalleeOnly marks the free names whose EVERY occurrence stands in
+// callee position of a plain call (`getValue(links[id])`) — a name the
+// body never reads as a value. Such a name needs no capture entry at
+// all when it resolves to a real declaration: the interior call lowers
+// through ResolveCallee exactly as it would in any body, and demanding
+// a value slot for it was what declined every arrow calling a
+// module-level helper. CalleeNode holds one representative callee node
+// per such name for the resolution.
 type freeNameScan struct {
-	Reads []string
-	Ok    bool
+	Reads      []string
+	CalleeOnly map[string]bool
+	CalleeNode map[string]*ast.Node
+	Ok         bool
 }
 
 // scanFreeNames walks an arrow's body and reports its free reads in
@@ -284,6 +295,9 @@ func scanFreeNames(arrow *ast.Node) freeNameScan {
 	}
 	var reads []string
 	seen := map[string]struct{}{}
+	calleeSeen := map[string]bool{}
+	calleeNode := map[string]*ast.Node{}
+	valueSeen := map[string]bool{}
 	declined := false
 	var visit func(node *ast.Node) bool
 	visit = func(node *ast.Node) bool {
@@ -312,6 +326,30 @@ func scanFreeNames(arrow *ast.Node) freeNameScan {
 					return false
 				}
 			}
+			// `getValue(…)` — a BARE-IDENTIFIER callee is still recorded
+			// as a read (a captured function value called by name stays a
+			// capture), but its position is remembered: a name whose every
+			// occurrence is callee position needs no value slot when the
+			// resolution answers a declaration (capturesOf's own gate)
+			if ast.IsIdentifier(callee) {
+				name := callee.Text()
+				if _, isBound := bound[name]; !isBound {
+					if _, already := seen[name]; !already {
+						seen[name] = struct{}{}
+						reads = append(reads, name)
+					}
+					calleeSeen[name] = true
+					if _, held := calleeNode[name]; !held {
+						calleeNode[name] = call.Expression
+					}
+				}
+				if call.Arguments != nil {
+					for _, argument := range call.Arguments.Nodes {
+						visit(argument)
+					}
+				}
+				return false
+			}
 		}
 		// `this` anywhere else — as a value, as a property read, as an
 		// argument — is a whole object no slot holds
@@ -331,6 +369,7 @@ func scanFreeNames(arrow *ast.Node) freeNameScan {
 					seen[name] = struct{}{}
 					reads = append(reads, name)
 				}
+				valueSeen[name] = true
 			}
 			return false
 		}
@@ -341,17 +380,34 @@ func scanFreeNames(arrow *ast.Node) freeNameScan {
 	if declined {
 		return freeNameScan{}
 	}
-	return freeNameScan{Reads: reads, Ok: true}
+	calleeOnly := map[string]bool{}
+	for name := range calleeSeen {
+		if !valueSeen[name] {
+			calleeOnly[name] = true
+		}
+	}
+	return freeNameScan{Reads: reads, CalleeOnly: calleeOnly, CalleeNode: calleeNode, Ok: true}
 }
 
 // capturesOf turns the scan's free reads into capture entries, or
-// declines: every free name must resolve to a slot in the ENCLOSING
-// lowering, since the call site binds each entry to a `var` of that
-// slot. A free name with no slot — an import, a global, an outer
-// function — has no `var` to bind, so the arrow declines.
+// declines. A SCALAR name takes one entry from its own slot. Beyond
+// that, three widened arms serve what used to decline outright:
 //
-// The capture list keeps the scan's order, which is the layout the
-// entries take after the declared parameters.
+//   - a name whose EVERY occurrence is callee position and whose
+//     resolution answers a bodied declaration contributes NO capture —
+//     the interior call lowers through ResolveCallee exactly as any
+//     body's call does, and no value slot ever existed to bind;
+//   - a FLATTENED ARRAY (`links` living as "links.len"/"links.elem")
+//     captures as a two-leaf bundle, so the arrow's own element reads
+//     resolve against the same pair the caller holds;
+//   - a FLATTENED RECORD captures as one leaf per slot — the object
+//     capture appendSummaryCaptureEntries already lays out, mirrored
+//     from closureCapturesOf's own expansion.
+//
+// A free name none of those hold — an import, a global read as a value
+// — still declines. The capture list keeps the scan's order; the flat
+// slots list carries ONE slot per laid-out entry (a bundle contributes
+// one per leaf), which is the lockstep arrowCallStatement binds by.
 func capturesOf(context *LoweringContext, scan freeNameScan) ([]capturedSlot, []int, bool) {
 	if !scan.Ok {
 		return nil, nil, false
@@ -360,18 +416,54 @@ func capturesOf(context *LoweringContext, scan freeNameScan) ([]capturedSlot, []
 	var slots []int
 	for _, name := range scan.Reads {
 		index, found := slotIndexOfName(context, name)
-		if !found {
-			return nil, nil, false
+		if found {
+			if index >= len(context.Sorts) || index >= len(context.Typeofs) {
+				return nil, nil, false
+			}
+			captures = append(captures, capturedSlot{
+				Name:      name,
+				Sort:      context.Sorts[index],
+				TypeofTag: context.Typeofs[index],
+			})
+			slots = append(slots, index)
+			continue
 		}
-		if index >= len(context.Sorts) || index >= len(context.Typeofs) {
-			return nil, nil, false
+		if scan.CalleeOnly[name] && context.ResolveCallee != nil {
+			if callee := context.ResolveCallee(scan.CalleeNode[name]); callee != nil && callee.Body() != nil {
+				continue
+			}
 		}
-		captures = append(captures, capturedSlot{
-			Name:      name,
-			Sort:      context.Sorts[index],
-			TypeofTag: context.Typeofs[index],
-		})
-		slots = append(slots, index)
+		if lenSlot, elemSlot, isArray := arraySlotsOf(context, name); isArray {
+			if lenSlot >= len(context.Sorts) || elemSlot >= len(context.Sorts) {
+				return nil, nil, false
+			}
+			captures = append(captures, capturedSlot{
+				Name: name,
+				Members: []capturedLeaf{
+					{Member: "len", Sort: context.Sorts[lenSlot], TypeofTag: context.Typeofs[lenSlot]},
+					{Member: "elem", Sort: context.Sorts[elemSlot], TypeofTag: context.Typeofs[elemSlot]},
+				},
+			})
+			slots = append(slots, lenSlot, elemSlot)
+			continue
+		}
+		if leaves, ok := leafSlotsUnder(context, name); ok {
+			members := make([]capturedLeaf, len(leaves))
+			for at, leaf := range leaves {
+				if leaf.Index >= len(context.Sorts) {
+					return nil, nil, false
+				}
+				members[at] = capturedLeaf{
+					Member:    leaf.Path,
+					Sort:      context.Sorts[leaf.Index],
+					TypeofTag: context.Typeofs[leaf.Index],
+				}
+				slots = append(slots, leaf.Index)
+			}
+			captures = append(captures, capturedSlot{Name: name, Members: members})
+			continue
+		}
+		return nil, nil, false
 	}
 	return captures, slots, true
 }

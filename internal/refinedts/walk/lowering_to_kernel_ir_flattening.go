@@ -173,9 +173,17 @@ func lowerFlatteningRoutes(
 	// `x = count + f(y)` / `let x = f(g(y)) + 1`: the RHS reading hoists
 	// each call it met, left to right, and those statements go out ahead
 	// of the assignment that reads their temps
+	//
+	// AssignmentOf is ALSO FoldBody's own single-statement reader
+	// (ir_loop_fold.go), which substitutes its Effect into LATER
+	// statements' operands via SubstituteVars — so the copy-to-varState
+	// upgrade cannot live inside AssignmentOf/AssignmentOfExpression
+	// themselves (a varState nested into a later arithmetic operand is
+	// exactly what the kernel refuses). It is safe HERE, at this
+	// terminal statement-list use, which never re-nests the effect.
 	if assignment, ok := AssignmentOf(context, s); ok {
 		out = flush(out)
-		out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: assignment.Target, Effect: assignment.Effect})
+		out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: assignment.Target, Effect: asVarStateEffect(assignment.Effect)})
 		return out, true
 	}
 	dropHoists()

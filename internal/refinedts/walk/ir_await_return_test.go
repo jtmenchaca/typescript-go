@@ -24,8 +24,8 @@ func TestAwaitReturn_ReturnAwaitOfATrackedScalarWritesTheResultSlotAndRaisesTheF
 	if lowered[0].Target != context.Result.Ret {
 		t.Errorf("lowered[0].Target = %d, want %d (#ret)", lowered[0].Target, context.Result.Ret)
 	}
-	if lowered[0].Effect.Kind != kernelbridge.LoopEffectVar || lowered[0].Effect.Index != 1 {
-		t.Errorf("the ret write is not the identity read of s: %+v", lowered[0].Effect)
+	if lowered[0].Effect.Kind != kernelbridge.LoopEffectVarState || lowered[0].Effect.Index != 1 {
+		t.Errorf("the ret write is not the verbatim identity copy of s: %+v", lowered[0].Effect)
 	}
 	if lowered[1].Target != context.Result.Done {
 		t.Errorf("lowered[1] is not the raise: target = %d, want %d", lowered[1].Target, context.Result.Done)

@@ -137,5 +137,14 @@ func promiseRaceJoinEffect(context *LoweringContext, elements []*ast.Node) (kern
 		}
 		joined = joinEffect(joined, effect)
 	}
+	// a ONE-element race has no join to build — the same degenerate case
+	// the array-literal fold handles (ir_array_declarations.go): the
+	// value IS that element's, exactly, so it rides the verbatim copy.
+	// Every caller of awaitIdentityEffect (whose join this feeds)
+	// consumes the result as a bare assign, never as another effect's
+	// operand.
+	if len(elements) == 1 {
+		joined = asVarStateEffect(joined)
+	}
 	return joined, true
 }

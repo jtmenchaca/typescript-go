@@ -8,6 +8,8 @@
 package walk
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
@@ -310,7 +312,11 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	} else if ast.IsPropertyAccessExpression(callee) {
 		calleeName = callee.AsPropertyAccessExpression().Name()
 	}
-	if calleeName == nil || !ast.IsIdentifier(calleeName) {
+	// a PRIVATE-NAMED callee (`C.#read()`) resolves exactly as a plain
+	// one — the checker answers a symbol for a PrivateIdentifier name —
+	// and declining it left every static-private-method chain opaque
+	// (e-435's staticPrivateFieldAndMethod row)
+	if calleeName == nil || !(ast.IsIdentifier(calleeName) || ast.IsPrivateIdentifier(calleeName)) {
 		return silence.Residue()
 	}
 	// the amplifier ledger: which callees the inline count concentrates
@@ -356,7 +362,12 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		for name := range written {
 			if _, ok := env.Get(name); ok {
 				HavocEnv(ctx.Aliases, env, name)
+				continue
 			}
+			// an UNTRACKED written root (a class name whose static place
+			// entries live under dotted keys) still sweeps its entries —
+			// the recursive call may write the static
+			ForgetPlaceEntriesEnv(env, name)
 		}
 		return RecursionMarker(symbol)
 	}
@@ -455,7 +466,14 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 			if receiverTouched && SuperCalleeRoot(callee) != nil {
 				ForgetThisHeld(ctx, env, callee)
 			} else if receiverTouched && ast.IsPropertyAccessExpression(callee) {
-				ForgetThrough(ctx, env, callee.AsPropertyAccessExpression().Expression)
+				// the WRITE-BACK: a COMPLETE summary's written this-fields
+				// land their exit values on the caller's tracked receiver
+				// object (foldWrittenReceiverExits) — the kernel's answer
+				// already carried them, and forgetting threw them away.
+				// Every shape the fold cannot carry keeps the forget.
+				if !foldWrittenReceiverExits(ctx, env, callee.AsPropertyAccessExpression().Expression, contract, argKnowns, receiver) {
+					ForgetThrough(ctx, env, callee.AsPropertyAccessExpression().Expression)
+				}
 			}
 			for _, index := range writtenArguments {
 				if index < len(argumentNodes) && argumentNodes[index] != nil {
@@ -602,6 +620,47 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		if !abstractdomain.SameKnown(after, before) {
 			postByName = append(postByName, postByNameEntry{Name: name, After: after})
 			UpdateTrackedEnv(ctx.Aliases, env, name, after)
+		}
+		return true
+	})
+	// STATIC place entries — dotted keys rooted at a CLASS NAME no env
+	// tracks (`C.total`, static_accessor_backing.go) — are writes on the
+	// caller's own world exactly as a tracked name's are, but the
+	// name-keyed write-back above never sees them: the callee's write
+	// carries FORWARD (copied verbatim), and an entry the callee's walk
+	// swept carries its DEATH forward too (deleted here), or the caller
+	// would keep a static fact the callee's own body invalidated.
+	callEnv.Range(func(key string, held abstractdomain.AbstractValue) bool {
+		dot := strings.Index(key, ".")
+		if dot < 0 {
+			return true
+		}
+		root := key[:dot]
+		if _, isShadowed := shadowed[root]; isShadowed {
+			return true
+		}
+		if _, tracked := env.Get(root); tracked {
+			return true
+		}
+		if before, has := env.Get(key); !has || !abstractdomain.SameKnown(before, held) {
+			env.Set(key, held)
+		}
+		return true
+	})
+	env.Range(func(key string, _ abstractdomain.AbstractValue) bool {
+		dot := strings.Index(key, ".")
+		if dot < 0 {
+			return true
+		}
+		root := key[:dot]
+		if _, isShadowed := shadowed[root]; isShadowed {
+			return true
+		}
+		if _, tracked := env.Get(root); tracked {
+			return true
+		}
+		if _, alive := callEnv.Get(key); !alive {
+			env.Delete(key)
 		}
 		return true
 	})

@@ -95,6 +95,12 @@ func rootOfReceiver(receiver *ast.Node) (string, bool) {
 // object, and with it every name sharing the reference — no stale
 // key survives a write the checker cannot place.
 func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdomain.AbstractValue, at *ast.Node) {
+	// `C.prop = v` through a static SET accessor trivially fronting a
+	// backing field: the value lands under the "<C>.<#backing>" place
+	// key the getter read answers (static_accessor_backing.go)
+	if WriteStaticAccessorBacking(ctx, env, target, value) {
+		return
+	}
 	pae := target.AsPropertyAccessExpression()
 	// a DEEPER chain rooted at a tracked object rebuilds the nested
 	// key in place — `root.a.b = v` replaces b inside a inside root

@@ -16,6 +16,26 @@ var CmpOps = map[ast.Kind]kernelbridge.NarrowCmpOp{
 	ast.KindLessThanToken:          kernelbridge.NarrowOpLt,
 }
 
+// isBareUndefinedLiteral is the global `undefined` identifier, or
+// `void <literal>` — the idiomatic `void 0` spelling — through Unwrapped.
+// A `void` over anything else (a call, an identifier read) is NOT
+// admitted here: TestOf is a pure recognizer with no hoisting door of
+// its own, so an operand that RUNS something has no site to place its
+// effect ahead of the branch and must fall through to a route that
+// does (or decline).
+func isBareUndefinedLiteral(e *ast.Node) bool {
+	head := Unwrapped(e)
+	if ast.IsIdentifier(head) && head.Text() == "undefined" {
+		return true
+	}
+	if ast.IsVoidExpression(head) {
+		operand := Unwrapped(head.AsVoidExpression().Expression)
+		_, isNumber := NumberOf(operand)
+		return isNumber
+	}
+	return false
+}
+
 // TestOfResult mirrors testOf's return shape. OnB/HasOnB carry the
 // SECOND slot when the head compares two tracked number bindings
 // (`i < n`); those results never carry W.
@@ -42,17 +62,34 @@ func TestOf(context *LoweringContext, head *ast.Node) (TestOfResult, bool) {
 		bin := head.AsBinaryExpression()
 		kind := bin.OperatorToken.Kind
 		on, onOk := IndexOf(context, bin.Left)
-		isUndefined := ast.IsIdentifier(bin.Right) && bin.Right.Text() == "undefined"
+		isUndefined := isBareUndefinedLiteral(bin.Right)
+		isNull := Unwrapped(bin.Right).Kind == ast.KindNullKeyword
 		cmp, hasCmp := CmpOps[kind]
-		if onOk && isUndefined {
-			// definedness reads under every sort
-			if kind == ast.KindExclamationEqualsEqualsToken {
-				return TestOfResult{On: on, Test: kernelbridge.IrTestDefined, Swapped: false}, true
+		// A STRICT test against exactly one of the two absent values —
+		// `x === undefined`, `x === null` — reads as the flavored
+		// eqUndef/eqNull test rather than the conflated IrTestDefined:
+		// eqUndef's false arm keeps null admitted (and the mirror for
+		// eqNull), which IrTestDefined's either-admission split cannot
+		// state. LOOSE `x == null` / `x != null` is deliberately NOT
+		// read here — bin.Right is a NullKeyword there too, but the
+		// loose operator is true of BOTH values, and no test on this
+		// wire states that; the `==` arm below already declines a
+		// non-tracked-slot right side, so it is left alone.
+		if onOk && kind == ast.KindExclamationEqualsEqualsToken {
+			if isUndefined {
+				return TestOfResult{On: on, Test: kernelbridge.IrTestEqUndef, Swapped: true}, true
 			}
-			if kind == ast.KindEqualsEqualsEqualsToken {
-				return TestOfResult{On: on, Test: kernelbridge.IrTestDefined, Swapped: true}, true
+			if isNull {
+				return TestOfResult{On: on, Test: kernelbridge.IrTestEqNull, Swapped: true}, true
 			}
-			return TestOfResult{}, false
+		}
+		if onOk && kind == ast.KindEqualsEqualsEqualsToken {
+			if isUndefined {
+				return TestOfResult{On: on, Test: kernelbridge.IrTestEqUndef, Swapped: false}, true
+			}
+			if isNull {
+				return TestOfResult{On: on, Test: kernelbridge.IrTestEqNull, Swapped: false}, true
+			}
 		}
 		if kind == ast.KindEqualsEqualsEqualsToken {
 			// strict equality reads under the LITERAL's sort, and only

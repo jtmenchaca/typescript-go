@@ -52,6 +52,39 @@ func collectionCallOf(node *ast.Node) (collectionCall, bool) {
 	}, true
 }
 
+// reduceCallExpressionOf matches the `xs.reduce(...)` receiver shape
+// every reduce reader needs — a plain non-optional identifier receiver,
+// a non-optional `.reduce` step — and hands back the parsed call plus the
+// receiver's own name, leaving the ARGUMENT COUNT to each caller. Both
+// reduceCallOf (two arguments, a seed) and oneArgumentReduceCallOf (one
+// argument, no seed) start here, since the receiver rule the two share is
+// the whole of collectionCallOf's own rule minus the argument count.
+func reduceCallExpressionOf(node *ast.Node) (call *ast.CallExpression, receiver string, ok bool) {
+	head := Unwrapped(node)
+	if !ast.IsCallExpression(head) {
+		return nil, "", false
+	}
+	callExpr := head.AsCallExpression()
+	if callExpr.QuestionDotToken != nil {
+		return nil, "", false
+	}
+	access := Unwrapped(callExpr.Expression)
+	if !ast.IsPropertyAccessExpression(access) {
+		return nil, "", false
+	}
+	property := access.AsPropertyAccessExpression()
+	if property.QuestionDotToken != nil {
+		return nil, "", false
+	}
+	if !ast.IsIdentifier(property.Expression) || !ast.IsIdentifier(property.Name()) {
+		return nil, "", false
+	}
+	if property.Name().Text() != "reduce" {
+		return nil, "", false
+	}
+	return callExpr, property.Expression.Text(), true
+}
+
 // reduceCallOf reads `xs.reduce(cb, seed)` — the TWO-argument shape
 // collectionCallOf refuses, since every other recognized method takes
 // exactly one. The receiver rules are the same ones collectionCallOf
@@ -62,32 +95,13 @@ func collectionCallOf(node *ast.Node) (collectionCall, bool) {
 // what fills the accumulator entry is a caller-side effect the entry
 // layout builds; the reader's job is only to hand back the node.
 //
-// The one-argument form `xs.reduce(cb)` — no seed, the first element
-// standing in — is NOT read here. Its accumulator starts as an element
-// rather than a value the site can name, and reduce over an empty array
-// with no seed THROWS, which is a control-flow outcome this lowering
-// does not model. The two-argument form has neither problem.
+// The one-argument form `xs.reduce(cb)` — no seed — is read separately,
+// by oneArgumentReduceCallOf below: its accumulator starts as an ELEMENT
+// rather than a value this reader can name, which is a different shape of
+// answer, not a decline.
 func reduceCallOf(node *ast.Node) (source collectionCall, seed *ast.Node, ok bool) {
-	head := Unwrapped(node)
-	if !ast.IsCallExpression(head) {
-		return collectionCall{}, nil, false
-	}
-	call := head.AsCallExpression()
-	if call.QuestionDotToken != nil {
-		return collectionCall{}, nil, false
-	}
-	access := Unwrapped(call.Expression)
-	if !ast.IsPropertyAccessExpression(access) {
-		return collectionCall{}, nil, false
-	}
-	property := access.AsPropertyAccessExpression()
-	if property.QuestionDotToken != nil {
-		return collectionCall{}, nil, false
-	}
-	if !ast.IsIdentifier(property.Expression) || !ast.IsIdentifier(property.Name()) {
-		return collectionCall{}, nil, false
-	}
-	if property.Name().Text() != "reduce" {
+	call, receiver, matched := reduceCallExpressionOf(node)
+	if !matched {
 		return collectionCall{}, nil, false
 	}
 	if call.Arguments == nil || len(call.Arguments.Nodes) != 2 {
@@ -99,10 +113,47 @@ func reduceCallOf(node *ast.Node) (source collectionCall, seed *ast.Node, ok boo
 		return collectionCall{}, nil, false
 	}
 	return collectionCall{
-		Receiver: property.Expression.Text(),
+		Receiver: receiver,
 		Method:   "reduce",
 		Callback: callback,
 	}, seedNode, true
+}
+
+// oneArgumentReduceCallOf reads `xs.reduce(cb)` — no seed, the array's
+// own first element standing in for the accumulator's starting value
+// (sec-array.prototype.reduce, tmp/ecma262/spec.html: with no initial
+// value, the accumulator is set to the array's element at index 0 and
+// the callback runs from index 1).
+//
+// AN EMPTY ARRAY THROWS on this form (same clause: "If len is 0 and
+// initialValue is not present, throw a TypeError exception") — a control-
+// flow outcome this lowering does not model as a statement. That is not
+// a soundness gap: on an empty array the call throws and no later
+// statement in the body runs, so a summary that quantifies only over
+// completing runs claims nothing false about the empty-array case. This
+// is the same stance the lowering already takes toward every callee that
+// may throw (a served call's summary is a claim about the runs that
+// return, never about the runs that don't).
+//
+// The accumulator's START is therefore the source's own ELEMENT slot,
+// not a caller-named seed node — there is no seed expression to read.
+func oneArgumentReduceCallOf(node *ast.Node) (source collectionCall, ok bool) {
+	call, receiver, matched := reduceCallExpressionOf(node)
+	if !matched {
+		return collectionCall{}, false
+	}
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+		return collectionCall{}, false
+	}
+	callback := call.Arguments.Nodes[0]
+	if ast.IsSpreadElement(callback) {
+		return collectionCall{}, false
+	}
+	return collectionCall{
+		Receiver: receiver,
+		Method:   "reduce",
+		Callback: callback,
+	}, true
 }
 
 // promiseAllMapOf reads `Promise.all(xs.map(cb))` — through an await

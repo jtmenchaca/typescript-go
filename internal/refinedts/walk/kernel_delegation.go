@@ -71,15 +71,40 @@ func StateOfKnown(k abstractdomain.AbstractValue) (kernelbridge.KnownStateWire, 
 	case abstractdomain.KindUnknown:
 		return kernelbridge.KnownStateWire{Top: true}, true
 	case abstractdomain.KindUndef:
-		return kernelbridge.KnownStateWire{Set: emptySet, Absent: true, Nan: false}, true
+		// the producer audit is complete: every exact KindUndef site
+		// means exactly the undefined value (missing keys, out-of-bounds
+		// reads, void, uninitialized, the undefined literal) — the
+		// conflated cases ride the maybe wrapper's AbsentFlavorConflated
+		// flavor instead (below), which still sends both flags. So the
+		// wire claims Undef alone here, no Null alongside it.
+		return kernelbridge.KnownStateWire{Set: emptySet, Undef: true, Null: false, Nan: false}, true
+	case abstractdomain.KindNull:
+		// KindNull is a deliberate, exact-null site — every producer of
+		// it (unlike KindUndef) already knows the flavor, so the wire
+		// claims exactly the null admission, no undefined alongside it
+		return kernelbridge.KnownStateWire{Set: emptySet, Null: true}, true
 	case abstractdomain.KindNaN:
-		return kernelbridge.KnownStateWire{Set: emptySet, Absent: false, Nan: true}, true
+		return kernelbridge.KnownStateWire{Set: emptySet, Undef: false, Null: false, Nan: true}, true
 	case abstractdomain.KindPossiblyUndefined:
 		inner, ok := StateOfKnown(*k.Inner)
 		if !ok || inner.Top {
 			return kernelbridge.KnownStateWire{}, false
 		}
-		inner.Absent = true
+		// send BY FLAVOR: an UndefOnly/NullOnly wrapper's own absent side
+		// admits exactly the one flag its flavor names — sending both
+		// unconditionally (the pre-split behavior) would tell the kernel
+		// less than the checker has proved. AbsentFlavorConflated (the
+		// zero value, every wrapper built before this field existed)
+		// keeps sending both, unchanged.
+		switch k.AbsentSide {
+		case abstractdomain.AbsentFlavorUndefOnly:
+			inner.Undef = true
+		case abstractdomain.AbsentFlavorNullOnly:
+			inner.Null = true
+		default:
+			inner.Undef = true
+			inner.Null = true
+		}
 		return inner, true
 	case abstractdomain.KindPossiblyNaN:
 		inner, ok := StateOfKnown(*k.Inner)
@@ -101,7 +126,7 @@ func StateOfKnown(k abstractdomain.AbstractValue) (kernelbridge.KnownStateWire, 
 		if !ok {
 			return kernelbridge.KnownStateWire{}, false
 		}
-		return kernelbridge.KnownStateWire{Set: set, Absent: false, Nan: false}, true
+		return kernelbridge.KnownStateWire{Set: set, Undef: false, Null: false, Nan: false}, true
 	default:
 		return kernelbridge.KnownStateWire{}, false
 	}
@@ -113,11 +138,41 @@ func KnownOfState(s kernelbridge.KnownStateWire) abstractdomain.AbstractValue {
 	if s.Top {
 		return silence.Residue()
 	}
+	if s.Null && !s.Undef && !s.Nan && reflect.DeepEqual(s.Set, emptySet) {
+		// exactly null, nothing else admitted, no other value in the
+		// set: the exact abstractdomain.Null fast path, kept unchanged.
+		// Sound because Null-only-over-∅ is exactly what StateOfKnown's
+		// own KindNull arm sends — any other flag combination (Undef
+		// alongside it, a non-empty set) falls through below.
+		return abstractdomain.Null
+	}
+	if s.Undef && !s.Null && !s.Nan && reflect.DeepEqual(s.Set, emptySet) {
+		// exactly undefined, nothing else admitted, no other value in
+		// the set: the exact abstractdomain.Undef fast path, the mirror
+		// of the Null one above. Sound because Undef-only-over-∅ is
+		// exactly what StateOfKnown's own KindUndef arm now sends (the
+		// producer audit closed — an exact KindUndef site never means
+		// null); a conflated wrapper's own send still sets BOTH flags,
+		// so it never reaches this arm.
+		return abstractdomain.Undef
+	}
 	k := abstractdomain.KnownSet(s.Set, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
 	if s.Nan {
 		k = abstractdomain.PossiblyNaN(k)
 	}
-	if s.Absent {
+	// read back BY FLAVOR: Undef-only and Null-only each keep the exact
+	// flavor the kernel proved (over a NON-empty set — the empty-set
+	// cases already returned the bare exact value above); both together
+	// stay the conflated wrapper (this is the shape a conflated
+	// AbsentFlavor wrapper's own send still produces).
+	switch {
+	case s.Undef && !s.Null:
+		k = abstractdomain.PossiblyAbsent(k, abstractdomain.AbsentFlavorUndefOnly, "", false, false)
+	case s.Null && !s.Undef:
+		// Null-only over a NON-empty set — the empty-set case already
+		// returned abstractdomain.Null above
+		k = abstractdomain.PossiblyAbsent(k, abstractdomain.AbsentFlavorNullOnly, "", false, false)
+	case s.Undef || s.Null:
 		k = abstractdomain.PossiblyUndefined(k, "", false, false)
 	}
 	return k
@@ -186,9 +241,15 @@ func MeetEngineState(existing abstractdomain.AbstractValue, engine kernelbridge.
 	}
 	mergedForms := append(append([]refinementsets.Refinement{}, held.Set.Forms...), engine.Set.Forms...)
 	return KnownOfState(kernelbridge.KnownStateWire{
-		Set:    refinementsets.MakeRefinedSet(mergedForms...),
-		Absent: held.Absent && engine.Absent,
-		Nan:    held.Nan && engine.Nan,
+		// canonical spelling (CanonicalScalarForms, a structural
+		// equality): the concatenation says shared conjuncts twice and
+		// keeps vacuous ±inf bounds, and that spelling blinds JoinKnown's
+		// run collapse downstream — the stacking the node budget above
+		// bounds in SIZE resurfaced as unreadable SHAPE
+		Set:   refinementsets.CanonicalScalarForms(refinementsets.MakeRefinedSet(mergedForms...)),
+		Undef: held.Undef && engine.Undef,
+		Null:  held.Null && engine.Null,
+		Nan:   held.Nan && engine.Nan,
 	})
 }
 

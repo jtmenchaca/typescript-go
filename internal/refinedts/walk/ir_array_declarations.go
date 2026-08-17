@@ -112,6 +112,15 @@ func ArrayDeclarationAssignmentsOf(context *LoweringContext, statement *ast.Node
 		}
 		joined = joinEffect(joined, effect)
 	}
+	// a ONE-element literal (`[x]`) has no join to build: the elem slot's
+	// value IS x's, exactly — a pure copy, standing alone as the whole
+	// assign, so it rides the verbatim whole-state copy rather than the
+	// numeric var read. Two or more elements build a real join, which
+	// stays var at each operand (a copy must never sit inside a join's
+	// A/B — the kernel's join reading refuses it).
+	if len(elements) == 1 {
+		joined = asVarStateEffect(joined)
+	}
 	out = append(out, AssignmentTarget{Target: elemSlot, Effect: joined})
 	return out, true
 }

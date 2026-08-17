@@ -67,7 +67,23 @@ func CheckPossiblyNaN(
 		} else if known.Inner.Kind == abstractdomain.KindValues && known.Inner.KindTag == abstractdomain.PrimitiveNumber {
 			innerSet, hasInnerSet = abstractdomain.SetOfKnown(*known.Inner)
 		}
-		if hasInnerSet && refinementsets.OnOneTupleLayer(innerSet) {
+		// a real half that ADDS NOTHING beyond the number sort's own
+		// ground (AddsNothingSet — the same "no information beyond the
+		// host type" test check_assignability.go's KindUnknown arm
+		// already asks of the TARGET) carries no more information than
+		// KindUnknown does: "any real, or NaN" is not a derived fact
+		// about this value, it is the un-narrowed sort itself, most
+		// often AfterReaders' own fallback seed for an expression this
+		// walk determined nothing about (silence/after_readers.go's
+		// NumberWithNaN — the ONLY producer of the maximal
+		// AtLeast(-Infinity) real half). A "subset of the target" question
+		// against that real half is a foregone false for every bounded
+		// target — refusing it as a genuine 7001 refutation would report
+		// "this value is out of range" about a value the walk never
+		// actually examined. Undetermined stays undetermined: skip
+		// straight to the 7002 alert below, the same verdict KindUnknown
+		// itself takes.
+		if hasInnerSet && refinementsets.OnOneTupleLayer(innerSet) && !AddsNothingSet(innerSet) {
 			if checkPossiblyNaNSubset(ctx, innerSet, target, node, what) {
 				return // reported (either the sort refutation or the NaN refutation)
 			}

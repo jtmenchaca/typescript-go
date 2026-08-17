@@ -21,20 +21,26 @@ const (
 	// are read out; the object itself is never handed to code that could
 	// store into it, so every slot keeps its value.
 	recordParameterReadWhole
-	// UNUSED as an answer — kept as a distinct ordinal so the "worst use
-	// wins" comparison below still reads as an ordered scale, and so a
-	// caller switching on this type sees the retired name rather than a
-	// silently reused one. Nothing constructs it: a hand-over to code
-	// (a call/new argument, a store into another name) and a write
-	// through a member both name no slot a summary can carry an effect
-	// back through, so both refuse outright — see recordParameterUnreadable.
-	recordParameterEscapesWhole
+	// the body HANDS the whole record to a call or construction
+	// (`f(p)`, `new C(p)`). The layout serves this by marking EVERY
+	// leaf written and joining the leaves to HandOverHavocNames: no
+	// code-running statement believes a leaf across the hand-over, the
+	// leaves ride out Written so call sites read the exit states back
+	// (recordParamRets), and the interior call statement itself either
+	// EMBEDS a complete callee (whose own summary bounds what it did to
+	// the leaves) or falls to the opaque floor and the body goes porous
+	// — the honest cascade either way. The one channel this cannot
+	// carry — the callee STORING the reference for later — cannot hide
+	// inside a COMPLETE callee: a store to an outer name has no slot
+	// and poisons the callee's own summary first.
+	recordParameterHandedOver
 	// the body does something to the record no slot can stand for: a
-	// write through ANY member (declared or not — a write moves the
-	// caller's own object, which no summary entry carries back out), a
-	// hand-over of the whole record to code (a call/new argument, a
-	// store into another name), an undeclared member READ, a computed or
-	// optional step, or a deep path.
+	// write through an UNDECLARED member or a deeper-than-declared path
+	// (a declared leaf's write is served — writtenMembers), a STORE of
+	// the whole record under another name (`const q = p` — the scan
+	// cannot follow the alias's writes), a `delete` through any member
+	// (an absence claim the declared shape contradicts), an undeclared
+	// member READ, a computed or optional step.
 	recordParameterUnreadable
 )
 
@@ -98,53 +104,6 @@ func recordParameterUseOf(
 	for _, member := range members {
 		declared[strings.Join(member.Path, ".")] = struct{}{}
 	}
-	// no write through the parameter is ever served (see the doc above),
-	// so this map is always empty — kept in the return shape the layout
-	// still reads, rather than reworking every caller's signature for a
-	// map that never holds a key
-	writtenMembers := map[string]struct{}{}
-	// writeThroughParameter answers whether a node writes through this
-	// parameter's spelling at all — a WRITE position through an expanded
-	// parameter's member is a caller-visible effect no summary carries
-	// out, so every write refuses, declared member or not.
-	writeThroughParameter := func(target *ast.Node) bool {
-		root, _, ok := propertyPathOf(Unwrapped(target))
-		return ok && root == name
-	}
-	// a node that WRITES through this parameter's spelling, whatever
-	// member it names
-	writesThroughParameter := func(node *ast.Node) bool {
-		if ast.IsBinaryExpression(node) {
-			bin := node.AsBinaryExpression()
-			if bin.OperatorToken.Kind >= ast.KindFirstAssignment && bin.OperatorToken.Kind <= ast.KindLastAssignment {
-				if writeThroughParameter(bin.Left) {
-					return true
-				}
-			}
-		}
-		if ast.IsPrefixUnaryExpression(node) {
-			unary := node.AsPrefixUnaryExpression()
-			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
-				if writeThroughParameter(unary.Operand) {
-					return true
-				}
-			}
-		}
-		if ast.IsPostfixUnaryExpression(node) {
-			unary := node.AsPostfixUnaryExpression()
-			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
-				if writeThroughParameter(unary.Operand) {
-					return true
-				}
-			}
-		}
-		if ast.IsDeleteExpression(node) {
-			if writeThroughParameter(node.AsDeleteExpression().Expression) {
-				return true
-			}
-		}
-		return false
-	}
 	worst := recordParameterMembersOnly
 	// the worst use wins, and an unreadable one ends the walk
 	note := func(use recordParameterUse) {
@@ -152,13 +111,91 @@ func recordParameterUseOf(
 			worst = use
 		}
 	}
+	// the DECLARED leaves the body writes — each is a caller-visible
+	// effect the summary carries out through its Written row, exactly
+	// the class-typed bundle's treatment (recordParamRets threads the
+	// exit back onto the caller's own leaf slot)
+	writtenMembers := map[string]struct{}{}
+	// writeTargetPath reads a write target through this parameter's
+	// spelling: the joined member path, or ("", false) for another
+	// name's target.
+	writeTargetPath := func(target *ast.Node) (string, bool) {
+		root, path, ok := propertyPathOf(Unwrapped(target))
+		if !ok || root != name {
+			return "", false
+		}
+		return strings.Join(path, "."), true
+	}
+	// writesThroughParameter classifies a node that WRITES through this
+	// parameter's spelling: a write to a DECLARED leaf is SERVED (the
+	// leaf's slot takes the assignment and its Written row carries the
+	// exit out — noteWrite), any other write refuses. `delete` refuses
+	// even on a declared leaf: it claims absence of a member the
+	// declared shape states.
+	noteWrite := func(path string, declaredLeaf bool) {
+		if !declaredLeaf {
+			note(recordParameterUnreadable)
+			return
+		}
+		writtenMembers[path] = struct{}{}
+	}
+	// answers (rhs, handled): handled says the node was a write through
+	// the parameter and was classified; rhs, when non-nil, is the
+	// assignment's own right side, which the VISITOR still walks — a
+	// hand-over or refusal hiding there (`p.lo = g(p)`) must classify
+	// exactly as it would anywhere else
+	writesThroughParameter := func(node *ast.Node) (*ast.Node, bool) {
+		if ast.IsBinaryExpression(node) {
+			bin := node.AsBinaryExpression()
+			if bin.OperatorToken.Kind >= ast.KindFirstAssignment && bin.OperatorToken.Kind <= ast.KindLastAssignment {
+				if path, isParam := writeTargetPath(bin.Left); isParam {
+					_, declaredLeaf := declared[path]
+					noteWrite(path, declaredLeaf)
+					return bin.Right, true
+				}
+			}
+		}
+		if ast.IsPrefixUnaryExpression(node) {
+			unary := node.AsPrefixUnaryExpression()
+			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+				if path, isParam := writeTargetPath(unary.Operand); isParam {
+					_, declaredLeaf := declared[path]
+					noteWrite(path, declaredLeaf)
+					return nil, true
+				}
+			}
+		}
+		if ast.IsPostfixUnaryExpression(node) {
+			unary := node.AsPostfixUnaryExpression()
+			if unary.Operator == ast.KindPlusPlusToken || unary.Operator == ast.KindMinusMinusToken {
+				if path, isParam := writeTargetPath(unary.Operand); isParam {
+					_, declaredLeaf := declared[path]
+					noteWrite(path, declaredLeaf)
+					return nil, true
+				}
+			}
+		}
+		if ast.IsDeleteExpression(node) {
+			if _, isParam := writeTargetPath(node.AsDeleteExpression().Expression); isParam {
+				note(recordParameterUnreadable)
+				return nil, true
+			}
+		}
+		return nil, false
+	}
 	var visit func(node *ast.Node) bool
 	visit = func(node *ast.Node) bool {
 		if worst == recordParameterUnreadable {
 			return true
 		}
-		if writesThroughParameter(node) {
-			note(recordParameterUnreadable)
+		// the classifier notes for itself: a declared-leaf write lands in
+		// writtenMembers, everything else notes unreadable inside. The
+		// assignment's right side still walks — a use hiding there
+		// (`p.lo = g(p)`) classifies as it would anywhere else.
+		if rhs, handled := writesThroughParameter(node); handled {
+			if rhs != nil {
+				visit(rhs)
+			}
 			return true
 		}
 		// a declared member READ consumes the root and every step name, so
@@ -179,7 +216,7 @@ func recordParameterUseOf(
 		// the POSITION it stands in decides what the body may still be
 		// served
 		if ast.IsIdentifier(node) && node.Text() == name && !isPropertyStepName(node) {
-			note(wholeRecordUseAt(node))
+			note(wholeRecordUseAt(node, declared))
 			return true
 		}
 		node.ForEachChild(visit)
@@ -205,18 +242,47 @@ func recordParameterUseOf(
 //   - a `return p` — the value leaves; nothing in this body reads it
 //     again, and the caller already holds whatever it passed.
 //
-// UNREADABLE, a bare CALL or NEW argument (`f(p)`, `new C(p)`, INCLUDING
-// a spread one — `f(...p)` passes the object's own entries): the callee
-// may store into it, and no write-back threading carries that move out
-// to the caller — the same refusal a `const q = p` alias already takes.
-// A summary that served this would let the callee's write silently
-// stand in for the caller's own object with no route back.
+// HANDED-OVER, a bare CALL or NEW argument (`f(p)`, `new C(p)`): the
+// callee may write the record's members, and the layout serves exactly
+// that — every leaf marked Written and joined to HandOverHavocNames
+// (recordParameterHandedOver's own doc). A SPREAD argument (`f(...p)`)
+// stays refused: it passes the entries positionally, a shape no leaf
+// row spells.
+//
+// READ-WHOLE also covers a TRUTHINESS TEST — the node stands as a `!`
+// operand, an `&&`/`||` operand, or an `if`/`while`/ternary CONDITION
+// (the condition itself, or a term of one built from `&&`/`||`/`!` over
+// other such terms). Testing a value's truthiness reads it and hands out
+// no reference the body could store through — spec-wise, ToBoolean
+// (sec-toboolean, tmp/ecma262/spec.html) consumes the operand and
+// produces a fresh boolean, never the operand itself, so the record can
+// only escape through this position if it is ALSO used somewhere else
+// that already gets its own classification (a `return`, a call argument,
+// a store). The GUARD lowering (LowerGuard, ir_guard.go) is where this
+// pays off: only a NON-OPTIONAL record parameter's whole name may fold
+// as "always truthy" there — this classification is position-only and
+// intentionally blind to optionality, exactly like every other arm here.
+//
+// MEMBERS-ONLY, a DECLARATION DESTRUCTURING THE WHOLE PARAMETER —
+// `const { lo } = p;` (Sankey.tsx's `const { targetNodes } = curNode;`
+// is this shape). The parameter's own name never denotes a slot after
+// expansion, but a destructuring declaration only ever READS members
+// out of it — no route through this shape lets the RECEIVER value
+// escape as a reference the body could store into, so it is no riskier
+// than an ordinary `p.lo` read. It counts as members-only, not merely
+// read-whole, only when EVERY bound element is a plain identifier (no
+// default, no rest, no computed key) naming a DECLARED depth-1 member —
+// an element naming an undeclared member, or any non-plain element
+// (a default, a rest, a computed key, a nested pattern), falls through
+// to the refusal below: nothing here promises those shapes a slot to
+// read from.
 //
 // The default refuses too: a bare mention this reading does not
-// recognize — an initializer, an assignment right side, an array
-// element, a property value — stores the reference under a name the
-// scan does not follow, so its writes cannot be ruled out either.
-func wholeRecordUseAt(node *ast.Node) recordParameterUse {
+// recognize — an assignment right side, an array element, a property
+// value, or a destructuring declaration this reading cannot classify —
+// stores the reference under a name the scan does not follow, so its
+// writes cannot be ruled out either.
+func wholeRecordUseAt(node *ast.Node, declared map[string]struct{}) recordParameterUse {
 	parent := node.Parent
 	if parent == nil {
 		return recordParameterUnreadable
@@ -229,5 +295,111 @@ func wholeRecordUseAt(node *ast.Node) recordParameterUse {
 		// which is an argument and falls through to the refusal below
 		return recordParameterReadWhole
 	}
+	if ast.IsCallExpression(parent) || ast.IsNewExpression(parent) {
+		// the node must stand in ARGUMENT position, not callee position —
+		// `p()` calls the record, which no leaf row spells
+		if arguments := argumentsOf(parent); arguments != nil {
+			for _, argument := range arguments {
+				if argument == node {
+					return recordParameterHandedOver
+				}
+			}
+		}
+	}
+	if ast.IsVariableDeclaration(parent) {
+		declaration := parent.AsVariableDeclaration()
+		if declaration.Initializer == node && destructuresOnlyDeclaredMembers(declaration.Name(), declared) {
+			return recordParameterMembersOnly
+		}
+	}
+	if isTruthinessTestPosition(node, parent) {
+		return recordParameterReadWhole
+	}
 	return recordParameterUnreadable
+}
+
+// isTruthinessTestPosition answers whether NODE stands in a position that
+// only ever tests its truthiness: a `!` operand, an `&&`/`||` operand, or
+// an `if`/`while`/ternary CONDITION. Each of these hands the value to
+// ToBoolean (sec-toboolean, tmp/ecma262/spec.html) and nowhere else — no
+// route through this position lets the value itself escape as a
+// reference the body could store through.
+func isTruthinessTestPosition(node *ast.Node, parent *ast.Node) bool {
+	if ast.IsPrefixUnaryExpression(parent) {
+		return parent.AsPrefixUnaryExpression().Operator == ast.KindExclamationToken &&
+			parent.AsPrefixUnaryExpression().Operand == node
+	}
+	if ast.IsBinaryExpression(parent) {
+		bin := parent.AsBinaryExpression()
+		kind := bin.OperatorToken.Kind
+		return (kind == ast.KindAmpersandAmpersandToken || kind == ast.KindBarBarToken) &&
+			(bin.Left == node || bin.Right == node)
+	}
+	if ast.IsIfStatement(parent) {
+		return parent.AsIfStatement().Expression == node
+	}
+	if ast.IsWhileStatement(parent) {
+		return parent.AsWhileStatement().Expression == node
+	}
+	if ast.IsDoStatement(parent) {
+		return parent.AsDoStatement().Expression == node
+	}
+	if ast.IsConditionalExpression(parent) {
+		return parent.AsConditionalExpression().Condition == node
+	}
+	return false
+}
+
+// destructuresOnlyDeclaredMembers says whether a binding NAME is an
+// object binding pattern whose every element is a plain identifier (no
+// default, no rest, no computed key) naming a DECLARED depth-1 member —
+// the shape a whole-parameter destructuring declaration must wear to
+// count as members-only rather than an unreadable whole-record use.
+//
+// A RENAMED element (`const { lo: low } = p;`) reads member `lo` under
+// local name `low` — the same PropertyName/Name split a binding-pattern
+// PARAMETER element already reads (SummaryParameterEntriesIn's pattern
+// arm). Any other shape — a non-pattern name, a default, a rest, a
+// computed key, a nested pattern, or a name this reading cannot resolve
+// to a plain identifier — answers false.
+func destructuresOnlyDeclaredMembers(name *ast.Node, declared map[string]struct{}) bool {
+	if name == nil || !ast.IsObjectBindingPattern(name) {
+		return false
+	}
+	elements := name.AsBindingPattern().Elements.Nodes
+	if len(elements) == 0 {
+		return false
+	}
+	for _, element := range elements {
+		binding := element.AsBindingElement()
+		if binding.DotDotDotToken != nil || binding.Initializer != nil ||
+			binding.Name() == nil || !ast.IsIdentifier(binding.Name()) {
+			return false
+		}
+		key := binding.Name().Text()
+		if binding.PropertyName != nil {
+			if !ast.IsIdentifier(binding.PropertyName) {
+				return false
+			}
+			key = binding.PropertyName.Text()
+		}
+		if _, isDeclared := declared[key]; !isDeclared {
+			return false
+		}
+	}
+	return true
+}
+
+// argumentsOf reads a call's or construction's argument nodes.
+func argumentsOf(call *ast.Node) []*ast.Node {
+	if ast.IsCallExpression(call) {
+		if a := call.AsCallExpression().Arguments; a != nil {
+			return a.Nodes
+		}
+		return nil
+	}
+	if a := call.AsNewExpression().Arguments; a != nil {
+		return a.Nodes
+	}
+	return nil
 }

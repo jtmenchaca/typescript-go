@@ -226,12 +226,20 @@ func receiverWritten(ctx *FlowContext, declaration *ast.Node, contract *Function
 	if contract != nil && contract.Declaration != declaration {
 		// SummaryReceiverEffects answers a bare false BOTH when the
 		// summary says the receiver is untouched AND when the body did
-		// not lower at all, so the lowering is asked first: only a body
-		// that actually lowered gets to say "not written". A declined
-		// lowering falls through to the name list below.
+		// not lower at all, so the lowering is asked first — and only a
+		// COMPLETE body gets to say "not written". A POROUS body has
+		// statements the lowering did not read (an escaped receiver, a
+		// havocked construct), so its empty written-entry list is absence
+		// of evidence: trusting it kept a caller's stale field knowledge
+		// across `over.write(200)` when write's own body escaped. The
+		// doubt direction is written. A declined lowering falls through
+		// to the name list below.
 		if _, lowered := LowerSummaryBody(ctx, contract.Declaration); lowered {
-			receiverTouched, _ := SummaryReceiverEffects(ctx, contract.Declaration)
-			return receiverTouched
+			if outcome, _, recorded := SummaryOutcomeOf(contract.Declaration); recorded && outcome == SummaryComplete {
+				receiverTouched, _ := SummaryReceiverEffects(ctx, contract.Declaration)
+				return receiverTouched
+			}
+			return true
 		}
 	}
 	_, readOnly := dataflowfacts.ReadOnlyArrayMethods[methodName]

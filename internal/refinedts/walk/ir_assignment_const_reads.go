@@ -47,6 +47,9 @@ func FreeConstEffect(context *LoweringContext, node *ast.Node) (kernelbridge.Loo
 			ReadPlace: func(string) (kernelbridge.LoopEffect, bool) { return kernelbridge.LoopEffect{}, false },
 			Opaque: func(e *ast.Node) (kernelbridge.LoopEffect, bool) {
 				if IsAbsentKeyword(e) {
+					if Unwrapped(e).Kind == ast.KindNullKeyword {
+						return kernelbridge.NullConst(), true
+					}
 					return kernelbridge.AbsentConst(), true
 				}
 				return kernelbridge.LoopEffect{}, false

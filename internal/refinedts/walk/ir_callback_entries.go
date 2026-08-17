@@ -43,7 +43,7 @@ func slotCallbackEntry(context *LoweringContext, slot int) callbackEntry {
 		return absentCallbackEntry()
 	}
 	return callbackEntry{
-		Effect: varEffect(slot),
+		Effect: varStateEffect(slot),
 		Sort:   context.Sorts[slot],
 		Typeof: context.Typeofs[slot],
 	}

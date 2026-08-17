@@ -29,8 +29,10 @@ func TestIrSequenceLowering_AssigningNullWritesTheAbsentStateConstantUnderTheNum
 	if stmts[0].Effect.Kind != kernelbridge.LoopEffectConstState {
 		t.Fatalf("effect kind = %q, want %q", stmts[0].Effect.Kind, kernelbridge.LoopEffectConstState)
 	}
-	if !stmts[0].Effect.Absent {
-		t.Errorf("effect.Absent = false, want true")
+	// the null LITERAL carries exactly the null admission — a later
+	// `=== undefined` on x is decidably false
+	if stmts[0].Effect.Null == false || stmts[0].Effect.Undef {
+		t.Errorf("effect.Undef=%v effect.Null=%v, want the null-only constant", stmts[0].Effect.Undef, stmts[0].Effect.Null)
 	}
 	exit := kernel.Walk(
 		[]kernelbridge.KnownStateWire{
@@ -42,8 +44,8 @@ func TestIrSequenceLowering_AssigningNullWritesTheAbsentStateConstantUnderTheNum
 	if x.Top {
 		t.Fatalf("x.Top = true, want false")
 	}
-	if !x.Absent {
-		t.Errorf("x.Absent = false, want true")
+	if !x.Null || x.Undef {
+		t.Errorf("x admissions (undef=%v null=%v), want null alone", x.Undef, x.Null)
 	}
 	if kernel.Member(loweringSetOf(t, x), []float64{5}) {
 		t.Errorf("member(x, [5]) = true, want false — the write replaced the entry value")
@@ -70,8 +72,8 @@ func TestIrSequenceLowering_AssigningUndefinedWritesTheSameAbsentConstantUnderTh
 	if s.Top {
 		t.Fatalf("s.Top = true, want false")
 	}
-	if !s.Absent {
-		t.Errorf("s.Absent = false, want true")
+	if !s.Undef || s.Null {
+		t.Errorf("s admissions (undef=%v null=%v), want undefined alone", s.Undef, s.Null)
 	}
 }
 

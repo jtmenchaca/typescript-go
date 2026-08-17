@@ -93,7 +93,7 @@ func mapStatements(
 		return nil, false
 	}
 	return []kernelbridge.IrStatement{
-		{Kind: kernelbridge.IrStatementAssign, Target: targetLen, Effect: varEffect(sourceLen)},
+		{Kind: kernelbridge.IrStatementAssign, Target: targetLen, Effect: varStateEffect(sourceLen)},
 		call,
 	}, true
 }
@@ -124,7 +124,7 @@ func filterStatements(
 		return nil, false
 	}
 	return []kernelbridge.IrStatement{
-		{Kind: kernelbridge.IrStatementAssign, Target: targetElem, Effect: varEffect(sourceElem)},
+		{Kind: kernelbridge.IrStatementAssign, Target: targetElem, Effect: varStateEffect(sourceElem)},
 		{
 			Kind:   kernelbridge.IrStatementAssign,
 			Target: targetLen,

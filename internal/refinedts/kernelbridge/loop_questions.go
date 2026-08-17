@@ -50,14 +50,23 @@ func PremiseKey(p InvariantPremise) (string, bool) {
 type LoopEffectKind string
 
 const (
-	LoopEffectVar   LoopEffectKind = "var"
-	LoopEffectConst LoopEffectKind = "const"
+	LoopEffectVar LoopEffectKind = "var"
+	// LoopEffectVarState is the VERBATIM COPY of a binding's whole
+	// state: the set, its Undef/Null admissions, and the NaN flag all
+	// hand through unchanged (`lo = p.lo`). This is NOT LoopEffectVar's
+	// numeric read, which coerces an absent or NaN source to NaN — a
+	// copy must carry the source position's exact state, absence
+	// included, the same way a plain assignment of one binding to
+	// another does at every other sort. Rides the Index field, like
+	// LoopEffectVar.
+	LoopEffectVarState LoopEffectKind = "varState"
+	LoopEffectConst    LoopEffectKind = "const"
 	// LoopEffectConstState is the const leaf carrying the WHOLE state:
-	// the set beside the absent and NaN flags. `x = null` and `return
-	// undefined` write the absent outcome, which lives outside R-bar
-	// and so cannot ride in a RefinedSet. A const with both flags down
-	// is exactly LoopEffectConst, and the wire keeps them distinct so
-	// older forms decode unchanged.
+	// the set beside the Undef, Null, and NaN flags. `x = null` and
+	// `return undefined` write one of the two absent outcomes, which
+	// live outside R-bar and so cannot ride in a RefinedSet. A const
+	// with every flag down is exactly LoopEffectConst, and the wire
+	// keeps them distinct so older forms decode unchanged.
 	LoopEffectConstState LoopEffectKind = "constState"
 	LoopEffectUnknown    LoopEffectKind = "unknown"
 	LoopEffectUnary      LoopEffectKind = "un"
@@ -383,13 +392,18 @@ const (
 type LoopEffect struct {
 	Kind LoopEffectKind
 
-	Index int                       // "var"
+	Index int                       // "var" / "varState"
 	Set   refinementsets.RefinedSet // "const" / "constState"
 
-	// Absent, Nan: "constState" only — whether the written constant may
-	// be the absent value or NaN, neither of which any set can hold.
-	Absent bool
-	Nan    bool
+	// Undef, Null, Nan: "constState" only — whether the written constant
+	// may be exactly undefined, exactly null, or NaN, none of which any
+	// set can hold. Undef and Null are the two SEPARATE absent
+	// admissions (a legacy wire that sent one conflated `absent` bool
+	// decodes as both); a state with both flags down and Nan down is
+	// exactly LoopEffectConst.
+	Undef bool
+	Null  bool
+	Nan   bool
 
 	Op LoopEffectOp // "un" / "bin" / "seqUn" / "seqNum"
 	A  *LoopEffect
@@ -407,15 +421,31 @@ type LoopEffect struct {
 	Bump    int
 }
 
-// AbsentConst is the state constant `null`/`undefined` writes: the
-// empty set of values beside a raised absent flag. Under ANY target
-// sort — the absent value is not a number and not a word, so no sort
-// can hold it in its set part.
+// AbsentConst is the state constant exactly `undefined` writes: the
+// empty set of values beside a raised Undef flag. Every caller means
+// a missing or uninitialized read — an empty array element, a cleared
+// map entry, an uninitialized declaration, an absent callback
+// argument, a throw's own ret slot — never the null literal, which
+// carries its own flag (Null) this constant leaves down. Under ANY
+// target sort — the undefined value is not a number and not a word,
+// so no sort can hold it in its set part.
 func AbsentConst() LoopEffect {
 	return LoopEffect{
-		Kind:   LoopEffectConstState,
-		Set:    refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)),
-		Absent: true,
+		Kind:  LoopEffectConstState,
+		Set:   refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)),
+		Undef: true,
+	}
+}
+
+// NullConst is the state constant exactly the `null` LITERAL writes:
+// the empty set of values beside a raised Null flag, the undefined
+// admission down — `x = null` then `x === undefined` is decidably
+// false, which the conflated constant could never say.
+func NullConst() LoopEffect {
+	return LoopEffect{
+		Kind: LoopEffectConstState,
+		Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)),
+		Null: true,
 	}
 }
 
@@ -436,10 +466,13 @@ func EffectWire(e LoopEffect) string {
 	switch e.Kind {
 	case LoopEffectVar:
 		return fmt.Sprintf(`{"var":%d}`, e.Index)
+	case LoopEffectVarState:
+		return fmt.Sprintf(`{"varState":%d}`, e.Index)
 	case LoopEffectConst:
 		return fmt.Sprintf(`{"set":%s}`, EncodeSet(e.Set))
 	case LoopEffectConstState:
-		return fmt.Sprintf(`{"set":%s,"absent":%v,"nan":%v}`, EncodeSet(e.Set), e.Absent, e.Nan)
+		return fmt.Sprintf(`{"set":%s,"undef":%v,"null":%v,"nan":%v}`,
+			EncodeSet(e.Set), e.Undef, e.Null, e.Nan)
 	case LoopEffectUnknown:
 		return `{"unknown":true}`
 	case LoopEffectUnary:
@@ -563,7 +596,17 @@ const (
 type IrBranchTest string
 
 const (
-	IrTestDefined   IrBranchTest = "defined"
+	IrTestDefined IrBranchTest = "defined"
+	// IrTestEqUndef and IrTestEqNull are the STRICT flavored tests split
+	// out of the old conflated absent marker: `x === undefined` /
+	// `x === null` decide exactly one admission, leaving the other
+	// (null on eqUndef's false arm, undefined on eqNull's false arm)
+	// untouched — a strictly stronger claim than IrTestDefined's
+	// either-admission split. Neither carries a `w` operand — the tested
+	// value is fixed by the test's own name, the same shape
+	// defined/truthyNum/truthyStr/isNan already have.
+	IrTestEqUndef   IrBranchTest = "eqUndef"
+	IrTestEqNull    IrBranchTest = "eqNull"
 	IrTestTruthyNum IrBranchTest = "truthyNum"
 	IrTestTruthyStr IrBranchTest = "truthyStr"
 	IrTestIsNan     IrBranchTest = "isNan"
@@ -820,7 +863,8 @@ func StmtWire(s IrStatement) string {
 		operand = fmt.Sprintf(`,"onB":%d`, s.OnB)
 	} else if s.Test == IrTestEqSeq && s.Points != nil {
 		operand = fmt.Sprintf(`,"t":%s`, EncodeTuple(s.Points))
-	} else if s.Test != IrTestDefined && s.Test != IrTestTruthyNum &&
+	} else if s.Test != IrTestDefined && s.Test != IrTestEqUndef &&
+		s.Test != IrTestEqNull && s.Test != IrTestTruthyNum &&
 		s.Test != IrTestTruthyStr && s.Test != IrTestIsNan && s.W != nil {
 		operand = fmt.Sprintf(`,"w":%s`, marshalWireValue(WireNumberOf(*s.W)))
 	}

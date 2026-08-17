@@ -54,7 +54,7 @@ func RecordAssignmentOf(context *LoweringContext, statement *ast.Node) ([]Assign
 			if !found {
 				return nil, false
 			}
-			out = append(out, AssignmentTarget{Target: leaf.Index, Effect: varEffect(from)})
+			out = append(out, AssignmentTarget{Target: leaf.Index, Effect: varStateEffect(from)})
 		}
 		return out, true
 	}
@@ -81,7 +81,7 @@ func RecordAssignmentOf(context *LoweringContext, statement *ast.Node) ([]Assign
 			if !effectOk {
 				return nil, false
 			}
-			out = append(out, AssignmentTarget{Target: slot, Effect: effect})
+			out = append(out, AssignmentTarget{Target: slot, Effect: asVarStateEffect(effect)})
 		}
 		return out, true
 	}

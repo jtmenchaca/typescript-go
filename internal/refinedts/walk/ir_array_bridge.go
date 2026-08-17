@@ -190,11 +190,12 @@ func bridgedElementsOf(collection MapLocal, view string) []*ast.Node {
 }
 
 // bridgedDeclarationAssignmentsOf is the BRIDGE's lowering: `const a =
-// [...m.values()]` writes `a.len := var m.size` and `a.elem := var
-// m.vals` (or `var m.keys` for a `keys()` bridge). Two ordinary slot
-// reads — the array's slots hold exactly what the collection's held, so
-// every later `a.length`, `a[i]`, `a.push(v)` and for-of over `a` reads
-// the same shapes it would over a literal-built array.
+// [...m.values()]` writes `a.len := a verbatim copy of m.size` and
+// `a.elem := a verbatim copy of m.vals` (or of `m.keys` for a `keys()`
+// bridge). Two whole-state copies — the array's slots hold exactly what
+// the collection's held, so every later `a.length`, `a[i]`, `a.push(v)`
+// and for-of over `a` reads the same shapes it would over a
+// literal-built array.
 //
 // The syntax alone decides here, as everywhere in the lowering: the
 // recognizer's admission is already recorded in the slot vector, so the
@@ -232,7 +233,7 @@ func bridgedDeclarationAssignmentsOf(context *LoweringContext, declaration *ast.
 		return nil, false
 	}
 	return []AssignmentTarget{
-		{Target: lenSlot, Effect: varEffect(sizeSlot)},
-		{Target: elemSlot, Effect: varEffect(elementSource)},
+		{Target: lenSlot, Effect: varStateEffect(sizeSlot)},
+		{Target: elemSlot, Effect: varStateEffect(elementSource)},
 	}, true
 }

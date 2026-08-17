@@ -47,6 +47,7 @@ const (
 	KindBigints           Kind = "bigints"
 	KindRegex             Kind = "regex"
 	KindUndef             Kind = "undef"
+	KindNull              Kind = "null"
 	KindNaN               Kind = "nan"
 	KindPossiblyUndefined Kind = "possiblyUndefined"
 	KindPossiblyNaN       Kind = "possiblyNaN"
@@ -60,6 +61,28 @@ type Flavor string
 const (
 	FlavorMap Flavor = "map"
 	FlavorSet Flavor = "set"
+)
+
+// AbsentFlavor is which absent admission a "possiblyUndefined" wrapper's
+// OWN absent side carries — never a claim about Inner (Inner already
+// says everything about the present side, and a wrapper around Null
+// already says "null or undefined" through Inner, not through this
+// field). The zero value, AbsentFlavorConflated, is the "either
+// admission" reading every existing wrapper carries today — so every
+// call site and every reader that does not know about flavors keeps
+// today's exact behavior with no edit.
+type AbsentFlavor string
+
+const (
+	// AbsentFlavorConflated is the zero value: the wrapper's absent side
+	// admits BOTH undefined and null, same as before this field existed.
+	AbsentFlavorConflated AbsentFlavor = ""
+	// AbsentFlavorUndefOnly: the wrapper's absent side is exactly
+	// undefined — null is not admitted.
+	AbsentFlavorUndefOnly AbsentFlavor = "undefOnly"
+	// AbsentFlavorNullOnly: the wrapper's absent side is exactly null —
+	// undefined is not admitted.
+	AbsentFlavorNullOnly AbsentFlavor = "nullOnly"
 )
 
 // Measures is the sequence MEASURES the value provably wears — parse-
@@ -230,6 +253,12 @@ type AbstractValue struct {
 	// value is absent, never mere not-proved-present.
 	ProvedAbsent bool
 
+	// "possiblyUndefined": which admission the wrapper's OWN absent side
+	// carries — AbsentFlavorConflated (the zero value) means "either
+	// undefined or null", matching every wrapper built before this field
+	// existed. See AbsentFlavor's doc for the full rule.
+	AbsentSide AbsentFlavor
+
 	// "kindUnion": the sort-distinguished arms.
 	Arms []AbstractValue
 
@@ -297,6 +326,12 @@ func PossiblyNaN(inner AbstractValue) AbstractValue {
 // Undef is UNDEF in the TS source.
 var Undef = AbstractValue{Kind: KindUndef}
 
+// Null is the exactly-null admission the Lean kernel's AbsentMark split
+// carries as its own flavor, distinct from KindUndef (exactly-undefined).
+// Mirrors Undef's own construction — a bare, kind-only value with no
+// carried fields.
+var Null = AbstractValue{Kind: KindNull}
+
 // NaNValue is NAN in the TS source (renamed: NAN collides with nothing
 // in Go, but the exported identifier NAN would be ALL_CAPS-only, unusual
 // among this package's names; NaNValue keeps the connection to the TS
@@ -334,10 +369,61 @@ var ObjectPrototypeFunctionKeys = map[string]bool{
 //
 // hasWrapperGrade takes the place of TS's `wrapperGrade?: TrustLevel`
 // being omitted at the call site.
+//
+// Delegates to PossiblyAbsent with AbsentFlavorConflated — every
+// existing caller (none of which knows about flavors) keeps building
+// today's "either admission" wrapper exactly as before.
 func PossiblyUndefined(inner AbstractValue, wrapperGrade TrustLevel, hasWrapperGrade bool, provedAbsent bool) AbstractValue {
+	return PossiblyAbsent(inner, AbsentFlavorConflated, wrapperGrade, hasWrapperGrade, provedAbsent)
+}
+
+// PossiblyAbsent is the flavor-carrying twin of PossiblyUndefined: the
+// same maybe wrapper, but flavor states which admission the wrapper's
+// OWN absent side carries (AbsentFlavorConflated — the zero value —
+// reproduces PossiblyUndefined exactly). A new constructor rather than
+// a widened PossiblyUndefined signature, per the package's convention:
+// every existing call site keeps compiling unchanged, and only a
+// caller that has proved a single flavor reaches for this one.
+//
+// Normalization, in order:
+//   - wrapping KindUndef always collapses to the bare Undef — the
+//     flavor is a fact about the WRAPPER's absent contribution, and
+//     Undef already IS the exact-undefined value with nothing left to
+//     wrap.
+//   - wrapping KindNull with a flavor that still admits undefined
+//     (conflated or UndefOnly) is the existing Inner=Null wrapper,
+//     which already states "null or undefined" through Inner alone —
+//     the wrapper's OWN side collapses to conflated (there is nothing
+//     left for a separate flavor tag to add: the undefined admission
+//     already reads off Inner, not off this field).
+//   - wrapping KindNull with AbsentFlavorNullOnly would claim "null,
+//     or null" — exactly Null itself, so it collapses to the bare
+//     Null value with no wrapper at all.
+//   - wrapping an existing KindPossiblyUndefined never nests; the
+//     inner wrapper's own flavor stands (a second flavor claim about
+//     the same wrapper's absent side is not this constructor's call to
+//     make — the caller narrowing an already-built wrapper reaches for
+//     a narrowing operation, not a re-wrap).
+func PossiblyAbsent(inner AbstractValue, flavor AbsentFlavor, wrapperGrade TrustLevel, hasWrapperGrade bool, provedAbsent bool) AbstractValue {
 	if inner.Kind == KindUndef {
 		return Undef
 	}
+	if inner.Kind == KindNull {
+		if flavor == AbsentFlavorNullOnly {
+			// "null, or null" is just null — no wrapper needed
+			return Null
+		}
+		// conflated or UndefOnly: the undefined admission already reads
+		// through Inner=Null (PossiblyUndefined(Null)'s own established
+		// meaning), so the wrapper's own side carries nothing further
+		flavor = AbsentFlavorConflated
+	}
+	// PossiblyUndefined(Null) admits BOTH null (the inner value) and
+	// undefined (what the wrapper itself contributes) — and the wrapper
+	// with Inner = Null states EXACTLY that, so it does NOT collapse:
+	// collapsing to the bare Undef would let a flavored consumer (the
+	// comparison tables) decide `=== undefined` true of a value that
+	// may be null. The wrapper form keeps both admissions visible.
 	if inner.Kind == KindPossiblyUndefined {
 		if provedAbsent && !inner.ProvedAbsent {
 			out := inner
@@ -353,7 +439,7 @@ func PossiblyUndefined(inner AbstractValue, wrapperGrade TrustLevel, hasWrapperG
 		grade = MinTrustLevel(wrapperGrade, TrustLevelOf(inner))
 	}
 	innerCopy := inner
-	out := AbstractValue{Kind: KindPossiblyUndefined, Inner: &innerCopy, ProvedAbsent: provedAbsent}
+	out := AbstractValue{Kind: KindPossiblyUndefined, Inner: &innerCopy, ProvedAbsent: provedAbsent, AbsentSide: flavor}
 	if grade != TrustProved {
 		out.Grade = grade
 	}

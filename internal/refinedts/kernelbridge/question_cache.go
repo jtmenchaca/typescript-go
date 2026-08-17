@@ -415,6 +415,7 @@ func AskCached(key string, compute func() (string, error)) (string, error) {
 	if held, ok := lookupQuestionCache(key); ok {
 		tracing.Count("kernel.cacheHit", 0)
 		TraceQuestionLine(fmt.Sprintf("kernel cachehit %s", firstLine(key)))
+		traceKernelCacheHit(opOfCacheKey(key), key, held.Ok)
 		if held.IsError {
 			return "", fmt.Errorf("%s", held.Err)
 		}
@@ -486,4 +487,15 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// opOfCacheKey recovers the question name from a cache key — ask1/ask2
+// (ask_kernel.go) build every key as "op\x00therest", so a cache hit
+// (which never reaches the timed/traceKernelQuestion seam) can still
+// report which question it answered without asking the kernel.
+func opOfCacheKey(key string) string {
+	if i := strings.IndexByte(key, '\x00'); i != -1 {
+		return key[:i]
+	}
+	return key
 }

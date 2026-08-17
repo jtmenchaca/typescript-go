@@ -59,6 +59,8 @@ func NarrowKnown(k AbstractValue, forms []refinementsets.Refinement) AbstractVal
 		return narrowedSet(refinementsets.FoldRayForms(combined), TrustLevelOf(k))
 	case KindUndef:
 		return k // a set claim on the absent value: a dead branch
+	case KindNull:
+		return k // a set claim on null: the same dead branch
 	case KindNaN:
 		// no comparison or equality holds on NaN: the guarded branch
 		// is unreachable, so keeping the fact is sound

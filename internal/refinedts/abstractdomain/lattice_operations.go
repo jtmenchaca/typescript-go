@@ -133,6 +133,9 @@ func Truthiness(k AbstractValue) (bool, bool) {
 		return false, true
 	case KindUndef:
 		return false, true
+	case KindNull:
+		// sec-toboolean: null is one of the seven falsy values
+		return false, true
 	case KindKindUnion:
 		// decided only when EVERY arm agrees. A kindUnion with zero arms
 		// does not occur in practice (KindUnionOf collapses that case to
@@ -247,10 +250,12 @@ func SameKnown(a, b AbstractValue) bool {
 		return true
 	case KindUndef:
 		return true
+	case KindNull:
+		return true
 	case KindNaN:
 		return true
 	case KindPossiblyUndefined:
-		return SameKnown(*a.Inner, *b.Inner)
+		return a.AbsentSide == b.AbsentSide && SameKnown(*a.Inner, *b.Inner)
 	case KindPromise:
 		return SameKnown(*a.Inner, *b.Inner)
 	case KindPossiblyNaN:
@@ -411,12 +416,39 @@ func SetOfKnown(k AbstractValue) (refinementsets.RefinedSet, bool) {
 			set = refinementsets.MakeRefinedSet(refinementsets.Star(set))
 		}
 		return set, true
-	case KindUndef, KindPossiblyUndefined, KindPossiblyNaN, KindSymbol,
-		KindHostFunction, KindBigints, KindRegex, KindKindUnion:
-		// absence, NaN, symbols, functions, bigints leave ℝ̄; a sort
-		// union has no ONE set — its arms would reread each other's
-		// words
+	case KindUndef, KindNull, KindPossiblyUndefined, KindPossiblyNaN, KindSymbol,
+		KindHostFunction, KindBigints, KindRegex:
+		// absence (undefined or null), NaN, symbols, functions, bigints
+		// leave ℝ̄
 		return refinementsets.RefinedSet{}, false
+	case KindKindUnion:
+		// a union of SAME-SORT value tuples denotes the union of its
+		// arms' sets — `"axis" | "item"` is the two-word set, `1 | 2`
+		// the two-number one. Arms of DIFFERENT sorts stay refused: a
+		// one-letter word and a number spell the same double, so one
+		// untagged set would let each arm read the other's members.
+		if len(k.Arms) == 0 {
+			return refinementsets.RefinedSet{}, false
+		}
+		tag := k.Arms[0].KindTag
+		var union *refinementsets.RefinedSet
+		for _, arm := range k.Arms {
+			if arm.Kind != KindValues || arm.KindTag != tag {
+				return refinementsets.RefinedSet{}, false
+			}
+			armSet, armOk := SetOfKnown(arm)
+			if !armOk {
+				return refinementsets.RefinedSet{}, false
+			}
+			if union == nil {
+				first := armSet
+				union = &first
+			} else {
+				combined := refinementsets.MakeRefinedSet(refinementsets.Union(*union, armSet))
+				union = &combined
+			}
+		}
+		return *union, true
 	case KindNaN:
 		return refinementsets.RefinedSet{}, false // NaN is not an element of ℝ̄ — no set holds it
 	case KindSet:
@@ -522,6 +554,45 @@ func stringWordSet(k AbstractValue) (refinementsets.RefinedSet, bool) {
 	return refinementsets.RefinedSet{}, false
 }
 
+// absentFlavorOf reads the AbsentFlavor a value's own absent side
+// carries, and whether the value HAS an absent side to carry at all
+// (ok=false for a plain present value — that side contributes no
+// absent admission to a join, so it must not enter joinAbsentFlavor,
+// whose own zero value already means something else: "either
+// admission").
+func absentFlavorOf(k AbstractValue) (flavor AbsentFlavor, ok bool) {
+	switch k.Kind {
+	case KindUndef:
+		return AbsentFlavorUndefOnly, true
+	case KindNull:
+		return AbsentFlavorNullOnly, true
+	case KindPossiblyUndefined:
+		return k.AbsentSide, true
+	default:
+		return AbsentFlavorConflated, false
+	}
+}
+
+// joinAbsentFlavor is the flavor lattice JoinKnown's wrapper-building
+// arms thread: the same flavor joined with itself stays that flavor,
+// UndefOnly joined with NullOnly (either order) is conflated — the
+// joined value's absent side may be either admission now. A side with
+// no absent side of its own (ok=false — a plain present value) does
+// not enter the join at all: the OTHER side's flavor is the whole
+// answer, since only one side is actually contributing an absence.
+func joinAbsentFlavor(a AbsentFlavor, aOK bool, b AbsentFlavor, bOK bool) AbsentFlavor {
+	if !aOK {
+		return b
+	}
+	if !bOK {
+		return a
+	}
+	if a == b {
+		return a
+	}
+	return AbsentFlavorConflated
+}
+
 // JoinKnown is joinKnown in the TS source: the looser of two facts
 // about one name — exact where both sides are known (the union form for
 // sets, key-wise for objects), unknown where either is.
@@ -531,15 +602,60 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 	if SameKnown(a, b) {
 		return AtTrustLevel(a, grade)
 	}
+	// null joined with undefined (either order): a branch that returns
+	// null and a branch that returns undefined join to "null, or
+	// undefined" — which is exactly the maybe wrapper around Null, so
+	// neither exact flavor is ever claimed. Must be checked BEFORE the
+	// plain KindUndef arms below, or the Null side would be wrapped as
+	// the value part of the wrong branch.
+	if (a.Kind == KindUndef && b.Kind == KindNull) || (a.Kind == KindNull && b.Kind == KindUndef) {
+		return AtTrustLevel(PossiblyAbsent(Null, AbsentFlavorConflated, "", false, false), grade)
+	}
 	// absence joins as the maybe wrapper — a branch returning undefined
 	// and a branch returning a value join to "that value, or absent".
 	// NO provenance bit here: the walk has not proved the undefined
-	// branch reachable, so the joined maybe is not a derived absence
+	// branch reachable, so the joined maybe is not a derived absence.
+	// The undef side alone pins the flavor UndefOnly, UNLESS the other
+	// side is itself a wrapper whose own absent side must join in too.
 	if a.Kind == KindUndef {
-		return AtTrustLevel(PossiblyUndefined(b, "", false, false), grade)
+		otherFlavor, otherOK := absentFlavorOf(b)
+		flavor := joinAbsentFlavor(AbsentFlavorUndefOnly, true, otherFlavor, otherOK)
+		inner := b
+		if b.Kind == KindPossiblyUndefined {
+			inner = *b.Inner
+		}
+		return AtTrustLevel(PossiblyAbsent(inner, flavor, "", false, false), grade)
 	}
 	if b.Kind == KindUndef {
-		return AtTrustLevel(PossiblyUndefined(a, "", false, false), grade)
+		otherFlavor, otherOK := absentFlavorOf(a)
+		flavor := joinAbsentFlavor(otherFlavor, otherOK, AbsentFlavorUndefOnly, true)
+		inner := a
+		if a.Kind == KindPossiblyUndefined {
+			inner = *a.Inner
+		}
+		return AtTrustLevel(PossiblyAbsent(inner, flavor, "", false, false), grade)
+	}
+	// null joins the same way as undefined does: a branch returning null
+	// and a branch returning a value join to "that value, or absent" —
+	// the wrapper's own absent side is exactly NullOnly, unless the
+	// other side is itself a wrapper whose flavor must join in too.
+	if a.Kind == KindNull {
+		otherFlavor, otherOK := absentFlavorOf(b)
+		flavor := joinAbsentFlavor(AbsentFlavorNullOnly, true, otherFlavor, otherOK)
+		inner := b
+		if b.Kind == KindPossiblyUndefined {
+			inner = *b.Inner
+		}
+		return AtTrustLevel(PossiblyAbsent(inner, flavor, "", false, false), grade)
+	}
+	if b.Kind == KindNull {
+		otherFlavor, otherOK := absentFlavorOf(a)
+		flavor := joinAbsentFlavor(otherFlavor, otherOK, AbsentFlavorNullOnly, true)
+		inner := a
+		if a.Kind == KindPossiblyUndefined {
+			inner = *a.Inner
+		}
+		return AtTrustLevel(PossiblyAbsent(inner, flavor, "", false, false), grade)
 	}
 	// NaN joins the same way on its own wrapper
 	if a.Kind == KindNaN {
@@ -572,8 +688,16 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 		// keeps the joined value provably maybe-absent
 		proved := (a.Kind == KindPossiblyUndefined && a.ProvedAbsent) ||
 			(b.Kind == KindPossiblyUndefined && b.ProvedAbsent)
+		// the flavor lattice: a side that is not itself a wrapper
+		// contributes no absent side of its own (its whole claim is
+		// PRESENT knowledge — the OTHER side's flavor is the join's
+		// whole answer); where both sides are wrappers, their own
+		// flavors join per joinAbsentFlavor
+		aFlavor, aOK := absentFlavorOf(a)
+		bFlavor, bOK := absentFlavorOf(b)
+		flavor := joinAbsentFlavor(aFlavor, aOK, bFlavor, bOK)
 		return AtTrustLevel(
-			PossiblyUndefined(JoinKnown(innerA, innerB), "", false, proved),
+			PossiblyAbsent(JoinKnown(innerA, innerB), flavor, "", false, proved),
 			grade,
 		)
 	}
@@ -908,6 +1032,15 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 	if !leftOK || !rightOK {
 		return Unknown
 	}
+	// canonical SPELLING first (CanonicalScalarForms — a structural
+	// equality, never an approximation): a meet-concatenated side wears
+	// duplicate conjuncts and vacuous ±inf bounds that blind the run
+	// collapse below, and a blinded collapse stacks a union form per
+	// walk pass — the same unbounded growth the collapse exists to
+	// stop, resurfacing one spelling away (createCategoricalInverse.ts
+	// hung a kernel invariant ask on exactly that stack)
+	left = refinementsets.CanonicalScalarForms(left)
+	right = refinementsets.CanonicalScalarForms(right)
 	// measures both sides share survive the join: the runtime value
 	// came through one arm or the other, and each arm wore them
 	var sharedMeasures *Measures
@@ -968,7 +1101,10 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 		}
 	}
 	return KnownWithMeasures(
-		KnownSet(refinementsets.MakeRefinedSet(refinementsets.Union(left, right)), nil, grade, SetKindTagNone),
+		KnownSet(
+			refinementsets.CanonicalScalarForms(
+				refinementsets.MakeRefinedSet(refinementsets.Union(left, right))),
+			nil, grade, SetKindTagNone),
 		sharedMeasures,
 	)
 }

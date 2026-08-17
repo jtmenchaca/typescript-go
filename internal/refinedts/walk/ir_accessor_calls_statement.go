@@ -75,9 +75,12 @@ func accessorCallStatement(
 		rets[shape.RetIndex] = target
 	}
 	// the setter's one declared parameter is entry 0 — the layout puts
-	// declared parameters first and bundle entries after
+	// declared parameters first and bundle entries after. `value` may be
+	// a bare copy or a compound effect (setterValueEffect's own RhsEffect
+	// read); either way this is the WHOLE entry-0 arg, never an operand,
+	// so a bare copy upgrades to the whole-state read here.
 	if value != nil {
-		args[0] = *value
+		args[0] = asVarStateEffect(*value)
 	}
 	for _, entry := range shape.BundleEntries {
 		if entry.Index < 0 || entry.Index >= len(args) {
@@ -96,7 +99,7 @@ func accessorCallStatement(
 			args[entry.Index] = unknownEffect
 			continue
 		}
-		args[entry.Index] = varEffect(slot)
+		args[entry.Index] = varStateEffect(slot)
 		if entry.Written && entry.Index < len(rets) {
 			rets[entry.Index] = slot
 		}

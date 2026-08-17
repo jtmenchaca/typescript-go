@@ -428,6 +428,76 @@ func TestPromiseConstruction_AnEscapingResolveDeclines(t *testing.T) {
 	}
 }
 
+/* ── Promise.withResolvers ───────────────────────────────────────── */
+
+// TestPromiseWithResolvers_TheDestructuredResolveCallFillsThePromise
+// pins c-reads-and-values.ts's promiseWithResolvers row's destructured
+// half: `const { promise, resolve } = Promise.withResolvers<number>();
+// resolve(40); await promise` must read exactly 40 — before the fix,
+// resolve/reject were bound as bare abstractdomain.HostFunction values
+// with nothing pairing them to their own promise binding, so a later
+// resolve(40) call reached no model at all (readUnmodeledMethod's
+// generic fallback) and `promise` stayed the walk's own residue
+// forever.
+func TestPromiseWithResolvers_TheDestructuredResolveCallFillsThePromise(t *testing.T) {
+	kernel := yieldContractKernel(t)
+	source := "async function caller(): Promise<number> {\n" +
+		"  const { promise, resolve } = Promise.withResolvers<number>();\n" +
+		"  resolve(40);\n" +
+		"  return await promise;\n" +
+		"}\n"
+	contract, ctx, diagnostics := yieldContractOf(t, source, "caller")
+	ctx.Kernel = kernel
+	SetEngineKernel(kernel)
+
+	var sink []abstractdomain.AbstractValue
+	ctx.ReturnSink = &sink
+	AnalyzeFunction(ctx, contract, nil)
+	if len(sink) == 0 {
+		t.Fatalf("caller's body recorded no return value")
+	}
+	returned := JoinSinkSummarized(sink)
+	if !valuesHold(returned, 40) {
+		t.Errorf("resolve(40) then await promise determined %+v, want exactly 40", returned)
+	}
+	if len(*diagnostics) != 0 {
+		t.Errorf("an in-range withResolvers round trip reported %d diagnostics, want 0: %+v", len(*diagnostics), *diagnostics)
+	}
+}
+
+// TestPromiseWithResolvers_ThePropertyFormResolveCallFillsThePromise
+// is the same row's property-form half: `const over =
+// Promise.withResolvers<number>(); over.resolve(200); await
+// over.promise` — the whole capability kept as ONE binding, so the
+// write lands on that binding's own "promise" key directly
+// (readPromiseWithResolversPropertyCall) rather than through the
+// ResolverTargets pairing the destructured form needs.
+func TestPromiseWithResolvers_ThePropertyFormResolveCallFillsThePromise(t *testing.T) {
+	kernel := yieldContractKernel(t)
+	source := "async function caller(): Promise<number> {\n" +
+		"  const over = Promise.withResolvers<number>();\n" +
+		"  over.resolve(200);\n" +
+		"  return await over.promise;\n" +
+		"}\n"
+	contract, ctx, diagnostics := yieldContractOf(t, source, "caller")
+	ctx.Kernel = kernel
+	SetEngineKernel(kernel)
+
+	var sink []abstractdomain.AbstractValue
+	ctx.ReturnSink = &sink
+	AnalyzeFunction(ctx, contract, nil)
+	if len(sink) == 0 {
+		t.Fatalf("caller's body recorded no return value")
+	}
+	returned := JoinSinkSummarized(sink)
+	if !valuesHold(returned, 200) {
+		t.Errorf("over.resolve(200) then await over.promise determined %+v, want exactly 200", returned)
+	}
+	if len(*diagnostics) != 0 {
+		t.Errorf("an in-range withResolvers round trip reported %d diagnostics, want 0: %+v", len(*diagnostics), *diagnostics)
+	}
+}
+
 /* ── the resolve-call scan, parser only ──────────────────────────── */
 
 // promiseShapesArrow parses a throwaway source and answers its first

@@ -38,6 +38,8 @@ func summaryConstructorPrelude(
 				effect, lowered := RhsEffect(context, context.Sorts[slot], property.Initializer)
 				if !lowered {
 					effect = kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}
+				} else {
+					effect = asVarStateEffect(effect)
 				}
 				constructorPrelude = append(constructorPrelude, kernelbridge.IrStatement{
 					Kind: kernelbridge.IrStatementAssign, Target: slot, Effect: effect,
@@ -74,7 +76,7 @@ func summaryConstructorPrelude(
 			}
 			effect := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectUnknown}
 			if paramSlot, hasParam := slotIndexOfName(context, pd.Name().Text()); hasParam {
-				effect = kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: paramSlot}
+				effect = varStateEffect(paramSlot)
 			}
 			constructorPrelude = append(constructorPrelude, kernelbridge.IrStatement{
 				Kind: kernelbridge.IrStatementAssign, Target: fieldSlot, Effect: effect,

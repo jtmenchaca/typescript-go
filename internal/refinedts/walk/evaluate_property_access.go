@@ -92,7 +92,7 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 	// evaluation, sidesteps that entirely; a receiver that does NOT
 	// name a class declaration answers nil here and falls through
 	// unchanged.
-	if staticField := ReadStaticFieldAccess(ctx, e); staticField != nil {
+	if staticField := ReadStaticFieldAccess(ctx, env, e); staticField != nil {
 		return meetHeldPlaceEntry(ctx.P.Checker, env, e, staticField)
 	}
 	// `this.key` and a known object's key each answer off the receiver,
@@ -146,6 +146,19 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 				out := silence.Residue()
 				return &out
 			}
+			// a SORT UNION of same-sort word values (`"insideStart" |
+			// "insideEnd" | "end"` read off a declared annotation) denotes
+			// one set — SetOfKnown's union fold — and that set is exactly
+			// what the word-list arm below reads. Without the fold the
+			// union kind matched no arm and a three-word value's `.length`
+			// answered nothing while the same value as a KindSet answered
+			// {11, 9, 3} (e-568's orNarrowedBranchCall row).
+			if receiver.Kind == abstractdomain.KindKindUnion &&
+				(primitives.IsStringKind(ctx.P.Checker, pa.Expression) || unionOfWordValues(receiver)) {
+				if folded, foldedOk := abstractdomain.SetOfKnown(receiver); foldedOk {
+					receiver = abstractdomain.KnownSet(folded, nil, abstractdomain.TrustLevelOf(receiver), abstractdomain.SetKindTagNone)
+				}
+			}
 			if receiver.Kind == abstractdomain.KindValues {
 				// a string's `.length` counts UTF-16 code units, not scalar
 				// values — exact for a known tuple: each astral scalar is two
@@ -187,6 +200,30 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 				return &out
 			}
 			if receiver.Kind == abstractdomain.KindSet && receiver.SetKindTag == abstractdomain.SetKindTagNone {
+				// a finite word list (a string-union type: "left" | "right" |
+				// "middle") is a union of exact string tuples, never a
+				// Repetition — AsRepetition below declines it outright. Read
+				// each word's own UTF-16 length (sec-properties-of-string-
+				// instances-length + sec-ecmascript-language-types-string-
+				// type, tmp/ecma262/spec.html — a String value is a finite
+				// ordered sequence of UTF-16 code units, and .length is the
+				// count of those elements) and answer the exact SET of
+				// lengths one arm at a time, trust carried from the receiver.
+				// WordTuplesOfConjunction, not WordTuplesOf: a summary-served
+				// word value arrives MET with its declared return type — two
+				// conjoined forms — and any one conjunct's finite word list
+				// soundly over-approximates the members (its own comment)
+				if words, ok := refinementsets.WordTuplesOfConjunction(receiver.Set); ok && len(words) > 0 {
+					lengths := make([]float64, len(words))
+					for i, w := range words {
+						lengths[i] = float64(refinementsets.Utf16LengthOf(w))
+					}
+					out := abstractdomain.KnownSet(
+						refinementsets.MakeRefinedSet(refinementsets.OneOf(lengths)),
+						nil, abstractdomain.TrustLevelOf(receiver), abstractdomain.SetKindTagNone,
+					)
+					return &out
+				}
 				// a difference's members are all members of its minuend, so the
 				// minuend's length window bounds every one of them — a pattern-
 				// narrowed string (`!/[%+]/.test(key)`) keeps its length read
@@ -265,6 +302,22 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 		return nil
 	}
 	return meetHeldPlaceEntry(ctx.P.Checker, env, e, nil)
+}
+
+// unionOfWordValues: every arm of a sort union is a WORD-tagged value
+// tuple — the reading that lets the `.length` fold run without asking
+// the checker (a summary-served value's expression may not type as a
+// string even when the value is exactly a word list).
+func unionOfWordValues(receiver abstractdomain.AbstractValue) bool {
+	if receiver.Kind != abstractdomain.KindKindUnion || len(receiver.Arms) == 0 {
+		return false
+	}
+	for _, arm := range receiver.Arms {
+		if arm.Kind != abstractdomain.KindValues || arm.KindTag != abstractdomain.PrimitiveString {
+			return false
+		}
+	}
+	return true
 }
 
 // ReadElementAccess is readElementAccess in the TS source.

@@ -123,12 +123,12 @@ func TestArraySlots_TheBridgeWritesTheLenFromTheSizeAndTheElemFromTheValues(t *t
 	if len(stmts) != 2 {
 		t.Fatalf("len(stmts) = %d, want 2 (len then elem)", len(stmts))
 	}
-	if stmts[0].Target != 3 || stmts[0].Effect.Kind != kernelbridge.LoopEffectVar || stmts[0].Effect.Index != 0 {
-		t.Errorf("len write = target %d, effect %+v, want target 3 (a.len) from a var of slot 0 (m.size)",
+	if stmts[0].Target != 3 || stmts[0].Effect.Kind != kernelbridge.LoopEffectVarState || stmts[0].Effect.Index != 0 {
+		t.Errorf("len write = target %d, effect %+v, want target 3 (a.len) from a verbatim copy of slot 0 (m.size)",
 			stmts[0].Target, stmts[0].Effect)
 	}
-	if stmts[1].Target != 4 || stmts[1].Effect.Kind != kernelbridge.LoopEffectVar || stmts[1].Effect.Index != 1 {
-		t.Errorf("elem write = target %d, effect %+v, want target 4 (a.elem) from a var of slot 1 (m.vals)",
+	if stmts[1].Target != 4 || stmts[1].Effect.Kind != kernelbridge.LoopEffectVarState || stmts[1].Effect.Index != 1 {
+		t.Errorf("elem write = target %d, effect %+v, want target 4 (a.elem) from a verbatim copy of slot 1 (m.vals)",
 			stmts[1].Target, stmts[1].Effect)
 	}
 	exit := kernel.Walk([]kernelbridge.KnownStateWire{
@@ -187,9 +187,9 @@ func TestArraySlots_ABridgedArrayReadsExactlyLikeALiteralOne(t *testing.T) {
 	if !ok {
 		t.Fatalf("LowerStatements over a bridged array ok = false, want true")
 	}
-	// n = a.length — the len slot's var
-	if stmts[2].Effect.Kind != kernelbridge.LoopEffectVar || stmts[2].Effect.Index != 3 {
-		t.Errorf("length read = %+v, want a var read of slot 3 (a.len)", stmts[2].Effect)
+	// n = a.length — a plain assignment copying the len slot verbatim
+	if stmts[2].Effect.Kind != kernelbridge.LoopEffectVarState || stmts[2].Effect.Index != 3 {
+		t.Errorf("length read = %+v, want a verbatim copy of slot 3 (a.len)", stmts[2].Effect)
 	}
 	// x = a[i] — the or-absent wrapping, nothing bounding i
 	if stmts[3].Effect.Kind != kernelbridge.LoopEffectOrAbsent {
@@ -210,9 +210,9 @@ func TestArraySlots_ABridgedArrayReadsExactlyLikeALiteralOne(t *testing.T) {
 	if guard.On != 5 || guard.OnB != 3 {
 		t.Errorf("branch slots = (%d, %d), want (5 = i, 3 = a.len)", guard.On, guard.OnB)
 	}
-	if len(guard.Then) != 1 || guard.Then[0].Effect.Kind != kernelbridge.LoopEffectVar ||
+	if len(guard.Then) != 1 || guard.Then[0].Effect.Kind != kernelbridge.LoopEffectVarState ||
 		guard.Then[0].Effect.Index != 4 {
-		t.Errorf("guarded read = %+v, want a plain var read of slot 4 (a.elem)", guard.Then)
+		t.Errorf("guarded read = %+v, want a verbatim copy of slot 4 (a.elem)", guard.Then)
 	}
 }
 

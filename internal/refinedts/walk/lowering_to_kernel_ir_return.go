@@ -92,12 +92,32 @@ func lowerReturnStatement(
 			return out, true
 		}
 		dropHoists()
+		// a SHORT-CIRCUIT- or TERNARY-shaped return takes the BRANCH
+		// route ahead of the plain effect grammar: the effect grammar's
+		// logical arm claims every `a && b` with either the operands'
+		// whole JOIN (sound, wider than the branch's per-arm narrowing)
+		// or a bare `unknown` — which lowered COMPLETE with no havoc
+		// name, so the serving rule answered that unknown as the call's
+		// own answer instead of declining to the walk route (Area.tsx's
+		// `return stroke && stroke !== 'none' ? stroke : fill`). The
+		// branch route narrows each arm under its own side and declines
+		// cleanly, so the effect grammar below stays the fallback.
+		if head := Unwrapped(rs.Expression); head != nil &&
+			(ast.IsConditionalExpression(head) ||
+				(ast.IsBinaryExpression(head) && isShortCircuitToken(head.AsBinaryExpression().OperatorToken.Kind))) {
+			if branched, ok := returnBranchStatements(context, rs.Expression, sort, raise); ok {
+				out = flush(out)
+				out = append(out, branched...)
+				return out, true
+			}
+			dropHoists()
+		}
 		effect, ok := RhsEffect(context, sort, rs.Expression)
 		if ok {
 			// `return this.a(this.b(x)) + 1`: the hoisted calls go out
 			// first, then the result write reads their temps
 			out = flush(out)
-			out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: effect})
+			out = append(out, kernelbridge.IrStatement{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: asVarStateEffect(effect)})
 			out = append(out, raise)
 			return out, true
 		}
@@ -140,7 +160,7 @@ func lowerReturnStatement(
 				out = append(out, kernelbridge.IrStatement{
 					Kind:   kernelbridge.IrStatementAssign,
 					Target: context.Result.Ret,
-					Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: inlined.RetIndex},
+					Effect: varStateEffect(inlined.RetIndex),
 				})
 				out = append(out, raise)
 				return out, true

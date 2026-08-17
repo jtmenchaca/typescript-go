@@ -45,7 +45,7 @@ func TestReadStaticFieldAccess_APlainStaticFieldAnswersItsInitializer(t *testing
 		return ast.IsIdentifier(pa.Expression) && pa.Expression.Text() == "Limits" &&
 			pa.Name() != nil && ast.IsIdentifier(pa.Name()) && pa.Name().Text() == "ceiling"
 	})
-	held := ReadStaticFieldAccess(ctx, access)
+	held := ReadStaticFieldAccess(ctx, NewEnv(), access)
 	if held == nil {
 		t.Fatalf("ReadStaticFieldAccess answered nil for a plain static field read")
 	}
@@ -79,7 +79,7 @@ func TestReadStaticFieldAccess_AStaticBlockWriteLandsOverTheInitializer(t *testi
 			!(node.Parent != nil && ast.IsBinaryExpression(node.Parent) &&
 				node.Parent.AsBinaryExpression().Left == node)
 	})
-	held := ReadStaticFieldAccess(ctx, access)
+	held := ReadStaticFieldAccess(ctx, NewEnv(), access)
 	if held == nil {
 		t.Fatalf("ReadStaticFieldAccess answered nil for a static field a static block writes")
 	}
@@ -110,7 +110,7 @@ func TestReadStaticFieldAccess_AStaticBlockWriteThroughThisAlsoLands(t *testing.
 		return ast.IsIdentifier(pa.Expression) && pa.Expression.Text() == "Counted" &&
 			pa.Name() != nil && ast.IsIdentifier(pa.Name()) && pa.Name().Text() == "total"
 	})
-	held := ReadStaticFieldAccess(ctx, access)
+	held := ReadStaticFieldAccess(ctx, NewEnv(), access)
 	if held == nil {
 		t.Fatalf("ReadStaticFieldAccess answered nil for a static field a `this`-spelled static-block write touches")
 	}

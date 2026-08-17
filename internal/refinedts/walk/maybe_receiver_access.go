@@ -20,7 +20,14 @@ func ReadThroughMaybeReceiver(
 		return &out
 	}
 	if receiver.Kind == abstractdomain.KindPossiblyUndefined {
-		out := abstractdomain.PossiblyUndefined(readPresent(*receiver.Inner), "", false, false)
+		// sec-optional-chaining-evaluation: "If baseValue is either
+		// undefined or null, then Return undefined" — the short-circuit
+		// answers EXACTLY undefined regardless of which one the receiver
+		// held, never null. The wrapper's own absent side is therefore
+		// UndefOnly, not the pre-flavor conflated claim (which would
+		// wrongly let a flavored consumer treat this result as possibly
+		// null).
+		out := abstractdomain.PossiblyAbsent(readPresent(*receiver.Inner), abstractdomain.AbsentFlavorUndefOnly, "", false, false)
 		return &out
 	}
 	return nil

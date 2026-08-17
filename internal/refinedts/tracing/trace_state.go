@@ -106,9 +106,6 @@ var recordsMu sync.Mutex
 
 var Flat = map[string]*TraceEntry{}
 
-// Active holds how many frames of each name are on the stack right
-// now — the recursion guard for inclusive time and for the tree.
-var Active = map[string]int{}
 var Counters = map[string]*TraceCounter{}
 
 type Frame struct {
@@ -120,30 +117,26 @@ type Frame struct {
 	Reentrant bool
 	TreeHeld  *TraceSpan
 	TreeDepth int
+	// scope is the goroutine-owned stack this frame was pushed onto, so
+	// Leave credits its elapsed to the frame that actually contained it
+	// rather than to whatever another goroutine had open (span_scope.go).
+	scope *spanScope
 }
-
-var Stack []*Frame
 
 /* ── the tree record ─────────────────────────────────────────────── */
 
-var (
-	Root        *TraceSpan
-	TreeCurrent *TraceSpan
-	TreeDepth   int
-)
+// Root is the tree's shared root. The CURSOR into the tree is
+// per-scope (spanScope.treeCurrent) rather than global — two workers
+// walking at once are at two different places in the tree, and one
+// shared cursor made each worker's Enter reparent the other's nodes.
+var Root *TraceSpan
 
-// SetRoot and SetTreeCurrent are called by TraceStop, outside
-// Enter/Leave's own locking, so each takes recordsMu itself.
+// SetRoot is called by TraceStop, outside Enter/Leave's own locking,
+// so it takes recordsMu itself.
 func SetRoot(value *TraceSpan) {
 	recordsMu.Lock()
 	defer recordsMu.Unlock()
 	Root = value
-}
-
-func SetTreeCurrent(value *TraceSpan) {
-	recordsMu.Lock()
-	defer recordsMu.Unlock()
-	TreeCurrent = value
 }
 
 // GetRoot reads Root under the same lock Enter/Leave/ResetRecords use
@@ -195,6 +188,21 @@ var RunStartedAt time.Time
 // own overhead.
 var ClockReads int64
 
+// ScopeReads counts goroutine-identity reads — one per Enter, to find
+// which goroutine's span stack the frame belongs on. Priced separately
+// from ClockReads in the report because it costs ~100x a clock read.
+var ScopeReads int64
+
+// negativeSelf counts frames whose elapsed came out below their own
+// children's — impossible once child time is only ever charged within
+// one goroutine's stack. The report prints it when non-zero, so the
+// accounting says when it has broken rather than quietly flooring.
+var negativeSelf atomic.Int64
+
+// NegativeSelfCount is how many frames closed with children longer than
+// themselves. Zero on a sound run.
+func NegativeSelfCount() int64 { return negativeSelf.Load() }
+
 // AddClockReads takes recordsMu itself: Clock() in tracing.go calls it
 // standalone, not from inside an Enter/Leave critical section.
 func AddClockReads(n int64) {
@@ -207,81 +215,73 @@ func msSince(t time.Time) float64 {
 	return float64(time.Since(t)) / float64(time.Millisecond)
 }
 
-// Enter takes recordsMu for its whole body: the stack push, the
-// active-count bump, and the tree-node open are one bookkeeping step
-// that must not interleave with another goroutine's Enter/Leave.
+// Enter pushes a frame onto THIS goroutine's own span stack. The
+// nesting bookkeeping (which frame is my parent, is a frame of my name
+// already open above me, where am I in the tree) is per-goroutine, so
+// it lives in spanScope; only the shared records — ClockReads, the tree
+// nodes — take recordsMu.
+//
+// Enter finds its scope by goroutine identity, which costs ~3 us here
+// against the ~30 ns of bookkeeping around it. That is paid on purpose:
+// a shared stack attributed child time across workers, which is what
+// printed negative self time, and a table nobody can trust is worth
+// less than 1.7% of a traced wall (the measured share at this corpus's
+// span counts). Leave pays nothing — it reads the scope back off the
+// frame. ScopeReads carries the count so the report prices it beside
+// the clock reads.
 func Enter(name string, grain Grain) *Frame {
+	scope := currentScope()
+
 	recordsMu.Lock()
-	defer recordsMu.Unlock()
-	already := Active[name]
-	Active[name] = already + 1
-	var treeHeld *TraceSpan
-	if already == 0 && grain != GrainNode && TreeCurrent != nil &&
-		TreeDepth < treeDepthCap {
-		children := treeChildren[TreeCurrent]
-		if children == nil {
-			children = map[string]*TraceSpan{}
-			treeChildren[TreeCurrent] = children
-		}
-		mine := children[name]
-		if mine == nil {
-			mine = &TraceSpan{Name: name}
-			children[name] = mine
-			TreeCurrent.Children = append(TreeCurrent.Children, mine)
-		}
-		treeHeld = TreeCurrent
-		TreeCurrent = mine
-		TreeDepth++
-	}
 	ClockReads++
-	frame := &Frame{
-		Name:      name,
-		StartedAt: time.Now(),
-		Reentrant: already > 0,
-		TreeHeld:  treeHeld,
-		TreeDepth: TreeDepth,
-	}
-	Stack = append(Stack, frame)
+	ScopeReads++
+	recordsMu.Unlock()
+
+	frame := scope.enterScope(name, grain)
+	frame.StartedAt = time.Now()
 	return frame
 }
 
-// Leave takes recordsMu for its whole body, mirroring Enter — the
-// stack pop, the flat-entry update, and the tree-node close are one
-// step.
+// Leave closes a frame against the scope it was opened on. Self time
+// is elapsed minus the time this frame's OWN children took, which is
+// non-negative by construction: leaveScope only ever credits a child's
+// elapsed to the frame directly beneath it on the same goroutine's
+// stack, and a child's elapsed is bounded by its parent's because the
+// parent's clock started first and stops later.
 func Leave(frame *Frame, grain Grain) {
+	elapsed := msSince(frame.StartedAt)
+	scope := frame.scope
+	if scope == nil {
+		scope = currentScope()
+	}
+	scope.leaveScope(frame, elapsed)
+
+	// Self time is non-negative BY CONSTRUCTION now: a frame is only
+	// ever charged child time by frames directly above it on its own
+	// goroutine's stack, and those ran strictly inside it. The floor is
+	// kept as an assertion rather than a repair — NegativeSelf counts
+	// any time it fires, and a non-zero count in the report means the
+	// nesting model is wrong again, not that a row needed rounding.
+	self := elapsed - frame.ChildMs
+	if self < 0 {
+		self = 0
+		negativeSelf.Add(1)
+	}
+
 	recordsMu.Lock()
 	defer recordsMu.Unlock()
 	ClockReads++
-	elapsed := msSince(frame.StartedAt)
-	Stack = Stack[:len(Stack)-1]
-	if len(Stack) > 0 {
-		Stack[len(Stack)-1].ChildMs += elapsed
-	}
-
-	remaining := Active[frame.Name] - 1
-	if remaining == 0 {
-		delete(Active, frame.Name)
-	} else {
-		Active[frame.Name] = remaining
-	}
-
 	entry := Flat[frame.Name]
 	if entry == nil {
 		entry = &TraceEntry{Name: frame.Name, Grain: grain}
 		Flat[frame.Name] = entry
 	}
 	entry.Calls++
-	entry.SelfMs += elapsed - frame.ChildMs
+	entry.SelfMs += self
 	// inclusive time counts the OUTERMOST entry only, so a recursive
 	// span does not multiply its own total
 	if !frame.Reentrant {
 		entry.TotalMs += elapsed
-	}
-
-	if frame.TreeHeld != nil && TreeCurrent != nil {
-		TreeCurrent.TotalMs += elapsed
-		TreeCurrent = frame.TreeHeld
-		TreeDepth--
 	}
 }
 
@@ -292,18 +292,19 @@ func Leave(frame *Frame, grain Grain) {
 func ResetRecords() {
 	recordsMu.Lock()
 	Flat = map[string]*TraceEntry{}
-	Active = map[string]int{}
 	Counters = map[string]*TraceCounter{}
-	Stack = Stack[:0]
 	FileMs = map[string]float64{}
 	FileOrder = FileOrder[:0]
 	ClockReads = 0
+	ScopeReads = 0
+	negativeSelf.Store(0)
 	treeChildren = map[*TraceSpan]map[string]*TraceSpan{}
 	Root = &TraceSpan{Name: "check"}
-	TreeCurrent = Root
-	TreeDepth = 0
 	RunStartedAt = time.Now()
 	recordsMu.Unlock()
+	// the span stacks and tree cursors are per-goroutine, so a fresh
+	// trace drops them rather than rewinding one shared stack
+	resetScopes()
 	ClearFileDetails()
 	ClearSummaryOutcomes()
 }

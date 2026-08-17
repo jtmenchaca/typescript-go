@@ -54,9 +54,10 @@
 //     → an ARRAY local bridged onto these slots (ir_array_slots.go).
 //   - `const n = new Map(m)` / `const t = new Set(s)` over an
 //     already-flattened sibling of the SAME kind → a COPY: the new
-//     collection's slots take the sibling's, read var for var. The two
-//     hold the same values, so they wear the same sorts, and every
-//     reader treats the copy exactly as it treats a seeded collection.
+//     collection's slots take the sibling's, verbatim, whole-state for
+//     whole-state. The two hold the same values, so they wear the same
+//     sorts, and every reader treats the copy exactly as it treats a
+//     seeded collection.
 //   - `const u = a.union(b)` / `.intersection(b)` / `.difference(b)` /
 //     `.symmetricDifference(b)` over two already-flattened Set siblings
 //     → a PRODUCER: size := unknown (duplicates between the operands are

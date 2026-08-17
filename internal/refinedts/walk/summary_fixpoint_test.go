@@ -114,12 +114,13 @@ func TestRetStateOf_ARefusedApplyProposesNothing(t *testing.T) {
 func TestJoinStates_UnionsTheSetsAndRaisesEitherSidesFlags(t *testing.T) {
 	a := scalarState(1)
 	b := scalarState(2)
-	b.Absent = true
+	b.Undef = true
+	b.Null = true
 	joined := joinStates(a, b)
 	if joined.Top {
 		t.Fatalf("the join went to top")
 	}
-	if !joined.Absent {
+	if !joined.Undef || !joined.Null {
 		t.Errorf("absent did not ride along; either side raising it raises the join")
 	}
 	if joined.Nan {
@@ -213,7 +214,8 @@ func TestCertifyConstant_AnUncoveredAbsentFlagFailsBeforeTheSubsetAsk(t *testing
 	seedSummaryShape(t, declaration, shape)
 	asked := 0
 	answered := scalarState(1)
-	answered.Absent = true
+	answered.Undef = true
+	answered.Null = true
 	withFixpointSeams(t, fixpointSeams{
 		Build: func(arity int, retIndex int, set kernelbridge.KnownStateWire) (kernelbridge.SummaryBlob, bool) {
 			return "const-blob", true

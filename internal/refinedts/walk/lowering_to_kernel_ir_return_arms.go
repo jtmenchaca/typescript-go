@@ -49,7 +49,7 @@ func returnValueStatements(
 	// the arm's value where the effect grammar spells it — `0`, `'unknown'`,
 	// a tracked name, an arithmetic or concatenation of them
 	if effect, ok := RhsEffect(context, sort, arm); ok {
-		return assign(effect), true
+		return assign(asVarStateEffect(effect)), true
 	}
 	head := Unwrapped(arm)
 	// a NESTED ternary or short circuit — nest's `result instanceof Promise
@@ -76,7 +76,7 @@ func returnValueStatements(
 			out = append(out, kernelbridge.IrStatement{
 				Kind:   kernelbridge.IrStatementAssign,
 				Target: context.Result.Ret,
-				Effect: varEffect(inlined.RetIndex),
+				Effect: varStateEffect(inlined.RetIndex),
 			})
 			return append(out, raise), true
 		}

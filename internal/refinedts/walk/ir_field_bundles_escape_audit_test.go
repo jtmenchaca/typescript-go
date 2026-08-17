@@ -264,13 +264,23 @@ func TestEscapeAudit_TheReceiverSpread(t *testing.T) {
 	}
 }
 
-// an UNDECLARED member read: no slot holds it, so answering it from a
-// slot would answer some other field's state
+// an UNDECLARED member read: no slot holds it — the spelling a GET
+// ACCESSOR is read by. The census DEFERS it (AccessorReads) instead of
+// escaping, and the protection moves to Believable: every consumer
+// without the accessor fold refuses exactly as the escape refused, and
+// the fold itself (thisBundleOf) turns an unresolvable name back into
+// the escape.
 func TestEscapeAudit_AnUndeclaredMemberRead(t *testing.T) {
 	census := auditMethodCensus(t,
 		"class C { count: number; m() { return this.other; } }")
-	if !census.Escapes {
-		t.Errorf("reading an undeclared member did not escape: %+v", census)
+	if census.Escapes {
+		t.Errorf("reading an undeclared member escaped at the census: %+v — the ruling is the consumer's", census)
+	}
+	if !contains(census.AccessorReads, "other") {
+		t.Errorf("AccessorReads = %v, want it to name other", census.AccessorReads)
+	}
+	if census.Believable() {
+		t.Errorf("a deferred accessor read answered believable — a consumer without the fold would answer another slot's state")
 	}
 }
 
@@ -373,10 +383,18 @@ func TestEscapeAudit_DestructuringFromThisWithADefaultStillEscapes(t *testing.T)
 	if !rest.Escapes {
 		t.Errorf("a rest pattern from this did not escape: %+v", rest)
 	}
+	// an undeclared member in the pattern is the getter-read deferral,
+	// exactly as the dotted read defers (TestEscapeAudit_AnUndeclaredMemberRead)
 	undeclared := auditMethodCensus(t,
 		"class C { count: number; m(): number { const { other } = this; return 1; } }")
-	if !undeclared.Escapes {
-		t.Errorf("a pattern reading an undeclared member did not escape: %+v", undeclared)
+	if undeclared.Escapes {
+		t.Errorf("a pattern reading an undeclared member escaped at the census: %+v — the ruling is the consumer's", undeclared)
+	}
+	if !contains(undeclared.AccessorReads, "other") {
+		t.Errorf("AccessorReads = %v, want it to name other", undeclared.AccessorReads)
+	}
+	if undeclared.Believable() {
+		t.Errorf("a deferred pattern read answered believable")
 	}
 }
 

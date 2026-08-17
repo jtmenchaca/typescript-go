@@ -32,10 +32,13 @@
 // so a regression that accidentally widens the pin past one statement
 // shows immediately.
 //
-// No kernel needed: ContractOf/InlineStoredClosure resolution and the
-// evaluated scalar are asserted directly, the same as
-// super_and_array_ctor_test.go's no-kernel half
-// (TestSuperCallContract_*, TestContractOf_*).
+// The TRANSFER kernel is needed and set explicitly: the exact-11 assert
+// runs `age + 1` through TransferBinary, whose kernel is the
+// SetTransferKernel global (arithmetic_transfer.go) — a test that skips
+// that setup reads unknown from every transfer and can only pass by
+// riding an earlier test's setup in a full-suite run. The RESOLUTION
+// asserts alone (ContractOf/InlineStoredClosure, the decline twin below)
+// still need no kernel.
 package walk
 
 import (
@@ -95,6 +98,8 @@ const reassignedLetCalleeSource = "function reassignedCalleeFallsToGoFlow(): num
 // is the row's own in-set leg: call(10) must evaluate to the exact
 // scalar 11, read off the arrow assigned one statement earlier.
 func TestReassignedLetCallee_TheImmediatelyPrecedingReassignmentPinsTheArrow(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetTransferKernel(kernel)
 	p := entryEnvTestProgram(t, reassignedLetCalleeSource)
 	ctx := superArrayContracts(t, p)
 	fn := entryEnvFunctionNamed(t, p, "reassignedCalleeFallsToGoFlow")

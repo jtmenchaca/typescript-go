@@ -22,6 +22,8 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
 // ── overload group: the implementation's summary answers the call ──
@@ -173,6 +175,121 @@ func TestThisParameterCall_APlainThisReadOutsideACallStillDeclines(t *testing.T)
 	}
 }
 
+// ── .call/.apply on an ORDINARY function (no this-parameter) ───────
+
+// TestThisParameterCall_AnOrdinaryCalleeStillBindsThroughDotCall pins
+// e-class-and-function.ts's callApplyBind row: firstOfCallStyle has NO
+// written `this` parameter at all, so thisParameterCalleeOf used to
+// decline outright for it (isThisParameterNode(declaredParams[0])
+// gated on a this-parameter that does not exist here) — an ordinary
+// `.call(undefined, 40)` on such a function fell through to whatever
+// the generic method-call fallback answers, never the exact 40 the
+// receiver argument's arguments carry once shifted onto the ordinary
+// parameters starting at position 0 (sec-ordinarycallbindthis binds
+// SOME thisArgument regardless of whether the callee reads it).
+func TestThisParameterCall_AnOrdinaryCalleeStillBindsThroughDotCall(t *testing.T) {
+	kernel := yieldContractKernel(t)
+	source := "function firstOfCallStyle(age: number, extra?: number): number {\n" +
+		"  return age;\n" +
+		"}\n" +
+		"function caller(): number {\n" +
+		"  return firstOfCallStyle.call(undefined, 40);\n" +
+		"}\n"
+	contract, ctx, diagnostics := yieldContractOf(t, source, "caller")
+	ctx.Kernel = kernel
+	SetEngineKernel(kernel)
+
+	var sink []abstractdomain.AbstractValue
+	ctx.ReturnSink = &sink
+	AnalyzeFunction(ctx, contract, nil)
+	if len(sink) == 0 {
+		t.Fatalf("caller's body recorded no return value")
+	}
+	returned := JoinSinkSummarized(sink)
+	if returned.Kind != abstractdomain.KindValues {
+		t.Fatalf("firstOfCallStyle.call(undefined, 40) determined %+v, want an exact KindValues(40)", returned)
+	}
+	if len(returned.Values) != 1 || returned.Values[0] != 40 {
+		t.Errorf("firstOfCallStyle.call(undefined, 40) determined %v, want exactly [40]", returned.Values)
+	}
+	if len(*diagnostics) != 0 {
+		t.Errorf("an in-range .call on an ordinary function reported %d diagnostics, want 0: %+v", len(*diagnostics), *diagnostics)
+	}
+}
+
+// TestApplyCall_AnOrdinaryCalleeStillBindsThroughDotApply is
+// TestThisParameterCall_AnOrdinaryCalleeStillBindsThroughDotCall's
+// .apply sibling: the same ordinary callee, the receiver argument
+// array's own items standing in for .call's ...rest (apply_call.go's
+// thisParameterCallBindKnown seam).
+func TestApplyCall_AnOrdinaryCalleeStillBindsThroughDotApply(t *testing.T) {
+	kernel := yieldContractKernel(t)
+	source := "function firstOfCallStyle(age: number, extra?: number): number {\n" +
+		"  return age;\n" +
+		"}\n" +
+		"function caller(): number {\n" +
+		"  return firstOfCallStyle.apply(undefined, [40, 1]);\n" +
+		"}\n"
+	contract, ctx, diagnostics := yieldContractOf(t, source, "caller")
+	ctx.Kernel = kernel
+	SetEngineKernel(kernel)
+
+	var sink []abstractdomain.AbstractValue
+	ctx.ReturnSink = &sink
+	AnalyzeFunction(ctx, contract, nil)
+	if len(sink) == 0 {
+		t.Fatalf("caller's body recorded no return value")
+	}
+	returned := JoinSinkSummarized(sink)
+	if returned.Kind != abstractdomain.KindValues {
+		t.Fatalf("firstOfCallStyle.apply(undefined, [40, 1]) determined %+v, want an exact KindValues(40)", returned)
+	}
+	if len(returned.Values) != 1 || returned.Values[0] != 40 {
+		t.Errorf("firstOfCallStyle.apply(undefined, [40, 1]) determined %v, want exactly [40]", returned.Values)
+	}
+	if len(*diagnostics) != 0 {
+		t.Errorf("an in-range .apply on an ordinary function reported %d diagnostics, want 0: %+v", len(*diagnostics), *diagnostics)
+	}
+}
+
+// TestThisParameterCall_AnOrdinaryCalleeThatReadsThisStillDeclines
+// pins the safety half: an ordinary callee whose body MENTIONS `this`
+// without declaring the parameter (untyped/implicit this) must not
+// bind — thisParameterCalleeOf's MentionsThis gate, the same rule
+// BoundFunctionOf already applies to `.bind`.
+func TestThisParameterCall_AnOrdinaryCalleeThatReadsThisStillDeclines(t *testing.T) {
+	kernel := yieldContractKernel(t)
+	source := "function readsThis(): number {\n" +
+		"  return (this as { age: number }).age;\n" +
+		"}\n" +
+		"function caller(): number {\n" +
+		"  return readsThis.call(undefined);\n" +
+		"}\n"
+	contract, ctx, _ := yieldContractOf(t, source, "caller")
+	ctx.Kernel = kernel
+	SetEngineKernel(kernel)
+
+	var sink []abstractdomain.AbstractValue
+	ctx.ReturnSink = &sink
+	AnalyzeFunction(ctx, contract, nil)
+	if len(sink) == 0 {
+		t.Fatalf("caller's body recorded no return value")
+	}
+	returned := JoinSinkSummarized(sink)
+	// the DECLINE surface answers the callee's declared `: number`
+	// return as the spec-graded ground (number, or NaN) — never a
+	// walked binding's exact value. The safety claim is that no
+	// refined answer appears: the ground's kind at spec standing, and
+	// nothing exact.
+	if returned.Kind == abstractdomain.KindValues {
+		t.Fatalf("readsThis.call(undefined) determined the exact %+v — the this-mentioning body bound", returned)
+	}
+	if returned.Kind != abstractdomain.KindPossiblyNaN ||
+		abstractdomain.TrustLevelOf(returned) != abstractdomain.TrustSpec {
+		t.Errorf("readsThis.call(undefined) = %+v, want the spec-graded number ground — the declined call's honest answer", returned)
+	}
+}
+
 // ── rest parameter: an exact call site fills an exact tuple ────────
 
 // TestRestParameter_AnExactCallSiteFillsTheRestParameterExactly pins
@@ -317,3 +434,155 @@ func TestGeneratorAlias_AYieldExpressionWithNoStatedNPositionStillDeclines(t *te
 		t.Errorf("a yield expression's value with no stated N position determined %+v, want KindUnknown", answer)
 	}
 }
+
+// ── word-union .length: the exact set of per-word UTF-16 lengths ───
+
+// TestWordUnionLength_ReadsTheExactSetOfPerWordUtf16Lengths pins
+// evaluate_property_access.go's new WordTuplesOf arm: `.length` off a
+// receiver holding "end" | "start" | "middle" (the KindSet a joined
+// string-literal union wears, refinementsets' own OneOf-words encoding
+// — never KindValues, which holds ONE exact string's own codepoints)
+// must read as the exact SET {3, 5, 6}, one UTF-16 length per word
+// (sec-properties-of-string-instances-length, tmp/ecma262/spec.html).
+// Before the fix, AsRepetition declined the word-list set outright (it
+// is a union of exact tuples, never a Repetition window), so the read
+// fell through to the general "unknown receiver" tail and answered
+// residue — the RTS7002 the fixture's switchOverStringUnionWhole row
+// pins against.
+func TestWordUnionLength_ReadsTheExactSetOfPerWordUtf16Lengths(t *testing.T) {
+	end := abstractdomain.KnownValues(refinementsets.CodepointsOf("end"), abstractdomain.PrimitiveString, abstractdomain.TrustProved)
+	start := abstractdomain.KnownValues(refinementsets.CodepointsOf("start"), abstractdomain.PrimitiveString, abstractdomain.TrustProved)
+	middle := abstractdomain.KnownValues(refinementsets.CodepointsOf("middle"), abstractdomain.PrimitiveString, abstractdomain.TrustProved)
+	whole := abstractdomain.JoinKnown(abstractdomain.JoinKnown(end, start), middle)
+	if whole.Kind != abstractdomain.KindSet {
+		t.Fatalf("joining three exact string words determined kind %v, want KindSet (the OneOf-words union)", whole.Kind)
+	}
+
+	p, lengthAccess := propertyAccessTestProgram(t, "whole")
+	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
+	env := NewEnv()
+	env.Set("whole", whole)
+
+	answer := ReadPropertyAccess(ctx, env, lengthAccess)
+	if answer == nil {
+		t.Fatalf("ReadPropertyAccess(whole.length) answered nil, want the exact set {3, 5, 6}")
+	}
+	if answer.Kind != abstractdomain.KindSet {
+		t.Fatalf("whole.length determined kind %v, want KindSet (an exact OneOf set of lengths)", answer.Kind)
+	}
+	if len(answer.Set.Forms) != 1 || answer.Set.Forms[0].Form != refinementsets.FormOneOf {
+		t.Fatalf("whole.length's set is %+v, want a single OneOf form", answer.Set.Forms)
+	}
+	gotLengths := map[float64]bool{}
+	for _, w := range answer.Set.Forms[0].W {
+		gotLengths[w] = true
+	}
+	for _, want := range []float64{3, 5, 6} {
+		if !gotLengths[want] {
+			t.Errorf("whole.length determined %v, missing %v", answer.Set.Forms[0].W, want)
+		}
+	}
+	if len(gotLengths) != 3 {
+		t.Errorf("whole.length determined %d distinct lengths, want exactly 3: %v", len(gotLengths), answer.Set.Forms[0].W)
+	}
+}
+
+// TestWordUnionLength_TheSingleExactWordSiblingStaysOnTheValuesRoute
+// pins the sibling row switchOverStringUnionExact stays silent through:
+// a receiver holding ONE exact string ("end", the KindValues codepoint
+// tuple an exact call argument narrows an overload to) must keep
+// reading its length through the existing Utf16LengthOf(receiver.Values)
+// branch — never fall into the new word-union arm, which only KindSet
+// receivers reach.
+func TestWordUnionLength_TheSingleExactWordSiblingStaysOnTheValuesRoute(t *testing.T) {
+	exact := abstractdomain.KnownValues(refinementsets.CodepointsOf("end"), abstractdomain.PrimitiveString, abstractdomain.TrustProved)
+
+	p, lengthAccess := propertyAccessTestProgram(t, "exact")
+	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
+	env := NewEnv()
+	env.Set("exact", exact)
+
+	answer := ReadPropertyAccess(ctx, env, lengthAccess)
+	if answer == nil {
+		t.Fatalf("ReadPropertyAccess(exact.length) answered nil, want the exact value 3")
+	}
+	want := abstractdomain.KnownValues([]float64{3}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	if !abstractValueEqual(*answer, want) {
+		t.Errorf("exact.length determined %+v, want exactly 3", *answer)
+	}
+}
+
+// ── an or-narrowed argument through an overloaded identity call ────
+
+// TestOrNarrowedBranchCall_TheCalleeReceivesTheNarrowedSubUnionThenReadsItsLength
+// pins e-class-and-function.ts's orNarrowedBranchCall row: inside
+// `p === "insideStart" || p === "insideEnd" || p === "end"`, p is
+// narrowed to the three-word sub-union in env BEFORE positionLabel(p)
+// is called — the same or-composed equality narrowing
+// orEqualityNarrowsStringUnionHeldArm (c-reads-and-values.ts) already
+// returns directly. positionLabel is an overloaded IDENTITY body
+// (`return p`), so if the narrowed argument value threads through the
+// call — whichever route serves it, walk or kernel-summary — the
+// result is the SAME three-word set the caller already held, and
+// `.length` reads the exact set {11, 9, 3} (the three words'
+// own UTF-16 lengths) through the already-landed word-union
+// WordTuplesOf arm (evaluate_property_access.go).
+func TestOrNarrowedBranchCall_TheCalleeReceivesTheNarrowedSubUnionThenReadsItsLength(t *testing.T) {
+	kernel := yieldContractKernel(t)
+	source := `function positionLabel(p: "insideStart" | "insideEnd" | "end"): "insideStart" | "insideEnd" | "end";
+function positionLabel(
+  p: "insideStart" | "insideEnd" | "end" | "outside",
+): "insideStart" | "insideEnd" | "end" | "outside";
+function positionLabel(
+  p: "insideStart" | "insideEnd" | "end" | "outside",
+): "insideStart" | "insideEnd" | "end" | "outside" {
+  return p;
+}
+function caller(p: "insideStart" | "insideEnd" | "end" | "outside"): number {
+  if (p === "insideStart" || p === "insideEnd" || p === "end") {
+    const narrowed: "insideStart" | "insideEnd" | "end" = positionLabel(p);
+    return narrowed.length;
+  }
+  return 0;
+}
+`
+	contract, ctx, diagnostics := yieldContractOf(t, source, "caller")
+	ctx.Kernel = kernel
+	SetEngineKernel(kernel)
+
+	var sink []abstractdomain.AbstractValue
+	ctx.ReturnSink = &sink
+	AnalyzeFunction(ctx, contract, nil)
+	if len(sink) == 0 {
+		t.Fatalf("caller's body recorded no return value")
+	}
+	returned := JoinSinkSummarized(sink)
+	// the join of the narrowed branch's exact lengths {11,9,3} (each
+	// word's own UTF-16 length) with the fall-through branch's 0
+	if returned.Kind == abstractdomain.KindUnknown {
+		t.Fatalf("caller determined %+v (KindUnknown) — the narrowed call-then-.length row stayed undetermined", returned)
+	}
+	if len(*diagnostics) != 0 {
+		t.Errorf("an in-set narrowed call reported %d diagnostics, want 0: %+v", len(*diagnostics), *diagnostics)
+	}
+}
+
+// propertyAccessTestProgram builds a one-function program whose body is
+// `return <receiverName>.length;` and hands back the program alongside
+// the parsed `.length` PropertyAccessExpression node — a real,
+// SourceFile-bound node ReadPropertyAccess's callers can walk
+// (PropertyAccessExpression.Expression needs a bound tree, not a bare
+// synthesized one). The receiver name is never declared as a real
+// parameter; these tests seed its value straight into a synthetic Env
+// instead; the checker is only asked for the node shape, never for the
+// receiver's own type.
+func propertyAccessTestProgram(t *testing.T, receiverName string) (*program.CheckerProgram, *ast.Node) {
+	t.Helper()
+	source := "declare const " + receiverName + ": unknown;\n" +
+		"function probe() { return " + receiverName + ".length; }\n"
+	p := entryEnvTestProgram(t, source)
+	fn := entryEnvFunctionNamed(t, p, "probe")
+	ret := fn.AsFunctionDeclaration().Body.AsBlock().Statements.Nodes[0]
+	return p, ret.AsReturnStatement().Expression
+}
+

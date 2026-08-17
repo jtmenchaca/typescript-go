@@ -75,15 +75,16 @@ func TestArraySlots_AnEmptyArrayLiteralStartsTheElemSlotAtTheAbsentCarryingConst
 	if len(stmts) != 2 {
 		t.Fatalf("len(stmts) = %d, want 2", len(stmts))
 	}
-	if stmts[1].Effect.Kind != kernelbridge.LoopEffectConstState || !stmts[1].Effect.Absent {
-		t.Errorf("elem effect = %+v, want the absent-carrying constState", stmts[1].Effect)
+	if stmts[1].Effect.Kind != kernelbridge.LoopEffectConstState ||
+		!stmts[1].Effect.Undef || stmts[1].Effect.Null {
+		t.Errorf("elem effect = %+v, want the undefined-carrying constState (Undef alone)", stmts[1].Effect)
 	}
 	exit := kernel.Walk([]kernelbridge.KnownStateWire{{Top: true}, {Top: true}}, stmts)
 	if !kernel.Member(loweringSetOf(t, exit[0]), []float64{0}) {
 		t.Errorf("member(a.len, [0]) = false, want true")
 	}
-	if !exit[1].Absent {
-		t.Errorf("a.elem.Absent = false, want true — an empty array has no element to read")
+	if !exit[1].Undef || exit[1].Null {
+		t.Errorf("a.elem admissions (undef=%v null=%v), want undefined alone — a missing element reads undefined, never null", exit[1].Undef, exit[1].Null)
 	}
 }
 
@@ -96,8 +97,8 @@ func TestArraySlots_ALengthReadResolvesToTheLenSlot(t *testing.T) {
 	if !ok {
 		t.Fatalf("LowerStatements(a.length) ok = false, want true")
 	}
-	if stmts[0].Effect.Kind != kernelbridge.LoopEffectVar || stmts[0].Effect.Index != 0 {
-		t.Errorf("effect = %+v, want a var read of slot 0 (a.len)", stmts[0].Effect)
+	if stmts[0].Effect.Kind != kernelbridge.LoopEffectVarState || stmts[0].Effect.Index != 0 {
+		t.Errorf("effect = %+v, want a verbatim copy of slot 0 (a.len)", stmts[0].Effect)
 	}
 }
 
@@ -194,8 +195,8 @@ func TestArraySlots_AnIndexReadUnderADominatingLengthGuardIsThePlainElemRead(t *
 		t.Fatalf("len(then) = %d, want 1", len(stmts[0].Then))
 	}
 	read := stmts[0].Then[0].Effect
-	if read.Kind != kernelbridge.LoopEffectVar || read.Index != 1 {
-		t.Errorf("guarded read = %+v, want a plain var read of slot 1 (a.elem)", read)
+	if read.Kind != kernelbridge.LoopEffectVarState || read.Index != 1 {
+		t.Errorf("guarded read = %+v, want a verbatim copy of slot 1 (a.elem)", read)
 	}
 }
 

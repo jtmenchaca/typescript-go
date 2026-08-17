@@ -87,11 +87,11 @@ func TestMapSlots_AClearCallBehindAnUnknownCastStillLowers(t *testing.T) {
 	if kernel.Member(size, []float64{3}) {
 		t.Errorf("member(m.size, [3]) = true, want false — the old count does not ride")
 	}
-	if !exit[1].Absent {
-		t.Errorf("m.vals.Absent = false, want true — a cleared Map has no value to read")
+	if !exit[1].Undef || exit[1].Null {
+		t.Errorf("m.vals admissions (undef=%v null=%v), want undefined alone — a missing read answers undefined, never null", exit[1].Undef, exit[1].Null)
 	}
-	if !exit[2].Absent {
-		t.Errorf("m.keys.Absent = false, want true — a cleared Map has no key to read")
+	if !exit[2].Undef || exit[2].Null {
+		t.Errorf("m.keys admissions (undef=%v null=%v), want undefined alone", exit[2].Undef, exit[2].Null)
 	}
 }
 

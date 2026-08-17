@@ -138,10 +138,20 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 	// tracked name of its own it is neither a call, an element access,
 	// nor a literal — the same gap the array-literal receiver closed for
 	// a fresh literal, now closed for a fresh construction.
+	// A PROPERTY-ACCESS receiver — plain or under `!`/`as`/parens
+	// (`grouped.young![0]`, j-stdlib-surfaces' objectGroupBy row) — is
+	// the same gap one more time: the receiver's own reader
+	// (ReadPropertyAccess through evaluateExpression, absence stripped
+	// by the cast layer) answers the exact KindList the groupBy model
+	// built, and every arm below this one gates on an identifier
+	// receiver, so without admission here the built list is never
+	// indexed.
 	if ast.IsElementAccessExpression(e) && (ast.IsCallExpression(e.AsElementAccessExpression().Expression) ||
 		ast.IsElementAccessExpression(e.AsElementAccessExpression().Expression) ||
 		ast.IsArrayLiteralExpression(e.AsElementAccessExpression().Expression) ||
-		ast.IsNewExpression(e.AsElementAccessExpression().Expression)) {
+		ast.IsNewExpression(e.AsElementAccessExpression().Expression) ||
+		(Unwrapped(e.AsElementAccessExpression().Expression) != nil &&
+			ast.IsPropertyAccessExpression(Unwrapped(e.AsElementAccessExpression().Expression)))) {
 		elem := e.AsElementAccessExpression()
 		called := evaluateExpression(ctx, env, elem.Expression)
 		index := evaluateExpression(ctx, env, elem.ArgumentExpression)
@@ -263,8 +273,11 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 						return &element
 					}
 					// POSITIVELY derived absence: the index may sit past the
-					// guaranteed count, where a get answers undefined
-					out := abstractdomain.PossiblyUndefined(element, "", false, true)
+					// guaranteed count, where a get answers exactly undefined
+					// (sec-ordinaryget: a missing own property, once the
+					// prototype chain reaches null, returns undefined — never
+					// null) — so the wrapper's own absent side is UndefOnly.
+					out := abstractdomain.PossiblyAbsent(element, abstractdomain.AbsentFlavorUndefOnly, "", false, true)
 					return &out
 				}
 				// `o?.[i]`: the same optional-chain rule property links use
@@ -439,7 +452,10 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 				// states the length is unclaimed, so a run where this index
 				// is past the end is admitted, not merely unproved.
 				if element, ok := abstractdomain.ElementOfObjectStar(receiver); ok {
-					out := abstractdomain.PossiblyUndefined(element, abstractdomain.TrustSpec, true, true)
+					// sec-ordinaryget: a get past the end reaches no own
+					// property and returns exactly undefined, never null —
+					// the wrapper's own absent side is UndefOnly.
+					out := abstractdomain.PossiblyAbsent(element, abstractdomain.AbsentFlavorUndefOnly, abstractdomain.TrustSpec, true, true)
 					return &out
 				}
 				if receiver.Kind == abstractdomain.KindList && index.Kind == abstractdomain.KindValues &&

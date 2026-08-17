@@ -102,6 +102,13 @@ func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]
 		return nil, false
 	}
 	reference := typeNode.AsTypeReferenceNode()
+	// `Pick<T, K>` is the ONE type-argument shape this reader resolves
+	// rather than refusing over — the two arguments together spell a
+	// closed member list (T's members, filtered to the K keys), not an
+	// open-ended substitution the way a generic's OWN parameter does
+	if pickMembers, pickOk := pickMembersOf(ctx, holder, reference); pickOk {
+		return pickMembers, true
+	}
 	// type ARGUMENTS make the members depend on what was applied
 	if reference.TypeArguments != nil && len(reference.TypeArguments.Nodes) > 0 {
 		return nil, false
@@ -265,8 +272,276 @@ func declaredTypeMembersOf(
 			copy(path, visiting)
 			return unionMembersOf(ctx, holder, asAlias.Type, append(path, declaration), atEntry)
 		}
+		if ast.IsTypeReferenceNode(asAlias.Type) {
+			// an alias of a TYPE REFERENCE (`type Picked = Pick<Base, 'lo'>`,
+			// or a plain `type A = B`) recurses through the SAME two readings
+			// namedTypeMembersOf itself takes at the top level — the Pick
+			// shape first, then the general named-type resolution — so an
+			// alias costs nothing beyond one more link on the cycle-guarded
+			// path. A parameterized alias of a reference would have to
+			// substitute into the reference's own arguments first, which
+			// this reader has no instantiation to do, so it declines exactly
+			// as the intersection/union alias arms do above.
+			if len(parameterNames) > 0 {
+				return nil, false
+			}
+			path := make([]*ast.Node, len(visiting), len(visiting)+1)
+			copy(path, visiting)
+			path = append(path, declaration)
+			innerReference := asAlias.Type.AsTypeReferenceNode()
+			if pickMembers, pickOk := pickMembersOf(ctx, holder, innerReference); pickOk {
+				return pickMembers, true
+			}
+			if innerReference.TypeArguments != nil && len(innerReference.TypeArguments.Nodes) > 0 {
+				return nil, false
+			}
+			if !isResolvableTypeName(innerReference.TypeName) {
+				return nil, false
+			}
+			return declaredTypeMembersOf(ctx, holder, innerReference.TypeName, path, atEntry)
+		}
 		return nil, false
 	}
 	// a class, an enum, a module, a type parameter — none expand
 	return nil, false
+}
+
+// pickMembersOf reads a `Pick<T, K>` type reference as its own member
+// list: one leaf per literal key K names, filtered out of T's own
+// members.
+//
+// WHY THIS IS SOUND OVER-APPROXIMATION RATHER THAN AN EXACT READING.
+// `Pick` promises the picked NAME is a member of the result — TypeScript
+// itself defines `Pick<T, K> = { [P in K]: T[P] }`, so the result's
+// member at P has exactly T's own member type at P. Two things can keep
+// this reader from stating that type exactly: T's own member may not be
+// one this census can sort (a nested shape, a mentioned type parameter),
+// and — for the intersection-T case below — the reader may only be able
+// to read SOME of T's arms. Either way the leaf still contributes,
+// wearing unknown sort and MayBeAbsent: the unknown sort claims nothing
+// about the VALUE, and MayBeAbsent is the weaker promise, so the leaf
+// never claims more than Pick's own contract states. Where a picked
+// key's member IS found in a readable arm, taking that arm's own
+// Sort/TypeofTag/MayBeAbsent is exact when T is a single record, and a
+// SOUND OVER-APPROXIMATION when T is an intersection with an unreadable
+// arm: the true member type at that key is the INTERSECTION of every
+// arm's own declared type at that key (a value satisfying `A & B` has
+// both A's and B's member there), and a single arm's declared type is
+// always a superset of that intersection — so claiming one arm's own
+// reading can only be WEAKER than the truth, never stronger, which is
+// the direction soundness requires.
+//
+// K must be a string-literal type or a union of string-literal types —
+// anything else (a keyof, a generic K, a template literal) leaves the
+// picked set unspellable and this reader declines, falling through to
+// the ordinary type-argument refusal above it.
+func pickMembersOf(ctx *FlowContext, holder string, reference *ast.TypeReferenceNode) ([]recordParamMember, bool) {
+	if reference == nil || reference.TypeName == nil || !ast.IsIdentifier(reference.TypeName) ||
+		reference.TypeName.Text() != "Pick" {
+		return nil, false
+	}
+	if reference.TypeArguments == nil || len(reference.TypeArguments.Nodes) != 2 {
+		return nil, false
+	}
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+		return nil, false
+	}
+	sourceArg := reference.TypeArguments.Nodes[0]
+	keysArg := reference.TypeArguments.Nodes[1]
+	keys, keysOk := stringLiteralKeysOf(keysArg)
+	if !keysOk || len(keys) == 0 {
+		return nil, false
+	}
+	gathered, gatheredOk := pickSourceMembersOf(ctx, holder, sourceArg)
+	if !gatheredOk {
+		return nil, false
+	}
+	byKey := map[string]recordParamMember{}
+	for _, member := range gathered {
+		if len(member.Path) != 1 {
+			continue
+		}
+		byKey[member.Key] = member
+	}
+	out := make([]recordParamMember, 0, len(keys))
+	for _, key := range keys {
+		if member, found := byKey[key]; found {
+			out = append(out, member)
+			continue
+		}
+		// a picked key no gathered arm names: Pick still promises the NAME
+		// (K is checked against T at the call site by the host checker
+		// itself, so a key reaching here is one T does carry) — unknown
+		// sort claims nothing about the value, and MayBeAbsent is the
+		// weaker promise, so this leaf states no more than "this key may be
+		// there, and if it is, nothing is claimed about its value"
+		out = append(out, recordParamMember{
+			Key:         key,
+			Path:        []string{key},
+			SlotName:    holder + "." + key,
+			Sort:        BindingKindUnknown,
+			TypeofTag:   TypeofTagNone,
+			MayBeAbsent: true,
+		})
+	}
+	return out, true
+}
+
+// stringLiteralKeysOf reads K in `Pick<T, K>` — a string-literal type
+// (`'lo'`) or a union of string-literal types (`'lo' | 'hi'`) — as the
+// plain key strings it names. Anything else (keyof, a generic, a
+// template literal, a number literal) answers false: the picked set is
+// not spellable as a fixed list of names.
+func stringLiteralKeysOf(node *ast.Node) ([]string, bool) {
+	if literal, ok := stringLiteralTextOf(node); ok {
+		return []string{literal}, true
+	}
+	if !ast.IsUnionTypeNode(node) {
+		return nil, false
+	}
+	arms := node.AsUnionTypeNode().Types
+	if arms == nil || len(arms.Nodes) == 0 {
+		return nil, false
+	}
+	out := make([]string, 0, len(arms.Nodes))
+	for _, arm := range arms.Nodes {
+		text, ok := stringLiteralTextOf(arm)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, text)
+	}
+	return out, true
+}
+
+// stringLiteralTextOf reads a single string-literal TYPE node's own
+// text — `ast.IsLiteralTypeNode` wrapping an `ast.IsStringLiteral`, the
+// same test type_node_sets.go and type_node_aliases.go already use for
+// a literal type's key text.
+func stringLiteralTextOf(node *ast.Node) (string, bool) {
+	if node == nil || !ast.IsLiteralTypeNode(node) {
+		return "", false
+	}
+	literal := node.AsLiteralTypeNode().Literal
+	if literal == nil || !ast.IsStringLiteral(literal) {
+		return "", false
+	}
+	return literal.AsStringLiteral().Text, true
+}
+
+// pickSourceMembersOf gathers T's own members for `Pick<T, K>` — the
+// members every route Pick's arg-1 position admits: a plain or
+// qualified named type (through declaredTypeMembersOf, at a LINK
+// position so a source contributing no data member still gathers as
+// empty rather than refusing Pick outright), or an INTERSECTION, read
+// arm BY ARM rather than through intersectionMembersOf's own all-sides-
+// readable rule.
+//
+// AN INTERSECTION SOURCE READS DIFFERENTLY FOR Pick THAN FOR A PLAIN
+// annotation. intersectionMembersOf refuses its whole answer the moment
+// one side is unreadable, because a plain intersection annotation
+// promises every member of every side and an unread side might hide
+// members nothing here can name. Pick already answers UNKNOWN-SORTED,
+// MayBeAbsent for a key no gathered arm names (pickMembersOf's own
+// fallback) — so an unexpandable arm here costs only the SORT of
+// whichever picked keys that arm alone would have named, never the
+// list's own completeness the way it would for the general reader. This
+// reader therefore SKIPS an unexpandable arm instead of refusing the
+// whole Pick — gathering everything the readable arms state and letting
+// pickMembersOf's per-key fallback cover the rest.
+func pickSourceMembersOf(ctx *FlowContext, holder string, sourceArg *ast.Node) ([]recordParamMember, bool) {
+	switch {
+	case ast.IsIntersectionTypeNode(sourceArg):
+		sides := sourceArg.AsIntersectionTypeNode().Types
+		if sides == nil || len(sides.Nodes) == 0 {
+			return nil, false
+		}
+		var gathered []recordParamMember
+		for _, side := range sides.Nodes {
+			var members []recordParamMember
+			var readable bool
+			switch {
+			case ast.IsTypeLiteralNode(side):
+				members, readable = scalarMemberListWithCheckerIn(
+					checkerOf(ctx), holder, side.AsTypeLiteralNode().Members.Nodes, nil, false, nil)
+			case ast.IsTypeReferenceNode(side):
+				sideReference := side.AsTypeReferenceNode()
+				if sideReference.TypeArguments == nil || len(sideReference.TypeArguments.Nodes) == 0 {
+					if isResolvableTypeName(sideReference.TypeName) {
+						members, readable = declaredTypeMembersOf(ctx, holder, sideReference.TypeName, nil, false)
+					}
+				}
+			}
+			if !readable {
+				// an unexpandable arm is SKIPPED for Pick, not a whole refusal
+				// (this function's own doc argues why) — a class arm, a
+				// generic-applied arm, anything declaredTypeMembersOf itself
+				// refuses
+				continue
+			}
+			gathered = mergeShadowedMembers(gathered, members)
+		}
+		if len(gathered) == 0 {
+			return nil, true
+		}
+		return gathered, true
+	case ast.IsTypeReferenceNode(sourceArg):
+		reference := sourceArg.AsTypeReferenceNode()
+		if reference.TypeArguments != nil && len(reference.TypeArguments.Nodes) > 0 {
+			return nil, false
+		}
+		if !isResolvableTypeName(reference.TypeName) {
+			return nil, false
+		}
+		// an alias whose OWN target is an intersection (`type Combined =
+		// HasLo & Unexpandable`) recurses into the SAME lenient, arm-by-arm
+		// reading this function takes for an intersection written straight
+		// on Pick's first argument — declaredTypeMembersOf's own
+		// intersection arm delegates to the STRICT intersectionMembersOf,
+		// which refuses the whole answer over one unreadable arm; Pick's
+		// looser contract (a key no gathered arm names still contributes
+		// unknown-sorted, MayBeAbsent) tolerates that arm being skipped
+		// instead, so the source-position reading must not go through the
+		// strict path just because the intersection sits behind a name.
+		if aliasTarget, isAlias := aliasedTypeNode(ctx, reference.TypeName); isAlias {
+			if ast.IsIntersectionTypeNode(aliasTarget) {
+				return pickSourceMembersOf(ctx, holder, aliasTarget)
+			}
+		}
+		return declaredTypeMembersOf(ctx, holder, reference.TypeName, nil, false)
+	case ast.IsTypeLiteralNode(sourceArg):
+		return scalarMemberListWithCheckerIn(
+			checkerOf(ctx), holder, sourceArg.AsTypeLiteralNode().Members.Nodes, nil, false, nil)
+	}
+	return nil, false
+}
+
+// aliasedTypeNode resolves a type NAME to its own right-hand-side syntax
+// node where the name is a NON-GENERIC type alias — `type Combined = X`
+// answers X's node for the name "Combined". Anything else (an
+// interface, a class, a generic alias, an unresolvable name) answers
+// (nil, false): this reader only exists so pickSourceMembersOf's
+// type-reference case can look ONE layer through a plain alias to find
+// an intersection hiding behind it, never to re-derive the general
+// named-type resolution declaredTypeMembersOf already owns.
+func aliasedTypeNode(ctx *FlowContext, typeName *ast.Node) (*ast.Node, bool) {
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+		return nil, false
+	}
+	symbol := symbolAt(ctx.P.Checker, typeName)
+	if symbol == nil || len(symbol.Declarations) != 1 {
+		return nil, false
+	}
+	declaration := symbol.Declarations[0]
+	if declaration == nil || !ast.IsTypeAliasDeclaration(declaration) {
+		return nil, false
+	}
+	asAlias := declaration.AsTypeAliasDeclaration()
+	if asAlias.TypeParameters != nil && len(asAlias.TypeParameters.Nodes) > 0 {
+		return nil, false
+	}
+	if asAlias.Type == nil {
+		return nil, false
+	}
+	return asAlias.Type, true
 }

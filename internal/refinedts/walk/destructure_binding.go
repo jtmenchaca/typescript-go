@@ -181,6 +181,11 @@ func bindObjectPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer
 			}
 		}
 	}
+	// `const { promise, resolve } = Promise.withResolvers()` — the
+	// resolve/reject member's own declared symbol pairs with the
+	// promise member's tracked name, so a later `resolve(arg)` call
+	// (promise_with_resolvers.go) can find its promise
+	PairPromiseWithResolversBindings(ctx, initializer, elements)
 }
 
 func bindArrayPattern(ctx *FlowContext, env Env, pattern *ast.Node, initializer *ast.Node) {

@@ -48,7 +48,57 @@ func PathSlotIndexOf(context *LoweringContext, node *ast.Node) (int, bool) {
 	if root, leaf, ok := symbolKeyedLeafOf(context, head); ok {
 		return slotIndexOfName(context, root+"."+leaf)
 	}
+	if spelling, ok := arrayElementMemberLeafOf(head); ok {
+		return slotIndexOfName(context, spelling)
+	}
 	return 0, false
+}
+
+// arrayElementMemberLeafOf reads `xs[i].a` — a PropertyAccessExpression
+// whose receiver is an ElementAccessExpression over a plain (non-optional)
+// name — as the ELEM-LEAF spelling "xs.elem.a", the slot step 2
+// (SummaryParameterEntriesIn's array-parameter branch, this agent's
+// territory) lays out for a flattened array whose element is a record.
+//
+// The elem-leaf denotes the JOIN over every element the array can hold,
+// the same weak-summary story the plain scalar elem slot already carries
+// one member wide — `xs[i].a` for ANY `i` answers the same join, exactly
+// as `xs[i]` alone already answers the join through the scalar elem slot.
+// A deeper receiver (`xs[i].a.b`, a nested member two steps below the
+// index) or a receiver that is not one plain ElementAccessExpression
+// directly on an identifier both decline here — this reads the single
+// step adjacent to an index, mirroring symbolKeyedLeafOf's own one-step
+// shape.
+//
+// Only the SPELLING is built here; whether "xs.elem.a" resolves to an
+// actual slot is slotIndexOfName's own question — a name whose array
+// never expanded per-member (a scalar-elemented array, or an array whose
+// element record only PARTIALLY matches this step) answers false there,
+// exactly as an unresolved plain path already does.
+func arrayElementMemberLeafOf(node *ast.Node) (spelling string, ok bool) {
+	if !ast.IsPropertyAccessExpression(node) {
+		return "", false
+	}
+	access := node.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return "", false
+	}
+	if !ast.IsIdentifier(access.Name()) {
+		return "", false
+	}
+	receiver := Unwrapped(access.Expression)
+	if !ast.IsElementAccessExpression(receiver) {
+		return "", false
+	}
+	element := receiver.AsElementAccessExpression()
+	if element.QuestionDotToken != nil {
+		return "", false
+	}
+	holder := Unwrapped(element.Expression)
+	if !ast.IsIdentifier(holder) {
+		return "", false
+	}
+	return holder.Text() + arrayElemSuffix + "." + access.Name().Text(), true
 }
 
 // symbolKeyedLeafOf reads `p[S]` as the holder and the derived `#sym:`
@@ -99,7 +149,7 @@ func ObjectLocalDeclarationAssignments(context *LoweringContext, local ObjectLoc
 		if !ok {
 			return nil, false
 		}
-		out = append(out, AssignmentTarget{Target: target, Effect: effect})
+		out = append(out, AssignmentTarget{Target: target, Effect: asVarStateEffect(effect)})
 	}
 	return out, true
 }

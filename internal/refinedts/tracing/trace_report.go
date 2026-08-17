@@ -90,6 +90,13 @@ type TraceReport struct {
 	Counters     map[string]*TraceCounter
 	Files        []FileCost
 	ClockReads   int64
+	ScopeReads   int64
+	// WorkerMs is the sum of every span scope's own wall — the CPU-time
+	// window the self-time column actually divides up. Under a
+	// goroutine-per-entry sweep that is N times the process wall, so a
+	// self-time share taken against the WALL reads over 100%; taken
+	// against this, the rows sum to 100% by construction.
+	WorkerMs float64
 }
 
 // ProcessStartedAt stands in for JS's performance.timeOrigin (always
@@ -112,8 +119,18 @@ func TraceData() TraceReport {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].SelfMs > entries[j].SelfMs })
 	files := append([]FileCost(nil), FileOrder...)
+	wall := msSince(RunStartedAt)
+	// A single-goroutine check opens no scope, so its spans ran in the
+	// fallback and workerMs stayed zero; the traced wall IS its worker
+	// window. A sweep's workers each closed their scope, so their summed
+	// wall is the window instead — and it is never smaller than the
+	// process wall, since the workers ran inside it.
+	window := workerMs
+	if window < wall {
+		window = wall
+	}
 	return TraceReport{
-		WallMs:       msSince(RunStartedAt),
+		WallMs:       wall,
 		ProcessMs:    float64(now.Sub(ProcessStartedAt)) / float64(time.Millisecond),
 		TracedFromMs: float64(RunStartedAt.Sub(ProcessStartedAt)) / float64(time.Millisecond),
 		PreTrace:     append([]PreTraceNote(nil), PreTraceNotes...),
@@ -121,6 +138,8 @@ func TraceData() TraceReport {
 		Counters:     Counters,
 		Files:        files,
 		ClockReads:   ClockReads,
+		ScopeReads:   ScopeReads,
+		WorkerMs:     window,
 	}
 }
 
@@ -231,7 +250,7 @@ func TraceReportText() string {
 		noted += note.Ms
 	}
 	unmarked := max(0, data.TracedFromMs-noted)
-	unspannedMs := max(0, data.WallMs-attributed)
+	unspannedMs := max(0, data.WorkerMs-attributed)
 	share := func(x float64) string {
 		return padLeft(strconv.FormatFloat(100*x/max(data.ProcessMs, 1e-9), 'f', 1, 64), 8)
 	}
@@ -243,19 +262,38 @@ func TraceReportText() string {
 		say(pad(note.Name, 46) + padLeft(ms(note.Ms), 11) + share(note.Ms))
 	}
 	say(pad("(before tracing, unmarked)", 46) + padLeft(ms(unmarked), 11) + share(unmarked))
-	say(pad("traced window — attributed to spans below", 46) + padLeft(ms(attributed), 11) + share(attributed))
-	say(pad("traced window — (unspanned)", 46) + padLeft(ms(unspannedMs), 11) + share(unspannedMs))
+	say(pad("traced window (wall)", 46) + padLeft(ms(data.WallMs), 11) + share(data.WallMs))
 	say(strings.Repeat("─", 65))
 	say(pad("process wall", 46) + padLeft(ms(data.ProcessMs), 11) + padLeft("100.0", 8))
 	say("Composing this report and process exit run after the accounting;")
 	say("GC pauses land inside whichever span was running when they hit.")
 	sayBlank()
-	say(fmt.Sprintf(
-		"Attributed %s ms of %s ms (%s%%) in the traced window. The remainder ran outside every instrumented span.",
-		ms(attributed), ms(data.WallMs),
-		strconv.FormatFloat(100*attributed/max(data.WallMs, 1e-9), 'f', 1, 64),
-	))
+
+	// Span time is WORKER time, not wall time: the sweep walks entries on
+	// several goroutines at once, so one wall millisecond can hold one
+	// millisecond of span time per worker. The self-time column below is
+	// divided out of the worker window for that reason — against the wall
+	// it would read past 100% by roughly the worker count.
+	say(pad("the span window — what the self-time column divides up", 46) +
+		padLeft("ms", 11) + padLeft("%", 8))
+	say(strings.Repeat("─", 65))
+	windowShare := func(x float64) string {
+		return padLeft(strconv.FormatFloat(100*x/max(data.WorkerMs, 1e-9), 'f', 1, 64), 8)
+	}
+	say(pad("attributed to spans below", 46) + padLeft(ms(attributed), 11) + windowShare(attributed))
+	say(pad("(unspanned)", 46) + padLeft(ms(unspannedMs), 11) + windowShare(unspannedMs))
+	say(strings.Repeat("─", 65))
+	say(pad("worker window (summed goroutine walls)", 46) +
+		padLeft(ms(data.WorkerMs), 11) + padLeft("100.0", 8))
 	sayBlank()
+	if data.WorkerMs > data.WallMs*1.05 {
+		say(fmt.Sprintf(
+			"%s ms of worker time inside %s ms of wall — the sweep ran ~%sx parallel, so span ms exceed wall ms by design.",
+			ms(data.WorkerMs), ms(data.WallMs),
+			strconv.FormatFloat(data.WorkerMs/max(data.WallMs, 1e-9), 'f', 1, 64),
+		))
+		sayBlank()
+	}
 
 	// The product question first: which entries own the wall, and by
 	// which mechanism — one row each, so no reader has to join the
@@ -269,8 +307,8 @@ func TraceReportText() string {
 	for _, entry := range data.Entries {
 		owners[OwnerOf(entry.Name)] += entry.SelfMs
 	}
-	unattributed := max(0, data.WallMs-attributed)
-	say("who owns the time")
+	unattributed := max(0, data.WorkerMs-attributed)
+	say("who owns the time — shares of the worker window")
 	sayBlank()
 	say(pad("owner", 14) + padLeft("self ms", 11) + padLeft("%", 8) + "  note")
 	say(strings.Repeat("─", 78))
@@ -278,17 +316,19 @@ func TraceReportText() string {
 	for _, owner := range ownerOrder {
 		held := owners[owner]
 		say(pad(string(owner), 14) + padLeft(ms(held), 11) +
-			padLeft(strconv.FormatFloat(100*held/max(data.WallMs, 1e-9), 'f', 1, 64), 8) +
+			padLeft(strconv.FormatFloat(100*held/max(data.WorkerMs, 1e-9), 'f', 1, 64), 8) +
 			"  " + ownerNote[owner])
 	}
 	say(pad("(unspanned)", 14) + padLeft(ms(unattributed), 11) +
-		padLeft(strconv.FormatFloat(100*unattributed/max(data.WallMs, 1e-9), 'f', 1, 64), 8) +
+		padLeft(strconv.FormatFloat(100*unattributed/max(data.WorkerMs, 1e-9), 'f', 1, 64), 8) +
 		"  ran outside every span — instrument before reading it")
 	sayBlank()
 
-	// SELF time is the attribution: it sums to the run, and a name's
-	// share of it is that name's share of the cost.
-	say("where the time is — SELF ms, the column that sums to the run")
+	// SELF time is the attribution: it sums to the worker window, and a
+	// name's share of it is that name's share of the cost. Self is
+	// elapsed minus the time a frame's OWN children took on its OWN
+	// goroutine, so it is non-negative for every row.
+	say("where the time is — SELF ms, the column that sums to the worker window")
 	sayBlank()
 	say(pad("span", 40) + padLeft("calls", 10) + padLeft("self ms", 11) +
 		padLeft("self %", 8) + padLeft("total ms", 11))
@@ -300,7 +340,7 @@ func TraceReportText() string {
 		say(pad(entry.Name, 40) +
 			padLeft(commaInt(entry.Calls), 10) +
 			padLeft(ms(entry.SelfMs), 11) +
-			padLeft(strconv.FormatFloat(100*entry.SelfMs/max(data.WallMs, 1e-9), 'f', 1, 64), 8) +
+			padLeft(strconv.FormatFloat(100*entry.SelfMs/max(data.WorkerMs, 1e-9), 'f', 1, 64), 8) +
 			padLeft(ms(entry.TotalMs), 11))
 	}
 	sayBlank()
@@ -327,14 +367,14 @@ func TraceReportText() string {
 			"with two clock reads rather than wrapped in a span, because " +
 			"wrapping it changes how the engine optimizes it.")
 		sayBlank()
-		say(pad("loop", 40) + padLeft("times run", 12) + padLeft("ms", 11) + padLeft("% wall", 9))
+		say(pad("loop", 40) + padLeft("times run", 12) + padLeft("ms", 11) + padLeft("% window", 9))
 		say(strings.Repeat("─", 72))
 		sort.Slice(timed, func(i, j int) bool { return timed[i].counter.TotalMs > timed[j].counter.TotalMs })
 		for _, nc := range timed {
 			say(pad(nc.name, 40) +
 				padLeft(commaInt(nc.counter.Calls), 12) +
 				padLeft(ms(nc.counter.TotalMs), 11) +
-				padLeft(strconv.FormatFloat(100*nc.counter.TotalMs/max(data.WallMs, 1e-9), 'f', 1, 64), 9))
+				padLeft(strconv.FormatFloat(100*nc.counter.TotalMs/max(data.WorkerMs, 1e-9), 'f', 1, 64), 9))
 		}
 		sayBlank()
 	}
@@ -481,6 +521,17 @@ func TraceReportText() string {
 		"%s clock reads. At ~25 ns each that is ~%s ms of the wall above — subtract it before comparing to an untraced run.",
 		commaInt(data.ClockReads), ms(float64(data.ClockReads)*25e-6),
 	))
+	say(fmt.Sprintf(
+		"%s scope reads (one per span, to find which goroutine's stack the frame belongs on). "+
+			"At ~3 us each that is ~%s ms — the price of attributing child time to the right parent under a parallel sweep.",
+		commaInt(data.ScopeReads), ms(float64(data.ScopeReads)*3e-3),
+	))
+	if n := NegativeSelfCount(); n != 0 {
+		say(fmt.Sprintf(
+			"%s frames closed with children longer than themselves — the nesting model is wrong and the self-time column above is not trustworthy.",
+			commaInt(n),
+		))
+	}
 	say(strings.Repeat("═", 78))
 	return strings.Join(out, "\n")
 }

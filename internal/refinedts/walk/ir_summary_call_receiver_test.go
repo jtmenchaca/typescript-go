@@ -61,11 +61,11 @@ func TestSummaryCallStatement_AThisMethodCallFillsTheCalleesThisEntriesFromTheCa
 	if !ok {
 		t.Fatalf("a this-method call declined the threading")
 	}
-	if args[0].Kind != kernelbridge.LoopEffectVar || args[0].Index != 1 {
-		t.Errorf("entry 0 = %+v, want a var of the caller's this.count slot 1", args[0])
+	if args[0].Kind != kernelbridge.LoopEffectVarState || args[0].Index != 1 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of the caller's this.count slot 1", args[0])
 	}
-	if args[1].Kind != kernelbridge.LoopEffectVar || args[1].Index != 2 {
-		t.Errorf("entry 1 = %+v, want a var of the caller's this.limit slot 2", args[1])
+	if args[1].Kind != kernelbridge.LoopEffectVarState || args[1].Index != 2 {
+		t.Errorf("entry 1 = %+v, want a whole-state copy of the caller's this.limit slot 2", args[1])
 	}
 }
 
@@ -82,8 +82,8 @@ func TestSummaryCallStatement_ANamedReceiverFillsTheCalleesThisEntriesFromThatNa
 	if !ok {
 		t.Fatalf("a named-receiver method call declined the threading")
 	}
-	if args[0].Kind != kernelbridge.LoopEffectVar || args[0].Index != 0 {
-		t.Errorf("entry 0 = %+v, want a var of wrapper.metatype's slot 0", args[0])
+	if args[0].Kind != kernelbridge.LoopEffectVarState || args[0].Index != 0 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of wrapper.metatype's slot 0", args[0])
 	}
 }
 
@@ -103,11 +103,11 @@ func TestSummaryCallStatement_AChainReceiverFillsFromTheFieldsFieldsSlots(t *tes
 	if !ok {
 		t.Fatalf("a chained receiver declined the threading — one hop is the same prefix rule")
 	}
-	if args[0].Kind != kernelbridge.LoopEffectVar || args[0].Index != 0 {
-		t.Errorf("entry 0 = %+v, want a var of this.injector.depth's slot 0", args[0])
+	if args[0].Kind != kernelbridge.LoopEffectVarState || args[0].Index != 0 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of this.injector.depth's slot 0", args[0])
 	}
-	if args[1].Kind != kernelbridge.LoopEffectVar || args[1].Index != 1 {
-		t.Errorf("entry 1 = %+v, want a var of this.injector.name's slot 1", args[1])
+	if args[1].Kind != kernelbridge.LoopEffectVarState || args[1].Index != 1 {
+		t.Errorf("entry 1 = %+v, want a whole-state copy of this.injector.name's slot 1", args[1])
 	}
 }
 
@@ -128,8 +128,8 @@ func TestSummaryCallStatement_AFieldTheCallerHasNoSlotForFillsUnknownAndNeverAbs
 	if !ok {
 		t.Fatalf("a partially-known bundle declined — an unknown field is fillable")
 	}
-	if args[0].Kind != kernelbridge.LoopEffectVar || args[0].Index != 0 {
-		t.Errorf("entry 0 = %+v, want a var of this.count's slot 0", args[0])
+	if args[0].Kind != kernelbridge.LoopEffectVarState || args[0].Index != 0 {
+		t.Errorf("entry 0 = %+v, want a whole-state copy of this.count's slot 0", args[0])
 	}
 	if args[1].Kind != kernelbridge.LoopEffectUnknown {
 		t.Errorf("entry 1 = %+v, want the UNKNOWN effect — absent would claim the field is undefined", args[1])

@@ -78,6 +78,34 @@ func WordTuplesOf(set RefinedSet) ([][]float64, bool) {
 	return [][]float64{points}, true
 }
 
+// WordTuplesOfConjunction is WordTuplesOf over a set that may carry
+// SEVERAL forms. A multi-form set is a CONJUNCTION — every member
+// satisfies every form — so any ONE form's finite word list is a
+// superset of the members, and answering it widens the set claim in
+// the sound direction. The meet machinery CONCATENATES form lists (a
+// served return met with its declared type is the two-form shape), so
+// a value that is exactly a word union can arrive wearing a second
+// conjunct beside it. The TIGHTEST readable conjunct answers: fewer
+// words is a smaller superset.
+func WordTuplesOfConjunction(set RefinedSet) ([][]float64, bool) {
+	if len(set.Forms) == 1 {
+		return WordTuplesOf(set)
+	}
+	var best [][]float64
+	held := false
+	for _, form := range set.Forms {
+		words, ok := WordTuplesOf(MakeRefinedSet(form))
+		if !ok {
+			continue
+		}
+		if !held || len(words) < len(best) {
+			best = words
+			held = true
+		}
+	}
+	return best, held
+}
+
 // stringLiteralPointsOfSet reads one set as one exact word: a chain of
 // one-codepoint singletons (the StringTuple encoding), or the empty
 // tuple.

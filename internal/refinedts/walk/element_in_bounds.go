@@ -286,7 +286,11 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 				if receiverIsString {
 					return &read
 				}
-				out := abstractdomain.PossiblyUndefined(read, abstractdomain.TrustSpec, true, false)
+				// sec-ordinaryget: a hole (no own property at that index)
+				// falls through to the prototype, and Array.prototype has
+				// no numeric slots, so the get answers exactly undefined —
+				// never null. The wrapper's own absent side is UndefOnly.
+				out := abstractdomain.PossiblyAbsent(read, abstractdomain.AbsentFlavorUndefOnly, abstractdomain.TrustSpec, true, false)
 				return &out
 			}
 		}
@@ -376,7 +380,9 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 		} else {
 			inner = abstractdomain.KnownSet(rep.Element, nil, abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(p.Receiver), abstractdomain.TrustSpec), abstractdomain.SetKindTagNone)
 		}
-		out := abstractdomain.PossiblyUndefined(inner, abstractdomain.TrustSpec, true, true)
+		// sec-ordinaryget: an out-of-range get answers exactly undefined,
+		// never null — the wrapper's own absent side is UndefOnly.
+		out := abstractdomain.PossiblyAbsent(inner, abstractdomain.AbsentFlavorUndefOnly, abstractdomain.TrustSpec, true, true)
 		return &out
 	}
 	return nil

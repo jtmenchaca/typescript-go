@@ -233,9 +233,10 @@ func TestAccessorCalls_ASetterWriteIsOneCallStatementCarryingTheValueAtEntryZero
 		t.Fatalf("the write lowered to %v, want a call — the setter runs a body", statement.Kind)
 	}
 	// the setter's ONE declared parameter is entry 0, and it holds the
-	// value the caller lowered
-	if statement.Args[0].Kind != kernelbridge.LoopEffectVar || statement.Args[0].Index != 1 {
-		t.Errorf("entry 0 = %+v, want the caller's own value effect (a var of slot 1)", statement.Args[0])
+	// caller's own value effect, whole-state — this is the WHOLE arg the
+	// call statement carries, never another effect's operand
+	if statement.Args[0].Kind != kernelbridge.LoopEffectVarState || statement.Args[0].Index != 1 {
+		t.Errorf("entry 0 = %+v, want the caller's own value effect (a whole-state copy of slot 1)", statement.Args[0])
 	}
 	// no ret: a setter's value is discarded by the language, so nothing
 	// lands in any caller slot from the RETURN

@@ -39,10 +39,12 @@ func (s *fieldCensusScan) visitDestructuringRead(node *ast.Node) bool {
 			read = binding.PropertyName.Text()
 		}
 		if !s.noteRead(read) {
-			// the pattern reads a member the field set never
-			// declared — no slot answers it
-			s.census.Escapes = true
-			return true
+			// the pattern reads a member the field set never declared —
+			// the spelling a GET ACCESSOR is read by (`const { age } =
+			// this` runs the getter). The same deferral the dotted read
+			// makes: reported, and Believable refuses it for every
+			// consumer without the accessor fold.
+			s.noteAccessorRead(read)
 		}
 	}
 	s.consumed[Unwrapped(d.Initializer)] = struct{}{}
@@ -85,9 +87,12 @@ func (s *fieldCensusScan) visitFieldRead(node *ast.Node) bool {
 		return false
 	}
 	if !s.noteRead(name) {
-		// the field set never declared this member — reading it would
-		// answer some other slot's state
-		s.census.Escapes = true
+		// the field set never declared this member — the spelling a GET
+		// ACCESSOR is read by. Reported, not ruled on: the consumer that
+		// resolves it to a getter declaration folds that body's census in,
+		// and every other consumer refuses through Believable, exactly as
+		// the escape refused before.
+		s.noteAccessorRead(name)
 	}
 	consumeReceiver(s.consumed, node)
 	return true

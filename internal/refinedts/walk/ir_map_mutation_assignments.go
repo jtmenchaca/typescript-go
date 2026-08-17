@@ -252,9 +252,10 @@ func getOrInsertSlotEffectsOf(context *LoweringContext, call *ast.Node, name str
 // JOIN of the vals slot's OLD reading (what k might already have held)
 // with v's own reading, which is exactly what the vals slot holds AFTER
 // the weak update getOrInsertSlotEffectsOf makes. So the value form
-// lowers as the three slot writes followed by `r := var m.vals`,
-// reading the updated slot the writes just established — mirroring
-// ArrayPushAssignmentsOf's read of the stepped len slot for `a.push(v)`.
+// lowers as the three slot writes followed by `r := a verbatim copy of
+// m.vals`, reading the updated slot the writes just established —
+// mirroring ArrayPushAssignmentsOf's read of the stepped len slot for
+// `a.push(v)`.
 func MapGetOrInsertAssignmentsOf(context *LoweringContext, statement *ast.Node) ([]AssignmentTarget, bool) {
 	// `m.getOrInsert(k, v);` — the return value discarded
 	if ast.IsExpressionStatement(statement) {
@@ -317,8 +318,8 @@ func getOrInsertReceiverOf(call *ast.Node) (string, bool) {
 
 // getOrInsertValueAssignmentsOf is a getOrInsert whose RESULT is
 // written into the spelled target name: the call's own slot writes,
-// then the target taking the vals slot's var — the joined stored-or-
-// inserted reading, which is what getOrInsert answers.
+// then the target taking a verbatim copy of the vals slot — the joined
+// stored-or-inserted reading, which is what getOrInsert answers.
 //
 // Declines where the target has no slot of its own, or where its sort
 // does not match the Map's value sort.
@@ -339,5 +340,5 @@ func getOrInsertValueAssignmentsOf(context *LoweringContext, value *ast.Node, ta
 	if context.Sorts[targetSlot] != context.Sorts[valsSlot] {
 		return nil, false
 	}
-	return append(assignments, AssignmentTarget{Target: targetSlot, Effect: varEffect(valsSlot)}), true
+	return append(assignments, AssignmentTarget{Target: targetSlot, Effect: varStateEffect(valsSlot)}), true
 }

@@ -213,7 +213,12 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			for name := range written {
 				if _, ok := env.Get(name); ok {
 					HavocEnv(ctx.Aliases, env, name)
+					continue
 				}
+				// an UNTRACKED written root (a class name whose static
+				// place entries live under dotted keys) sweeps its entries
+				// — the handed function may run at any later time
+				ForgetPlaceEntriesEnv(env, name)
 			}
 		}
 	}

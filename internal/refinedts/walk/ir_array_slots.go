@@ -17,24 +17,34 @@
 // The recognized uses, total-or-decline over EVERY occurrence of the
 // name:
 //
-//   - `a.length` → the len slot's var.
+//   - `a.length` on its own, standing alone as a plain assignment's
+//     whole right side → a verbatim copy of the len slot (a pure copy
+//     must not launder an absent source into the NaN flag); nested
+//     inside arithmetic or a guard's operand → the len slot's ordinary
+//     numeric var.
 //   - `a.push(v, …)` → len := len + (the argument count); elem :=
 //     join(elem, every argument). push ANSWERS the new length, so
-//     `const n = a.push(v)` also writes n := the len slot's var, read
-//     after the step.
-//   - `a[i]` under a dominating `i < a.length` → the elem slot's var.
+//     `const n = a.push(v)` also writes n := a verbatim copy of the len
+//     slot, read after the step.
+//   - `a[i]` under a dominating `i < a.length`, standing alone as the
+//     whole assignment → a verbatim copy of the elem slot; nested in an
+//     operand → the elem slot's ordinary numeric var.
 //   - `a[i]` with nothing bounding i → orAbsent(elem): the element or
-//     undefined, which is exactly what an out-of-range read yields.
+//     undefined, which is exactly what an out-of-range read yields (the
+//     wrapped operand always stays the numeric var — a copy never rides
+//     inside orAbsent).
 //   - `a[i] = v` → elem := join(elem, v) (weak update; len unchanged),
 //     and the compound `a[i] += v` the same with the arithmetic in
 //     front: elem := join(elem, elem + v).
 //   - `for (const x of a)` and `for (x of a)` over a name declared
 //     outside → the ordinary loop lowering with x's per-pass effect the
-//     elem slot's var.
+//     elem slot's ordinary numeric var (a loop-body per-pass effect,
+//     never a copy).
 //   - `const b = [...a]` over an already-flattened sibling array of the
-//     same body → a COPY: b's two slots take a's, read var for var. The
-//     two hold the same values, so they wear the same sorts, and every
-//     reader treats the copy exactly as it treats a literal-built array.
+//     same body → a COPY: b's two slots take a's, verbatim, whole-state
+//     for whole-state. The two hold the same values, so they wear the
+//     same sorts, and every reader treats the copy exactly as it treats
+//     a literal-built array.
 //   - `a.map(cb)`, `a.filter(cb)`, `a.forEach(cb)`, `a.find(cb)`,
 //     `a.flatMap(cb)`, `a.reduce(cb, seed)` → the callback routes in
 //     ir_callback_summary.go, which read a's two slots and convert the
@@ -100,6 +110,23 @@ type ArrayLocal struct {
 	// declared type. Meaningful only when Parameter is set;
 	// ArrayElementSort reads it there instead of scanning Elements.
 	DeclaredElementSort BindingKind
+	// ElementMembers: the RECORD member list a parameter's element type
+	// expands to — "xs.elem.a", "xs.elem.b" for `xs: { a: number, b:
+	// number }[]` — or nil when the element type is not a record (a
+	// scalar, a union, an unresolvable reference). Meaningful only when
+	// Parameter is set; reuses recordParamMembersIn's own member reader
+	// (scalarMemberListWithCheckerIn / namedTypeMembersOf) against the
+	// ARRAY'S ELEMENT type node rather than the parameter's own, spelled
+	// under the elem slot as the holder so every member's SlotName already
+	// reads "xs.elem.<member>" with no further joining needed.
+	//
+	// The elem-leaf a member's SlotName resolves to is the JOIN over every
+	// element the array can hold — the same weak-summary story the plain
+	// scalar elem slot already carries, one member wide. A read through it
+	// answers the join; a write into it (an element-leaf write, `xs[i].a =
+	// v`) must join in rather than replace, mirroring the plain elem
+	// slot's own write rule.
+	ElementMembers []recordParamMember
 	// SplitReceiver: the receiver expression of `const parts =
 	// s.split(sep)` — the string this array's pieces were cut out of — or
 	// nil for every other initializer.

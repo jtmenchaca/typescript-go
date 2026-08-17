@@ -115,3 +115,46 @@ func TestAnInteriorRemovedPointKeepsTheStackedDifference(t *testing.T) {
 		t.Errorf("expected the lower bound to stay at -1")
 	}
 }
+
+// TestExcludeKindPreservesTheAbsentFlavor pins the AbsentFlavor fix: a
+// KindPossiblyUndefined wrapper's own AbsentSide (NullOnly/UndefOnly)
+// must survive a refuted-typeof narrowing on its inner union — the
+// pre-fix rebuild via PossiblyUndefined silently widened every
+// flavored wrapper back to conflated.
+func TestExcludeKindPreservesTheAbsentFlavor(t *testing.T) {
+	number := abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	str := abstractdomain.KnownValues(refinementsets.CodepointsOf("a"), abstractdomain.PrimitiveString, abstractdomain.TrustProved)
+	union := abstractdomain.KindUnionOf([]abstractdomain.AbstractValue{number, str})
+	wrapped := abstractdomain.PossiblyAbsent(union, abstractdomain.AbsentFlavorNullOnly, "", false, false)
+	narrowed := ApplyNarrowed(wrapped, Narrowed{
+		Binding:      "v",
+		ExcludesKind: "string",
+	})
+	if narrowed.Kind != abstractdomain.KindPossiblyUndefined {
+		t.Fatalf("ApplyNarrowed(ExcludesKind) = %+v, want KindPossiblyUndefined", narrowed)
+	}
+	if narrowed.AbsentSide != abstractdomain.AbsentFlavorNullOnly {
+		t.Errorf("ApplyNarrowed(ExcludesKind).AbsentSide = %v, want AbsentFlavorNullOnly (excludeKind must not widen it back to conflated)", narrowed.AbsentSide)
+	}
+}
+
+// TestDropWordSetPreservesTheAbsentFlavor is
+// TestExcludeKindPreservesTheAbsentFlavor's dropWordSet twin.
+func TestDropWordSetPreservesTheAbsentFlavor(t *testing.T) {
+	inner := abstractdomain.KnownSet(
+		refinementsets.MakeRefinedSet(refinementsets.Union(refinementsets.StringTuple("a"), refinementsets.StringTuple("b"))),
+		nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone,
+	)
+	wrapped := abstractdomain.PossiblyAbsent(inner, abstractdomain.AbsentFlavorUndefOnly, "", false, false)
+	narrowed := ApplyNarrowed(wrapped, Narrowed{
+		Binding:            "v",
+		WordSetExcluded:    [][]float64{refinementsets.CodepointsOf("a")},
+		HasWordSetExcluded: true,
+	})
+	if narrowed.Kind != abstractdomain.KindPossiblyUndefined {
+		t.Fatalf("ApplyNarrowed(WordSetExcluded) = %+v, want KindPossiblyUndefined", narrowed)
+	}
+	if narrowed.AbsentSide != abstractdomain.AbsentFlavorUndefOnly {
+		t.Errorf("ApplyNarrowed(WordSetExcluded).AbsentSide = %v, want AbsentFlavorUndefOnly (dropWordSet must not widen it back to conflated)", narrowed.AbsentSide)
+	}
+}

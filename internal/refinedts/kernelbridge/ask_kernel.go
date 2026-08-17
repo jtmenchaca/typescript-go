@@ -181,10 +181,21 @@ func KernelFromCalls(input KernelFromCallsInput) *RefinedTSKernel {
 	// Every question that actually reaches the kernel is timed and its
 	// wire measured. Nothing is declined on an estimate: what a
 	// question costs is observed, not predicted (boundary/observed_cost.ts).
+	//
+	// This is also the ask seam kernel_trace.go's Q/A lines fire from:
+	// `wire` here is the exact request that crosses to the dylib
+	// (post-cache-miss — AskCached only calls compute(), which reaches
+	// this closure, on a miss), and `raw` is the exact answer wire that
+	// comes back, before any decode. traceKernelQuestion/Answer are
+	// nil-checked no-ops when no trace writer is set.
 	timed := func(op string, bytes int, wire string, call func() (string, error)) (string, error) {
+		traceKernelQuestion(op, wire)
 		startedAt := nowMs()
 		raw, err := call()
 		elapsed := nowMs() - startedAt
+		if err == nil {
+			traceKernelAnswer(op, raw)
+		}
 		displayWire := wire
 		if len(wire) > 300 {
 			displayWire = wire[:300] + "…"

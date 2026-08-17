@@ -61,7 +61,7 @@ func DestructuringWithDefaultsOf(context *LoweringContext, statement *ast.Node) 
 		out = append(out, kernelbridge.IrStatement{
 			Kind:   kernelbridge.IrStatementAssign,
 			Target: target,
-			Effect: varEffect(source),
+			Effect: varStateEffect(source),
 		})
 		if binding.Initializer == nil {
 			continue
@@ -74,14 +74,20 @@ func DestructuringWithDefaultsOf(context *LoweringContext, statement *ast.Node) 
 		if !lowered {
 			return nil, false
 		}
+		// a destructuring default fires on exactly UNDEFINED, never on
+		// null (sec-destructuring-binding-patterns: KeyedBindingInitialization
+		// applies the Initializer only "if v is undefined") — so the
+		// branch tests eqUndef with the default on the true arm, not
+		// definedness with the default on the absent arm, which would
+		// wrongly default a null value away
 		out = append(out, kernelbridge.IrStatement{
 			Kind: kernelbridge.IrStatementBranch,
 			On:   target,
-			Test: kernelbridge.IrTestDefined,
-			Else: []kernelbridge.IrStatement{{
+			Test: kernelbridge.IrTestEqUndef,
+			Then: []kernelbridge.IrStatement{{
 				Kind:   kernelbridge.IrStatementAssign,
 				Target: target,
-				Effect: defaultEffect,
+				Effect: asVarStateEffect(defaultEffect),
 			}},
 		})
 	}
@@ -146,7 +152,7 @@ func DestructuringAssignmentsOf(context *LoweringContext, statement *ast.Node) (
 		if !targetOk {
 			return nil, false
 		}
-		out = append(out, AssignmentTarget{Target: target, Effect: varEffect(source)})
+		out = append(out, AssignmentTarget{Target: target, Effect: varStateEffect(source)})
 	}
 	if len(out) == 0 {
 		return nil, false

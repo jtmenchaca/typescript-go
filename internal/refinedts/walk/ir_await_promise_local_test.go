@@ -114,8 +114,8 @@ func TestPromiseLocalDeclaration_APromiseResolveInitializerFlattensToTheInnerSlo
 	if len(lowered) != 1 || lowered[0].Kind != kernelbridge.IrStatementAssign {
 		t.Fatalf("lowered = %+v, want one assign into the inner slot", lowered)
 	}
-	if lowered[0].Effect.Kind != kernelbridge.LoopEffectVar || lowered[0].Effect.Index != 1 {
-		t.Errorf("lowered[0].Effect = %+v, want the var read of s (slot 1)", lowered[0].Effect)
+	if lowered[0].Effect.Kind != kernelbridge.LoopEffectVarState || lowered[0].Effect.Index != 1 {
+		t.Errorf("lowered[0].Effect = %+v, want the verbatim copy of s (slot 1)", lowered[0].Effect)
 	}
 	slot, held := promiseInnerSlotOf(context, "p")
 	if !held {
@@ -168,7 +168,7 @@ func TestPromiseInnerSlot_TheHeldSlotIsReadBackByNameAndAnUnheldNameAnswersNothi
 	if len(lowered) != 1 {
 		t.Fatalf("len(lowered) = %d, want 1", len(lowered))
 	}
-	if lowered[0].Effect.Kind != kernelbridge.LoopEffectVar || lowered[0].Effect.Index != 7 {
+	if lowered[0].Effect.Kind != kernelbridge.LoopEffectVarState || lowered[0].Effect.Index != 7 {
 		t.Errorf("`await p` did not read the flattened inner slot: %+v", lowered[0].Effect)
 	}
 }

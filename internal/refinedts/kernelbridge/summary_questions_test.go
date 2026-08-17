@@ -55,7 +55,7 @@ func TestTheApplySummaryWireSplicesTheBlobBesideTheEntryStates(t *testing.T) {
 		{Top: true},
 	})
 	want := fmt.Sprintf(
-		`{"summary":%s,"entries":[{"set":{"forms":[{"form":"oneOf","w":[{"num":7,"exp":0}]}]},"absent":false,"nan":false},{"top":true}]}`,
+		`{"summary":%s,"entries":[{"set":{"forms":[{"form":"oneOf","w":[{"num":7,"exp":0}]}]},"undef":false,"null":false,"nan":false},{"top":true}]}`,
 		string(aSummary),
 	)
 	if got != want {
@@ -126,7 +126,7 @@ func TestApplySummaryDecodesTheSameStateListTheWalkAnswers(t *testing.T) {
 	if !states[0].Top {
 		t.Errorf("states[0].Top = false, want true")
 	}
-	if states[1].Top || !states[1].Absent {
+	if states[1].Top || !states[1].Undef || !states[1].Null {
 		t.Errorf("states[1] = %+v, want a set with the absent flag up", states[1])
 	}
 }

@@ -83,7 +83,7 @@ func bundleRetsAndArgs(
 			args[entry.Index] = unknownEffect
 			continue
 		}
-		args[entry.Index] = varEffect(slot)
+		args[entry.Index] = varStateEffect(slot)
 		if entry.Written && entry.Index < len(rets) {
 			rets[entry.Index] = slot
 		}

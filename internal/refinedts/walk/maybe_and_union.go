@@ -77,7 +77,18 @@ func RefutePossiblyAbsent(
 			statedWords + " — the absent value is a member of no " +
 			"refined set"
 	} else {
-		messageText = what + " may be 'undefined', which is not assignable to " + statedWords
+		// The wrapper's own absent side names which runtime value the
+		// refutation is about: NullOnly proves exactly 'null' admitted,
+		// UndefOnly exactly 'undefined'; the zero value (conflated)
+		// keeps the pre-flavor wording, since it may be either.
+		switch known.AbsentSide {
+		case abstractdomain.AbsentFlavorNullOnly:
+			messageText = what + " may be 'null', which is not assignable to " + statedWords
+		case abstractdomain.AbsentFlavorUndefOnly:
+			messageText = what + " may be 'undefined', which is not assignable to " + statedWords
+		default:
+			messageText = what + " may be 'undefined', which is not assignable to " + statedWords
+		}
 	}
 	base := assignability.At(node, 7001, messageText)
 	if hasFix {

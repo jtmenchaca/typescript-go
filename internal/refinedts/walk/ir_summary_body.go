@@ -73,9 +73,17 @@ func lowerArrowSummary(
 // parameter entry wears when the call site knows them. A nil entry list
 // (the declaration route) leaves every parameter reading its own
 // annotation.
+//
+// Array marks a declared parameter the site is filling as a flattened
+// ARRAY — the len/elem PAIR ir_array_slots.go's local carries, not one
+// scalar value. Sort/TypeofTag then describe the ELEMENT half only (the
+// length is always number); Array is what tells
+// summaryParameterEntries to accept the pair layout at this position
+// instead of refusing it as one entry short.
 type parameterSlotSort struct {
 	Sort      BindingKind
 	TypeofTag TypeofTag
+	Array     bool
 }
 
 // lowerSummaryBodyWithCaptures is the one lowering both doors share:

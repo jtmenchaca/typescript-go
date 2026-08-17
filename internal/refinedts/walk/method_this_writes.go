@@ -399,6 +399,11 @@ func literalThisBundleOf(ctx *FlowContext, declaration *ast.Node, literal *ast.N
 	switch {
 	case census.Escapes:
 		return thisBundleLayout{Escaped: true}
+	case len(census.AccessorStores) > 0 || len(census.AccessorReads) > 0:
+		// an object literal declares no accessors this arm resolves — the
+		// deferred names have no fold here, so the refusal the escape used
+		// to make stands
+		return thisBundleLayout{Escaped: true}
 	case census.ComputedWrite:
 		// `this[k] = v` moves a slot nothing names — the literal's rows
 		// bound the set, so every field joins the havoc set

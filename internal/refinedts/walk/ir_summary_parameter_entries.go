@@ -178,12 +178,14 @@ func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlo
 	// a BINDING-PATTERN parameter (`({ transform, whitelist }: Options)`)
 	// binds locals from the argument object's members: one entry per
 	// element, slot name the BOUND name, Key the annotation member it
-	// fills from, sort the member's own. Defaults, rests, computed keys,
-	// nested patterns, a member the annotation does not spell, a member
-	// whose own sort is unknown (a richer-typed or nested-literal member
-	// — the entry expands, but the pattern binds a LOCAL that the body
-	// goes on to use as a value, and an unknown-sorted one is nothing to
-	// bind from), and a duplicate bound name all refuse.
+	// fills from, sort the member's own. A member whose own sort is
+	// unknown (a richer-typed or nested-literal member) still binds —
+	// its entry rides in unknown-sorted (BindingKindUnknown,
+	// TypeofTagNone): reads of the bound local answer nothing, which is
+	// exactly what is known, the same argument the REST-parameter arm
+	// below already makes for its own single unknown-sorted entry.
+	// Defaults, rests, computed keys, nested patterns, a member the
+	// annotation does not spell, and a duplicate bound name all refuse.
 	if pd.Name() != nil && ast.IsObjectBindingPattern(pd.Name()) && pd.DotDotDotToken == nil && pd.Initializer == nil {
 		members, isRecord := recordParamMembersIn(ctx, parameter)
 		if !isRecord {
@@ -217,7 +219,7 @@ func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlo
 				key = binding.PropertyName.Text()
 			}
 			member, declared := byKey[key]
-			if !declared || member.Sort == BindingKindUnknown {
+			if !declared {
 				return nil, false
 			}
 			bound := binding.Name().Text()
@@ -275,11 +277,32 @@ func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlo
 	// exclusivity the caller relies on: one name has one slot family, and
 	// a record annotation and an array annotation are disjoint by syntax
 	// so no parameter ever reaches both.
+	//
+	// An array whose ELEMENT is itself a record (local.ElementMembers
+	// populated, step 1) widens the entry list from two to 1+N: the len
+	// slot unchanged, and one "xs.elem.<member>" entry per member IN
+	// PLACE of the single scalar elem entry — each member sorted by its
+	// own annotation, exactly as the record-parameter arm above sorts a
+	// plain record's members. The COUNT depends on this expansion, which
+	// is why arrayParamSlotsIn's own memo (not a fresh reading here) is
+	// what both this layout seam and the call-site seam must read: two
+	// readings that disagreed on ElementMembers would build entry vectors
+	// of different widths for one declaration.
 	if local, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
-		return []bodySlot{
-			{Name: local.LenSlotName, Sort: BindingKindNumber, TypeofTag: TypeofTagNumber},
-			{Name: local.ElemSlotName, Sort: ArrayElementSort(local), TypeofTag: ArrayElementTypeof(local)},
-		}, true
+		out := make([]bodySlot, 0, 1+max(1, len(local.ElementMembers)))
+		out = append(out, bodySlot{Name: local.LenSlotName, Sort: BindingKindNumber, TypeofTag: TypeofTagNumber})
+		if len(local.ElementMembers) > 0 {
+			for _, member := range local.ElementMembers {
+				out = append(out, bodySlot{
+					Name:      member.SlotName,
+					Sort:      member.Sort,
+					TypeofTag: member.TypeofTag,
+				})
+			}
+			return out, true
+		}
+		out = append(out, bodySlot{Name: local.ElemSlotName, Sort: ArrayElementSort(local), TypeofTag: ArrayElementTypeof(local)})
+		return out, true
 	}
 	return []bodySlot{{
 		Name:      pd.Name().Text(),
@@ -343,7 +366,7 @@ func arrayParamSlotsIn(ctx *FlowContext, parameter *ast.Node) (ArrayLocal, bool)
 	if ctx != nil && ctx.P != nil {
 		c = ctx.P.Checker
 	}
-	local, flattened := ArrayParameterOf(c, body, parameter)
+	local, flattened := ArrayParameterOf(ctx, c, body, parameter)
 	if c == nil {
 		// nothing was resolved against a checker, so nothing is remembered:
 		// a later reading WITH a context must still be free to read the

@@ -88,6 +88,8 @@ func spellInto(b *strings.Builder, known AbstractValue) bool {
 		b.WriteByte(')')
 	case KindUndef:
 		b.WriteString("undef")
+	case KindNull:
+		b.WriteString("null")
 	case KindNaN:
 		b.WriteString("nan")
 	case KindValues:
@@ -261,6 +263,12 @@ func spellInto(b *strings.Builder, known AbstractValue) bool {
 		if known.Kind == KindPossiblyUndefined {
 			b.WriteByte(';')
 			b.WriteString(strconv.FormatBool(known.ProvedAbsent))
+			b.WriteByte(';')
+			// the flavor keys the memo too: an UndefOnly and a NullOnly
+			// wrapper around the same inner value are DIFFERENT knowledge
+			// (a later `=== undefined` guard decides them differently) and
+			// must not share a cache hit
+			b.WriteString(string(known.AbsentSide))
 		}
 		b.WriteByte(';')
 		b.WriteString(string(known.Grade))

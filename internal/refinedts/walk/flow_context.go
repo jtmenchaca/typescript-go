@@ -118,6 +118,15 @@ type FlowContext struct {
 	// recursion, and a recursive inline answers unknown rather than
 	// diverging.
 	Inlining map[*ast.Symbol]struct{}
+	// ResolverTargets: a `Promise.withResolvers()` destructured
+	// resolve/reject binding's declared symbol maps to the NAME its
+	// paired promise binding is tracked under (promise_with_resolvers.go).
+	// A later `resolve(arg)`/`reject()` call on the SAME symbol writes
+	// the settled value into that name's env slot through
+	// UpdateTrackedEnv — the two bindings come from one destructuring
+	// statement, so the pairing is fixed at bind time, not discovered
+	// by scanning ahead.
+	ResolverTargets map[*ast.Symbol]string
 	// ThrowSink: when non-nil, a walked `throw` records a snapshot of
 	// its environment here — the states an exception can carry out to
 	// a caller's catch.

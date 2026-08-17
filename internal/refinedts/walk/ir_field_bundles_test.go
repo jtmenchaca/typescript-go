@@ -529,15 +529,26 @@ func TestFieldBundles_ABareMentionOfTheReceiverEscapes(t *testing.T) {
 	}
 }
 
-func TestFieldBundles_AnUndeclaredMemberEscapesBecauseNoSlotHoldsIt(t *testing.T) {
+func TestFieldBundles_AnUndeclaredMemberDefersToItsConsumer(t *testing.T) {
+	// no slot holds `missing` — the spelling a GET ACCESSOR is read by.
+	// The census reports the name (AccessorReads) instead of escaping;
+	// Believable refuses every consumer without the accessor fold, and
+	// the fold itself (thisBundleOf) turns an unresolvable name back
+	// into the escape — the same refusal, ruled at the right seam.
 	census := thisCensusOf(t, `
 		class Module {
 			depth: number;
 			load(): number { return this.missing; }
 		}
 	`)
-	if !census.Escapes {
-		t.Errorf("escapes = false, want true — no slot holds `missing`, so reading it would answer another slot")
+	if census.Escapes {
+		t.Errorf("escapes = true, want the deferral — the ruling is the consumer's")
+	}
+	if !contains(census.AccessorReads, "missing") {
+		t.Errorf("AccessorReads = %v, want it to name missing", census.AccessorReads)
+	}
+	if census.Believable() {
+		t.Errorf("a deferred accessor read answered believable")
 	}
 	if len(census.Reads) != 0 {
 		t.Errorf("reads = %v, want none — an undeclared member is not a field read", fieldNames(census.Reads))

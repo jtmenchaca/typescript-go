@@ -65,7 +65,7 @@ func textIsAlwaysAString(known abstractdomain.AbstractValue) bool {
 	case abstractdomain.KindObject:
 		return !known.BareProto
 	case abstractdomain.KindValues, abstractdomain.KindSet, abstractdomain.KindNaN,
-		abstractdomain.KindUndef, abstractdomain.KindList, abstractdomain.KindCollection,
+		abstractdomain.KindUndef, abstractdomain.KindNull, abstractdomain.KindList, abstractdomain.KindCollection,
 		abstractdomain.KindPromise, abstractdomain.KindDate, abstractdomain.KindRegex,
 		abstractdomain.KindHostFunction, abstractdomain.KindBigints:
 		return true
@@ -150,14 +150,13 @@ func TextOfKnown(decimal func(v float64) (string, bool), known abstractdomain.Ab
 	case abstractdomain.KindNaN:
 		return exactText("NaN", abstractdomain.TrustLevelOf(known)), true
 	case abstractdomain.KindUndef:
-		// the marker conflates undefined with null — two words, so the
-		// text is the two-word set, never one exact spelling
-		return TextReading{
-			Exact:    nil,
-			HasExact: false,
-			Set:      unionOf(refinementsets.StringTuple("undefined"), refinementsets.StringTuple("null")),
-			Grade:    abstractdomain.TrustLevelOf(known),
-		}, true
+		// KindUndef is exactly-undefined (the null/undefined split lives
+		// on KindNull now) — sec-tostring step 3: ToString(undefined) is
+		// "undefined", one exact word.
+		return exactText("undefined", abstractdomain.TrustLevelOf(known)), true
+	case abstractdomain.KindNull:
+		// sec-tostring step 4: ToString(null) is "null", one exact word.
+		return exactText("null", abstractdomain.TrustLevelOf(known)), true
 	case abstractdomain.KindSet:
 		// a provably scalar set is numeric: its text is SOME numeric
 		// spelling — the exact form is out of reach, but the result is
@@ -268,10 +267,26 @@ func TextOfKnown(decimal func(v float64) (string, bool), known abstractdomain.Ab
 		if !ok {
 			return TextReading{}, false
 		}
+		// The wrapper's own absent side contributes its ToString word(s)
+		// (sec-tostring steps 3-4) on top of Inner's own text — Inner
+		// already carries "null" for the Inner=Null wrapper shape
+		// (PossiblyAbsent's own normalization), so this arm only ever
+		// adds the WRAPPER side's word. AbsentSide states which runtime
+		// value the wrapper side is: NullOnly claims exactly "null",
+		// UndefOnly exactly "undefined"; the zero value (conflated) is a
+		// MAY-claim over both words, so a sound text set unions both —
+		// narrowing it to one word would drop a runtime possibility.
+		absentWord := unionOf(refinementsets.StringTuple("undefined"), refinementsets.StringTuple("null"))
+		switch known.AbsentSide {
+		case abstractdomain.AbsentFlavorNullOnly:
+			absentWord = refinementsets.StringTuple("null")
+		case abstractdomain.AbsentFlavorUndefOnly:
+			absentWord = refinementsets.StringTuple("undefined")
+		}
 		return TextReading{
 			Exact:    nil,
 			HasExact: false,
-			Set:      unionOf(inner.Set, refinementsets.StringTuple("undefined")),
+			Set:      unionOf(inner.Set, absentWord),
 			Grade:    abstractdomain.MinTrustLevel(inner.Grade, abstractdomain.TrustLevelOf(known)),
 		}, true
 	case abstractdomain.KindPossiblyNaN:

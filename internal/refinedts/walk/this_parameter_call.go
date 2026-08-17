@@ -81,23 +81,36 @@ func ThisParameterCallResult(ctx *FlowContext, env Env, e *ast.Node) *abstractdo
 
 // thisParameterCalleeShape is what every one of .call, .apply, and
 // .bind resolves before it can bind anything: the callee's own
-// contract, its this-parameter, and its ordinary parameters — read
-// once here so the three recognizers (this file, apply_call.go,
-// bind_call.go) share one resolution and one set of decline rules.
+// contract, its this-parameter (nil for an ORDINARY function — see
+// hasThisParameter), and its ordinary parameters — read once here so
+// the three recognizers (this file, apply_call.go, bind_call.go)
+// share one resolution and one set of decline rules.
 type thisParameterCalleeShape struct {
 	contract       *FunctionContract
-	thisParameter  *ast.Node
+	thisParameter  *ast.Node // nil when !hasThisParameter
 	ordinaryParams []*ast.Node
 	body           *ast.Node
+	// hasThisParameter is false for a callee with NO written `this`
+	// parameter — `.call`/`.apply` still bind ECMA-262's own way (the
+	// receiver argument fills sec-ordinarycallbindthis's thisArgument;
+	// the REST of the arguments fill the ordinary parameters starting
+	// at position 0, not 1). The bound thisArgument is never read back
+	// into the body: an arrow target never has its own `this` at all,
+	// and any other body that MENTIONS `this` without declaring the
+	// parameter is refused, the same rule BoundFunctionOf already
+	// applies to `.bind` on an ordinary function.
+	hasThisParameter bool
 }
 
 // thisParameterCalleeOf resolves an identifier receiver to its
 // contract and checks the shape every .call/.apply/.bind recognizer
-// needs: a function declaration or expression, carrying its own
-// written `this` parameter, with a body this walk can read. Nil
-// wherever any of those fails — the same declines
-// ThisParameterCallResult always answered before this shared reader
-// existed.
+// needs: a function declaration or expression with a body this walk
+// can read, either carrying its own written `this` parameter, or —
+// the ordinary-function case — one whose body an arrow-or-no-`this`
+// gate clears (BoundFunctionOf's own precedent: `.bind` already reads
+// an ordinary function this way, and `.call`/`.apply` reach the SAME
+// [[Call]] clause sec-ordinary-function-call pins for all three).
+// Nil wherever any of those fails.
 func thisParameterCalleeOf(ctx *FlowContext, receiver *ast.Node) *thisParameterCalleeShape {
 	if !ast.IsIdentifier(receiver) {
 		return nil
@@ -109,19 +122,32 @@ func thisParameterCalleeOf(ctx *FlowContext, receiver *ast.Node) *thisParameterC
 	if !ast.IsFunctionDeclaration(contract.Declaration) && !ast.IsFunctionExpression(contract.Declaration) {
 		return nil
 	}
-	declaredParams := contract.Declaration.Parameters()
-	if len(declaredParams) == 0 || !isThisParameterNode(declaredParams[0]) {
-		return nil
-	}
 	body := contract.Declaration.Body()
 	if body == nil {
 		return nil
 	}
+	declaredParams := contract.Declaration.Parameters()
+	if len(declaredParams) > 0 && isThisParameterNode(declaredParams[0]) {
+		return &thisParameterCalleeShape{
+			contract:         contract,
+			thisParameter:    declaredParams[0],
+			ordinaryParams:   declaredParams[1:],
+			body:             body,
+			hasThisParameter: true,
+		}
+	}
+	// no written `this` parameter: sound only where the body never
+	// reads `this` (an arrow target has none of its own to read,
+	// whatever the caller passes)
+	if !ast.IsArrowFunction(contract.Declaration) && MentionsThis(body) {
+		return nil
+	}
 	return &thisParameterCalleeShape{
-		contract:       contract,
-		thisParameter:  declaredParams[0],
-		ordinaryParams: declaredParams[1:],
-		body:           body,
+		contract:         contract,
+		thisParameter:    nil,
+		ordinaryParams:   declaredParams,
+		body:             body,
+		hasThisParameter: false,
 	}
 }
 
@@ -191,15 +217,24 @@ func thisParameterCallBindKnown(ctx *FlowContext, env Env, receiver *ast.Node, s
 	}
 	restEffective := EffectiveArguments{Nodes: restNodes, Knowns: restKnowns, Exact: effective.Exact}
 
-	// the THIS-PARAMETER's own declared type is the ceiling the same
-	// way an ordinary parameter's is (entryStateMeet) — the caller's
-	// exact value passes through whole where it fits, and only a
-	// claim the declaration cannot carry (an open-map completeness
-	// flag) is stripped
-	boundThis := entryStateMeet(ctx.P.Checker, thisParameter, thisArgument, InitialStateOfPlainParameter(ctx.P, thisParameter))
-
+	// an ORDINARY callee (no written `this` parameter) still consumes
+	// the receiver argument positionally (sec-ordinarycallbindthis
+	// binds SOME thisArgument whether or not the callee reads it), but
+	// there is no this-parameter to meet it against or bind it under —
+	// thisParameterCalleeOf already refused any body that reads `this`
+	// without declaring the parameter, so leaving "this" unset in
+	// callEnv is sound: nothing in the body looks for it.
+	var boundThis abstractdomain.AbstractValue
 	callEnv := NewEnv()
-	callEnv.Set("this", boundThis)
+	if shape.hasThisParameter {
+		// the THIS-PARAMETER's own declared type is the ceiling the same
+		// way an ordinary parameter's is (entryStateMeet) — the caller's
+		// exact value passes through whole where it fits, and only a
+		// claim the declaration cannot carry (an open-map completeness
+		// flag) is stripped
+		boundThis = entryStateMeet(ctx.P.Checker, thisParameter, thisArgument, InitialStateOfPlainParameter(ctx.P, thisParameter))
+		callEnv.Set("this", boundThis)
+	}
 	for i, parameter := range ordinaryParams {
 		name := parameter.AsParameterDeclaration().Name()
 		if !ast.IsIdentifier(name) {
@@ -212,10 +247,14 @@ func thisParameterCallBindKnown(ctx *FlowContext, env Env, receiver *ast.Node, s
 
 	// obligations check against the CALLER's own arguments, the same
 	// way a direct call's do — position 0 (thisArg) checks against
-	// the this-parameter's own statement, positions 1.. against the
-	// ordinary parameters, both through the shared CheckAssignability
-	// door CheckContractArguments already opens for a direct call
-	checkThisParameterArgument(ctx, thisParameter, thisArgument, thisArgumentNode)
+	// the this-parameter's own statement WHEN one is declared, positions
+	// 1.. (0.. for an ordinary callee, which reads no thisArg at all)
+	// against the ordinary parameters, both through the shared
+	// CheckAssignability door CheckContractArguments already opens for
+	// a direct call
+	if shape.hasThisParameter {
+		checkThisParameterArgument(ctx, thisParameter, thisArgument, thisArgumentNode)
+	}
 	checkOrdinaryArguments(ctx, ordinaryParams, restEffective)
 
 	// RECURSION GUARD: a this-parameter body that calls back into
@@ -273,13 +312,15 @@ func thisParameterCallBindKnown(ctx *FlowContext, env Env, receiver *ast.Node, s
 		}
 		return held
 	}
-	if _, writes := bodyWrites["this"]; writes && thisArgumentNode != nil {
-		WriteBackParameter(ctx, env, writeBackParameterParams{
-			parameter: thisParameter,
-			post:      post("this"),
-			entry:     boundThis,
-			argument:  thisArgumentNode,
-		})
+	if shape.hasThisParameter {
+		if _, writes := bodyWrites["this"]; writes && thisArgumentNode != nil {
+			WriteBackParameter(ctx, env, writeBackParameterParams{
+				parameter: thisParameter,
+				post:      post("this"),
+				entry:     boundThis,
+				argument:  thisArgumentNode,
+			})
+		}
 	}
 	for i, parameter := range ordinaryParams {
 		name := parameter.AsParameterDeclaration().Name()

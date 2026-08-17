@@ -123,6 +123,61 @@ func TestArrayUseScan_AnIndexOfWithASecondFromIndexArgumentDeclines(t *testing.T
 	}
 }
 
+func TestArrayUseScan_ConcatWithAPlainArgumentAdmitsTheArray(t *testing.T) {
+	declaration := summaryDeclarationOf(t,
+		"function f(x: number) { const a = [1, 2]; return a.concat(x); }")
+	body := declaration.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the array local collected")
+	}
+	if flattened := ArrayLocalsOf(body, locals.Locals, nil); len(flattened) != 1 {
+		t.Errorf("ArrayLocalsOf found %d flattened arrays, want 1 — concat is now a recognized read-form, not a decline", len(flattened))
+	}
+}
+
+func TestArrayUseScan_ConcatWithNoArgumentStillAdmitsTheArray(t *testing.T) {
+	declaration := summaryDeclarationOf(t,
+		"function f() { const a = [1, 2]; return a.concat(); }")
+	body := declaration.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the array local collected")
+	}
+	if flattened := ArrayLocalsOf(body, locals.Locals, nil); len(flattened) != 1 {
+		t.Errorf("ArrayLocalsOf found %d flattened arrays, want 1 — a.concat() is a legal zero-argument copy", len(flattened))
+	}
+}
+
+func TestArrayUseScan_ConcatWithASpreadArgumentDeclines(t *testing.T) {
+	declaration := summaryDeclarationOf(t,
+		"function f(xs: number[]) { const a = [1, 2]; return a.concat(...xs); }")
+	body := declaration.Body()
+	locals, ok := CollectLocals(body)
+	if !ok {
+		t.Fatalf("CollectLocals ok = false, want the array local collected")
+	}
+	if flattened := ArrayLocalsOf(body, locals.Locals, nil); len(flattened) != 0 {
+		t.Errorf("ArrayLocalsOf found %d flattened arrays, want 0 — a spread argument names no fixed count", len(flattened))
+	}
+}
+
+func TestArrayUseScan_ConcatOfAnArrayParameterAccumulatorAdmitsTheParameter(t *testing.T) {
+	// the Text.tsx reduce shape the brief names: `xs.reduce((acc: number[],
+	// x) => acc.concat(x), [])` — `acc` is an ARRAY-TYPED PARAMETER of the
+	// inner arrow, and its one use is `acc.concat(x)`. ArrayParameterOf
+	// (ir_array_parameters.go) gates on usesAreAllArrayFormsFrom exactly as
+	// ArrayLocalsOf does for a declared local; this pins the parameter path
+	// directly rather than through the outer reduce lowering (a sibling's
+	// territory).
+	declaration := summaryDeclarationOf(t,
+		"function g(acc: number[], x: number) { return acc.concat(x); }")
+	parameter := declaration.Parameters()[0]
+	if _, ok := ArrayParameterOf(nil, nil, declaration.Body(), parameter); !ok {
+		t.Errorf("ArrayParameterOf(acc) declined — concat should no longer block the array-parameter recognizer")
+	}
+}
+
 func TestArrayUseScan_AnArgumentThatMentionsTheArrayStillDeclines(t *testing.T) {
 	declaration := summaryDeclarationOf(t,
 		"function f() { const a = [1, 2]; return a.includes(a as unknown as number); }")

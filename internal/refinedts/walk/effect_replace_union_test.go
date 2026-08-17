@@ -67,8 +67,8 @@ func replaceSortRowServed(t *testing.T, kernel *kernelbridge.RefinedTSKernel, so
 	if out.Top {
 		t.Fatalf("out.Top = true, want false — the sort row is a claim, not a refusal")
 	}
-	if out.Absent {
-		t.Errorf("out.Absent = true, want false")
+	if out.Undef || out.Null {
+		t.Errorf("out admits absence (undef=%v null=%v), want neither", out.Undef, out.Null)
 	}
 	if out.Nan {
 		t.Errorf("out.Nan = true, want false")
@@ -221,8 +221,8 @@ func TestEffectReplace_AFunctionReplacementWithNoWritesTakesTheThrowRow(t *testi
 	if out.Top {
 		t.Fatalf("out.Top = true, want false — the throw row is a claim, not a refusal")
 	}
-	if out.Absent {
-		t.Errorf("out.Absent = true, want false")
+	if out.Undef || out.Null {
+		t.Errorf("out admits absence (undef=%v null=%v), want neither", out.Undef, out.Null)
 	}
 	if out.Nan {
 		t.Errorf("out.Nan = true, want false")

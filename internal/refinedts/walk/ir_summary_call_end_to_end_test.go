@@ -106,8 +106,8 @@ func TestSummaryCallStatement_AWrittenFieldExitRidesRetsBackIntoTheCallersSlotTh
 		t.Fatalf("the call carries %d entries, too few for the callee's entry %d", len(args), countEntry.Index)
 	}
 	filled := args[countEntry.Index]
-	if filled.Kind != kernelbridge.LoopEffectVar || filled.Index != 0 {
-		t.Errorf("the callee's this.count entry = %+v, want a var of the caller's own this.count slot 0", filled)
+	if filled.Kind != kernelbridge.LoopEffectVarState || filled.Index != 0 {
+		t.Errorf("the callee's this.count entry = %+v, want a whole-state copy of the caller's own this.count slot 0", filled)
 	}
 	if rets[countEntry.Index] != 0 {
 		t.Errorf("rets[%d] = %d, want the caller's this.count slot 0 — the write must ride back",
@@ -125,9 +125,9 @@ func TestSummaryCallStatement_AWrittenFieldExitRidesRetsBackIntoTheCallersSlotTh
 	if lowered[0].Kind == kernelbridge.IrStatementCall {
 		// the callee lowers now: the door's own statement must carry the
 		// same threading the direct call above produced
-		if lowered[0].Args[countEntry.Index].Kind != kernelbridge.LoopEffectVar ||
+		if lowered[0].Args[countEntry.Index].Kind != kernelbridge.LoopEffectVarState ||
 			lowered[0].Args[countEntry.Index].Index != 0 {
-			t.Errorf("the door's call entry = %+v, want the caller's this.count slot 0", lowered[0].Args[countEntry.Index])
+			t.Errorf("the door's call entry = %+v, want the caller's this.count slot 0, whole-state", lowered[0].Args[countEntry.Index])
 		}
 		if lowered[0].Rets[countEntry.Index] != 0 {
 			t.Errorf("the door's rets[%d] = %d, want 0", countEntry.Index, lowered[0].Rets[countEntry.Index])

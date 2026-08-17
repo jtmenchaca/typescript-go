@@ -80,7 +80,7 @@ func TestMapSlots_AGetOrInsertCallBehindACastBoundToADeclarationReadsTheJoinedVa
 	if len(assignments) != 4 {
 		t.Fatalf("len(assignments) = %d, want 4 (size, vals, keys, r)", len(assignments))
 	}
-	if assignments[3].Effect.Kind != kernelbridge.LoopEffectVar || assignments[3].Effect.Index != 1 {
-		t.Errorf("r's effect = %+v, want a var read of slot 1 (m.vals), taken AFTER the weak update", assignments[3].Effect)
+	if assignments[3].Effect.Kind != kernelbridge.LoopEffectVarState || assignments[3].Effect.Index != 1 {
+		t.Errorf("r's effect = %+v, want a verbatim copy of slot 1 (m.vals), taken AFTER the weak update", assignments[3].Effect)
 	}
 }

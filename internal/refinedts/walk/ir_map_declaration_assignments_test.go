@@ -32,8 +32,8 @@ func TestMapSlots_AnEmptyMapDeclarationWritesZeroAndTheAbsentCarryingConstant(t 
 	}
 	for _, index := range []int{1, 2} {
 		effect := assignments[index].Effect
-		if effect.Kind != kernelbridge.LoopEffectConstState || !effect.Absent {
-			t.Errorf("assignments[%d].Effect = %+v, want the absent-carrying constState", index, effect)
+		if effect.Kind != kernelbridge.LoopEffectConstState || !effect.Undef || effect.Null {
+			t.Errorf("assignments[%d].Effect = %+v, want the undefined-carrying constState (Undef alone)", index, effect)
 		}
 	}
 	stmts := assignsOf(assignments)
@@ -41,8 +41,8 @@ func TestMapSlots_AnEmptyMapDeclarationWritesZeroAndTheAbsentCarryingConstant(t 
 	if !kernel.Member(loweringSetOf(t, exit[0]), []float64{0}) {
 		t.Errorf("member(m.size, [0]) = false, want true")
 	}
-	if !exit[1].Absent {
-		t.Errorf("m.vals.Absent = false, want true — an empty Map has no value to read")
+	if !exit[1].Undef || exit[1].Null {
+		t.Errorf("m.vals admissions (undef=%v null=%v), want undefined alone — a missing read answers undefined, never null", exit[1].Undef, exit[1].Null)
 	}
 }
 

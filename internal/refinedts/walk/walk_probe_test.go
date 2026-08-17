@@ -72,8 +72,8 @@ func TestWalkProbe_TheKernelWalksALoweredBodyWholeAssignBranchJoin(t *testing.T)
 	if x.Top {
 		t.Fatalf("x.Top = true, want false")
 	}
-	if x.Absent {
-		t.Errorf("x.Absent = true, want false")
+	if x.Undef || x.Null {
+		t.Errorf("x admits absence (undef=%v null=%v), want neither", x.Undef, x.Null)
 	}
 	if x.Nan {
 		t.Errorf("x.Nan = true, want false")
@@ -92,8 +92,8 @@ func TestWalkProbe_TheKernelWalksALoweredBodyWholeAssignBranchJoin(t *testing.T)
 	if y.Top {
 		t.Fatalf("y.Top = true, want false")
 	}
-	if y.Absent {
-		t.Errorf("y.Absent = true, want false")
+	if y.Undef || y.Null {
+		t.Errorf("y admits absence (undef=%v null=%v), want neither", y.Undef, y.Null)
 	}
 	if y.Nan {
 		t.Errorf("y.Nan = true, want false")
@@ -119,7 +119,7 @@ func TestWalkProbe_ReadingAFlaggedBindingPoisonsTheAssignmentWithNaN(t *testing.
 	kernel := kernelDelegationLoadKernel(t)
 	entry := []kernelbridge.KnownStateWire{
 		{Top: true},
-		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{5})), Absent: true},
+		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{5})), Undef: true, Null: true},
 	}
 	exit := kernel.Walk(entry, []kernelbridge.IrStatement{
 		{
@@ -137,8 +137,8 @@ func TestWalkProbe_ReadingAFlaggedBindingPoisonsTheAssignmentWithNaN(t *testing.
 	if x.Top {
 		t.Fatalf("x.Top = true, want false")
 	}
-	if x.Absent {
-		t.Errorf("x.Absent = true, want false")
+	if x.Undef || x.Null {
+		t.Errorf("x admits absence (undef=%v null=%v), want neither", x.Undef, x.Null)
 	}
 	if !x.Nan {
 		t.Errorf("x.Nan = false, want true")
@@ -157,7 +157,7 @@ func TestWalkProbe_ALoopInsideTheWalkedBodyCertifiesThroughTheSolverAndAnUntouch
 	// possibly absent, never written by the loop
 	entry := []kernelbridge.KnownStateWire{
 		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0}))},
-		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{7})), Absent: true},
+		{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{7})), Undef: true, Null: true},
 	}
 	belowTen := refinementsets.MakeRefinedSet(refinementsets.Below(10))
 	atLeastTen := refinementsets.MakeRefinedSet(refinementsets.AtLeast(10))
@@ -188,8 +188,8 @@ func TestWalkProbe_ALoopInsideTheWalkedBodyCertifiesThroughTheSolverAndAnUntouch
 	if i.Top {
 		t.Fatalf("i.Top = true, want false")
 	}
-	if i.Absent {
-		t.Errorf("i.Absent = true, want false")
+	if i.Undef || i.Null {
+		t.Errorf("i admits absence (undef=%v null=%v), want neither", i.Undef, i.Null)
 	}
 	if i.Nan {
 		t.Errorf("i.Nan = true, want false")
@@ -211,8 +211,8 @@ func TestWalkProbe_ALoopInsideTheWalkedBodyCertifiesThroughTheSolverAndAnUntouch
 	if x.Top {
 		t.Fatalf("x.Top = true, want false")
 	}
-	if !x.Absent {
-		t.Errorf("x.Absent = false, want true")
+	if !x.Undef || !x.Null {
+		t.Errorf("x admissions (undef=%v null=%v), want both — the untouched entry conflated the two", x.Undef, x.Null)
 	}
 	if x.Nan {
 		t.Errorf("x.Nan = true, want false")
@@ -297,8 +297,8 @@ func TestWalkProbe_TheOpaqueBranchWalksBothArmsAndJoinsThemWithoutReadingAnyTest
 	if y.Top {
 		t.Fatalf("y.Top = true, want false")
 	}
-	if y.Absent {
-		t.Errorf("y.Absent = true, want false")
+	if y.Undef || y.Null {
+		t.Errorf("y admits absence (undef=%v null=%v), want neither", y.Undef, y.Null)
 	}
 	if y.Nan {
 		t.Errorf("y.Nan = true, want false")

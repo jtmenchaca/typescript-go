@@ -94,7 +94,14 @@ func AccessorDeclarationsOf(ctx *FlowContext, access *ast.Node) (getter *ast.Nod
 		return nil, nil, false
 	}
 	name := property.Name()
-	if name == nil || !ast.IsIdentifier(name) {
+	// a PRIVATE accessor's own access site names it through a
+	// PrivateIdentifier node (`this.#age`), a different AST kind from
+	// a plain Identifier (`this.age`) — accessorUsable below already
+	// tolerates a private-named DECLARATION (the class member itself),
+	// but this gate, over the ACCESS SITE, only ever admitted the
+	// plain-identifier shape, so every private accessor declined here
+	// before the declaration loop ever ran.
+	if name == nil || (!ast.IsIdentifier(name) && !ast.IsPrivateIdentifier(name)) {
 		return nil, nil, false
 	}
 	symbol := symbolAt(ctx.P.Checker, name)

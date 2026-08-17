@@ -242,10 +242,16 @@ func receiverProvedUntouched(ctx *FlowContext, declaration *ast.Node) bool {
 	}
 	// SummaryReceiverEffects answers a bare false BOTH when the summary
 	// says the receiver is untouched AND when the body did not lower at
-	// all, so the lowering is asked first: only a LOWERED body gets to
-	// say "not written" (callee_effects.go's receiverWritten reads the
-	// same two answers in the same order). A declined lowering forgets.
+	// all, so the lowering is asked first — and only a COMPLETE body
+	// gets to say "not written" (callee_effects.go's receiverWritten
+	// reads the same answers in the same order, with the same porous
+	// doubt direction: a porous body has statements the lowering did not
+	// read, so its empty written-entry list proves nothing). A declined
+	// or porous lowering forgets.
 	if _, lowered := LowerSummaryBody(ctx, declaration); !lowered {
+		return false
+	}
+	if outcome, _, recorded := SummaryOutcomeOf(declaration); !recorded || outcome != SummaryComplete {
 		return false
 	}
 	// receiverTouched folds both rows the proof needs: a written
@@ -446,7 +452,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		return silence.Residue()
 	}
 	if e.Kind == ast.KindNullKeyword {
-		return abstractdomain.Undef
+		return abstractdomain.Null
 	}
 	// `new.target` is the constructor when the enclosing function ran
 	// under `new`, and undefined when it ran as a plain call

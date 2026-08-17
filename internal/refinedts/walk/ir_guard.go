@@ -97,6 +97,13 @@ func lowerGuard(
 			//
 			// This is definedness and not truthiness: `0 ?? b` is 0, and a
 			// truthiness test on the left would wrongly hand it to `b`.
+			//
+			// IrTestDefined (either-admission) is the RIGHT test here, not
+			// IrTestEqUndef: CoalesceExpression's runtime semantics
+			// (sec-binary-logical-operators, tmp/ecma262/spec.html:21099-21106)
+			// runs the right operand whenever "_leftValue_ is neither
+			// *undefined* nor *null*" fails — so `??` treats null and
+			// undefined alike, which is exactly IrTestDefined's split.
 			left := Unwrapped(bin.Left)
 			on, tracked := IndexOf(context, left)
 			if tracked {
@@ -136,6 +143,12 @@ func lowerGuard(
 			// whose summary says "a value or undefined" hands this branch the
 			// definedness it tests, and one that says nothing hands `.top`,
 			// which the kernel's narrowDefined still splits soundly.
+			// IrTestDefined (either-admission, not the flavored eqUndef) is
+			// the right test for `??` regardless of the operand's shape:
+			// CoalesceExpression's runtime semantics treat null and
+			// undefined alike (sec-binary-logical-operators,
+			// tmp/ecma262/spec.html:21099-21106 — "neither *undefined* nor
+			// *null*" gates the right operand's evaluation).
 			//
 			// THE SLOT IS READ TWICE and both reads are of the temp: the
 			// branch tests it, and the defined arm's truthiness reads it
@@ -166,12 +179,50 @@ func lowerGuard(
 			}}, true
 		}
 	}
+	// A BARE NON-OPTIONAL RECORD PARAMETER — `if (entry)`, `entry && …`,
+	// `!entry`. Its declared annotation excludes undefined/null (the
+	// same rule recordParamMembersOf's expansion already trusts), so the
+	// value is always an object and ToBoolean always reads it true — the
+	// guard resolves to the truthy arm outright, no test on the wire at
+	// all, the same constant-fold TypeofRead's own IsConstant branch
+	// takes just below.
+	if truthyRecordParameterName(head) != "" {
+		return thn, true
+	}
 	if viaTypeof, ok := TypeofRead(context, head); ok {
 		if viaTypeof.IsConstant {
 			if viaTypeof.Value {
 				return thn, true
 			}
 			return els, true
+		}
+		// `typeof x === "undefined"` / `!==` is EXACTLY-UNDEFINED
+		// (sec-typeof-operator, tmp/ecma262/spec.html:20589-20590:
+		// `typeof null` answers "object", never "undefined") — the
+		// flavored eqUndef test, whose Then arm IS "the value is
+		// undefined", not IrTestDefined's either-admission split, which
+		// would wrongly also route a null value down the same arm as
+		// undefined. `typeof x === "<the slot's own tag>"` stays
+		// IrTestDefined: no scalar tag is ever "object"/"undefined", so a
+		// tag match means present and every miss (including null) means
+		// absent — the coincidence TypeofRead's own doc states.
+		if viaTypeof.IsUndefinedQuote {
+			// eqUndef's Then is "is undefined": `===` (Positive false)
+			// puts the condition-true branch on Then directly; `!==`
+			// (Positive true) is undefined exactly when the condition is
+			// FALSE, so its Then/Else swap the other way from the
+			// IrTestDefined arm below.
+			then, elseArm := thn, els
+			if viaTypeof.Positive {
+				then, elseArm = els, thn
+			}
+			return []kernelbridge.IrStatement{{
+				Kind: kernelbridge.IrStatementBranch,
+				On:   viaTypeof.On,
+				Test: kernelbridge.IrTestEqUndef,
+				Then: then,
+				Else: elseArm,
+			}}, true
 		}
 		then, elseArm := thn, els
 		if !viaTypeof.Positive {

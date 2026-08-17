@@ -68,9 +68,15 @@ func summaryParameterEntries(
 		// caller spells maps onto them the way "q.lo" maps onto a record
 		// leaf. The values enter from the entry state and go nowhere back.
 		if _, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
-			// the arrow route fills ONE entry per declared parameter with a
-			// site sort, which the two-slot pair has no single entry for
-			if index < len(parameterSorts) {
+			// the arrow route ordinarily fills ONE entry per declared
+			// parameter with a site sort, which the two-slot pair has no
+			// single entry for — UNLESS the site itself marked this
+			// position Array, meaning it is filling the pair (two effects,
+			// arrowCallStatement's own lockstep with convertReduceArrow).
+			// A site sort present but NOT marked Array is a genuine
+			// mismatch (a scalar-filled position whose declared type reads
+			// as an array) and still refuses.
+			if index < len(parameterSorts) && !parameterSorts[index].Array {
 				return layout, "an array parameter of an arrow argument", false
 			}
 			for _, entry := range entries {

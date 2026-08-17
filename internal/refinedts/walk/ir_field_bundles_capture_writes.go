@@ -70,7 +70,12 @@ func CaptureWriteSetWith(c *checker.Checker, classLike *ast.Node, fields []Bundl
 				continue
 			}
 			memberName := member.Name()
-			if memberName == nil || !ast.IsIdentifier(memberName) || memberName.Text() != name {
+			// a PRIVATE-NAMED method (`#helper`) reaches this worklist the
+			// same way a plain one does — the census's own private arm
+			// recognizes `this.#helper()` — so it resolves here too
+			if memberName == nil ||
+				(!ast.IsIdentifier(memberName) && !ast.IsPrivateIdentifier(memberName)) ||
+				memberName.Text() != name {
 				continue
 			}
 			body = member.Body()
@@ -115,7 +120,8 @@ func CaptureWriteSetWith(c *checker.Checker, classLike *ast.Node, fields []Bundl
 			default:
 				for _, literal := range literals {
 					literalCensus := FieldCensusWith(c, literal, "this", spelled)
-					if literalCensus.Escapes || literalCensus.ComputedWrite {
+					if literalCensus.Escapes || literalCensus.ComputedWrite ||
+						len(literalCensus.AccessorStores) > 0 || len(literalCensus.AccessorReads) > 0 {
 						return nil, false
 					}
 					for _, field := range literalCensus.Writes {
@@ -128,7 +134,13 @@ func CaptureWriteSetWith(c *checker.Checker, classLike *ast.Node, fields []Bundl
 			}
 		}
 		census := FieldCensusWith(c, body, "this", spelled)
-		if census.Escapes || census.ComputedWrite {
+		// an accessor store or read inside a walked body keeps the whole
+		// set incomputable — this closure has no accessor fold, and
+		// admitting the body would drop the setter's own writes from the
+		// havoc set (these occurrences WERE escapes before the census
+		// learned to defer them)
+		if census.Escapes || census.ComputedWrite ||
+			len(census.AccessorStores) > 0 || len(census.AccessorReads) > 0 {
 			return nil, false
 		}
 		for _, field := range census.Writes {

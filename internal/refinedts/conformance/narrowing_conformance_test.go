@@ -27,7 +27,7 @@ func flagged(t *testing.T, s kernelbridge.KnownStateWire) narrowingFlags {
 	if s.Top {
 		t.Fatalf("expected a concrete state")
 	}
-	return narrowingFlags{absent: s.Absent, nan: s.Nan}
+	return narrowingFlags{absent: s.Undef || s.Null, nan: s.Nan}
 }
 
 // setOf is the TS test's `setOf`.
@@ -49,9 +49,10 @@ func TestTheStructuralNarrowingsFilterTheWayTheProofsSay(t *testing.T) {
 	}
 
 	wide := kernelbridge.KnownStateWire{
-		Set:    refinementsets.MakeRefinedSet(refinementsets.AtLeast(-1)),
-		Absent: true,
-		Nan:    true,
+		Set:   refinementsets.MakeRefinedSet(refinementsets.AtLeast(-1)),
+		Undef: true,
+		Null:  true,
+		Nan:   true,
 	}
 
 	// definedness: truth strips the absent flag and nothing else;
@@ -139,8 +140,8 @@ func TestTheStructuralNarrowingsFilterTheWayTheProofsSay(t *testing.T) {
 	// the adapter's own empty spelling round-trips as the absent-only
 	// state through a join and a definedness split
 	absentOnly := kernel.JoinState(
-		kernelbridge.KnownStateWire{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)), Absent: true, Nan: false},
-		kernelbridge.KnownStateWire{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{7})), Absent: false, Nan: false},
+		kernelbridge.KnownStateWire{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)), Undef: true, Null: true, Nan: false},
+		kernelbridge.KnownStateWire{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{7})), Undef: false, Null: false, Nan: false},
 	)
 	splitTrue, splitFalse := kernel.NarrowState(absentOnly, "defined", 0, false)
 	if got := kernel.Member(setOf(t, splitTrue), []float64{7}); !got {

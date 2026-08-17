@@ -207,7 +207,9 @@ func TestCallHoist_ANestedCallPairHoistsInnerThenOuterThenTheAssignmentReadsTheT
 	}
 	foundInnerRead := false
 	for _, arg := range lowered[1].Args {
-		if arg.Kind == kernelbridge.LoopEffectVar && arg.Index == innerTemp {
+		// the temp read crosses as the verbatim copy since the census
+		// flip — the callee's entry takes the temp's whole state
+		if arg.Kind == kernelbridge.LoopEffectVarState && arg.Index == innerTemp {
 			foundInnerRead = true
 		}
 	}

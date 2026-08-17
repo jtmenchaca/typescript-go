@@ -8,6 +8,9 @@ interprocedural, and bindings form one SCC that Go cannot split into
 packages. Do not extract a new Go package for IR until a second adapter
 appears.
 
+Twin doctrine for walk-route `()` / tagged-template evaluation (not IR):
+`CALLS.md`. That rewrite does not change this module’s Interface.
+
 ## External interface
 
 Callers outside the IR cluster reach it through a small surface:

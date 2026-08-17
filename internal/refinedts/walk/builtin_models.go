@@ -114,6 +114,12 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 	if answered := readPromiseStatics(ctx, env, e); answered != nil {
 		return answered
 	}
+	if answered := readPromiseWithResolvers(ctx, env, e); answered != nil {
+		return answered
+	}
+	if answered := readPromiseResolverCall(ctx, env, e); answered != nil {
+		return answered
+	}
 	if answered := readArrayFrom(ctx, env, e); answered != nil {
 		return answered
 	}
@@ -165,6 +171,9 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 		if answered := readObjectStaticValues(site); answered != nil {
 			return answered
 		}
+		if answered := readObjectGroupBy(site); answered != nil {
+			return answered
+		}
 		if answered := readDateNow(site); answered != nil {
 			return answered
 		}
@@ -180,6 +189,9 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 		if answered := readPromiseInstanceMethod(site); answered != nil {
 			return answered
 		}
+		if answered := readPromiseWithResolversPropertyCall(site); answered != nil {
+			return answered
+		}
 		if answered := readArrayOf(site); answered != nil {
 			return answered
 		}
@@ -187,6 +199,14 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 			return answered
 		}
 		if answered := readObjectStaticMethods(site); answered != nil {
+			return answered
+		}
+		// a fresh (untracked) receiver's own `.fill(value)` VALUE — tried
+		// before the tracked-mutation reader below, which requires
+		// site.HasTrackedName and would otherwise never see this call at
+		// all (an inline `Array(2).fill(41)` receiver names no tracked
+		// identifier to mutate)
+		if answered := readFreshArrayFill(site); answered != nil {
 			return answered
 		}
 		if answered := readArrayWriteMethods(site); answered != nil {

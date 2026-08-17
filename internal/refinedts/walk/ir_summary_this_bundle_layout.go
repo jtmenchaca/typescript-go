@@ -92,6 +92,14 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 		return thisBundleLayout{}
 	}
 	census := FieldCensusOf(body, "this", BundleFieldsAs("this", fields))
+	// the body's ACCESSOR use resolves against the class's own get/set
+	// declarations, and those bodies' fields join this layout — the
+	// setter-write shape's slots (accessorCensusFold's comment). An
+	// unresolvable or untame accessor keeps the escape.
+	accessorReads, accessorWrites, foldOk := accessorCensusFold(classLike, fields, census)
+	if !foldOk {
+		return thisBundleLayout{Escaped: true}
+	}
 	// a METHOD-CALLING capture is admissible HERE, because this consumer
 	// has the havoc machinery: the captured methods' transitive write set
 	// becomes the havoc slots every code-running statement brackets, and
@@ -137,11 +145,15 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 	// laid out for a prelude write is one the prelude fills.
 	preludeWritten := constructorPreludeFields(declaration, fields)
 	if len(census.Reads) == 0 && len(census.Writes) == 0 &&
+		len(accessorReads) == 0 && len(accessorWrites) == 0 &&
 		len(captureHavocNames) == 0 && len(preludeWritten) == 0 {
 		return thisBundleLayout{}
 	}
 	written := map[string]struct{}{}
 	for _, field := range census.Writes {
+		written[field.SlotName] = struct{}{}
+	}
+	for _, field := range accessorWrites {
 		written[field.SlotName] = struct{}{}
 	}
 	for _, name := range captureHavocNames {
@@ -150,37 +162,34 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 	for _, field := range preludeWritten {
 		written[field.SlotName] = struct{}{}
 	}
-	// the READ fields carry entries. A write-only field has no entry state
-	// for the caller to fill — its slot is one the body creates, which the
-	// locals' own layout would have to hold — so this wave lays out the
-	// reads and names the writes among them.
+	// the READ fields carry entries, and so does every WRITTEN one — a
+	// write with no entry has no row, and a row is what the write-back
+	// rides: `spoil() { this.age = 200 }` writes age without reading it,
+	// and with no row the caller's own `age` slot kept its stale value
+	// across a call that changed it (the literal arm closed this first —
+	// literalThisBundleOf's comment — and a COMPLETE summary without the
+	// row also told SummaryReceiverEffects the receiver was untouched).
+	// A write-only entry is honest for the same reason the literal arm
+	// states: the call site fills every this-entry from the receiver's
+	// own slot (or unknown where it has none, bundleRetsAndArgs), so the
+	// entry enters holding what the field held, and the exit is the
+	// kernel's own join over the body's paths.
 	//
-	// A CONSTRUCTOR's prelude-written fields carry entries too, and for the
-	// reason the read fields do not have to argue: the prelude ASSIGNS every
-	// one of them before any statement runs, so the entry's incoming value
-	// is overwritten before anything can read it. The entry state a caller
-	// would fill is dead on arrival, which is what makes laying out a
-	// write-only slot honest here and not in a method. The entry exists so
-	// the prelude has a slot to write and the exit row has a slot to report
-	// — which is what a `new C()` local's leaves are read from.
-	entries := make([]bodySlot, 0, len(census.Reads)+len(preludeWritten))
-	for _, field := range census.Reads {
-		entries = append(entries, bodySlot{
-			Name:      field.SlotName,
-			Sort:      field.Sort,
-			TypeofTag: field.TypeofTag,
-		})
-	}
-	// the prelude fields come after the read ones, each at most once — a
-	// field the body ALSO reads already has its entry, and a second would
-	// put the same spelling in the vector twice
+	// The ACCESSOR-fold fields ride the same two lists: a getter's reads
+	// are entries the embedded call statement threads in, a setter's
+	// writes are rows its write-back threads out.
+	//
+	// A CONSTRUCTOR's prelude-written fields carry entries the same way:
+	// the prelude ASSIGNS every one of them before any statement runs, so
+	// the entry's incoming value is overwritten before anything can read
+	// it. The entry exists so the prelude has a slot to write and the exit
+	// row has a slot to report — which is what a `new C()` local's leaves
+	// are read from.
+	entries := make([]bodySlot, 0, len(census.Reads)+len(census.Writes)+len(preludeWritten))
 	laidOut := map[string]struct{}{}
-	for _, entry := range entries {
-		laidOut[entry.Name] = struct{}{}
-	}
-	for _, field := range preludeWritten {
+	appendEntry := func(field BundleField) {
 		if _, already := laidOut[field.SlotName]; already {
-			continue
+			return
 		}
 		laidOut[field.SlotName] = struct{}{}
 		entries = append(entries, bodySlot{
@@ -188,6 +197,21 @@ func thisBundleOf(ctx *FlowContext, declaration *ast.Node) thisBundleLayout {
 			Sort:      field.Sort,
 			TypeofTag: field.TypeofTag,
 		})
+	}
+	for _, field := range census.Reads {
+		appendEntry(field)
+	}
+	for _, field := range census.Writes {
+		appendEntry(field)
+	}
+	for _, field := range accessorReads {
+		appendEntry(field)
+	}
+	for _, field := range accessorWrites {
+		appendEntry(field)
+	}
+	for _, field := range preludeWritten {
+		appendEntry(field)
 	}
 	return thisBundleLayout{
 		Entries:           entries,

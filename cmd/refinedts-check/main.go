@@ -62,6 +62,8 @@ func main() {
 		"write a pprof allocation profile to this file when the sweep ends")
 	detailFlag := flag.Bool("detail", false,
 		"record per-entry mechanism timers only (honest wall, no trace inflation) and print the decomposition")
+	kernelTraceFlag := flag.Bool("kernel-trace", false,
+		"stream every kernel question and answer wire to stderr LIVE — the diagnosis line for a hang is the last Q with no A")
 	flag.Parse()
 	files := flag.Args()
 	if *listFlag != "" {
@@ -94,6 +96,11 @@ func main() {
 		kernelbridge.SetDylibPath(derived)
 	}
 
+	if *kernelTraceFlag {
+		kernelbridge.SetKernelTraceWriter(func(line string) {
+			fmt.Fprintln(os.Stderr, line)
+		})
+	}
 	if *traceFlag {
 		if *traceOutFlag != "" {
 			tracing.SetWriteTo(*traceOutFlag)

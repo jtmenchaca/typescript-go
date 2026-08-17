@@ -9,10 +9,16 @@ import (
 
 // summaryDefaultPrelude builds THE DEFAULT PRELUDE: each defaulted
 // parameter applies its default exactly where the runtime does — only
-// when the call left the entry undefined. The branch tests the slot's
-// definedness (the kernel's IrTest.defined, covered by walk_sound), and
-// the else arm assigns the default; a supplied argument walks the empty
-// then arm untouched.
+// when the call left the entry EXACTLY undefined. A parameter's default
+// initializer runs through IteratorBindingInitialization's
+// SingleNameBinding case ("If |Initializer| is present and _v_ is
+// *undefined*, then…" — tmp/ecma262/spec.html:10111), which is the
+// exactly-undefined shape, not the either-absent one: a `null` argument
+// must NOT take the default. The branch therefore tests the slot's
+// eqUndef (the kernel's flavored IrTest.eqUndef), and the THEN arm
+// assigns the default — eqUndef's true side IS "the value is undefined"
+// — while a supplied (or explicitly null) argument walks the empty else
+// arm untouched.
 //
 // The default's VALUE is read where the effect grammar can spell it
 // (`= 0`, `= null`, `= other`), and is UNKNOWN where it cannot —
@@ -51,7 +57,7 @@ func summaryDefaultPrelude(
 		// a summary, instead of taking unknown.
 		//
 		// The earlier refusal said the prelude has no statement stream, and
-		// that predates the branch-shaped prelude: the else arm below IS a
+		// that predates the branch-shaped prelude: the then arm below IS a
 		// statement list, which is exactly the position SummaryCallOrHavoc
 		// needs, and it writes the call's value into the parameter's own
 		// slot. The summary TABLE is live too — `table` and `context` are
@@ -59,12 +65,13 @@ func summaryDefaultPrelude(
 		// on demand — so a callee's blob is reachable here on the same
 		// terms it is reachable from any body statement.
 		//
-		// The call goes in the ELSE ARM alone, which is where the runtime
-		// runs it: a supplied argument never evaluates the default, so
-		// putting the call on the then arm would run code the real run does
-		// not. The bracketing around the branch is unchanged and still
-		// required — the call runs code, so a stored closure of this body
-		// may run inside it.
+		// The call goes in the THEN ARM alone (eqUndef's true side, "the
+		// entry is exactly undefined"), which is where the runtime runs
+		// it: a supplied — or explicitly null — argument never evaluates
+		// the default, so putting the call on the else arm would run code
+		// the real run does not. The bracketing around the branch is
+		// unchanged and still required — the call runs code, so a stored
+		// closure of this body may run inside it.
 		var defaultCall []kernelbridge.IrStatement
 		if !lowered && context.SummaryTable != nil {
 			if head := Unwrapped(defaulted.Initializer); head != nil &&
@@ -103,13 +110,13 @@ func summaryDefaultPrelude(
 		// (building an arrow runs nothing), and this prelude admits every
 		// default rather than declining, so the havoc floor's walk into the
 		// arrow never happens for it. The names go unknown here instead —
-		// inside the same else arm, since only the run that took the default
+		// inside the same then arm, since only the run that took the default
 		// built the closure. ClosureEscapesTrackedWrite states the boundary
 		// rule this shares with the census.
 		defaultArm := []kernelbridge.IrStatement{{
 			Kind:   kernelbridge.IrStatementAssign,
 			Target: defaulted.Slot,
-			Effect: effect,
+			Effect: asVarStateEffect(effect),
 		}}
 		if len(defaultCall) > 0 {
 			// the served call's own statements write the slot; the unknown
@@ -121,11 +128,17 @@ func summaryDefaultPrelude(
 				defaultArm = append(defaultArm, havocAssignments(written)...)
 			}
 		}
+		// the entry is EXACTLY undefined (IteratorBindingInitialization's
+		// SingleNameBinding case, tmp/ecma262/spec.html:10111) — eqUndef's
+		// Then arm IS "the value is undefined", so the default sits there;
+		// a null argument falls to the (empty, implicit) else arm untouched,
+		// unlike the old IrTestDefined lowering, which would have wrongly
+		// defaulted it away.
 		prelude = append(prelude, kernelbridge.IrStatement{
 			Kind: kernelbridge.IrStatementBranch,
 			On:   defaulted.Slot,
-			Test: kernelbridge.IrTestDefined,
-			Else: defaultArm,
+			Test: kernelbridge.IrTestEqUndef,
+			Then: defaultArm,
 		})
 		if runsCode && len(captureHavocPrelude) > 0 {
 			prelude = append(prelude, havocAssignments(captureHavocPrelude)...)

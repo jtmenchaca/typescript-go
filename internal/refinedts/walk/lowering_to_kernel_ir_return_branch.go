@@ -170,6 +170,19 @@ func returnShortCircuitStatements(
 		kind != ast.KindBarBarToken {
 		return nil, false
 	}
+	// A BOOLEAN-VALUED LEFT takes the other route entirely, and is tried
+	// first because it needs no slot at all — see
+	// returnBooleanLeftShortCircuit for why the two-reads-of-one-slot
+	// constraint below does not bind it.
+	if boolLeft, ok := returnBooleanLeftShortCircuit(context, binary, sort, raise); ok {
+		return boolLeft, true
+	}
+	// A NON-OPTIONAL RECORD PARAMETER'S OWN BARE NAME takes the same
+	// no-slot route, for the same reason: the value's TRUTH is provable
+	// from the annotation alone, so there is nothing to read twice.
+	if truthyLeft, ok := returnTruthyRecordLeftShortCircuit(context, binary, sort, raise); ok {
+		return truthyLeft, true
+	}
 	on, tracked := shortCircuitLeftSlot(context, binary.Left)
 	if !tracked {
 		return nil, false
@@ -179,6 +192,12 @@ func returnShortCircuitStatements(
 	// under the slot's sort, and a slot wearing neither the number nor
 	// the string sort has no truthiness test on the wire — that side takes
 	// the untested branch instead, both arms riding and joining.
+	//
+	// IrTestDefined is the CORRECT (either-admission) test for `??` here:
+	// CoalesceExpression's runtime semantics run the right operand
+	// whenever the left is undefined OR null (sec-binary-logical-
+	// operators, tmp/ecma262/spec.html:21099-21106), so definedness —
+	// not the flavored eqUndef split — is what picks the side.
 	test := kernelbridge.IrTestDefined
 	tested := true
 	if kind != ast.KindQuestionQuestionToken {
@@ -191,10 +210,11 @@ func returnShortCircuitStatements(
 			tested = false
 		}
 	}
-	// the arm holding `a` writes the slot it just tested — the same read,
-	// under the narrowing the test put on that side
+	// the arm holding `a` writes the slot it just tested — the same
+	// value verbatim, under the narrowing the test put on that side, so
+	// it rides the whole-state copy rather than the numeric var read
 	leftArm := []kernelbridge.IrStatement{
-		{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: varEffect(on)},
+		{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: varStateEffect(on)},
 		raise,
 	}
 	rightArm, rightOk := returnValueStatements(context, binary.Right, sort, raise)
@@ -268,6 +288,171 @@ func shortCircuitLeftSlot(context *LoweringContext, left *ast.Node) (int, bool) 
 		return 0, false
 	}
 	return effect.Index, true
+}
+
+// returnBooleanLeftShortCircuit lowers `return a && b` / `a || b` where
+// the LEFT operand's value is a BOOLEAN — `content != null &&
+// typeof content === 'function'` (Label.tsx:221), `stroke !== 'none' && b`,
+// `!x || b`, and any `&&`/`||` nest of those.
+//
+// WHY THIS LEFT NEEDS NO SLOT, which is the whole point. The route above
+// admits only a left whose evaluation lands in a slot readable twice,
+// because there `a` is both the test AND one of the two returned values,
+// and the wire has no test-and-reuse. A boolean-valued left has no such
+// problem: the value it contributes is decided by WHICH ARM RAN, so the
+// arm writes a CONSTANT and never reads the left back.
+//
+//	a && b  →  the falsy arm returns `a`, and a falsy boolean is exactly
+//	           `false`; the truthy arm returns `b`.
+//	a || b  →  the truthy arm returns `a`, and a truthy boolean is exactly
+//	           `true`; the falsy arm returns `b`.
+//
+// `false` rides {0} and `true` rides {1} — the same encoding
+// booleanPairEffect uses for every boolean-valued operator, so the
+// constant here is exact, not a widening.
+//
+// `??` IS DELIBERATELY EXCLUDED. A boolean is never null or undefined,
+// so `a ?? b` with a boolean-valued `a` always evaluates to `a` and the
+// right operand is dead. That is a true and stronger claim than a branch
+// — but it is a claim about an expression whose right side never runs,
+// which the plain effect grammar's own join already covers soundly, and
+// spelling it here would need a one-armed form this route does not build.
+// It keeps the refusal, named.
+//
+// WHAT PICKS THE SIDE is LowerGuard on the left operand itself — the
+// same composer the ternary arm above calls, and the reason this route
+// reaches shapes the slot route cannot: LowerGuard reads comparisons
+// (TestOf), typeof folds, Number.isNaN, `!` swaps, and `&&`/`||`
+// nesting, none of which resolve to a single slot. It is handed the two
+// prepared arms and returns the statements that run the right one.
+//
+// LowerGuard's own position rule is satisfied: a returned short
+// circuit's LEFT operand runs on every path through the expression and
+// runs FIRST, which is exactly the unconditional position
+// LowerGuard's entry point documents.
+//
+// A left LowerGuard cannot read keeps the refusal — there is no untested
+// fallback here, because without a test neither arm's constant is
+// justified: an untested branch would claim `false` on a path the source
+// may have returned `true` on. That is the one place this route must
+// decline rather than weaken.
+func returnBooleanLeftShortCircuit(
+	context *LoweringContext,
+	binary *ast.BinaryExpression,
+	sort BindingKind,
+	raise kernelbridge.IrStatement,
+) ([]kernelbridge.IrStatement, bool) {
+	kind := binary.OperatorToken.Kind
+	if kind != ast.KindAmpersandAmpersandToken && kind != ast.KindBarBarToken {
+		return nil, false
+	}
+	if !booleanValuedExpression(binary.Left) {
+		return nil, false
+	}
+	// the arm that returns the LEFT operand's own value writes the
+	// constant that value provably is on that side
+	constantArm := func(w float64) []kernelbridge.IrStatement {
+		return []kernelbridge.IrStatement{
+			{Kind: kernelbridge.IrStatementAssign, Target: context.Result.Ret, Effect: constNumber(w)},
+			raise,
+		}
+	}
+	rightArm, rightOk := returnValueStatements(context, binary.Right, sort, raise)
+	if !rightOk {
+		return nil, false
+	}
+	// `a && b` runs `b` where the left HELD and returns `false` where it
+	// did not; `a || b` returns `true` where the left held and runs `b`
+	// where it did not
+	thn, els := rightArm, constantArm(0)
+	if kind == ast.KindBarBarToken {
+		thn, els = constantArm(1), rightArm
+	}
+	return LowerGuard(context, binary.Left, thn, els)
+}
+
+// returnTruthyRecordLeftShortCircuit lowers `return entry && b` / `entry
+// || b` where the LEFT operand is a NON-OPTIONAL RECORD PARAMETER'S OWN
+// BARE NAME — `(entry && entry.value) || 0` (TASK 3(d)'s fixture) is this
+// shape one level up: the outer `||`'s left is itself `entry && entry.value`,
+// so this route resolves the inner `&&` and the outer `||` composes it
+// through the ordinary recursion in returnBranchStatements/
+// returnShortCircuitStatements.
+//
+// WHY THIS LEFT NEEDS NO SLOT, the same argument
+// returnBooleanLeftShortCircuit makes for a boolean-valued left. The
+// route above (shortCircuitLeftSlot) exists because an ordinary left
+// operand is read TWICE — once as the test, once as one of the two
+// returned values — and the wire has no test-and-reuse, so the left must
+// resolve to a slot readable twice. A record parameter's bare name is
+// TRACKED (declaredParamSort/recordParamMembersOf's own trust grade
+// proves its truth without reading any slot at all — ToBoolean answers
+// true for every Object, sec-toboolean, tmp/ecma262/spec.html), so the
+// arm that would return it is UNREACHABLE and never needs reading back:
+//
+//	entry && b  →  the record is always truthy, so the whole is always `b`
+//	entry || b  →  the record is always truthy, so the whole is always
+//	               the record itself — but that arm has no slot to read
+//	               the record BACK from (recordParameterUseOf expands it
+//	               away), so `||` stays refused here; only `&&` folds.
+//
+// `??` is excluded for the same reason `||` is: the LEFT is the value on
+// the defined arm, which needs the same slot this route does not have.
+func returnTruthyRecordLeftShortCircuit(
+	context *LoweringContext,
+	binary *ast.BinaryExpression,
+	sort BindingKind,
+	raise kernelbridge.IrStatement,
+) ([]kernelbridge.IrStatement, bool) {
+	if binary.OperatorToken.Kind != ast.KindAmpersandAmpersandToken {
+		return nil, false
+	}
+	if truthyRecordParameterName(Unwrapped(binary.Left)) == "" {
+		return nil, false
+	}
+	// the record is always truthy, so `a && b` is always `b` — no branch,
+	// no test, the right operand's own reading stands for the whole
+	return returnValueStatements(context, binary.Right, sort, raise)
+}
+
+// booleanValuedExpression answers whether evaluating this expression
+// yields exactly `true` or exactly `false` — never one of its operands.
+// That is what lets the caller above write a CONSTANT for the arm that
+// returns the expression's own value.
+//
+// The three shapes, and why each is exact:
+//
+//   - a COMPARISON (and `instanceof`/`in`): every one of these produces a
+//     boolean by definition, which is the same fact booleanBinaryTokens
+//     (effect_expression.go) already states and reads as the {0,1} set.
+//   - `!e`: logical NOT produces a boolean whatever its operand is
+//     (sec-logical-not-operator, tmp/ecma262/spec.html) — the same rule
+//     testShaped's own `negated` flag rides.
+//   - `a && b` / `a || b` where BOTH sides are themselves boolean-valued:
+//     the value is one of the two operands, and both are booleans, so the
+//     whole is one. A short circuit with a non-boolean side is NOT
+//     boolean-valued (`a && b.name` evaluates to a string), which is why
+//     this recurses into both sides rather than admitting the token.
+//
+// A bare identifier, a call, a member read, and a literal are all absent
+// here on purpose: `x && b` returns `x` itself on the falsy side, whose
+// value the caller cannot write as a constant. Those keep the slot route
+// above, which reads the left back from its own slot.
+func booleanValuedExpression(e *ast.Node) bool {
+	head := Unwrapped(e)
+	if ast.IsPrefixUnaryExpression(head) {
+		return head.AsPrefixUnaryExpression().Operator == ast.KindExclamationToken
+	}
+	if !ast.IsBinaryExpression(head) {
+		return false
+	}
+	bin := head.AsBinaryExpression()
+	kind := bin.OperatorToken.Kind
+	if kind == ast.KindAmpersandAmpersandToken || kind == ast.KindBarBarToken {
+		return booleanValuedExpression(bin.Left) && booleanValuedExpression(bin.Right)
+	}
+	_, isBoolean := booleanBinaryTokens[kind]
+	return isBoolean
 }
 
 // isShortCircuitToken is the same three-token gate logicalTokens states
@@ -386,6 +571,10 @@ func returnArithmeticOverShortCircuit(
 	// "absent" — the SAME rule returnShortCircuitStatements states: `??`
 	// asks definedness; `&&`/`||` ask truthiness under the slot's sort,
 	// falling to the untested branch where neither sort applies.
+	//
+	// IrTestDefined is correct (either-admission) for `??`: the right
+	// operand runs whenever the left is undefined OR null (CoalesceExpression,
+	// sec-binary-logical-operators, tmp/ecma262/spec.html:21099-21106).
 	test := kernelbridge.IrTestDefined
 	tested := true
 	if kind != ast.KindQuestionQuestionToken {
