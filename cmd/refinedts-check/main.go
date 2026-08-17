@@ -41,6 +41,14 @@ func main() {
 	// (a grow-only heap pays fresh page zeroing with no warm reuse).
 	// Set here, not via GOGC — no environment variables (the standing
 	// rule).
+	// (A 24 GB limit was tried against the madvise share pprof measured
+	// on 2026-08-17 — 38.9% of CPU samples — on the theory that the 8 GB
+	// ceiling under the 400-percent growth target forced limit-driven
+	// collection and scavenge thrash. The wall did not improve — 4790 ms
+	// before, 5285 ms with the raised limit — so the measured-best
+	// pairing below stands and the allocation itself, not the pacer, is
+	// the open speed item: the checker's type instantiation over the
+	// corpus's redux/reselect generics dominates alloc_space.)
 	debug.SetGCPercent(400)
 	debug.SetMemoryLimit(8 << 30)
 
