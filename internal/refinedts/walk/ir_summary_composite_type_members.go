@@ -166,12 +166,31 @@ func intersectionMembersOf(
 // interfaces and the one interface spelling the members they share expand
 // identically.
 //
-// AN ARM'S SORT MUST AGREE WITH THE OTHERS', or the whole expansion
-// declines — the same rule intersectionMembersOf argues at its own merge,
-// for the same reason. A member the arms sort differently is a member no
-// single slot can stand for, and picking one arm's sort would be the
-// unsound move: a slot sorted number for a member the value carries as a
-// string whenever it is the other arm. The reader does not guess.
+// A MEMBER THE ARMS SORT DIFFERENTLY degrades to an UNKNOWN-SORTED
+// leaf rather than declining the whole expansion. Picking one arm's
+// sort would be the unsound move — a slot sorted number for a member
+// the value carries as a string whenever it is the other arm — but
+// unknown claims nothing about the value and still promises the NAME,
+// which every arm does declare. The leaf then admits only the
+// definedness test, the same weaker-true-claim reading an unsortable
+// member already takes inside one arm.
+//
+// AN `undefined` OR `null` ARM contributes no member list and is
+// EXCLUDED from the intersection rather than declining it; every
+// surviving member then wears MayBeAbsent. Soundness is the
+// continuing-run argument: on a run where the value took the absent
+// arm, ANY leaf read through the holder THROWS (sec-property-accessors'
+// RequireObjectCoercible on an undefined or null base) and the run
+// ends before the read produces a value — so a leaf's claims quantify
+// over the runs where the holder was an object, exactly the runs the
+// record arms describe. MayBeAbsent additionally covers the leaf's
+// value being read out as undefined where the guard machinery reads
+// the slot without a proof of presence: the absent admission is a
+// superset of what any continuing run observes, weaker and never
+// wrong. What this deliberately does NOT claim is the holder's own
+// IDENTITY — a bare `entry` in value position still has no slot, and
+// the truthy fold (ir_guard_truthy_record.go) demands a syntactically
+// non-optional annotation, never mere expansion success.
 //
 // WHERE THE ARMS DISAGREE ABOUT ABSENCE, THE WEAKER PROMISE WINS — and
 // this is the exact opposite of the intersection's rule, because the
@@ -220,13 +239,20 @@ func unionMembersOf(
 	if arms == nil || len(arms.Nodes) == 0 {
 		return nil, false
 	}
-	// the running intersection: the first arm seeds it, every later arm
-	// keeps only what it also declares
+	// the running intersection: the first RECORD arm seeds it, every
+	// later record arm keeps only what it also declares. An absent arm
+	// (`undefined`, `null`) is skipped here and settled below.
 	var common []recordParamMember
+	seeded := false
+	sawAbsentArm := false
 	// whether any arm so far declared this member OPTIONAL — the weaker
 	// promise, settled once over the whole answer below
 	absentKey := map[string]bool{}
-	for at, arm := range arms.Nodes {
+	for _, arm := range arms.Nodes {
+		if isAbsentUnionArm(arm) {
+			sawAbsentArm = true
+			continue
+		}
 		members, readable := unionArmMembersOf(ctx, holder, arm, visiting)
 		if !readable {
 			return nil, false
@@ -242,10 +268,11 @@ func unionMembersOf(
 			byPath[path] = member
 			absentKey[path] = absentKey[path] || member.MayBeAbsent
 		}
-		if at == 0 {
-			// the first arm's list, copied: the intersection is narrowed in
-			// place below and the arm's own slice may be held by another
-			// reading
+		if !seeded {
+			// the first record arm's list, copied: the intersection is
+			// narrowed in place below and the arm's own slice may be held by
+			// another reading
+			seeded = true
 			common = make([]recordParamMember, len(members))
 			copy(common, members)
 			continue
@@ -258,10 +285,12 @@ func unionMembersOf(
 				// not have — it leaves the intersection
 				continue
 			}
-			// a member the arms sort differently is a member no one slot
-			// stands for
+			// a member the arms sort differently keeps its NAME and loses
+			// its sort: unknown promises the name and claims nothing about
+			// the value (the doc's own argument above)
 			if armMember.Sort != member.Sort || armMember.TypeofTag != member.TypeofTag {
-				return nil, false
+				member.Sort = BindingKindUnknown
+				member.TypeofTag = TypeofTagNone
 			}
 			kept = append(kept, member)
 		}
@@ -270,20 +299,39 @@ func unionMembersOf(
 			break
 		}
 	}
-	// arms sharing no member: at an entry the holder keeps its whole-name
-	// slot, at a link the union contributes nothing
+	// a union of absent arms alone (`undefined | null`) declares no
+	// record member anywhere; arms sharing no member expand to nothing.
+	// At an entry the holder keeps its whole-name slot, at a link the
+	// union contributes nothing.
 	if atEntry && len(common) == 0 {
 		return nil, false
 	}
-	// the weaker promise applied once over the whole answer, so an arm
+	// the weaker promise applied once over the whole answer: an arm
 	// declaring a member optional settles it whether it came before or
-	// after the arm that declared it required
+	// after the arm that declared it required, and an ABSENT ARM settles
+	// every member at once — the holder itself may be the absent arm, and
+	// a leaf read then throws rather than answers (the doc's
+	// continuing-run argument), so absent admission is the superset claim
 	for index := range common {
-		if absentKey[strings.Join(common[index].Path, ".")] {
+		if sawAbsentArm || absentKey[strings.Join(common[index].Path, ".")] {
 			common[index].MayBeAbsent = true
 		}
 	}
 	return common, true
+}
+
+// isAbsentUnionArm: the `undefined` keyword arm and the `null` literal
+// arm — the two spellings a union writes an absent value with. Every
+// other keyword arm (a `void`, a `string`) stays with unionArmMembersOf,
+// which declines what it cannot read.
+func isAbsentUnionArm(arm *ast.Node) bool {
+	if arm.Kind == ast.KindUndefinedKeyword {
+		return true
+	}
+	if ast.IsLiteralTypeNode(arm) {
+		return arm.AsLiteralTypeNode().Literal.Kind == ast.KindNullKeyword
+	}
+	return false
 }
 
 // unionArmMembersOf reads ONE arm of a union as a member list.

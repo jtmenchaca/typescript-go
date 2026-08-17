@@ -309,9 +309,25 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 		// `entry` fails to resolve as its own operand (LowerEffectExpression
 		// has no reading for a bare record-parameter identifier, its slots
 		// all being its MEMBERS' — "entry.value", never "entry").
-		if bin.OperatorToken.Kind == ast.KindAmpersandAmpersandToken &&
-			truthyRecordParameterName(Unwrapped(bin.Left)) != "" {
-			return LowerEffectExpression(bin.Right, reader)
+		if bin.OperatorToken.Kind == ast.KindAmpersandAmpersandToken {
+			left := Unwrapped(bin.Left)
+			if truthyRecordParameterName(left) != "" {
+				return LowerEffectExpression(bin.Right, reader)
+			}
+			// `entry && entry.value` where `entry` is an expanded record
+			// parameter whose ONLY absent arm is undefined: on a run where
+			// entry is undefined the `&&` yields entry itself — undefined —
+			// and the leaf slot already admits absent (every leaf of such an
+			// expansion wears MayBeAbsent, unionMembersOf's absent-arm rule),
+			// so the whole reads as exactly the leaf read. A null arm stays
+			// out (undefinedOnlyRecordParameterName's own doc), and a right
+			// side that is not a path through the SAME holder keeps the join
+			// below.
+			if name := undefinedOnlyRecordParameterName(left); name != "" {
+				if root, _, ok := propertyPathOf(Unwrapped(bin.Right)); ok && root == name {
+					return LowerEffectExpression(bin.Right, reader)
+				}
+			}
 		}
 		// a SHORT-CIRCUIT operator's value is one of its operands, so the
 		// join of both admits every run. A side that does not lower falls

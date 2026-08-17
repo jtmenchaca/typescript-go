@@ -1,24 +1,26 @@
-// Pins for a UNION annotation carrying an undefined/null keyword arm —
-// unionMembersOf/unionArmMembersOf's CURRENT reading of such an arm,
-// before any widening.
+// Pins for a UNION annotation carrying an undefined/null arm and for
+// arms whose shared member sorts disagree — unionMembersOf's absent-arm
+// and sort-degrade rules (the doc on unionMembersOf argues both: an
+// absent arm is excluded and every survivor wears MayBeAbsent, sound by
+// the continuing-run argument — a leaf read through an absent holder
+// throws; a sort disagreement degrades the member to unknown-sorted
+// rather than declining the expansion).
 package walk
 
 import (
 	"testing"
+
+	"github.com/microsoft/typescript-go/internal/ast"
 )
 
-func TestUnionMembersOf_AnUndefinedArmDeclinesTheWholeExpansion(t *testing.T) {
+func TestUnionMembersOf_AnUndefinedArmExpandsWithEveryLeafMayBeAbsent(t *testing.T) {
 	ClearResolvedRecordMembers()
 	// tmp/recharts-src/src/chart/Sankey.tsx:46's own shape:
 	// `entry: LinkDataItem | SankeyNode | undefined`. Both record arms
-	// declare `value`; the third arm is the bare `undefined` keyword.
-	//
-	// recordParamMembersIn's isRecord bool is the layer that actually
-	// reflects the union expansion — SummaryParameterEntriesIn's own
-	// `ok` stays true regardless (a declined record still falls through
-	// to the ordinary single unknown-sorted whole-name slot), so
-	// asserting on SummaryParameterEntriesIn's `ok` alone would pin the
-	// fallback, not the union reader under test.
+	// declare `value` (number vs any — the sorts disagree, so the leaf
+	// degrades to unknown-sorted); the third arm is the bare `undefined`
+	// keyword, excluded from the intersection and marking the survivor
+	// MayBeAbsent.
 	p := entryEnvTestProgram(t, `
 interface LinkDataItem { source: number; target: number; value: number; }
 interface SankeyNode { dx: number; dy: number; value: any; }
@@ -28,14 +30,27 @@ function f(entry: LinkDataItem | SankeyNode | undefined) { return entry; }
 	parameter := declaration.Parameters()[0]
 	ctx := &FlowContext{P: p}
 	members, isRecord := recordParamMembersIn(ctx, parameter)
-	t.Logf("isRecord=%v members=%+v", isRecord, members)
-	if isRecord {
-		t.Fatalf("undefined arm now expands (was declining) — members: %+v; update this pin and the brief, this is progress on Task 2, not a regression", members)
+	if !isRecord {
+		t.Fatalf("the undefined-armed union declined — members: %+v", members)
+	}
+	if len(members) != 1 || members[0].Key != "value" {
+		t.Fatalf("members = %+v, want exactly the shared `value` leaf", members)
+	}
+	if members[0].Sort != BindingKindUnknown {
+		t.Errorf("value's sort = %v, want unknown (number vs any disagree)", members[0].Sort)
+	}
+	if !members[0].MayBeAbsent {
+		t.Errorf("value is not MayBeAbsent — the undefined arm must mark every survivor")
 	}
 }
 
-func TestUnionMembersOf_ANullArmDeclinesTheWholeExpansion(t *testing.T) {
+func TestUnionMembersOf_ANullArmExpandsWithEveryLeafMayBeAbsent(t *testing.T) {
 	ClearResolvedRecordMembers()
+	// the null twin: a leaf read through a null holder throws exactly as
+	// through an undefined one (RequireObjectCoercible), so the member
+	// layer treats the two alike — only the `&&`-fold distinguishes them
+	// (a null holder's short-circuit value is null, which a leaf slot's
+	// absent admission does not spell).
 	p := entryEnvTestProgram(t, `
 interface LinkDataItem { source: number; target: number; value: number; }
 interface SankeyNode { dx: number; dy: number; value: any; }
@@ -45,25 +60,20 @@ function f(entry: LinkDataItem | SankeyNode | null) { return entry; }
 	parameter := declaration.Parameters()[0]
 	ctx := &FlowContext{P: p}
 	members, isRecord := recordParamMembersIn(ctx, parameter)
-	t.Logf("isRecord=%v members=%+v", isRecord, members)
-	if isRecord {
-		t.Fatalf("null arm now expands (was declining) — members: %+v; update this pin and the brief, this is progress on Task 2, not a regression", members)
+	if !isRecord {
+		t.Fatalf("the null-armed union declined — members: %+v", members)
+	}
+	if len(members) != 1 || !members[0].MayBeAbsent {
+		t.Fatalf("members = %+v, want the one shared leaf wearing MayBeAbsent", members)
 	}
 }
 
-func TestUnionMembersOf_TwoRecordArmsSharingAMemberSurviveWithNoAbsentArm(t *testing.T) {
+func TestUnionMembersOf_ASortDisagreementDegradesTheLeafInsteadOfDeclining(t *testing.T) {
 	ClearResolvedRecordMembers()
-	// The two-record part of the same Sankey shape, isolated: no
-	// undefined/null arm at all. Both LinkDataItem and SankeyNode declare
-	// `value` (LinkDataItem's is number-sorted, SankeyNode's is `any` and
-	// so contributes unknown-sorted) — the two sorts DISAGREE
-	// (BindingKindNumber vs BindingKindUnknown), which unionMembersOf's
-	// own merge rule refuses (a member the arms sort differently is a
-	// member no one slot can stand for) — so this is expected to decline
-	// on the SORT MISMATCH, not on the union machinery itself. Pinning
-	// this establishes that the two-record survival case is limited by
-	// SankeyNode's own `any`-typed member, a fact independent of the
-	// undefined-arm question this task is about.
+	// no absent arm at all: the two record arms share `value` at
+	// disagreeing sorts (number vs any/unknown). The member keeps its
+	// NAME and loses its sort — unknown claims nothing about the value
+	// and still promises the name every arm declares.
 	p := entryEnvTestProgram(t, `
 interface LinkDataItem { source: number; target: number; value: number; }
 interface SankeyNode { dx: number; dy: number; value: any; }
@@ -73,18 +83,21 @@ function f(entry: LinkDataItem | SankeyNode) { return entry; }
 	parameter := declaration.Parameters()[0]
 	ctx := &FlowContext{P: p}
 	members, isRecord := recordParamMembersIn(ctx, parameter)
-	t.Logf("isRecord=%v members=%+v", isRecord, members)
-	if isRecord {
-		t.Fatalf("two record arms with a sort-disagreeing shared member now expand (was declining) — members: %+v; update this pin, this is a distinct fix from Task 2's undefined-arm question", members)
+	if !isRecord {
+		t.Fatalf("the sort-disagreeing union declined — members: %+v", members)
+	}
+	if len(members) != 1 || members[0].Key != "value" || members[0].Sort != BindingKindUnknown {
+		t.Fatalf("members = %+v, want the one `value` leaf, unknown-sorted", members)
+	}
+	if members[0].MayBeAbsent {
+		t.Errorf("value wears MayBeAbsent with no absent arm and both arms requiring it")
 	}
 }
 
 func TestUnionMembersOf_TwoRecordArmsSharingAnAgreeingMemberSurvive(t *testing.T) {
 	ClearResolvedRecordMembers()
-	// The same two-record shape with SankeyNode's `value` narrowed to
-	// number (matching LinkDataItem's), so the sorts AGREE and the union
-	// of the two record arms alone (no undefined arm) is expected to
-	// expand today, independent of any undefined-arm fix.
+	// the agreeing-sorts control, unchanged behavior: one member, its own
+	// sort intact
 	p := entryEnvTestProgram(t, `
 interface LinkDataItem { source: number; target: number; value: number; }
 interface SankeyNode { dx: number; dy: number; value: number; }
@@ -102,5 +115,31 @@ function f(entry: LinkDataItem | SankeyNode) { return entry; }
 	}
 	if members[0].Key != "value" || members[0].Sort != BindingKindNumber {
 		t.Errorf("member = %+v, want Key=value Sort=number", members[0])
+	}
+}
+
+// TestUnionMembersOf_GetValueShapedBodyServesBothSides is the corpus
+// target end to end: `(entry && entry.value) || 0` over an
+// undefined-only union COMPLETES, admits the member's value on a
+// present call, and admits 0 on an undefined call — never a fold that
+// drops the absent arm's fallback.
+func TestUnionMembersOf_GetValueShapedBodyServesBothSides(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	p := entryEnvTestProgram(t, `
+interface LinkDataItem { source: number; target: number; value: number; }
+function getValue(entry: LinkDataItem | undefined): number { return (entry && entry.value) || 0; }
+`)
+	declaration := entryEnvFunctionNamed(t, p, "getValue")
+	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
+	_, ok := RelowerSummaryBody(ctx, declaration)
+	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	if !ok {
+		t.Fatalf("getValue declined: outcome=%q construct=%q", outcome, construct)
+	}
+	if outcome != SummaryComplete {
+		t.Errorf("outcome = %q (construct %q), want complete", outcome, construct)
 	}
 }
