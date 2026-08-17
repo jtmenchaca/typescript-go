@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 )
 
 // RecordAssignmentOf is the record REASSIGNMENT lowering: `p = q`
@@ -63,29 +64,165 @@ func RecordAssignmentOf(context *LoweringContext, statement *ast.Node) ([]Assign
 	// rows are matched to leaves BY PATH — a literal spelling its keys in
 	// another order is the same record.
 	if ast.IsObjectLiteralExpression(right) {
+		// `p = { ...p, x1: e, … }` — the leading SELF-spread copies every
+		// unmentioned leaf onto itself, so the statement IS the explicit
+		// rows: one ordinary assignment per spelled leaf, the rest
+		// untouched. Admitted only with the spread FIRST (a later explicit
+		// key overwrites the spread's copy, which per-leaf order preserves)
+		// and only where every explicit key covers its WHOLE subtree of the
+		// target's leaves — a nested literal replaces its key's subtree
+		// entire, so a partial spelling would keep a stale sibling leaf.
+		if rows, ok := selfSpreadOverlayRows(context, right, target); ok {
+			return lowerRecordRows(context, target, rows, leavesByPath(leaves))
+		}
 		rows, rowsOk := flatKeysOfLiteral(right, target, nil)
 		if !rowsOk || len(rows) != len(leaves) {
 			return nil, false
 		}
-		slotOfPath := map[string]int{}
-		for _, leaf := range leaves {
-			slotOfPath[leaf.Path] = leaf.Index
-		}
-		out := make([]AssignmentTarget, 0, len(rows))
-		for _, row := range rows {
-			slot, found := slotOfPath[strings.Join(row.Path, ".")]
-			if !found {
-				return nil, false
-			}
-			effect, effectOk := RhsEffect(context, context.Sorts[slot], row.Initializer)
-			if !effectOk {
-				return nil, false
-			}
-			out = append(out, AssignmentTarget{Target: slot, Effect: asVarStateEffect(effect)})
-		}
-		return out, true
+		return lowerRecordRows(context, target, rows, leavesByPath(leaves))
 	}
 	return nil, false
+}
+
+// leavesByPath indexes a leaf list by its path spelling.
+func leavesByPath(leaves []leafSlot) map[string]int {
+	slotOfPath := map[string]int{}
+	for _, leaf := range leaves {
+		slotOfPath[leaf.Path] = leaf.Index
+	}
+	return slotOfPath
+}
+
+// lowerRecordRows lowers explicit literal rows into their leaf slots, in
+// row order, with THE EVALUATION-ORDER GUARD: JavaScript evaluates every
+// initializer against the OLD record — the literal builds first, the
+// binding rebinds after — while these per-leaf assignments land one at a
+// time. A row whose initializer reads a leaf an EARLIER row already
+// wrote would therefore read the new value where the runtime read the
+// old one, so that shape declines. A row reading the record WHOLE (a
+// bare mention) declines the same way — which leaf it reads is not
+// spelled.
+func lowerRecordRows(
+	context *LoweringContext,
+	target string,
+	rows []ObjectLocalKey,
+	slotOfPath map[string]int,
+) ([]AssignmentTarget, bool) {
+	written := map[string]struct{}{}
+	out := make([]AssignmentTarget, 0, len(rows))
+	for _, row := range rows {
+		path := strings.Join(row.Path, ".")
+		slot, found := slotOfPath[path]
+		if !found {
+			return nil, false
+		}
+		if readsAnyWrittenLeaf(row.Initializer, target, written) {
+			return nil, false
+		}
+		effect, effectOk := RhsEffect(context, context.Sorts[slot], row.Initializer)
+		if !effectOk {
+			return nil, false
+		}
+		out = append(out, AssignmentTarget{Target: slot, Effect: asVarStateEffect(effect)})
+		written[path] = struct{}{}
+	}
+	return out, true
+}
+
+// readsAnyWrittenLeaf scans an initializer for reads of the target
+// record that an earlier row's write has made stale: a `target.<path>`
+// read whose path is already written, or any BARE mention of the target
+// (the whole record, whose leaves this cannot tell apart).
+func readsAnyWrittenLeaf(initializer *ast.Node, target string, written map[string]struct{}) bool {
+	if initializer == nil || len(written) == 0 {
+		return false
+	}
+	stale := false
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if stale {
+			return true
+		}
+		if root, path, isPath := propertyPathAdmittingRootOptionalStep(node); isPath && root == target {
+			if _, hit := written[strings.Join(path, ".")]; hit {
+				stale = true
+			}
+			return true
+		}
+		if ast.IsIdentifier(node) && node.Text() == target {
+			stale = true
+			return true
+		}
+		node.ForEachChild(visit)
+		return false
+	}
+	visit(initializer)
+	return stale
+}
+
+// selfSpreadOverlayRows recognizes `p = { ...p, <plain rows> }` — the
+// spread of the TARGET ITSELF, first, followed by ordinary rows — and
+// answers the explicit rows with each key's subtree verified COMPLETE
+// against the target's own leaves (lowerRecordRows' caller comment says
+// why a partial subtree cannot lower).
+func selfSpreadOverlayRows(
+	context *LoweringContext,
+	literal *ast.Node,
+	target string,
+) ([]ObjectLocalKey, bool) {
+	properties := literal.AsObjectLiteralExpression().Properties.Nodes
+	if len(properties) < 2 || !ast.IsSpreadAssignment(properties[0]) {
+		return nil, false
+	}
+	source := Unwrapped(properties[0].AsSpreadAssignment().Expression)
+	if source == nil || !ast.IsIdentifier(source) || source.Text() != target {
+		return nil, false
+	}
+	var c *checker.Checker
+	if context != nil && context.Flow != nil {
+		c = checkerOf(context.Flow)
+	}
+	rows, ok := flatKeysOfLiteralAfterLeadingSpread(c, literal, target)
+	if !ok {
+		return nil, false
+	}
+	leaves, leavesOk := leafSlotsUnder(context, target)
+	if !leavesOk {
+		return nil, false
+	}
+	// subtree completeness per explicit top-level key: the rows under a
+	// key must spell exactly the target's leaves under that key
+	rowPathsUnder := map[string]map[string]struct{}{}
+	for _, row := range rows {
+		key := row.Path[0]
+		if rowPathsUnder[key] == nil {
+			rowPathsUnder[key] = map[string]struct{}{}
+		}
+		rowPathsUnder[key][strings.Join(row.Path, ".")] = struct{}{}
+	}
+	leafPathsUnder := map[string]map[string]struct{}{}
+	for _, leaf := range leaves {
+		key := leaf.Path
+		if dot := strings.Index(key, "."); dot >= 0 {
+			key = key[:dot]
+		}
+		if leafPathsUnder[key] == nil {
+			leafPathsUnder[key] = map[string]struct{}{}
+		}
+		leafPathsUnder[key][leaf.Path] = struct{}{}
+	}
+	for key, rowPaths := range rowPathsUnder {
+		leafPaths, keyExists := leafPathsUnder[key]
+		if !keyExists || len(rowPaths) != len(leafPaths) {
+			return nil, false
+		}
+		for path := range rowPaths {
+			if _, held := leafPaths[path]; !held {
+				return nil, false
+			}
+		}
+	}
+	return rows, true
 }
 
 // leafSlot is one flattened leaf found in the slot vector: its path

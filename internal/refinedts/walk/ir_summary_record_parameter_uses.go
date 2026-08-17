@@ -336,6 +336,9 @@ func wholeRecordUseAt(node *ast.Node, declared map[string]struct{}) recordParame
 	if isTypeofOperand(node, parent) {
 		return recordParameterReadWhole
 	}
+	if isInOperatorRightOperand(node, parent) {
+		return recordParameterReadWhole
+	}
 	return recordParameterUnreadable
 }
 
@@ -396,6 +399,24 @@ func isEqualityTestOperand(node *ast.Node, parent *ast.Node) bool {
 // escapes.
 func isTypeofOperand(node *ast.Node, parent *ast.Node) bool {
 	return ast.IsTypeOfExpression(parent) && parent.AsTypeOfExpression().Expression == node
+}
+
+// isInOperatorRightOperand answers whether NODE stands as the RIGHT
+// operand of `in` (`'key' in p`) — axisSelectors.ts's getDomainDefinition
+// reads `!('domain' in axisSettings)` this way. The relational `in`
+// evaluation (sec-relational-operators-runtime-semantics-evaluation,
+// tmp/ecma262/spec.html) is `HasProperty(rightValue, ToPropertyKey(
+// leftValue))`: it reads the right operand's value and answers a fresh
+// boolean, never storing either operand anywhere — the same read-only
+// shape isEqualityTestOperand already argues for `===`/`==`. The LEFT
+// operand position (`p in q`, the record used as a property key) is a
+// different question this arm does not answer and is left refused.
+func isInOperatorRightOperand(node *ast.Node, parent *ast.Node) bool {
+	if !ast.IsBinaryExpression(parent) {
+		return false
+	}
+	bin := parent.AsBinaryExpression()
+	return bin.OperatorToken.Kind == ast.KindInKeyword && bin.Right == node
 }
 
 // destructuresOnlyDeclaredMembers says whether a binding NAME is an

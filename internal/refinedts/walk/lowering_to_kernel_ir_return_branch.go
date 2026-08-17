@@ -284,10 +284,15 @@ func shortCircuitLeftSlot(context *LoweringContext, left *ast.Node) (int, bool) 
 		return 0, false
 	}
 	effect, hoisted := HoistCallEffect(context, callHead)
-	if !hoisted || effect.Kind != kernelbridge.LoopEffectVar {
-		return 0, false
+	if hoisted && effect.Kind == kernelbridge.LoopEffectVar {
+		return effect.Index, true
 	}
-	return effect.Index, true
+	// no servable blob: the OPAQUE twin — sound at this position because
+	// the left operand runs first and unconditionally
+	// (HoistOpaqueCallTemp's own doc), so `return useAppSelector(sel) ??
+	// fallback` branches on the hook tier's temp instead of declining
+	// the whole return.
+	return HoistOpaqueCallTemp(context, callHead)
 }
 
 // returnBooleanLeftShortCircuit lowers `return a && b` / `a || b` where

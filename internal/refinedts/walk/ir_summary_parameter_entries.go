@@ -207,11 +207,30 @@ func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlo
 		var out []bodySlot
 		for _, element := range pd.Name().AsBindingPattern().Elements.Nodes {
 			binding := element.AsBindingElement()
-			if binding.DotDotDotToken != nil || binding.Initializer != nil ||
-				binding.Name() == nil || !ast.IsIdentifier(binding.Name()) {
+			if binding.Name() == nil || !ast.IsIdentifier(binding.Name()) {
 				return nil, false
 			}
-			key := binding.Name().Text()
+			bound := binding.Name().Text()
+			if _, duplicate := seen[bound]; duplicate {
+				return nil, false
+			}
+			seen[bound] = struct{}{}
+			// a REST element binds a fresh object of the remaining members,
+			// and a DEFAULTED element binds member-or-default: neither value
+			// is one member's own state, so each takes an unknown-sorted
+			// TOP-filled entry (bodySlot.TopEntry's doc) instead of refusing
+			// the whole pattern — reads of the bound name answer nothing,
+			// which is exactly what is known.
+			if binding.DotDotDotToken != nil || binding.Initializer != nil {
+				out = append(out, bodySlot{
+					Name:      bound,
+					Sort:      BindingKindUnknown,
+					TypeofTag: TypeofTagNone,
+					TopEntry:  true,
+				})
+				continue
+			}
+			key := bound
 			if binding.PropertyName != nil {
 				if !ast.IsIdentifier(binding.PropertyName) {
 					return nil, false
@@ -222,11 +241,6 @@ func SummaryParameterEntriesIn(ctx *FlowContext, parameter *ast.Node) ([]bodySlo
 			if !declared {
 				return nil, false
 			}
-			bound := binding.Name().Text()
-			if _, duplicate := seen[bound]; duplicate {
-				return nil, false
-			}
-			seen[bound] = struct{}{}
 			out = append(out, bodySlot{
 				Name:      bound,
 				Key:       key,

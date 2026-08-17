@@ -178,6 +178,56 @@ func HoistCallEffect(context *LoweringContext, call *ast.Node) (kernelbridge.Loo
 	return varEffect(temp), true
 }
 
+// HoistOpaqueCallTemp is HoistCallEffect's OPAQUE twin: a call with no
+// servable blob still hoists — to a fresh temp through the same
+// statement door every statement-position call takes
+// (SummaryCallOrHavocNamed), whose tiers end at the opaque havoc.
+//
+// The caller must stand at a CONDITION-FIRST position — an if head, a
+// short circuit's LEFT operand — where the source runs the call first
+// and unconditionally, so emitting its statements ahead of the branch
+// preserves source order exactly and the ordering gate has nothing to
+// measure: the havoc's writes are the call's own writes, at the call's
+// own position. No other position may use this door.
+//
+// What lands in the temp is whatever the serving tier said — a model
+// tier's value, the imported-hook tier's unknown with no havoc note,
+// the havoc floor's unknown with the mentioned slots havocked ahead of
+// it. A refusal (the enumeration itself unbounded) answers false and
+// the caller keeps its decline.
+func HoistOpaqueCallTemp(context *LoweringContext, call *ast.Node) (int, bool) {
+	if context == nil || call == nil || !context.CanHoist || context.Allocate == nil {
+		return 0, false
+	}
+	head := Unwrapped(call)
+	if operand, isAwait := AwaitedOperandOf(head); isAwait {
+		head = Unwrapped(operand)
+	}
+	if head == nil || !ast.IsCallExpression(head) {
+		return 0, false
+	}
+	if temp, already := context.HoistedTemp[head]; already {
+		return temp, true
+	}
+	sort, typeofTag := ResolvedExpressionSort(hoistCheckerOf(context), Unwrapped(call))
+	temp, allocated := context.Allocate(hoistedTempName(head), sort, typeofTag)
+	if !allocated {
+		return 0, false
+	}
+	statements, built := SummaryCallOrHavocNamed(context, head, temp, "")
+	if !built {
+		// the temp stays in the vector unwritten and unread — the same
+		// no-rollback rule HoistCallEffect states at its own refusal
+		return 0, false
+	}
+	context.Hoisted = append(context.Hoisted, statements...)
+	if context.HoistedTemp == nil {
+		context.HoistedTemp = map[*ast.Node]int{}
+	}
+	context.HoistedTemp[head] = temp
+	return temp, true
+}
+
 // hoistCheckerOf is the nil-tolerant reach for the host checker the
 // temp's sort is resolved against. A lowering that runs without a
 // program has none, and its temps then wear the unknown sort — exactly

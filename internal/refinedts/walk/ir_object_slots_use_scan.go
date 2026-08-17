@@ -94,6 +94,34 @@ func usesAreAllDeclaredKeySteps(
 							}
 							return false
 						}
+						// `p = { ...p, x1: e }` — the SELF-spread overlay: the
+						// leading spread copies every unmentioned leaf onto
+						// itself, so the write is the explicit rows alone
+						// (RecordAssignmentOf's spread arm). Admitted where the
+						// spread names THIS record first and every explicit row
+						// writes a declared leaf; the row initializers still
+						// scan as ordinary uses.
+						if properties := right.AsObjectLiteralExpression().Properties.Nodes; len(properties) >= 2 &&
+							ast.IsSpreadAssignment(properties[0]) {
+							source := Unwrapped(properties[0].AsSpreadAssignment().Expression)
+							if source != nil && ast.IsIdentifier(source) && source.Text() == name {
+								if rows, rowsOk := flatKeysOfLiteralAfterLeadingSpread(c, right, name); rowsOk {
+									declaredAll := true
+									for _, row := range rows {
+										if _, isDeclared := declared[strings.Join(row.Path, ".")]; !isDeclared {
+											declaredAll = false
+											break
+										}
+									}
+									if declaredAll {
+										for _, row := range rows {
+											visit(row.Initializer)
+										}
+										return false
+									}
+								}
+							}
+						}
 					}
 					ok = false
 					return true

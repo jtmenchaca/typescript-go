@@ -242,10 +242,14 @@ func ConditionTestSlot(context *LoweringContext, condition *ast.Node) (int, bool
 		return 0, false
 	}
 	effect, hoisted := HoistCallEffect(context, callHead)
-	if !hoisted || effect.Kind != kernelbridge.LoopEffectVar {
-		return 0, false
+	if hoisted && effect.Kind == kernelbridge.LoopEffectVar {
+		return effect.Index, true
 	}
-	return effect.Index, true
+	// no servable blob: the OPAQUE twin — sound at this condition-first
+	// position (HoistOpaqueCallTemp's own doc), so `if (f())` over an
+	// unreadable callee branches on the served temp instead of falling
+	// to the whole-statement havoc floor.
+	return HoistOpaqueCallTemp(context, callHead)
 }
 
 // conditionBranchOn is the branch a hoisted condition's temp takes: the

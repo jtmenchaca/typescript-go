@@ -246,12 +246,30 @@ func closureCallStatement(
 // when handed the function-like itself; a bare body block reads as "no
 // closures inside", the empty set that let a stored closure's writes
 // pass unhavocked.
+//
+// SAME-FILE ONLY. A closure "local" to THIS body means the declaration
+// sits in the source file this lowering is walking — symbolAt's alias
+// hop follows an import through to the exporting file's own
+// VariableDeclaration, which for `import { polarToCartesian } from
+// "./PolarUtils"` is an arrow literal exactly as shape-matching as a
+// real same-file closure. Without the file check below, that import
+// read as a body-local closure and reached ClosureCallStatementOf /
+// closureCallHavocNamed AHEAD of the imported-hook tier
+// (importedHookCallStatement, ir_summary_imported_hook_calls.go) —
+// stealing first refusal from the recognizer built for exactly this
+// shape, and running through OpaqueCallHavoc's NoteFirstHavoc on every
+// site even where the closure's write set was empty. A same-file
+// declaration keeps the reading this function always gave it; only a
+// declaration resolvesOutsideThisFile calls true is new here.
 func localClosureOf(context *LoweringContext, callee *ast.Node) (*ast.Node, bool) {
 	if context == nil || context.Flow == nil || context.Flow.P == nil || context.Flow.P.Checker == nil {
 		return nil, false
 	}
 	head := Unwrapped(callee)
 	if head == nil || !ast.IsIdentifier(head) {
+		return nil, false
+	}
+	if resolvesOutsideThisFile(context.Flow, head) {
 		return nil, false
 	}
 	symbol := symbolAt(context.Flow.P.Checker, head)

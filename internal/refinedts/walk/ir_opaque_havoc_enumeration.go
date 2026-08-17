@@ -92,6 +92,13 @@ func havocSlotsOfStatement(context *LoweringContext, statement *ast.Node) (map[i
 			for _, slot := range flattenedSlotsUnder(context, node.Text()) {
 				add(slot)
 			}
+			// an ELEMENT ALIAS holds no slots under its own name, but the
+			// element it stands for does — a mention hands the element's
+			// reference to unseen code, which may write any of its member
+			// slots (ElementAliasHavocSlots' own doc)
+			for _, slot := range ElementAliasHavocSlots(context, node) {
+				add(slot)
+			}
 		}
 		node.ForEachChild(visit)
 		return false

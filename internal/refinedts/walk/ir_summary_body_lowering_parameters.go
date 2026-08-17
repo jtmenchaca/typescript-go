@@ -28,6 +28,30 @@ func summaryParameterEntries(
 	layout.Sorts = make([]BindingKind, 0, len(parameters))
 	layout.Typeofs = make([]TypeofTag, 0, len(parameters))
 	for index, parameter := range parameters {
+		// a BINDING-PATTERN parameter AT AN ARROW-ARGUMENT SITE whose leaf
+		// sorts a callback conversion already resolved (reduceElementPatternEntries,
+		// ir_callback_convert.go) is laid out from THAT memo, entirely
+		// ahead of SummaryParameterEntriesIn: the pattern carries no
+		// annotation of its own in this shape (`{ word, width }` with the
+		// member shape living on the RECEIVER's array type), so
+		// SummaryParameterEntriesIn's own pattern arm — which reads only
+		// pd.Type — would decline before this function's own
+		// arrow-argument gate is ever reached. The memo is exactly the per-
+		// leaf evidence the site already proved each bound name resolves
+		// to, so laying entries out from it is no weaker a claim than the
+		// annotation-driven pattern arm makes for a parameter that does
+		// carry one.
+		if pd := parameter.AsParameterDeclaration(); pd.Name() != nil && ast.IsObjectBindingPattern(pd.Name()) && index < len(parameterSorts) {
+			if leaves, remembered := patternLeafSortsFor(pd.Name()); remembered {
+				for _, leaf := range leaves {
+					layout.Names = append(layout.Names, leaf.Bound)
+					layout.Sorts = append(layout.Sorts, leaf.Sort)
+					layout.Typeofs = append(layout.Typeofs, leaf.TypeofTag)
+				}
+				continue
+			}
+			return layout, "a binding-pattern parameter of an arrow argument", false
+		}
 		entries, entriesOk := SummaryParameterEntriesIn(ctx, parameter)
 		if !entriesOk {
 			return layout, declinedParameterConstruct(parameter), false

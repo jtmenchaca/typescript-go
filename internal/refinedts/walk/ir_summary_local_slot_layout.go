@@ -23,6 +23,14 @@ type bodySlot struct {
 	// renaming (`{ transform: t }` binds t from member transform).
 	// Empty for every other entry kind.
 	Key string
+	// TopEntry: call sites fill this entry TOP unconditionally, never
+	// from the argument's member. A DEFAULTED pattern element binds
+	// member-or-default — a definite-undefined member state would claim
+	// undefined where the runtime bound the default — and a REST pattern
+	// element binds a fresh object of the remaining members, which no
+	// member state spells. TOP claims nothing and the entry quantifier
+	// already covers it.
+	TopEntry bool
 }
 
 // collectSummaryLocals is CollectLocals widened by exactly two shapes,

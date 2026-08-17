@@ -6,6 +6,8 @@ package walk
 
 import (
 	"testing"
+
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
 
 // TestArrayElementMemberRead_ReturnsTheJoinedMemberAcrossCalls pins the
@@ -210,20 +212,16 @@ func TestArrayElementMemberRead_ReassignedAliasDeclines(t *testing.T) {
 	t.Logf("let p = xs[i]; p = xs[j]; return p.a: outcome=%q construct=%q (expected porous — reassignment declines the alias outright)", outcome, construct)
 }
 
-// TestArrayElementMemberRead_WriteThroughAliasDeclines pins the write-side
-// half of AGENT-BRIEF step 2's own soundness warning: `p.a = 5` must NOT
-// serve, because IndexOf resolves a write TARGET through the identical
-// seam a read uses (ir_lowering_context.go's IndexOf, shared by every
-// route in this package) — a write through the alias spelling would
-// REPLACE the slot AssignmentOfExpression's ordinary `=` route builds,
-// not JOIN into it, which would corrupt what every OTHER element's own
-// read through "xs[j].a" is allowed to assume about the array's
-// weak-summary elem slot. No join-write route is built for either
-// spelling ("p.a = v" or "xs[i].a = v") in this file, so
-// elementAliasHasWriteThrough refuses the WHOLE aliasing wherever the
-// body writes through the alias name at all — the honest porous answer,
-// never a silent unsound replace.
-func TestArrayElementMemberRead_WriteThroughAliasDeclines(t *testing.T) {
+// TestArrayElementMemberRead_WriteThroughAliasJoinsNeverReplaces pins the
+// write-side soundness rule in its BUILT form: the join-write route now
+// exists (AssignmentOfExpression's weakUpdate wrap over
+// ElementAliasResolvedSlot), so `p.a = 5` SERVES — and the lowered
+// write must be a JOIN into the shared elem slot, never a bare
+// replacement, which would corrupt what every OTHER element's read
+// through "xs[j].a" is allowed to assume about the array's weak-summary
+// elem slot. (This pin's earlier form asserted the pre-join refusal;
+// the refusal retired when the join landed.)
+func TestArrayElementMemberRead_WriteThroughAliasJoinsNeverReplaces(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearSummaryOutcomes()
@@ -233,15 +231,29 @@ func TestArrayElementMemberRead_WriteThroughAliasDeclines(t *testing.T) {
 	source := "function f(xs: { a: number, b: number }[], i: number) { const p = xs[i]; p.a = 5; return p.a; }\n"
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
-	RelowerSummaryBody(ctx, declaration)
+	summary, ok := RelowerSummaryBody(ctx, declaration)
 	outcome, construct, recorded := SummaryOutcomeOf(declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
-	if outcome == SummaryComplete {
-		t.Errorf("outcome=%q construct=%q — p.a = 5 served as complete; a write through the alias spelling must decline the whole aliasing (no join route exists), never replace the shared slot", outcome, construct)
+	if !ok || outcome != SummaryComplete {
+		t.Errorf("outcome=%q construct=%q ok=%v — the join-write route serves this body now", outcome, construct, ok)
 	}
-	t.Logf("const p = xs[i]; p.a = 5; return p.a: outcome=%q construct=%q (expected porous — the write-through declines the whole alias)", outcome, construct)
+	foundJoin := false
+	var scan func(statements []kernelbridge.IrStatement)
+	scan = func(statements []kernelbridge.IrStatement) {
+		for _, statement := range statements {
+			if statement.Kind == kernelbridge.IrStatementAssign && statement.Effect.Kind == kernelbridge.LoopEffectJoin {
+				foundJoin = true
+			}
+			scan(statement.Then)
+			scan(statement.Else)
+		}
+	}
+	scan(summary.Stmts)
+	if !foundJoin {
+		t.Errorf("no JOIN-shaped assignment in the lowered statements — the alias write must join into the shared slot, never replace it")
+	}
 }
 
 // TestArrayElementMemberRead_UndeclaredMemberDeclines pins that reading a

@@ -1010,6 +1010,15 @@ func summaryEntryStates(
 				argument = argKnowns[index]
 			}
 			for _, entry := range entries {
+				// a TOP-entry row (a defaulted or rest pattern element) never
+				// fills from the argument's member: the bound value is
+				// member-or-default (or a fresh rest object), and a definite
+				// member state would claim what the runtime did not bind
+				// (bodySlot.TopEntry's doc)
+				if entry.TopEntry {
+					states = append(states, kernelbridge.KnownStateWire{Top: true})
+					continue
+				}
 				states = append(states, thisEntryState(argument, entry.Key))
 			}
 			continue

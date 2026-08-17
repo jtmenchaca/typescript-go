@@ -214,6 +214,16 @@ func SummaryCallOrHavocNamed(context *LoweringContext, call *ast.Node, target in
 	if hooked, ok := importedHookCallStatement(context, call, target); ok {
 		return withMethodWrites(hooked, true)
 	}
+	// the RECEIVER-CALLEE twin of the tier above: `document.getElementById(x)`,
+	// `window.addEventListener(name, cb)`, `listenerApi.getState()` — a
+	// property-access callee whose METHOD resolves outside this file,
+	// proved non-interfering by the same write-and-call-free argument
+	// test. Tried at the same position, for the same reason: every tier
+	// above owns a callee this lowering can read a body for, and only a
+	// callee those tiers already declined on reaches either recognizer.
+	if receiverServed, ok := receiverCalleeCallStatement(context, call, target); ok {
+		return withMethodWrites(receiverServed, true)
+	}
 	if construct == "" {
 		havocked, ok := OpaqueCallHavoc(context, call, target)
 		if !ok {

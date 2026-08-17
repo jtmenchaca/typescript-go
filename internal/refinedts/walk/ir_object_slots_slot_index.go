@@ -271,91 +271,187 @@ func admitElementAlias(flow *FlowContext, c *checker.Checker, declaration *ast.N
 			TypeofTag: member.TypeofTag,
 		})
 	}
-	if !usesAreAllDeclaredKeySteps(c, body, declaration, aliasName, keys, nil, func(string) bool { return false }) {
-		return ArrayLocal{}, false
-	}
-	// usesAreAllDeclaredKeySteps admits a WRITE through a declared path
-	// exactly as readily as a read — right for an OWNED flattened local
-	// (its slot answers to no other name), wrong here: "p.a" is a SECOND
-	// SPELLING of "xs.elem.a"'s own slot, and IndexOf resolves a write
-	// target through the identical seam a read uses (AGENT-BRIEF's own
-	// step 2 names the danger — every route in this package, not only the
-	// object-local family, shares one IndexOf for both). A write through
-	// "p.a = v" would therefore REPLACE the array's own weak-summary join
-	// rather than joining into it, corrupting what every OTHER element's
-	// read through "xs[j].a" is allowed to assume. The write-side JOIN
-	// route AGENT-BRIEF step 2 describes is unbuilt in this file, so until
-	// it lands, any write through the alias spelling must decline the
-	// WHOLE aliasing rather than let IndexOf's ordinary write route treat
-	// the shared slot as this local's own.
-	if elementAliasHasWriteThrough(body, declaration, aliasName) {
+	if !aliasUsesAdmissible(body, declaration, aliasName, keys) {
 		return ArrayLocal{}, false
 	}
 	return local, true
 }
 
-// elementAliasHasWriteThrough scans for any WRITE through the alias name
-// — a plain, compound, or logical assignment whose target is `p` itself
-// or a `p.<member>` path, or a `++`/`--` step on one. usesAreAllDeclaredKeySteps
-// has already run and admits these as ordinary declared-path uses; this
-// is the alias-specific refusal on top of it (see admitElementAlias's own
-// comment on why a write here cannot be let through the shared IndexOf
-// seam a plain replace would use).
-func elementAliasHasWriteThrough(body *ast.Node, declarationNode *ast.Node, name string) bool {
-	declarationName := declarationNode.AsVariableDeclaration().Name()
-	found := false
+// aliasUsesAdmissible is the ALIAS's own use scan — wider than
+// usesAreAllDeclaredKeySteps in exactly the positions the alias has
+// sound semantics for, and narrower nowhere:
+//
+//   - a declared-member path step (`p.depth`, read OR written) — the
+//     write side is sound because AssignmentOfExpression wraps every
+//     alias-resolved write in a JOIN with the slot's own state (the
+//     weak update one-element-of-many needs);
+//   - a bare occurrence consumed as a TEST — an if/while/for/ternary
+//     condition, under `!`, under a `&&`/`||` chain whose own result
+//     is so consumed, or an equality against null/undefined. A test
+//     reads presence and truthiness; the alias value never escapes;
+//   - a bare occurrence as a direct CALL ARGUMENT — a hand-over. The
+//     opaque havoc enumerator names the aliased element's member
+//     slots for exactly this shape (elementAliasHavocSlots), so the
+//     callee's possible writes through the reference are covered.
+//
+// Everything else — `return p`, `const q = p`, `p[e]`, `delete p.k`,
+// a reassignment of p itself — still refuses the aliasing whole.
+func aliasUsesAdmissible(body *ast.Node, declaration *ast.Node, name string, keys []ObjectLocalKey) bool {
+	declared := declaredLeafPaths(keys)
+	declarationName := declaration.AsVariableDeclaration().Name()
+	ok := true
 	var visit func(node *ast.Node) bool
 	visit = func(node *ast.Node) bool {
-		if found {
+		if !ok {
 			return true
 		}
-		if node == declarationName {
+		if ast.IsDeleteExpression(node) {
+			operand := Unwrapped(node.AsDeleteExpression().Expression)
+			if root, _, isPath := propertyPathOf(operand); isPath && root == name {
+				ok = false
+				return true
+			}
+		}
+		if root, path, isPath := propertyPathAdmittingRootOptionalStep(node); isPath && root == name {
+			if _, isDeclared := declared[strings.Join(path, ".")]; !isDeclared {
+				ok = false
+				return true
+			}
 			return false
 		}
-		if ast.IsBinaryExpression(node) {
-			bin := node.AsBinaryExpression()
-			kind := bin.OperatorToken.Kind
-			isAssignmentToken := kind == ast.KindEqualsToken ||
-				(kind >= ast.KindFirstAssignment && kind <= ast.KindLastAssignment)
-			if isAssignmentToken {
-				left := Unwrapped(bin.Left)
-				if ast.IsIdentifier(left) && left.Text() == name {
-					found = true
-					return true
-				}
-				if root, _, isPath := propertyPathAdmittingRootOptionalStep(left); isPath && root == name {
-					found = true
-					return true
-				}
+		if ast.IsIdentifier(node) && node.Text() == name && node != declarationName {
+			if !aliasBareUseAdmissible(node) {
+				ok = false
+				return true
 			}
-		}
-		if ast.IsPrefixUnaryExpression(node) || ast.IsPostfixUnaryExpression(node) {
-			var operator ast.Kind
-			var operand *ast.Node
-			if ast.IsPrefixUnaryExpression(node) {
-				unary := node.AsPrefixUnaryExpression()
-				operator, operand = unary.Operator, unary.Operand
-			} else {
-				unary := node.AsPostfixUnaryExpression()
-				operator, operand = unary.Operator, unary.Operand
-			}
-			if operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken {
-				operand = Unwrapped(operand)
-				if ast.IsIdentifier(operand) && operand.Text() == name {
-					found = true
-					return true
-				}
-				if root, _, isPath := propertyPathAdmittingRootOptionalStep(operand); isPath && root == name {
-					found = true
-					return true
-				}
-			}
+			return false
 		}
 		node.ForEachChild(visit)
 		return false
 	}
 	visit(body)
-	return found
+	return ok
+}
+
+// aliasBareUseAdmissible classifies ONE bare occurrence of the alias
+// name by the position that consumes it: a test consumer or a direct
+// call argument admits; everything else refuses (the value would
+// escape as an identity the slots cannot spell).
+func aliasBareUseAdmissible(node *ast.Node) bool {
+	current := node
+	for {
+		parent := current.Parent
+		if parent == nil {
+			return false
+		}
+		switch {
+		case ast.IsParenthesizedExpression(parent):
+			current = parent
+			continue
+		case ast.IsIfStatement(parent):
+			return parent.AsIfStatement().Expression == current
+		case ast.IsWhileStatement(parent):
+			return parent.AsWhileStatement().Expression == current
+		case ast.IsDoStatement(parent):
+			return parent.AsDoStatement().Expression == current
+		case ast.IsForStatement(parent):
+			return parent.AsForStatement().Condition == current
+		case ast.IsConditionalExpression(parent):
+			return parent.AsConditionalExpression().Condition == current
+		case ast.IsPrefixUnaryExpression(parent):
+			// `!p` reads truthiness alone; the value never escapes
+			if parent.AsPrefixUnaryExpression().Operator == ast.KindExclamationToken {
+				return true
+			}
+			return false
+		case ast.IsTypeOfExpression(parent):
+			return true
+		case ast.IsBinaryExpression(parent):
+			bin := parent.AsBinaryExpression()
+			switch bin.OperatorToken.Kind {
+			case ast.KindEqualsEqualsToken, ast.KindExclamationEqualsToken,
+				ast.KindEqualsEqualsEqualsToken, ast.KindExclamationEqualsEqualsToken:
+				// an equality against null/undefined reads presence and
+				// answers a boolean — admissible wherever it sits
+				other := bin.Left
+				if other == current {
+					other = bin.Right
+				}
+				other = Unwrapped(other)
+				if other != nil && (other.Kind == ast.KindNullKeyword ||
+					(ast.IsIdentifier(other) && other.Text() == "undefined")) {
+					return true
+				}
+				return false
+			case ast.KindAmpersandAmpersandToken, ast.KindBarBarToken:
+				// `p && …` / `p || …` may hand p's own value onward —
+				// admissible only where the chain's RESULT is itself a test
+				current = parent
+				continue
+			}
+			return false
+		case ast.IsCallExpression(parent):
+			call := parent.AsCallExpression()
+			if call.Arguments != nil {
+				for _, argument := range call.Arguments.Nodes {
+					if argument == current {
+						return true
+					}
+				}
+			}
+			return false
+		default:
+			return false
+		}
+	}
+}
+
+// ElementAliasResolvedSlot answers the slot a one-step path resolves to
+// ONLY through the element-alias fallback — (slot, true) exactly where
+// the ordinary spelled lookup fails and the alias route answers. The
+// write side reads this: a write landing on such a slot is one element
+// of many, so its effect must JOIN into the slot rather than replace it
+// (AssignmentOfExpression's weak-update wrap).
+func ElementAliasResolvedSlot(context *LoweringContext, node *ast.Node) (int, bool) {
+	head := Unwrapped(node)
+	if head == nil {
+		return 0, false
+	}
+	root, path, ok := propertyPathAdmittingRootOptionalStep(head)
+	if !ok || len(path) != 1 {
+		return 0, false
+	}
+	if _, spelled := slotIndexOfName(context, root+"."+path[0]); spelled {
+		return 0, false
+	}
+	rootNode := rootIdentifierOf(head)
+	if rootNode == nil {
+		return 0, false
+	}
+	return elementAliasSlotIndexOf(context, rootNode, path[0])
+}
+
+// ElementAliasHavocSlots answers the aliased element's member slots for
+// a bare mention of the alias name — what a hand-over (`f(p)`) puts in
+// unseen code's reach. The opaque havoc enumerator reads this beside
+// flattenedSlotsUnder: the alias holds no slots under its own name, but
+// the element it stands for does, and a callee may write any of them
+// through the reference.
+func ElementAliasHavocSlots(context *LoweringContext, node *ast.Node) []int {
+	if node == nil || !ast.IsIdentifier(node) {
+		return nil
+	}
+	target, ok := elementAliasTargetOf(context, node)
+	if !ok {
+		return nil
+	}
+	var out []int
+	for _, member := range target.ElementMembers {
+		if index, found := slotIndexOfName(context, member.SlotName); found {
+			out = append(out, index)
+		}
+	}
+	return out
 }
 
 // enclosingFunctionBodyOf walks a node up to the nearest enclosing

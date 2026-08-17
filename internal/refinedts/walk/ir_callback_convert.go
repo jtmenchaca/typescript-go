@@ -487,19 +487,43 @@ func reduceElementPatternEntries(
 	parameterSorts[0] = parameterSlotSort{Sort: accumulatorSort, TypeofTag: accumulatorTypeof}
 	// the pattern's own declared position (index 1) takes no SINGLE sort —
 	// unknown is the honest placeholder, since a pattern position's real
-	// shape is N leaf sorts, which parameterSlotSort has no field for
-	// (convertReduceArrowElementPattern's own doc names the widening that
-	// would fix it).
+	// shape is N leaf sorts, which parameterSlotSort has no field for. The
+	// N leaf sorts ride the side memo instead (ir_pattern_leaf_sorts.go,
+	// filled below) — summaryParameterEntries' pattern arm reads that
+	// memo, keyed on this exact pattern node, in place of the single sort
+	// this position cannot carry.
 	parameterSorts[1] = parameterSlotSort{Sort: BindingKindUnknown, TypeofTag: TypeofTagNone}
 	var entries []callbackEntry
 	entries = append(entries, callbackEntry{Effect: accumulator, Sort: accumulatorSort, Typeof: accumulatorTypeof})
+	leafSorts := make([]patternLeafSort, 0, len(bindings))
 	for _, binding := range bindings {
+		// a REST element, a DEFAULTED element, or a NESTED pattern's outer
+		// name (Resolvable = false, objectPatternElementBindings' own doc)
+		// takes the absent entry and the unknown sort — the same treatment
+		// a member the RECEIVER does not carry would need, except the
+		// refusal here is about the BOUND NAME'S OWN shape rather than a
+		// missing member, so it degrades the one leaf instead of failing
+		// the lookup below.
+		if !binding.Resolvable {
+			entries = append(entries, absentCallbackEntry())
+			leafSorts = append(leafSorts, patternLeafSort{Bound: binding.Bound, Sort: BindingKindUnknown, TypeofTag: TypeofTagNone})
+			continue
+		}
 		slot, found := slotOfMember[binding.Key]
 		if !found {
+			// a member the RECEIVER's element does not carry AT ALL declines
+			// the whole pattern, unchanged from before this widening: a
+			// checker-validated program never names a member its own type
+			// lacks, so this is a genuine claim mismatch rather than a
+			// merely-unspellable shape, and TestCallbackConvert_ReduceElementPatternEntriesDeclinesAMemberTheReceiverDoesNotCarry
+			// pins the refusal.
 			return nil, nil, false
 		}
-		entries = append(entries, slotCallbackEntry(context, slot))
+		entry := slotCallbackEntry(context, slot)
+		entries = append(entries, entry)
+		leafSorts = append(leafSorts, patternLeafSort{Bound: binding.Bound, Sort: entry.Sort, TypeofTag: entry.Typeof})
 	}
+	rememberPatternLeafSorts(elementParameter.Name(), leafSorts)
 	for index := 2; index < declared; index++ {
 		entries = append(entries, absentCallbackEntry())
 		parameterSorts[index] = parameterSlotSort{Sort: BindingKindUnknown, TypeofTag: TypeofTagNone}

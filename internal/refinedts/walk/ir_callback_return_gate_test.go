@@ -834,17 +834,22 @@ func TestCallbackConvert_ReduceElementPatternEntriesDeclinesAMemberTheReceiverDo
 	}
 }
 
-func TestCallbackConvert_ConvertReduceArrowElementPatternStillDeclinesThroughTheLayoutWall(t *testing.T) {
-	// the full conversion route, entries built correctly (proved above)
-	// but still declining ONE layer further in — inside
-	// convertArrowWithEntryLayout's own call to lowerArrowSummary, whose
-	// body-layout (summaryParameterEntries, NOT this agent's file) has
-	// no annotation on `{ a }` to expand. This is the same wall
-	// TestCallbackReturn_ScalarDestructuredElementReduceStillDeclinesAtTheLayoutSideGate
-	// names for the full return-position route; this pin isolates it at
-	// the convert function itself.
+func TestCallbackConvert_ConvertReduceArrowElementPatternClosesTheLayoutWall(t *testing.T) {
+	// the full conversion route, entries built correctly (proved above),
+	// and now the layout wall this test used to pin as still-open is
+	// CLOSED: reduceElementPatternEntries records each bound leaf's sort
+	// under the pattern node (ir_pattern_leaf_sorts.go's memo), and
+	// summaryParameterEntries' own arrow-argument arm
+	// (ir_summary_body_lowering_parameters.go) reads that memo in place
+	// of refusing outright when the pattern carries no annotation of its
+	// own. `{ a }` has no pd.Type — SummaryParameterEntriesIn's
+	// annotation-only pattern arm still can't expand it — but the memo
+	// supplies the same evidence a call site's own resolved leaf already
+	// proved, so the layout no longer needs the annotation to lay the
+	// position out.
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
+	ClearPatternLeafSorts()
 	context := memberElementCallbackReturnContext(
 		"xs", map[string]BindingKind{"a": BindingKindNumber}, nil, nil)
 	context.Narrow = kernel.Narrow
@@ -860,8 +865,8 @@ func TestCallbackConvert_ConvertReduceArrowElementPatternStillDeclinesThroughThe
 	if _, ok := convertReduceArrowElementPattern(
 		context, reduceSource.Callback, "xs.elem",
 		accumulator, BindingKindNumber, TypeofTagNumber,
-	); ok {
-		t.Errorf("convertReduceArrowElementPattern compiled a blob — want a decline until the layout-side hook lands (summaryParameterEntries has no annotation on `{ a }` to expand)")
+	); !ok {
+		t.Errorf("convertReduceArrowElementPattern declined — want it to compile now that the layout-side memo supplies { a }'s sort")
 	}
 }
 

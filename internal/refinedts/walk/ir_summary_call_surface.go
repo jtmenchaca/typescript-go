@@ -24,6 +24,16 @@ func SummaryCallStatementOf(context *LoweringContext, statement *ast.Node) ([]ke
 	}
 	target, rhs, ok := callAssignmentShapeOf(context, statement)
 	if !ok {
+		// `const center = f(...)` where `center` is a FLATTENED record
+		// local (no scalar slot of its own, only leaf paths) — the shape
+		// above only ever finds a BARE name's own slot. Tried here, once
+		// the scalar route has already declined: an imported/free callee
+		// whose arguments prove write-and-call-free still has a sound
+		// answer for a flattened target — havoc every leaf — even though
+		// it has none for a scalar target's own single slot spelling.
+		if flattened, flattenedOk := importedHookFlattenedDeclarationStatement(context, statement); flattenedOk {
+			return flattened, true
+		}
 		return nil, false
 	}
 	head := Unwrapped(rhs)

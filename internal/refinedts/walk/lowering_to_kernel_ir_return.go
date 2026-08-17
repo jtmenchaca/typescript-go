@@ -193,6 +193,23 @@ func lowerReturnStatement(
 				return out, true
 			}
 			dropHoists()
+			// `return useAppSelector(sel)` / `return useContext(Ctx)`:
+			// InlineCall declined (no FunctionContract resolves the
+			// callee — a cross-file hook, a library function), so this
+			// falls to the SAME call door the statement route serves
+			// through, target = #ret. Tier 3 of that door — the opaque
+			// call havoc — is the widest answer it can give, and it is
+			// SOUND unconditionally: #ret takes unknown and so does
+			// every flattened-local leaf the call could have written
+			// through. Tried ahead of the opaque return below, whose own
+			// mention-havoc has no reading for a call at all.
+			if served, ok := returnCallStatements(context, head); ok {
+				out = flush(out)
+				out = append(out, served...)
+				out = append(out, raise)
+				return out, true
+			}
+			dropHoists()
 		}
 		// `return new C(…)`: the same door `const x = new C(…)` goes
 		// through — SummaryCallOrHavoc's blob tier, which runs the
@@ -274,6 +291,15 @@ func lowerReturnStatement(
 			return out, true
 		}
 		dropHoists()
+		// (A return-position member-read arm — `return x.a.b` served as
+		// an unknown-ret COMPLETE — briefly lived here and was RETIRED:
+		// a complete summary serves unconditionally, so its TOP ret
+		// shadowed richer walk-route answers (a static field chain's
+		// exact invariant read as the number ground —
+		// static_member_chain_test.go's pins caught it). A member return
+		// no route determines keeps the opaque floor's honest
+		// havoc-noting porous, which leaves the walk free to answer
+		// better.)
 		// THE INERT RETURN: a returned FUNCTION LITERAL (creating one
 		// runs nothing, whatever its body holds — the census rules its
 		// captures), and any other returned expression that MOVES

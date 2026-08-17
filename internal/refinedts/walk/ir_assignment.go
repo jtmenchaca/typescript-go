@@ -111,10 +111,18 @@ func AssignmentOfExpression(context *LoweringContext, e *ast.Node) (AssignmentTa
 			}
 			one := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1}))}
 			targetVar := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: target}
-			return AssignmentTarget{
+			stepped := AssignmentTarget{
 				Target: target,
 				Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectBinary, Op: op, A: &targetVar, B: &one},
-			}, true
+			}
+			// a step through an alias-resolved element slot joins rather
+			// than replaces — the same weak update every assignment form
+			// through the alias takes (AssignmentOfExpression's wrap)
+			if aliasSlot, viaAlias := ElementAliasResolvedSlot(context, operand); viaAlias && aliasSlot == target {
+				effect := stepped.Effect
+				stepped.Effect = kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectJoin, A: &targetVar, B: &effect}
+			}
+			return stepped, true
 		}
 	}
 	if !ast.IsBinaryExpression(e) {
@@ -131,12 +139,27 @@ func AssignmentOfExpression(context *LoweringContext, e *ast.Node) (AssignmentTa
 	if !ok {
 		return AssignmentTarget{}, false
 	}
+	// THE WEAK-UPDATE WRAP: a target that resolved through the
+	// element-alias fallback is ONE element of many sharing the slot, so
+	// the write JOINS into the slot's own state instead of replacing it —
+	// after the write, a read of any element is either an untouched one
+	// (the old join) or the written one (the new value), and the join
+	// admits both. Every assignment form below rides through this one
+	// wrap.
+	weakUpdate := func(assignment AssignmentTarget) AssignmentTarget {
+		if aliasSlot, viaAlias := ElementAliasResolvedSlot(context, bin.Left); viaAlias && aliasSlot == assignment.Target {
+			targetVar := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: assignment.Target}
+			effect := assignment.Effect
+			assignment.Effect = kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectJoin, A: &targetVar, B: &effect}
+		}
+		return assignment
+	}
 	if bin.OperatorToken.Kind == ast.KindEqualsToken {
 		effect, ok := RhsEffect(context, context.Sorts[target], bin.Right)
 		if !ok {
 			return AssignmentTarget{}, false
 		}
-		return AssignmentTarget{Target: target, Effect: effect}, true
+		return weakUpdate(AssignmentTarget{Target: target, Effect: effect}), true
 	}
 	// `x ||= e`, `x &&= e`, `x ??= e`: the result is x itself or e —
 	// the JOIN of the two admits every run, under any sort, exactly as
@@ -148,6 +171,8 @@ func AssignmentOfExpression(context *LoweringContext, e *ast.Node) (AssignmentTa
 			return AssignmentTarget{}, false
 		}
 		targetVar := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: target}
+		// already a join with the slot's own state — the weak update an
+		// alias-resolved target needs is this effect's own shape
 		return AssignmentTarget{
 			Target: target,
 			Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectJoin, A: &targetVar, B: &right},
@@ -162,10 +187,10 @@ func AssignmentOfExpression(context *LoweringContext, e *ast.Node) (AssignmentTa
 			return AssignmentTarget{}, false
 		}
 		targetVar := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: target}
-		return AssignmentTarget{
+		return weakUpdate(AssignmentTarget{
 			Target: target,
 			Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConcat, A: &targetVar, B: &right},
-		}, true
+		}), true
 	}
 	op, ok := compoundOps[bin.OperatorToken.Kind]
 	if !ok {
@@ -180,10 +205,10 @@ func AssignmentOfExpression(context *LoweringContext, e *ast.Node) (AssignmentTa
 		return AssignmentTarget{}, false
 	}
 	targetVar := kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectVar, Index: target}
-	return AssignmentTarget{
+	return weakUpdate(AssignmentTarget{
 		Target: target,
 		Effect: kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectBinary, Op: op, A: &targetVar, B: &b},
-	}, true
+	}), true
 }
 
 // AssignmentOf is assignmentOf in the TS source: an assignment's

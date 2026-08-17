@@ -186,18 +186,34 @@ func arrowParameterNames(arrow *ast.Node) ([]string, bool) {
 // spells one (`{ width: w }` binds "w" from member "width"), the bound
 // name itself otherwise (`{ width }` binds "width" from member
 // "width").
+//
+// Resolvable is false for an element whose OWN shape a caller slot
+// cannot fill even once the member it names is found: a REST element
+// (`...rest`, binds an object of everything else — no single slot holds
+// that), a DEFAULTED element (`a = 5` — applying the default needs a
+// definedness branch this leaf-for-leaf reader does not build), or a
+// NESTED pattern (`{ a: { b } }` — the outer name `a` binds no scalar).
+// The bound name still rides out (arrowBoundNames' capture scan must
+// not mistake a body read of it for a free name), but the caller
+// resolving leaves treats it as UNKNOWN rather than refusing every
+// OTHER element in the same pattern.
 type patternElementBinding struct {
-	Bound string
-	Key   string
+	Bound      string
+	Key        string
+	Resolvable bool
 }
 
-// objectPatternElementBindings reads a `{ a, b: renamed }`-shaped
+// objectPatternElementBindings reads a `{ a, b: renamed, ...rest }`-shaped
 // binding-pattern NAME (a ParameterDeclaration's own Name node) as one
-// binding per element — plain identifier elements only, no defaults, no
-// rest, no computed keys, no nested patterns. Any of those declines the
-// whole pattern, the same total-or-decline stance
-// SummaryParameterEntriesIn's own pattern arm takes for a record
-// parameter's binding pattern.
+// binding per element. A plain identifier element (renamed or not)
+// binds Resolvable; a rest element, a defaulted element, or a nested
+// pattern still binds its own name (Resolvable = false) rather than
+// refusing the whole pattern — the same "an unspellable member takes an
+// unknown slot" stance ir_summary_body_lowering_slots.go's array-pattern
+// collection already takes. Only a COMPUTED property name (`{ [k]: v
+// }`) refuses outright: it names no fixed member key at all, so no
+// caller could resolve it even as an unknown leaf, and no name is bound
+// for the capture scan to skip either.
 func objectPatternElementBindings(name *ast.Node) ([]patternElementBinding, bool) {
 	if name == nil || !ast.IsObjectBindingPattern(name) {
 		return nil, false
@@ -206,9 +222,37 @@ func objectPatternElementBindings(name *ast.Node) ([]patternElementBinding, bool
 	seen := map[string]struct{}{}
 	for _, element := range name.AsBindingPattern().Elements.Nodes {
 		binding := element.AsBindingElement()
-		if binding.DotDotDotToken != nil || binding.Initializer != nil ||
-			binding.Name() == nil || !ast.IsIdentifier(binding.Name()) {
+		// a REST element binds no member key at all — its own bound name
+		// stands for "everything else", read from no single leaf
+		if binding.DotDotDotToken != nil {
+			if binding.Name() == nil || !ast.IsIdentifier(binding.Name()) {
+				return nil, false
+			}
+			bound := binding.Name().Text()
+			if _, duplicate := seen[bound]; duplicate {
+				return nil, false
+			}
+			seen[bound] = struct{}{}
+			bindings = append(bindings, patternElementBinding{Bound: bound, Resolvable: false})
+			continue
+		}
+		if binding.Name() == nil {
 			return nil, false
+		}
+		// a NESTED pattern element (`{ a: { b } }`) binds no scalar under
+		// its own outer name — PropertyName carries the member key where
+		// one is spelled, the nested pattern itself contributes nothing
+		// this reader can bind a single local from
+		if !ast.IsIdentifier(binding.Name()) {
+			if binding.PropertyName == nil || !ast.IsIdentifier(binding.PropertyName) {
+				return nil, false
+			}
+			// nothing bound under a single local name — the nested pattern's
+			// OWN leaves are invisible here, so nothing is added to `seen`
+			// or `bindings`; a body read inside the nested pattern is a
+			// different name entirely and arrowBoundNames' own recursive
+			// scan over BindingElement nodes (not this function) covers it
+			continue
 		}
 		key := binding.Name().Text()
 		if binding.PropertyName != nil {
@@ -222,7 +266,14 @@ func objectPatternElementBindings(name *ast.Node) ([]patternElementBinding, bool
 			return nil, false
 		}
 		seen[bound] = struct{}{}
-		bindings = append(bindings, patternElementBinding{Bound: bound, Key: key})
+		// a DEFAULTED element (`{ a = 5 }`) still binds "a" from member
+		// "a" — the key resolution is unaffected — but is not Resolvable:
+		// applying the default needs a definedness branch this leaf-for-
+		// leaf reader does not build, so the CALLER treats it as unknown
+		// rather than refusing the sibling elements around it.
+		bindings = append(bindings, patternElementBinding{
+			Bound: bound, Key: key, Resolvable: binding.Initializer == nil,
+		})
 	}
 	if len(bindings) == 0 {
 		return nil, false

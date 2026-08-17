@@ -141,9 +141,39 @@ func flatKeysOfLiteralWith(
 	holder string,
 	prefix []string,
 ) ([]ObjectLocalKey, bool) {
+	return flatKeysOfProperties(c, literal.AsObjectLiteralExpression().Properties.Nodes, holder, prefix)
+}
+
+// flatKeysOfLiteralAfterLeadingSpread reads the literal's rows PAST one
+// leading spread — the self-spread reassignment's explicit overlay
+// (RecordAssignmentOf's spread arm). The spread row itself is the
+// caller's to interpret; every remaining row reads exactly as
+// flatKeysOfLiteral reads it, and a spread anywhere past the first
+// position declines through the ordinary per-row dispatch.
+func flatKeysOfLiteralAfterLeadingSpread(
+	c *checker.Checker,
+	literal *ast.Node,
+	holder string,
+) ([]ObjectLocalKey, bool) {
+	properties := literal.AsObjectLiteralExpression().Properties.Nodes
+	if len(properties) < 2 || !ast.IsSpreadAssignment(properties[0]) {
+		return nil, false
+	}
+	return flatKeysOfProperties(c, properties[1:], holder, nil)
+}
+
+// flatKeysOfProperties is the row loop flatKeysOfLiteralWith and the
+// after-spread entry share — one per-row dispatch, whoever supplies the
+// row list.
+func flatKeysOfProperties(
+	c *checker.Checker,
+	properties []*ast.Node,
+	holder string,
+	prefix []string,
+) ([]ObjectLocalKey, bool) {
 	var keys []ObjectLocalKey
 	seen := map[string]struct{}{}
-	for _, property := range literal.AsObjectLiteralExpression().Properties.Nodes {
+	for _, property := range properties {
 		// a SHORTHAND row (`{ a }`) names its key AND its value with the
 		// same identifier — `a` is short for `a: a`. It has no
 		// PropertyAssignment.Initializer to read (a different node kind

@@ -15,6 +15,20 @@ import (
 // push the slot holds everything the array could hold, which is exactly
 // what an index read may answer.
 //
+// A pushed value with NO scalar effect spelling — a call
+// (`result.push(getThing())`, tmp/recharts-src/src/util shapes over a
+// loop-collected array) — still joins, with UNKNOWN standing in for the
+// value RhsEffect cannot spell: the call is not an effect-grammar leaf
+// at all (RhsEffect's own dispatch has no call arm), but the length
+// arithmetic and the OTHER pushed values' exactness do not depend on
+// this one value's spelling, so declining the whole push over one
+// unspellable argument would lose knowledge the other slots never owed
+// to it. Sound only where the unspellable argument is itself
+// write-and-call-free over what it hands the call — a nested write
+// inside it (`getThing((total = total + 1))`) still declines the whole
+// push, since an unknown VALUE is not the same claim as "moved nothing
+// else," and this route has no reading for the second.
+//
 // Answers the two assignments and the len slot, which the expression
 // form below reads the new length back out of.
 func pushSlotEffectsOf(context *LoweringContext, call *ast.Node, name string) (assignments []AssignmentTarget, lenSlot int, ok bool) {
@@ -33,7 +47,19 @@ func pushSlotEffectsOf(context *LoweringContext, call *ast.Node, name string) (a
 	for _, argument := range arguments {
 		pushed, pushedOk := RhsEffect(context, context.Sorts[elemSlot], argument)
 		if !pushedOk {
-			return nil, 0, false
+			// RhsEffect declined — the value has no effect-grammar spelling.
+			// Sound to join UNKNOWN instead, but only where the argument
+			// itself moves nothing else: writeAndCallFree already refuses a
+			// WRITE inside it, and a nested CALL is exactly what RhsEffect
+			// just declined on, so the one remaining question is whether
+			// evaluating it could write a tracked slot — importedHookArgumentsFree
+			// answers that for a call argument the same way it does for an
+			// imported-hook call's own arguments (every one of ITS arguments
+			// write-and-call-free, or a write-free function literal).
+			if !pushedValueMovesNothingElse(context, argument) {
+				return nil, 0, false
+			}
+			pushed = unknownEffect
 		}
 		joined = joinEffect(joined, pushed)
 	}
@@ -142,4 +168,27 @@ func pushValueAssignmentsOf(context *LoweringContext, value *ast.Node, target st
 		return nil, false
 	}
 	return append(assignments, AssignmentTarget{Target: targetSlot, Effect: varStateEffect(lenSlot)}), true
+}
+
+// pushedValueMovesNothingElse answers whether a pushed argument RhsEffect
+// declined on (no scalar spelling) is still safe to join as unknown: the
+// argument's own evaluation must move no tracked slot. A CALL argument
+// (the common shape) is safe exactly when EVERY one of ITS arguments is
+// write-and-call-free or a write-free function literal —
+// importedHookArgumentsFree's own test, reused rather than
+// re-implemented so the two routes' idea of "free" cannot drift apart.
+// Any other shape RhsEffect declines on (a `new`, an await) falls back
+// to the plain writeAndCallFree reading, which still refuses a call
+// nested inside it — sound but narrower, since this route does not need
+// to serve every unspellable shape, only the one the census names.
+func pushedValueMovesNothingElse(context *LoweringContext, argument *ast.Node) bool {
+	unwrapped := Unwrapped(argument)
+	if unwrapped != nil && ast.IsCallExpression(unwrapped) {
+		var callArguments []*ast.Node
+		if a := unwrapped.AsCallExpression().Arguments; a != nil {
+			callArguments = a.Nodes
+		}
+		return importedHookArgumentsFree(context, callArguments)
+	}
+	return writeAndCallFree(argument)
 }
