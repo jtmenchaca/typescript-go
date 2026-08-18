@@ -54,7 +54,7 @@ func ReadEnumMemberAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomai
 			}
 		}
 		if isEnum {
-			memberType := ctx.P.Checker.GetTypeAtLocation(e)
+			memberType := typereading.TypeAtLocation(ctx.P.Checker, e)
 			if memberType.IsNumberLiteral() {
 				// tsgo stores a number literal's value as jsnum.Number, a
 				// NAMED float64 -- a plain float64 assertion never matched

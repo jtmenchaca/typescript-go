@@ -449,6 +449,24 @@ func NullConst() LoopEffect {
 	}
 }
 
+// NanConst is the state constant exactly the global `NaN` writes: the
+// empty set of values beside a raised Nan flag — NaN is not an element
+// of ℝ̄ (refinement_forms.go's boundary ruling), so it rides the state
+// flag the wire already carries for it. The global NaN property's
+// initial value is NaN and the property is non-writable
+// (sec-value-properties-of-the-global-object-nan, tmp/ecma262/spec.html:
+// "The initial value of the "NaN" property of the global object is NaN
+// ... This property has the attributes { [[Writable]]: false,
+// [[Enumerable]]: false, [[Configurable]]: false }."), so a read of the
+// unshadowed name is exactly this constant.
+func NanConst() LoopEffect {
+	return LoopEffect{
+		Kind: LoopEffectConstState,
+		Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)),
+		Nan:  true,
+	}
+}
+
 // ThrownConst is what an escaping throw writes into the result slot:
 // the run produced no completion at all. It carries no set and no
 // flags — the outcome it names lives outside everything a set holds,

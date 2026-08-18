@@ -96,12 +96,12 @@ func declaredTypeNodeMembers(ctx *FlowContext, holder string, typeNode *ast.Node
 	// takes — the members every arm declares — so a declared local and a
 	// declared parameter written with one union expand to one member list
 	if ast.IsUnionTypeNode(typeNode) {
-		return namedTypeMembersOf(ctx, holder, typeNode)
+		return namedTypeMembersOf(ctx, holder, typeNode, nil)
 	}
 	if !ast.IsTypeReferenceNode(typeNode) {
 		return nil, false
 	}
-	if members, isRecord := namedTypeMembersOf(ctx, holder, typeNode); isRecord {
+	if members, isRecord := namedTypeMembersOf(ctx, holder, typeNode, nil); isRecord {
 		return members, true
 	}
 	return constraintMembersOf(ctx, holder, typeNode)
@@ -110,9 +110,10 @@ func declaredTypeNodeMembers(ctx *FlowContext, holder string, typeNode *ast.Node
 // constraintMembersOf resolves a type reference that names a TYPE
 // PARAMETER to the members its constraint spells.
 //
-// The reference's own decline rules apply first — type arguments and
-// qualified names are refused by namedTypeMembersOf before this is
-// reached — and the constraint is then read by the SAME member reader
+// The reference's own readings apply first — a reference carrying type
+// arguments resolves (or declines) in namedTypeMembersOf's instantiated
+// arm before this is reached, and this function's own gates below refuse
+// it again regardless — and the constraint is then read by the SAME member reader
 // every other route uses, so a constraint written as an inline literal
 // and one written behind an interface expand identically. A type
 // parameter with no constraint, or a constraint the member reader
@@ -148,5 +149,5 @@ func constraintMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([
 	if ast.IsTypeLiteralNode(constraint) {
 		return scalarMemberListOf(holder, constraint.AsTypeLiteralNode().Members.Nodes)
 	}
-	return namedTypeMembersOf(ctx, holder, constraint)
+	return namedTypeMembersOf(ctx, holder, constraint, nil)
 }

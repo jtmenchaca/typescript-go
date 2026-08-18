@@ -23,9 +23,15 @@ import (
 // caller's own leaf slot (recordParamRets) — the class-typed bundle's
 // own treatment. A HAND-OVER (`f(p)`) is served by the havoc-and-
 // write-back reading recordParameterHandedOver documents: every leaf
-// Written and joined to HandOverHavocNames. A STORE (`q = p`) and a
-// write through anything undeclared still refuse
-// (recordParameterUnreadable).
+// Written and joined to HandOverHavocNames. A NESTED-ROOT element of a
+// whole-parameter destructuring declaration (`const { parentViewBox:
+// alias } = options;` where `parentViewBox` has no depth-1 row of its
+// own) takes the SAME treatment for every leaf under that root: the
+// bound local is a live alias one level into the caller's object, and a
+// write through it later in the body would move that leaf with no
+// statement mentioning the parameter's own name — the same reference a
+// hand-over argument is. A STORE (`q = p`) and a write through anything
+// undeclared still refuse (recordParameterUnreadable).
 func appendRecordParameterEntries(
 	body *ast.Node,
 	parameter *ast.Node,
@@ -35,7 +41,7 @@ func appendRecordParameterEntries(
 	members []recordParamMember,
 	layout *summaryEntryLayout,
 ) (declined string, ok bool) {
-	use, writtenMembers := recordParameterUseOf(
+	use, writtenMembers, destructuredNestedRoots := recordParameterUseWithNestedRootsOf(
 		body, parameter.AsParameterDeclaration().Name().Text(), members)
 	if use == recordParameterUnreadable {
 		return "a whole-record parameter use", false
@@ -54,7 +60,16 @@ func appendRecordParameterEntries(
 	}
 	handed := use == recordParameterHandedOver
 	for at, entry := range entries {
-		written := handed
+		// a leaf under a DESTRUCTURED NESTED ROOT takes the hand-over
+		// treatment even though the whole use classified as members-only:
+		// the destructured local aliases this leaf's holder one level up,
+		// and no other row here can tell a leaf under such a root apart
+		// from an ordinary declared one
+		underDestructuredRoot := false
+		if len(members[at].Path) > 0 {
+			_, underDestructuredRoot = destructuredNestedRoots[members[at].Path[0]]
+		}
+		written := handed || underDestructuredRoot
 		if !written {
 			_, written = writtenMembers[strings.Join(members[at].Path, ".")]
 		}
@@ -63,9 +78,10 @@ func appendRecordParameterEntries(
 			Index:   len(layout.Names),
 			Written: written,
 		})
-		if handed {
-			// no code-running statement believes a handed-over leaf
-			// across a call — the wiring puts these in the havoc vector
+		if handed || underDestructuredRoot {
+			// no code-running statement believes a handed-over leaf, or a
+			// leaf under a destructured nested root, across the point the
+			// alias was bound — the wiring puts these in the havoc vector
 			// (wireSummaryCaptureHavoc)
 			layout.HandOverHavocNames = append(layout.HandOverHavocNames, entry.Name)
 		}

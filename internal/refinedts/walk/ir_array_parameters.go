@@ -136,8 +136,12 @@ func typeNodeSort(typeNode *ast.Node) BindingKind {
 // A scalar element (number, string), a union, an unresolvable reference,
 // or any other non-record shape answers (nil, false): the array keeps
 // its plain scalar elem slot, exactly as before this reader existed.
+// `visiting` carries the declaration nodes already on the member-reading
+// path; every route below passes it through, so a recursive type reached
+// through the element terminates at declaredTypeMembersOf's revisit check.
 func arrayParameterElementMembers(
 	ctx *FlowContext, c *checker.Checker, elementTypeNode *ast.Node, elemHolder string,
+	visiting []*ast.Node,
 ) ([]recordParamMember, bool) {
 	if elementTypeNode == nil {
 		return nil, false
@@ -147,9 +151,15 @@ func arrayParameterElementMembers(
 		node = node.AsParenthesizedTypeNode().Type
 	}
 	if ast.IsTypeLiteralNode(node) {
-		return scalarMemberListWithCheckerIn(c, elemHolder, node.AsTypeLiteralNode().Members.Nodes, nil, true, nil)
+		return scalarMemberListWithCheckerIn(c, elemHolder, node.AsTypeLiteralNode().Members.Nodes, nil, true, visiting)
 	}
-	return namedTypeMembersOf(ctx, elemHolder, node)
+	// an ARRAY-VALUED element (`xs: number[][]`, `depthTree:
+	// SankeyNode[][]`): the element is itself an array, and it expands to
+	// the inner array's own pair one level down
+	if inner := elementTypeNodeOf(node); inner != nil {
+		return arrayElementPairMembers(ctx, c, node, inner, elemHolder, visiting)
+	}
+	return namedTypeMembersOf(ctx, elemHolder, node, visiting)
 }
 
 // elementTypeNodeOf reads an ARRAY type node's own element type node —
@@ -271,7 +281,7 @@ func ArrayParameterOf(ctx *FlowContext, c *checker.Checker, body *ast.Node, para
 		DeclaredElementSort: sort,
 	}
 	if elementType := elementTypeNodeOf(declared.Type); elementType != nil {
-		if members, isRecord := arrayParameterElementMembers(ctx, c, elementType, local.ElemSlotName); isRecord {
+		if members, isRecord := arrayParameterElementMembers(ctx, c, elementType, local.ElemSlotName, nil); isRecord {
 			local.ElementMembers = members
 		}
 	}

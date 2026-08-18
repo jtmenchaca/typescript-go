@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // seqSubsetAsker adapts *kernelbridge.RefinedTSKernel's SeqSubset
@@ -311,7 +312,7 @@ func readDateMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 	if argCount == 0 {
 		_, hasWindow := dateGetterWindows[method]
 		if hasWindow || method == "getTime" || method == "valueOf" {
-			receiverType := ctx.P.Checker.GetTypeAtLocation(receiverExpression)
+			receiverType := typereading.TypeAtLocation(ctx.P.Checker, receiverExpression)
 			if receiverType != nil && receiverType.Symbol() != nil && receiverType.Symbol().Name == "Date" {
 				// getTime/valueOf return [[DateValue]]: NaN, or an
 				// integral time value in the TimeClip range

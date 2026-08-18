@@ -24,13 +24,23 @@ func SummaryCallStatementOf(context *LoweringContext, statement *ast.Node) ([]ke
 	}
 	target, rhs, ok := callAssignmentShapeOf(context, statement)
 	if !ok {
+		// `const { a, b } = f(...)` where `f` has a COMPILED SUMMARY whose
+		// returns carry a per-member RetShape — callAssignmentShapeOf only
+		// ever finds a BARE identifier's own slot, so a binding-pattern
+		// name declines it outright before summaryCallStatement is ever
+		// reached. Tried first: a callee this lowering can read a summary
+		// for gets its members threaded by NAME rather than only havocked.
+		if destructured, destructuredOk := destructuredCallDeclarationStatement(context, statement); destructuredOk {
+			return destructured, true
+		}
 		// `const center = f(...)` where `center` is a FLATTENED record
 		// local (no scalar slot of its own, only leaf paths) — the shape
 		// above only ever finds a BARE name's own slot. Tried here, once
-		// the scalar route has already declined: an imported/free callee
-		// whose arguments prove write-and-call-free still has a sound
-		// answer for a flattened target — havoc every leaf — even though
-		// it has none for a scalar target's own single slot spelling.
+		// the scalar and destructured routes have already declined: an
+		// imported/free callee whose arguments prove write-and-call-free
+		// still has a sound answer for a flattened target — havoc every
+		// leaf — even though it has none for a scalar target's own single
+		// slot spelling.
 		if flattened, flattenedOk := importedHookFlattenedDeclarationStatement(context, statement); flattenedOk {
 			return flattened, true
 		}

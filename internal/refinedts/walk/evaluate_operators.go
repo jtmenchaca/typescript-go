@@ -19,6 +19,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // ReadUnary is readUnary in the TS source: `-x`, `!x`, `~x`, `+x`,
@@ -209,7 +210,7 @@ func ReadBinary(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractV
 			heldBooleanKnown = false
 		}
 		if !heldBooleanKnown {
-			heldBoolean = (ctx.P.Checker.GetTypeAtLocation(bin.Left).Flags() & checker.TypeFlagsBooleanLike) != 0
+			heldBoolean = (typereading.TypeAtLocation(ctx.P.Checker, bin.Left).Flags() & checker.TypeFlagsBooleanLike) != 0
 		}
 		if heldBoolean {
 			v := float64(0)

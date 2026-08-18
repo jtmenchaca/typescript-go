@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // collectionKey is the TS source's collectionKey: a key a collection
@@ -596,7 +597,7 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 	// (sec-set.prototype.add), clear undefined — none of it is an
 	// unmodeled gap
 	{
-		receiverType := ctx.P.Checker.GetTypeAtLocation(receiverExpression)
+		receiverType := typereading.TypeAtLocation(ctx.P.Checker, receiverExpression)
 		var receiverTypeName string
 		if receiverType != nil && receiverType.Symbol() != nil {
 			receiverTypeName = receiverType.Symbol().Name

@@ -1,6 +1,7 @@
-// pins for binding-pattern parameters whose annotation names an
-// unknown-sorted member (a richer-typed leaf like `number[]`) — TASK 1
-// of the parameter-entries fix wave
+// pins for binding-pattern parameters whose annotation names a member
+// that binds no depth-1 row of its own (a richer-typed leaf like
+// `number[]`, which nestedMemberLeavesOf's array arm now expands to
+// nested "len"/"elem" leaves) — TASK 1 of the parameter-entries fix wave
 package walk
 
 import (
@@ -9,15 +10,15 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 )
 
-// TestKernelSummaryDirect_ABindingPatternMixesAScalarAndAnUnknownSortedMember
+// TestKernelSummaryDirect_ABindingPatternMixesAScalarAndATopEntryMember
 // pins `{ a, b }: { a: number, b: number[] }` — `a` is an ordinary
-// scalar member, `b` is unknown-sorted (a richer-typed leaf). Before the
-// fix, an unknown-sorted bound member refused the WHOLE pattern; after,
-// it binds as an unknown-sorted entry (BindingKindUnknown, TypeofTagNone)
-// beside `a`'s scalar entry — reads of `b` answer nothing, which is
-// exactly what is known, the same argument the rest-parameter arm
-// already makes.
-func TestKernelSummaryDirect_ABindingPatternMixesAScalarAndAnUnknownSortedMember(t *testing.T) {
+// scalar member; `b`'s own annotation (`number[]`) now expands through
+// nestedMemberLeavesOf's array arm to nested "len"/"elem" leaves (this
+// wave), so `b` has no depth-1 row and binds the nestedRoots TOP entry
+// (ir_summary_parameter_entries.go) instead of an unknown-sorted leaf
+// entry keyed "b" — reads of `b` answer nothing, which is exactly what
+// is known, beside `a`'s scalar entry, which keeps its precise binding.
+func TestKernelSummaryDirect_ABindingPatternMixesAScalarAndATopEntryMember(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearResolvedRecordMembers()
@@ -44,9 +45,15 @@ func TestKernelSummaryDirect_ABindingPatternMixesAScalarAndAnUnknownSortedMember
 		t.Errorf("entry a = %+v (ok %v), want key a, sort number", a, aOk)
 	}
 	b, bOk := byName["b"]
-	if !bOk || b.Key != "b" || b.Sort != BindingKindUnknown || b.TypeofTag != TypeofTagNone {
-		t.Errorf("entry b = %+v (ok %v), want key b, sort unknown, typeof none", b, bOk)
+	if !bOk || b.Key != "" || b.Sort != BindingKindUnknown || b.TypeofTag != TypeofTagNone || !b.TopEntry {
+		t.Errorf("entry b = %+v (ok %v), want no Key, sort unknown, typeof none, TopEntry true — b's member expanded to nested leaves with no depth-1 row", b, bOk)
 	}
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
-	t.Logf("outcome = %q, construct = %q", outcome, construct)
+	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	if !recorded {
+		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
+	}
+	t.Logf("mixed scalar/TOP-entry pattern: outcome=%q construct=%q", outcome, construct)
+	if construct == "a binding-pattern parameter" {
+		t.Errorf("construct = %q — the pattern must bind its entries (a precisely, b as a TOP entry) rather than refuse", construct)
+	}
 }

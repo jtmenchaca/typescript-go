@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // admittedSortsOf is the TS source's admittedSortsOf: the sorts one
@@ -107,7 +108,7 @@ func CheckAdmittedSort(
 		admitted, ok = admittedSortsOf(ctx, contextual)
 	}
 	if !ok {
-		admitted, ok = admittedSortsOf(ctx, ctx.P.Checker.GetTypeAtLocation(node))
+		admitted, ok = admittedSortsOf(ctx, typereading.TypeAtLocation(ctx.P.Checker, node))
 	}
 	// PrimitiveKind (abstract_domain) and Sort (primitives) are
 	// distinct named string types with the same literal values

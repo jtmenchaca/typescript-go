@@ -5,6 +5,9 @@ package walk
 
 import (
 	"testing"
+
+	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
 
 // TestCenterYShapedRecordParameter_PremiseCheck pins the AGENT-BRIEF's
@@ -168,4 +171,78 @@ func TestSummaryParameterEntries_RecordArrayWidensPastTwo(t *testing.T) {
 		t.Fatalf("len(entries) = %d, want 3 (xs.len, xs.elem.a, xs.elem.b) — SummaryParameterEntries no longer answers what this test predicts; re-check ir_summary_call_statement.go's array branch against the CURRENT width before assuming the hazard below still applies", len(entries))
 	}
 	t.Logf("SummaryParameterEntries(xs) = %d entries; ir_summary_call_statement.go's array branch (summaryCallStatement, line ~160) still pushes a HARDCODED two effects for this parameter — a sibling fix there must widen to len(entries) or every argument effect after xs misaligns by %d slots", len(entries), len(entries)-2)
+}
+
+// TestSummaryCallStatement_RecordArrayParameterFollowedByAnotherArgAligns
+// is the CALL-SITE pin the test above only documents: an actual caller
+// calling a record-array-parameter callee with a SECOND scalar parameter
+// after it, lowered through the real summaryCallStatement route (not
+// SummaryParameterEntries read in isolation). If the array branch's
+// pushed-effect count ever drifts from the entry width the layout
+// allocated, the second parameter's own argument effect lands at the
+// wrong slot — this pin catches that by asserting the produced
+// IrStatementCall's Args length against the callee's own SlotCount
+// bookkeeping (ParamCount), not a hand-counted literal.
+func TestSummaryCallStatement_RecordArrayParameterFollowedByAnotherArgAligns(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	SetEngineKernel(kernel)
+	ClearResolvedArrayParameters()
+	ClearResolvedRecordMembers()
+	ClearSummaryOutcomes()
+	p := entryEnvTestProgram(t, `
+		function g(xs: { a: number, b: number }[], i: number): number {
+			return xs[i].a;
+		}
+		function f(ys: { a: number, b: number }[], j: number): number {
+			return g(ys, j);
+		}
+	`)
+	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
+	callee := entryEnvFunctionNamed(t, p, "g")
+	symbol := p.Checker.GetSymbolAtLocation(callee.AsFunctionDeclaration().Name())
+	if symbol == nil {
+		t.Fatalf("no symbol for g")
+	}
+	ctx.Contracts[symbol] = &FunctionContract{Declaration: callee}
+	declaration := entryEnvFunctionNamed(t, p, "f")
+	lowered, ok := RelowerSummaryBody(ctx, declaration)
+	if !ok {
+		t.Fatalf("f's body declined whole — expected at least a lowering to inspect the call statement's Args width")
+	}
+	calleeShape, shapeOk := LowerSummaryBody(ctx, callee)
+	if !shapeOk {
+		t.Fatalf("g's own summary failed to lower — nothing to align against")
+	}
+	var call *kernelbridge.IrStatement
+	for i := range lowered.Stmts {
+		if lowered.Stmts[i].Kind == kernelbridge.IrStatementCall {
+			call = &lowered.Stmts[i]
+			break
+		}
+	}
+	if call == nil {
+		t.Fatalf("f's lowering carries no IrStatementCall — g's call did not take the summary route at all (stmts=%+v)", lowered.Stmts)
+	}
+	// the pushed args vector is padded to calleeShape.SlotCount past the
+	// parameter fill (the done-flag / local-slot padding loop at the tail
+	// of summaryCallStatement) — the LOAD-BEARING check is that the
+	// SECOND parameter's own effect (j's scalar argument) lands at
+	// entries-count-for-xs, not at a hardcoded 2, i.e. Args[3] (xs.len,
+	// xs.elem.a, xs.elem.b, then i) must be j's own effect, not junk from
+	// a misaligned push.
+	entries, entriesOk := SummaryParameterEntries(callee.Parameters()[0])
+	if !entriesOk {
+		t.Fatalf("SummaryParameterEntries(xs) declined")
+	}
+	if len(call.Args) < calleeShape.SlotCount {
+		t.Fatalf("call.Args = %d entries, want at least calleeShape.SlotCount = %d — the push under-filled the vector", len(call.Args), calleeShape.SlotCount)
+	}
+	secondParamSlot := len(entries)
+	if secondParamSlot >= len(call.Args) {
+		t.Fatalf("second parameter's slot index %d falls outside call.Args (len %d)", secondParamSlot, len(call.Args))
+	}
+	secondEffect := call.Args[secondParamSlot]
+	if secondEffect.Kind != kernelbridge.LoopEffectVarState && secondEffect.Kind != kernelbridge.LoopEffectVar {
+		t.Errorf("call.Args[%d] (i's own slot, right after xs's %d entries) = %+v, want a var/varState read of j — the array branch's push width has drifted from SummaryParameterEntries's %d, misaligning every parameter after xs", secondParamSlot, len(entries), secondEffect, len(entries))
+	}
 }

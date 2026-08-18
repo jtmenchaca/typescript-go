@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 var webClasses = map[string]bool{
@@ -29,7 +30,7 @@ var webClasses = map[string]bool{
 // web-platform class name, or "" (with ok=false) when its static type
 // is not one of the five modeled classes.
 func WebClassOf(p *program.CheckerProgram, receiver *ast.Node) (string, bool) {
-	t := p.Checker.GetTypeAtLocation(receiver)
+	t := typereading.TypeAtLocation(p.Checker, receiver)
 	if t == nil {
 		return "", false
 	}
@@ -289,7 +290,7 @@ func WebNew(p *program.CheckerProgram, e *ast.Node, statusOf func(init *ast.Node
 	if !hasClassName || !webClasses[className] {
 		return nil
 	}
-	t := p.Checker.GetTypeAtLocation(e)
+	t := typereading.TypeAtLocation(p.Checker, e)
 	if t == nil || t.Symbol() == nil || t.Symbol().Name != className {
 		return nil
 	}

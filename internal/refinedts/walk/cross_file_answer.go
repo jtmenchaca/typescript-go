@@ -23,7 +23,7 @@ func AnswerCrossFile(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKe
 	if declaration != nil && ast.GetSourceFileOfNode(declaration) == p.Entry {
 		return Answer{}, false
 	}
-	worn, ok := typereading.ReadHostType(p.Checker, p.Checker.GetTypeAtLocation(token), token, 0)
+	worn, ok := typereading.ReadHostType(p.Checker, typereading.TypeAtLocation(p.Checker, token), token, 0)
 	if ok && worn.Kind != abstractdomain.KindUnknown {
 		plain := worn
 		if worn.Kind == abstractdomain.KindSet {

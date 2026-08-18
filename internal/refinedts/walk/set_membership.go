@@ -15,6 +15,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 func formatValues(values []float64) string {
@@ -173,7 +174,7 @@ func checkSetMembershipOfArm(
 	// a string-sorted position reads its word AS the string — the
 	// value as the quoted text, a literal-chain target as its quoted
 	// text (the shapes are one word; only the sort tells them apart)
-	stringy := (ctx.P.Checker.GetTypeAtLocation(node).Flags()&checker.TypeFlagsStringLike) != 0 ||
+	stringy := (typereading.TypeAtLocation(ctx.P.Checker, node).Flags()&checker.TypeFlagsStringLike) != 0 ||
 		(known.Kind == abstractdomain.KindValues && known.KindTag == abstractdomain.PrimitiveString)
 	spelledSet := func(set refinementsets.RefinedSet) string {
 		if stringy {

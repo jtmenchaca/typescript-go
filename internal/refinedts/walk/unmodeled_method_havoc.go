@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // declaredInDefaultLib is declaredInDefaultLib in the TS source:
@@ -208,7 +209,7 @@ func readUnmodeledMethod(site MethodCallSite) abstractdomain.AbstractValue {
 	// null/undefined arm riding as the maybe wrapper; any other
 	// type keeps no claim
 	if declaredInDefaultLib(ctx, call.Expression) {
-		if ground := scalarGroundOfType(ctx.P.Checker.GetTypeAtLocation(e)); ground != nil {
+		if ground := scalarGroundOfType(typereading.TypeAtLocation(ctx.P.Checker, e)); ground != nil {
 			return *ground
 		}
 	}
@@ -225,7 +226,7 @@ func isCallableArgument(ctx *FlowContext, argument *ast.Node) (result bool) {
 			result = true
 		}
 	}()
-	t := ctx.P.Checker.GetTypeAtLocation(argument)
+	t := typereading.TypeAtLocation(ctx.P.Checker, argument)
 	if (t.Flags() & checker.TypeFlagsAny) != 0 {
 		return true
 	}

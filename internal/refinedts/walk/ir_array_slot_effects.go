@@ -41,32 +41,85 @@ func ArrayLengthSlotOf(context *LoweringContext, node *ast.Node) (int, bool) {
 		return 0, false
 	}
 	lenSlot, _, ok := arraySlotsOf(context, access.Expression.Text())
-	if !ok {
-		return 0, false
+	if ok {
+		return lenSlot, true
 	}
-	return lenSlot, true
+	// a MEMBER-EXPANDED array (a record element's leaves, or the inner
+	// array pair) has no scalar "xs.elem" slot, so the pair resolution
+	// above misses — the parameter's own layout still holds "xs.len"
+	if local, expanded := memberExpandedArrayOf(context, access.Expression); expanded {
+		return slotIndexOfName(context, local.LenSlotName)
+	}
+	return 0, false
 }
 
 // ArrayElementSlotOf resolves an index access `a[i]` to the element
 // slot its read answers — the sort gate a caller consults before
-// admitting the read into arithmetic or a sequence.
+// admitting the read into arithmetic or a sequence. The nested shapes
+// — `xs[i][j]` over a nested-pair array, and `row[j]` where `row` is
+// an element alias — resolve to the element-of-element slot the same
+// way (nestedElemSlotOf).
 func ArrayElementSlotOf(context *LoweringContext, node *ast.Node) (int, bool) {
 	head := Unwrapped(node)
 	if !ast.IsElementAccessExpression(head) {
 		return 0, false
 	}
 	receiver := head.AsElementAccessExpression().Expression
-	if !ast.IsIdentifier(receiver) {
+	if ast.IsIdentifier(receiver) {
+		if _, isIndex := indexAccessOf(head, receiver.Text()); isIndex {
+			if _, elemSlot, ok := arraySlotsOf(context, receiver.Text()); ok {
+				return elemSlot, true
+			}
+		}
+	}
+	return nestedElemSlotOf(context, head)
+}
+
+// nestedElemSlotOf resolves an index access whose receiver is not a
+// plainly flattened name to the ELEMENT-OF-ELEMENT slot it reads:
+// `xs[i][j]` (the receiver itself indexes a nested-pair array), or
+// `row[j]` where `row` is an element alias over one. Both answer the
+// "….elem.elem" slot — the join of every element of every inner
+// array — and a read through it is always or-absent (no bound relates
+// an index to the inner pair's joined length).
+func nestedElemSlotOf(context *LoweringContext, head *ast.Node) (int, bool) {
+	if !ast.IsElementAccessExpression(head) {
 		return 0, false
 	}
-	if _, isIndex := indexAccessOf(head, receiver.Text()); !isIndex {
+	access := head.AsElementAccessExpression()
+	if access.QuestionDotToken != nil {
 		return 0, false
 	}
-	_, elemSlot, ok := arraySlotsOf(context, receiver.Text())
-	if !ok {
-		return 0, false
+	receiver := Unwrapped(access.Expression)
+	// `row[j]` — row an element alias over a nested-pair array
+	if ast.IsIdentifier(receiver) {
+		if _, _, isPlain := arraySlotsOf(context, receiver.Text()); isPlain {
+			// the plain flattened read owns this shape
+			return 0, false
+		}
+		target, isAlias := elementAliasTargetOf(context, receiver)
+		if !isAlias || !hasNestedElementPair(target) {
+			return 0, false
+		}
+		return slotIndexOfName(context, target.ElemSlotName+arrayElemSuffix)
 	}
-	return elemSlot, true
+	// `xs[i][j]` — the receiver indexes a nested-pair array directly;
+	// gated on the holder's own layout so a record element merely
+	// declaring a member spelled "elem" is never served for an index read
+	if ast.IsElementAccessExpression(receiver) {
+		inner := receiver.AsElementAccessExpression()
+		if inner.QuestionDotToken != nil {
+			return 0, false
+		}
+		holder := Unwrapped(inner.Expression)
+		if !ast.IsIdentifier(holder) {
+			return 0, false
+		}
+		if local, expanded := memberExpandedArrayOf(context, holder); expanded && hasNestedElementPair(local) {
+			return slotIndexOfName(context, local.ElemSlotName+arrayElemSuffix)
+		}
+	}
+	return 0, false
 }
 
 // varEffect is a slot read as an effect — the one-liner every array

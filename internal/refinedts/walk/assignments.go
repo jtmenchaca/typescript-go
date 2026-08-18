@@ -20,6 +20,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // WriteBinding binds a written value: a declared binding judges every
@@ -217,7 +218,7 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 			}
 			return
 		}
-		shape := ctx.P.Checker.GetTypeAtLocation(pae.Expression)
+		shape := typereading.TypeAtLocation(ctx.P.Checker, pae.Expression)
 		keys := []abstractdomain.ObjectKey{}
 		for _, member := range ctx.P.Checker.GetPropertiesOfType(shape) {
 			keys = append(keys, abstractdomain.ObjectKey{Name: member.Name, Value: silence.Residue()})
@@ -464,7 +465,7 @@ func embeddedReferences(ctx *FlowContext, e *ast.Node, into *[]string) {
 				// a spread copies SCALAR fields by value — only a nested
 				// reference makes the copy share structure with its source
 				sa := property.AsSpreadAssignment()
-				t := ctx.P.Checker.GetTypeAtLocation(sa.Expression)
+				t := typereading.TypeAtLocation(ctx.P.Checker, sa.Expression)
 				// The TS source reads type.getProperties() (safe on any
 				// type shape, [] when there are none). t.Symbol() is nil
 				// for a union/primitive/any spread source, so walking

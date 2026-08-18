@@ -22,6 +22,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // analysisDepth: how deep THIS check's expression walk has gone. A
@@ -473,7 +474,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	if ast.IsTypeOfExpression(e) {
 		typeOf := e.AsTypeOfExpression()
 		operand := evaluateExpression(ctx, env, typeOf.Expression)
-		word := primitives.TypeofWordOf(ctx.P.Checker, ctx.P.Checker.GetTypeAtLocation(typeOf.Expression))
+		word := primitives.TypeofWordOf(ctx.P.Checker, typereading.TypeAtLocation(ctx.P.Checker, typeOf.Expression))
 		// a WALKED value admitting several words (an enum reverse read:
 		// value, name, or undefined; a maybe-unwritten `let x: string`)
 		// contradicts any single static word — EXCEPT that pure absence

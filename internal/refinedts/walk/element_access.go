@@ -16,6 +16,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // OpenMapAt is whether the type at a node is an open map — a
@@ -55,7 +56,7 @@ func OpenMapAt(c *checker.Checker, at *ast.Node) bool {
 	if at == nil {
 		return false
 	}
-	atType := c.GetTypeAtLocation(at)
+	atType := typereading.TypeAtLocation(c, at)
 	if atType == nil {
 		return false
 	}

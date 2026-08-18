@@ -59,7 +59,7 @@ func builtinIteratorClassNamed(name string) bool {
 // not such an iterator. A user's own class named MapIterator answers
 // nothing: the symbol has to be the default library's.
 func builtinIteratorElementOf(ctx *FlowContext, receiver *ast.Node) (*checker.Type, bool) {
-	t := ctx.P.Checker.GetTypeAtLocation(receiver)
+	t := typereading.TypeAtLocation(ctx.P.Checker, receiver)
 	if t == nil {
 		return nil, false
 	}

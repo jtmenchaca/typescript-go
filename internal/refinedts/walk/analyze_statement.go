@@ -30,6 +30,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // AnalyzeStatements is analyzeStatements in the TS source: walk
@@ -127,7 +128,7 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 func AnalyzeStatement(ctx *FlowContext, env Env, statement *ast.Node, result *annotations.DeclaredRefinement) bool {
 	entry, hasEntry := EngineEntryOf(env, statement, func(node *ast.Node) BindingKind {
 		// the host's own type at the occurrence — the sort layer
-		t := ctx.P.Checker.GetTypeAtLocation(node)
+		t := typereading.TypeAtLocation(ctx.P.Checker, node)
 		flags := t.Flags()
 		numOrBool := checker.TypeFlagsNumber | checker.TypeFlagsNumberLiteral |
 			checker.TypeFlagsBoolean | checker.TypeFlagsBooleanLiteral

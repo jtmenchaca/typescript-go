@@ -17,6 +17,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // ReadIndexedWrite is readIndexedWrite in the TS source: a write
@@ -108,7 +109,7 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 		// never have held.
 		var indexType *checker.Type
 		if !hasLiteral {
-			indexType = ctx.P.Checker.GetTypeAtLocation(argument)
+			indexType = typereading.TypeAtLocation(ctx.P.Checker, argument)
 			if !indexType.IsUnion() && indexType.IsStringLiteral() {
 				if lit, ok := indexType.AsLiteralType().Value().(string); ok {
 					literal, hasLiteral = lit, true

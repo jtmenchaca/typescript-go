@@ -590,18 +590,47 @@ func TestReturnedLiteralShape_AnArrowValuedMemberNoLongerRefusesTheWholeShape(t 
 	}
 }
 
-func TestReturnedLiteralShape_AMemberThatActuallyCallsAtEvaluationTimeStillRefuses(t *testing.T) {
-	// unlike the arrow-valued member above, `x: f()` CALLS at evaluation
-	// time — inertValue must still catch this exactly as writeAndCallFree
-	// did, or the widening would be unsound rather than merely wider.
+func TestReturnedLiteralShape_AMemberThatIsABareCallAtItsOwnTopLevelStillAllocatesTheShape(t *testing.T) {
+	// `x: g()` CALLS at evaluation time, unlike the arrow-valued member
+	// above (constructing a closure runs nothing) — but a bare call at a
+	// property's own TOP LEVEL is not a shape refusal either:
+	// objectLiteralMembersAdmitShape (ir_summary_returned_shape.go) admits
+	// it, on the theory that objectReturnMemberStatements can still WRITE
+	// that one member — hoisting the call where its callee resolves to a
+	// COMPLETE summary blob, or declining that ONE member honestly
+	// (NoteFirstHavoc) otherwise. This is the shape-allocation gate alone;
+	// lowering_to_kernel_ir_return_members_test.go's
+	// TestReturnObjectLiteral_ResolvableCallMemberDeterminesAndStaysComplete
+	// / _UnresolvableCallMemberStaysPorous prove the writer keeps that
+	// promise at the body level, through the kernel.
 	statements := loweringParse(t, `function f() {
 		return { x: g() };
 	}
 	function g(): number { return 1; }`)
 	body := statements[0].AsFunctionDeclaration().Body
 	_, shape := returnedLiteralShape(body)
+	if shape != RetShapeObject {
+		t.Errorf("shape = %v, want RetShapeObject — a bare call at a property's own top-level value admits the shape now", shape)
+	}
+}
+
+func TestReturnedLiteralShape_ACallBuriedUnderAnOperatorStillRefuses(t *testing.T) {
+	// `x: 1 + g()` is NOT a property's own top-level value — the call
+	// sits under a `+` operator. objectLiteralMembersAdmitShape's own doc
+	// states this boundary plainly: neither writer route (the hoist, the
+	// coercion reader) reaches into an operator to hoist a sub-term, so
+	// admitting the shape here would only lead objectReturnMemberStatements
+	// to the same decline further down, after spending a slot for nothing —
+	// the shape stays refused, exactly as inertValue refused it before the
+	// bare-call widening existed.
+	statements := loweringParse(t, `function f() {
+		return { x: 1 + g() };
+	}
+	function g(): number { return 1; }`)
+	body := statements[0].AsFunctionDeclaration().Body
+	_, shape := returnedLiteralShape(body)
 	if shape != RetShapeNone {
-		t.Errorf("shape = %v, want RetShapeNone — a member that calls at evaluation time still refuses the whole shape", shape)
+		t.Errorf("shape = %v, want RetShapeNone — a call buried under an operator still refuses the whole shape", shape)
 	}
 }
 

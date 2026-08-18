@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 var calleeWordsWhitespace = regexp.MustCompile(`\s+`)
@@ -41,8 +42,8 @@ func NarrowedSinceDeclaration(ctx *FlowContext, e *ast.Node) bool {
 		return false
 	}
 	declaration := symbol.ValueDeclaration
-	occurrence := ctx.P.Checker.GetTypeAtLocation(e)
-	declared := ctx.P.Checker.GetTypeAtLocation(declaration)
+	occurrence := typereading.TypeAtLocation(ctx.P.Checker, e)
+	declared := typereading.TypeAtLocation(ctx.P.Checker, declaration)
 	// the same type OBJECT prints the same — the common un-narrowed
 	// case skips both prints
 	if occurrence == declared {

@@ -21,6 +21,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // StaticTypeWithinTarget answers whether the node's own static type
@@ -57,7 +58,7 @@ func StaticTypeWithinTarget(ctx *FlowContext, node *ast.Node, target annotations
 	if head == nil {
 		return false
 	}
-	ground := typeGroundOf(ctx, ctx.P.Checker.GetTypeAtLocation(head), head)
+	ground := typeGroundOf(ctx, typereading.TypeAtLocation(ctx.P.Checker, head), head)
 	if ground == nil {
 		return false
 	}

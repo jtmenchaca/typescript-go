@@ -254,6 +254,17 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 				return held, true
 			}
 		}
+		// the GLOBAL `NaN` — an identifier, not a literal. Tried only after
+		// the place readers decline, and only where HoldsPlace positively
+		// says no slot spells the name: the global property is non-writable
+		// (NanConst's clause citation), so an unshadowed read is exactly the
+		// NaN state constant, while a local named NaN keeps its slot read. A
+		// reader with no HoldsPlace cannot rule the shadow out and declines
+		// to Opaque, exactly as before this arm existed.
+		if spelled == "NaN" && ast.IsIdentifier(e) &&
+			reader.HoldsPlace != nil && !reader.HoldsPlace("NaN") {
+			return kernelbridge.NanConst(), true
+		}
 		return reader.Opaque(e)
 	}
 	// a DEEP path (`p.a.b`) has no one-step spelling; a flattened nested
@@ -283,8 +294,25 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 		}
 		// `!x` always produces exactly true or false — the two-value set,
 		// under the same moves-nothing gate the comparisons wear
-		if unary.Operator == ast.KindExclamationToken && writeAndCallFree(unary.Operand) {
-			return booleanPairEffect(), true
+		if unary.Operator == ast.KindExclamationToken {
+			if writeAndCallFree(unary.Operand) {
+				return booleanPairEffect(), true
+			}
+			// `!Number.isFinite(x)` / `!Array.isArray(x)`: the operand is a
+			// call, so the gate above refuses — but a curated PURE-BUILTIN
+			// read moves nothing either (pureBuiltinEffect's own gates:
+			// exactly `<root>.<name>` on the global root, every argument
+			// write-and-call-free), and logical NOT of ANY value is exactly
+			// true or false (sec-logical-not-operator, tmp/ecma262/
+			// spec.html). The unnegated call already reads through the
+			// pureBuiltinEffect arm below; this admits the same call under
+			// the `!`, carrying the same two-value set either way.
+			operand := Unwrapped(unary.Operand)
+			if ast.IsCallExpression(operand) {
+				if _, pure := pureBuiltinEffect(operand.AsCallExpression()); pure {
+					return booleanPairEffect(), true
+				}
+			}
 		}
 		return reader.Opaque(e)
 	}
@@ -420,6 +448,80 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 		// is curated read-only spec behavior, never guessed.
 		if effect, pure := pureBuiltinEffect(call); pure {
 			return effect, true
+		}
+		// `Boolean(x)` called AS A FUNCTION is exactly ToBoolean(x)
+		// (sec-boolean-constructor-boolean-value, tmp/ecma262/spec.html:
+		// "Let bool be ToBoolean(value)." with NewTarget undefined).
+		// ToBoolean's own signature carries no throw completion at all
+		// (sec-toboolean: "): a Boolean" — every value, of every type,
+		// answers a Boolean) — the same totality `!x` already rides
+		// (booleanBinaryTokens' arm above). So the gate is the SAME one
+		// `!x` wears: the operand must move nothing (writeAndCallFree),
+		// which is what makes evaluating the whole call safe to skip and
+		// answer from its contract alone.
+		if ast.IsIdentifier(call.Expression) && call.Expression.Text() == "Boolean" &&
+			call.Arguments != nil && len(call.Arguments.Nodes) == 1 &&
+			!ast.IsSpreadElement(call.Arguments.Nodes[0]) &&
+			writeAndCallFree(call.Arguments.Nodes[0]) {
+			return booleanPairEffect(), true
+		}
+		// `Number(x)` called AS A FUNCTION is ToNumeric(x) narrowed to its
+		// Number leg (sec-number-constructor-number-value: "Let primitive
+		// be ? ToNumeric(value)." with NewTarget undefined; ToNumeric
+		// (sec-tonumeric) is ToPrimitive-then-ToNumber for anything that
+		// is not already a BigInt, and this reader never holds a
+		// BigInt-sorted slot to begin with). ToNumber
+		// (sec-tonumber) throws only for a Symbol or a BigInt and only
+		// runs arbitrary code (ToPrimitive) for an Object — the same two
+		// refused shapes ToString refuses for the same reason, and the
+		// same argument applies: an operand this grammar can already
+		// lower through a RECURSIVE call here is number- or
+		// boolean-sorted (this walk has no slot machinery for a Symbol or
+		// an Object to begin with), so it is never one of the two refused
+		// shapes.
+		//
+		// The CLAIM stays sort-only for the same reason String(x)'s does
+		// (effect_sequence.go's stringConstructorCallOf arm): no wire op
+		// computes ToNumber's exact numeric image of an arbitrary
+		// runtime value, so the row widens to "some number" rather than
+		// naming one — EXCEPT where the operand is already number-sorted,
+		// where ToNumber is the identity (step 1, "If arg is a Number,
+		// return arg") and the operand's own effect rides through
+		// unchanged.
+		//
+		// A STRING operand is left OUT: StringToNumber
+		// (sec-tonumber-applied-to-the-string-type) is total (never NaN
+		// from a throw — an unparseable string reads NaN, not an
+		// exception) but this function has no reach into the sequence
+		// world (SequenceEffectOf lives in a sibling file over
+		// *LoweringContext, which LowerEffectExpression's signature does
+		// not carry) — declined here rather than forced, per the
+		// same-discipline rule: an admission this function cannot prove
+		// stays a decline, exactly as it was before this arm existed.
+		if ast.IsIdentifier(call.Expression) && call.Expression.Text() == "Number" &&
+			call.Arguments != nil && len(call.Arguments.Nodes) == 1 &&
+			!ast.IsSpreadElement(call.Arguments.Nodes[0]) {
+			operand := call.Arguments.Nodes[0]
+			if operandEffect, ok := LowerEffectExpression(operand, reader); ok {
+				// already number-sorted (booleans ride this sort too): the
+				// identity row
+				return operandEffect, true
+			}
+			if IsAbsentKeyword(operand) {
+				// `Number(undefined)` is exactly NaN (step: "If arg is
+				// undefined, return NaN"); `Number(null)` is exactly +0
+				// (step: "If arg is either null or false, return +0")
+				if Unwrapped(operand).Kind == ast.KindNullKeyword {
+					return kernelbridge.LoopEffect{
+						Kind: kernelbridge.LoopEffectConst,
+						Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0})),
+					}, true
+				}
+				return kernelbridge.LoopEffect{
+					Kind: kernelbridge.LoopEffectConst,
+					Set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{math.NaN()})),
+				}, true
+			}
 		}
 		if ast.IsPropertyAccessExpression(call.Expression) {
 			access := call.Expression.AsPropertyAccessExpression()

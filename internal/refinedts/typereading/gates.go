@@ -38,7 +38,7 @@ func UncheckedDeclaration(c *checker.Checker, declaration *ast.Node, depth int) 
 	if variableDeclaration.Initializer == nil {
 		return false
 	}
-	if (c.GetTypeAtLocation(variableDeclaration.Initializer).Flags() & checker.TypeFlagsAny) != 0 {
+	if (TypeAtLocation(c, variableDeclaration.Initializer).Flags() & checker.TypeFlagsAny) != 0 {
 		return true
 	}
 	if depth >= 4 || !ast.IsIdentifier(variableDeclaration.Initializer) {

@@ -16,6 +16,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // numberLiteralValue is the number a checker literal type holds. tsgo
@@ -120,7 +121,7 @@ func evaluateTemplate(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abs
 		// a span typed `string | undefined` is still a STRING span for
 		// reading purposes — the nullish arms spell their own words, so
 		// look through them when judging string-ness
-		spanType := ctx.P.Checker.GetTypeAtLocation(span.Expression)
+		spanType := typereading.TypeAtLocation(ctx.P.Checker, span.Expression)
 		var constituents []*checker.Type
 		if spanType.IsUnion() {
 			constituents = spanType.Types()

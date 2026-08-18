@@ -7,6 +7,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // switchLabelGuard is one `case k:` as its equality branch, built
@@ -161,6 +162,27 @@ func hoistedLabelGuard(
 // (nil, false, false) for anything else — a computed label compares two
 // values the equality tests do not speak.
 //
+// TRIED AND ABANDONED: a fourth route reading the checker's TYPE at a
+// const-bound identifier's INITIALIZER, to ground a computed constant
+// like `const FLAG_A = 1 << 0` past ConstChainLiteral's syntactic reach.
+// Checked against the live checker (TypeAtLocation on the initializer
+// node, and again with an `as const` assertion added): TypeScript never
+// narrows a bitwise-shift result to a number-literal type either way —
+// `1 << 0`'s type is plain `number` at the expression itself, so no
+// checker-side reading exists to fall back to for this shape. Confirmed
+// separately: the recharts corpus's own switch statements (state/
+// selectors/axisSelectors.ts, polarScaleSelectors.ts, shape/Symbols.tsx,
+// animation/easing.ts, component/Text.tsx, cartesian/CartesianAxis.tsx,
+// polar/PolarRadiusAxis.tsx, util/ActiveShapeUtils.tsx, util/scale/
+// RechartsScale.ts) spell every case label as an ordinary quoted string
+// or number literal — a full-corpus search for `case <identifier>:` and
+// `` case `…` `` (a template-literal label) found none — so the census's
+// "switch on a case label that is not a literal" rows do not correspond
+// to a reproducible non-literal-label fixture in this corpus at all,
+// matching lowering_to_kernel_ir_switch_pins_test.go's own earlier
+// finding that every specimen it tried already lowers via branch-both
+// (porous, not declined) rather than hitting this decline.
+//
 // The middle result is whether the token stands for a BOOLEAN literal —
 // `true`/`false` spelled as the number words 1/0 (this package's own
 // ToNumber encoding) — which the caller uses to gate the discriminant's
@@ -218,7 +240,7 @@ func switchLabelLiteral(context *LoweringContext, label *ast.Node) (*ast.Node, b
 	if !isEnum {
 		return nil, false, false
 	}
-	memberType := c.GetTypeAtLocation(head)
+	memberType := typereading.TypeAtLocation(c, head)
 	if memberType.IsNumberLiteral() {
 		// a member the checker never pinned (a computed one) has no value
 		// at all, and no token can be made for it

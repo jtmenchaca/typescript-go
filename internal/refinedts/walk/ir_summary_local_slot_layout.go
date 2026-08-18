@@ -296,6 +296,137 @@ func destructuredSlotsOf(pattern *ast.Node, records map[*ast.Node]ObjectLocal) [
 	return out
 }
 
+// localSortAndTypeof is a plain scalar local's sort and typeof evidence,
+// tried in order and stopping at the first grounded answer:
+//
+//  1. the let's OWN declared annotation (`let x1: number`) —
+//     annotationSort's reading, the same one a parameter or a bundle
+//     field wears.
+//  2. LocalSortResolved / LocalTypeof — the initializer's syntax, with
+//     a call head's return type consulted through the checker.
+//  3. an UNINITIALIZED, unannotated local's WRITE-DERIVED sort: the
+//     checker's own resolved type at a plain READ occurrence of the
+//     name inside this body. `let x1; x1 = x2 - 1;` carries no
+//     annotation and no initializer, so (1) and (2) both answer
+//     unknown — but the checker's control-flow analysis narrows a
+//     later read of `x1` to `number` from the assignment alone
+//     (confirmed against this exact shape: GetTypeAtLocation on the
+//     bare declaration name answers `any`, the same call on a read
+//     occurrence after the assignment answers the assigned type).
+//     Reading it at a USE site rather than the declaration is what
+//     makes this grounded rather than a guess — a name never read
+//     answers "undefined" there and stays unknown, and a name whose
+//     reads disagree (one branch leaves it a string, another a
+//     number) also stays unknown, since only ONE read is consulted
+//     and a caller wanting soundness across every read still needs
+//     every read to agree with what that one read said. Here every
+//     read occurrence is checked and required to agree, which is the
+//     stronger reading the CartesianAxis body's own several
+//     assignments (`x1 = x2 - 1`, `x1 = x2 + sign * finalTickSize`, …)
+//     needs before its later `x1` read may wear a number sort.
+func localSortAndTypeof(
+	ctx *FlowContext,
+	c *checker.Checker,
+	body *ast.Node,
+	declaration *ast.Node,
+) (BindingKind, TypeofTag) {
+	decl := declaration.AsVariableDeclaration()
+	if sort, typeofTag := annotationSort(decl.Type); sort != BindingKindUnknown {
+		return sort, typeofTag
+	}
+	if sort := LocalSortResolved(c, declaration); sort != BindingKindUnknown {
+		return sort, LocalTypeof(declaration)
+	}
+	if decl.Type != nil || decl.Initializer != nil || c == nil {
+		// an ANNOTATED or INITIALIZED local that still reads unknown has
+		// already had its one honest chance — a write-derived reading is
+		// for the uninitialized, unannotated case alone, where nothing
+		// else was ever going to ground it
+		return BindingKindUnknown, TypeofTagNone
+	}
+	return writtenSortOf(ctx, c, body, declaration)
+}
+
+// writtenSortOf grounds an uninitialized local's sort from the checker's
+// OWN resolved type at every plain read occurrence of its name in the
+// body — never the declaration name itself (which resolves to `any`,
+// having nothing to narrow from) and never an occurrence that is itself
+// the LEFT side of a plain assignment (that position states nothing
+// about the value read back). Every read found must agree on the SAME
+// mask LocalSortResolved already applies (number/boolean-only,
+// string-only) or the local stays unknown — one disagreeing read is
+// answer enough to refuse, matching the package's "never guess a sort"
+// rule.
+func writtenSortOf(
+	ctx *FlowContext,
+	c *checker.Checker,
+	body *ast.Node,
+	declaration *ast.Node,
+) (BindingKind, TypeofTag) {
+	if c == nil || ctx == nil {
+		return BindingKindUnknown, TypeofTagNone
+	}
+	name := declaration.AsVariableDeclaration().Name().Text()
+	declarationName := declaration.AsVariableDeclaration().Name()
+	sawSort := BindingKind("")
+	sawTypeof := TypeofTag("")
+	agreed := true
+	var visit func(node *ast.Node) bool
+	visit = func(node *ast.Node) bool {
+		if !agreed {
+			return true
+		}
+		if node == declarationName {
+			return false
+		}
+		if !ast.IsIdentifier(node) || node.Text() != name {
+			node.ForEachChild(visit)
+			return false
+		}
+		if assignmentLeftHandSide(node) {
+			// the write itself states nothing about the read-back value —
+			// only a READ occurrence's narrowed type is evidence
+			return false
+		}
+		sort, typeofTag := ResolvedExpressionSort(c, node)
+		if sort == BindingKindUnknown {
+			agreed = false
+			return true
+		}
+		if sawSort == "" {
+			sawSort, sawTypeof = sort, typeofTag
+			return false
+		}
+		if sawSort != sort || sawTypeof != typeofTag {
+			agreed = false
+			return true
+		}
+		return false
+	}
+	visit(body)
+	if !agreed || sawSort == "" {
+		return BindingKindUnknown, TypeofTagNone
+	}
+	return sawSort, sawTypeof
+}
+
+// assignmentLeftHandSide answers whether `node` is the plain identifier
+// LEFT side of a `=` or compound-assignment binary expression — the one
+// occurrence shape writtenSortOf must skip, since that position's own
+// narrowed type is the RIGHT side's, not evidence about a later read.
+func assignmentLeftHandSide(node *ast.Node) bool {
+	parent := node.Parent
+	if parent == nil || !ast.IsBinaryExpression(parent) {
+		return false
+	}
+	bin := parent.AsBinaryExpression()
+	if bin.Left != node {
+		return false
+	}
+	return bin.OperatorToken.Kind >= ast.KindFirstAssignment &&
+		bin.OperatorToken.Kind <= ast.KindLastAssignment
+}
+
 // localSlotsOf lays out a body's locals as slots: a scalar local takes
 // one, a flattened record one PER LEAF ("p.a.b"), and a flattened array
 // TWO ("a.len", "a.elem"). A local the recognizers declined keeps its
@@ -399,10 +530,11 @@ func localSlotsIn(
 			}
 			continue
 		}
+		sort, typeofTag := localSortAndTypeof(ctx, c, body, declared)
 		out = append(out, bodySlot{
 			Name:      name,
-			Sort:      LocalSortResolved(c, declared),
-			TypeofTag: LocalTypeof(declared),
+			Sort:      sort,
+			TypeofTag: typeofTag,
 		})
 	}
 	// the destructured names last: an object pattern's each wearing its

@@ -40,7 +40,7 @@ func typePartsOf(t *checker.Type) []*checker.Type {
 // peeled above, so nil here is the union's own answer, not a decline
 // short of one.
 func AnnotationOfReturnType(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
-	t := ctx.P.Checker.GetTypeAtLocation(e)
+	t := typereading.TypeAtLocation(ctx.P.Checker, e)
 	parts := typePartsOf(t)
 	sawAbsent := false
 	var worn *abstractdomain.AbstractValue
@@ -219,7 +219,7 @@ func MapValueAnnotation(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractV
 // OVER, which is the element, and the element is read through the yield
 // walk and the drain routes instead (generator_element.go).
 func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
-	return typeGroundOf(ctx, ctx.P.Checker.GetTypeAtLocation(e), e)
+	return typeGroundOf(ctx, typereading.TypeAtLocation(ctx.P.Checker, e), e)
 }
 
 // typeGroundOf is ReturnTypeGround's part-walk over an ALREADY-HELD

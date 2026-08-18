@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
@@ -159,7 +160,7 @@ func AlertPlainAbsence(
 	if known.Kind != abstractdomain.KindPossiblyUndefined || !known.ProvedAbsent {
 		return
 	}
-	t := ctx.P.Checker.GetTypeAtLocation(typeNode)
+	t := typereading.TypeAtLocation(ctx.P.Checker, typeNode)
 	if TypeAdmitsAbsence(t) {
 		return
 	}

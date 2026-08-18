@@ -144,14 +144,41 @@ func returnedLiteralShape(body *ast.Node) ([]bodySlot, RetShapeKind) {
 		// The layout decision here only ALLOCATES the member slot as
 		// unknown-sorted — it writes no effect itself. The actual member
 		// value is written later by returnMemberStatements
-		// (lowering_to_kernel_ir_return_members.go, a sibling's file, not
-		// this agent's), which keeps its OWN writeAndCallFree gate for now:
-		// a body this reader now shapes may still fall through that
-		// sibling gate to the opaque floor, which is sound (a wider
-		// layout serving a narrower writer costs nothing — the extra slot
-		// sits unused) but leaves the corpus row unfixed until that
-		// sibling gate widens to inertValue too, mirroring this one.
-		if !inertValue(head) {
+		// (lowering_to_kernel_ir_return_members.go): its OBJECT-shaped gate
+		// now mirrors this one (objectLiteralMembersAdmitShape, the same
+		// function), so a body this reader shapes reaches the per-member
+		// writer rather than falling through to the opaque floor unused.
+		// Its ARRAY-shaped gate is still the narrower inertValue — the
+		// array writer's own per-element join (elementJoinAssignments) has
+		// not been widened to admit a bare-call element the way the object
+		// writer's per-member RhsEffect call has — so an array return with
+		// a bare-call element still keeps the pre-existing refusal here.
+		//
+		// An OBJECT LITERAL gets the WIDER of the two gates:
+		// objectLiteralMembersAdmitShape, not the bare inertValue this
+		// switch's array arm still uses below. A property whose value is a
+		// CALL AT ITS OWN TOP LEVEL — `index: fetchLabel()` — is not inert
+		// (calling runs code), but it is not a refusal either:
+		// objectReturnMemberStatements writes the member through the
+		// ordinary RhsEffect route, which reaches HoistCallEffect
+		// (ir_call_hoist.go) as its last resort — a callee resolving to a
+		// COMPLETE summary blob hoists to a temp ahead of the return (object
+		// properties evaluate left to right and unconditionally, exactly the
+		// premise hoistingIsOrderSafe measures against the whole return
+		// statement), and the member reads the temp. A callee with no
+		// resolvable declaration or no complete blob (a builtin coercion
+		// like `String(i)`, an ambient signature, an imported hook) still
+		// declines that ONE member — RhsEffect returns false, the slot takes
+		// unknown, and NoteFirstHavoc names it, so the body reports porous
+		// rather than fabricating the member. A call BURIED inside a
+		// further expression (`index: 1 + f(i)`) is refused at the SHAPE
+		// gate below, since RhsEffect's own hoist reaches a bare call node
+		// only, never a sub-term of an operator.
+		if ast.IsObjectLiteralExpression(head) {
+			if !objectLiteralMembersAdmitShape(head) {
+				return nil, RetShapeNone
+			}
+		} else if !inertValue(head) {
 			return nil, RetShapeNone
 		}
 		switch {
@@ -187,6 +214,60 @@ func returnedLiteralShape(body *ast.Node) ([]bodySlot, RetShapeKind) {
 		}, RetShapeArray
 	}
 	return nil, RetShapeNone
+}
+
+// objectLiteralMembersAdmitShape is inertValue's own recursive tree walk,
+// EXCEPT at a property's own VALUE position: a value that is a bare
+// CallExpression (or an AwaitExpression wrapping one — the ret-as-inner
+// convention every hoist route already reads a settled value through)
+// admits the shape even though calling one is not inert, because
+// objectReturnMemberStatements can still WRITE that one member — through
+// RhsEffect's own HoistCallEffect fallback (ir_call_hoist.go), which
+// hoists the call to a temp ahead of the return where the callee resolves
+// to a COMPLETE summary blob — without needing the object's OTHER
+// members, or the return statement around it, to say anything about
+// running code. A callee HoistCallEffect cannot serve (no resolvable
+// declaration, no complete blob) still declines that one member honestly
+// — RhsEffect answers false, the slot takes unknown, and NoteFirstHavoc
+// names it — rather than refusing the whole shape.
+//
+// A call BURIED under a further operator (`1 + f(i)`, `f(i).toString()`)
+// is NOT a property's own top-level value and is refused here exactly as
+// inertValue refuses it: RhsEffect's hoist reaches a bare CallExpression
+// node only, never a sub-term of an operator, so admitting the shape for
+// it would only lead objectReturnMemberStatements to the SAME decline
+// further down, after spending a slot for nothing.
+//
+// Every property that is NOT a bare call keeps inertValue's own reading
+// unchanged — a nested object/array literal, an arrow, a plain
+// identifier, a spread all recurse exactly as they did before this
+// function existed. The refusal for a property whose KEY this reader
+// cannot name (a spread, a computed key, an accessor, a method) is not
+// this function's job: objectRetMembersOf's own retMemberNameOf gate
+// (called after this one, over the SAME properties) still runs unchanged.
+func objectLiteralMembersAdmitShape(literal *ast.Node) bool {
+	for _, property := range literal.AsObjectLiteralExpression().Properties.Nodes {
+		value := retMemberValueOf(property)
+		if value == nil {
+			// a property this function does not read a value for (a
+			// spread, an accessor, a method) — leave the call to
+			// objectRetMembersOf's own key gate, which runs after this one
+			continue
+		}
+		head := Unwrapped(value)
+		if head != nil {
+			if operand, isAwait := AwaitedOperandOf(head); isAwait {
+				head = Unwrapped(operand)
+			}
+			if ast.IsCallExpression(head) {
+				continue
+			}
+		}
+		if !inertValue(value) {
+			return false
+		}
+	}
+	return true
 }
 
 // isArrayProducingCollectionCall: `xs.map(cb)` / `xs.filter(cb)` — the

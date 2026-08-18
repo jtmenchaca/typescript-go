@@ -8,6 +8,7 @@
 package walk
 
 import (
+	"reflect"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -92,6 +93,18 @@ func ContractBySymbol(ctx *FlowContext, callee *ast.Node) *FunctionContract {
 	return nil
 }
 
+// contractIndexRow is one built index beside the map it indexed and
+// the map's entry count at build time. Holding the map itself keeps
+// it live, so its header address below stays unambiguous — a freed
+// map's address could otherwise be reused by a new one; the size is
+// what detects a map that grew after the row was built (tests
+// register contracts into a context's map before walking).
+type contractIndexRow struct {
+	contracts map[*ast.Symbol]*FunctionContract
+	size      int
+	index     map[*ast.Node]*FunctionContract
+}
+
 // contractIndexesMu guards contractIndexes: the by-declaration-node
 // index of a contracts map, held per map — the map is immutable once
 // the file's contracts register. The TS source keys this with a
@@ -99,32 +112,34 @@ func ContractBySymbol(ctx *FlowContext, callee *ast.Node) *FunctionContract {
 // FunctionContract>>`; Go has no weak maps, so this substitutes a
 // regular map guarded by a mutex (same substitution as
 // annotations/annotation_of_type.go's readingTypeNodes) — keyed on
-// the contracts map's own address. A Go map VALUE has no stable
-// identity across calls (each parameter copy is a fresh local with
-// its own address), so the caller passes `&ctx.Contracts` — the
-// FlowContext field's address, stable for that FlowContext's whole
-// walk — rather than the map by value.
+// the map's OWN header address (reflect.Value.Pointer), which is
+// stable across every handle onto the same map. Keying on the caller's
+// field address instead rebuilt the same program-wide index once per
+// FlowContext — one per entry walk, one per call-site snapshot fill —
+// which was the ContractIndexOf row of the 2026-08-17 alloc profile.
 var (
 	contractIndexesMu sync.Mutex
-	contractIndexes   = map[*map[*ast.Symbol]*FunctionContract]map[*ast.Node]*FunctionContract{}
+	contractIndexes   = map[uintptr]contractIndexRow{}
 )
 
 // ContractIndexOf is the by-declaration-node index of a contracts
 // map, held per map — the map is immutable once the file's contracts
-// register. `contracts` is the map's address (see contractIndexes'
-// comment), not the map by value.
+// register. `contracts` is the FlowContext field's address; the map
+// it holds is the identity the row is kept under.
 func ContractIndexOf(contracts *map[*ast.Symbol]*FunctionContract) map[*ast.Node]*FunctionContract {
+	m := *contracts
+	key := reflect.ValueOf(m).Pointer()
 	contractIndexesMu.Lock()
 	defer contractIndexesMu.Unlock()
-	if held, ok := contractIndexes[contracts]; ok {
-		return held
+	if held, ok := contractIndexes[key]; ok && held.size == len(m) {
+		return held.index
 	}
-	index := map[*ast.Node]*FunctionContract{}
-	for _, contract := range *contracts {
+	index := make(map[*ast.Node]*FunctionContract, len(m))
+	for _, contract := range m {
 		if _, ok := index[contract.Declaration]; !ok {
 			index[contract.Declaration] = contract
 		}
 	}
-	contractIndexes[contracts] = index
+	contractIndexes[key] = contractIndexRow{contracts: m, size: len(m), index: index}
 	return index
 }

@@ -120,23 +120,27 @@ func ArrayIndexReadEffect(context *LoweringContext, node *ast.Node) (kernelbridg
 		return kernelbridge.LoopEffect{}, false
 	}
 	receiver := head.AsElementAccessExpression().Expression
-	if !ast.IsIdentifier(receiver) {
-		return kernelbridge.LoopEffect{}, false
+	if ast.IsIdentifier(receiver) {
+		if index, isIndex := indexAccessOf(head, receiver.Text()); isIndex {
+			if _, elemSlot, ok := arraySlotsOf(context, receiver.Text()); ok {
+				elem := varEffect(elemSlot)
+				if indexName, spelled := SpelledNameOf(Unwrapped(index)); spelled &&
+					IndexIsBounded(context, indexName, receiver.Text()) {
+					return elem, true
+				}
+				return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectOrAbsent, A: &elem}, true
+			}
+		}
 	}
-	index, isIndex := indexAccessOf(head, receiver.Text())
-	if !isIndex {
-		return kernelbridge.LoopEffect{}, false
+	// the nested shapes — `xs[i][j]` and an element alias's `row[j]` —
+	// read the element-of-element join, always or-absent: the inner
+	// pair's len is a join over every inner array, so no dominating
+	// bound relates this index to the one inner array being read
+	if slot, ok := nestedElemSlotOf(context, head); ok {
+		elem := varEffect(slot)
+		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectOrAbsent, A: &elem}, true
 	}
-	_, elemSlot, ok := arraySlotsOf(context, receiver.Text())
-	if !ok {
-		return kernelbridge.LoopEffect{}, false
-	}
-	elem := varEffect(elemSlot)
-	if indexName, spelled := SpelledNameOf(Unwrapped(index)); spelled &&
-		IndexIsBounded(context, indexName, receiver.Text()) {
-		return elem, true
-	}
-	return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectOrAbsent, A: &elem}, true
+	return kernelbridge.LoopEffect{}, false
 }
 
 // boundIndexKey spells one "this index is below that array's length"
@@ -188,7 +192,12 @@ func BoundIndexOfTest(context *LoweringContext, head *ast.Node) (indexName strin
 	}
 	array := access.Expression.Text()
 	if _, _, isArray := arraySlotsOf(context, array); !isArray {
-		return "", "", false
+		// a MEMBER-EXPANDED array has no scalar elem slot, but `i <
+		// xs.length` states the same bound — its len slot exists and the
+		// head lowers through ArrayLengthSlotOf's own expanded arm
+		if _, expanded := memberExpandedArrayOf(context, access.Expression); !expanded {
+			return "", "", false
+		}
 	}
 	return index, array, true
 }

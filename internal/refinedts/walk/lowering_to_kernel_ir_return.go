@@ -112,6 +112,32 @@ func lowerReturnStatement(
 			}
 			dropHoists()
 		}
+		// THE MEMBER-CARRYING RETURN, tried AHEAD of the plain effect
+		// grammar where the layout allocated member slots for this body
+		// (context.RetShape != RetShapeNone).
+		//
+		// The plain effect grammar's own object/array-literal arm
+		// (effect_expression.go's LowerEffectExpression, the "moves
+		// nothing" gate) answers `unknown, true` for ANY inert literal —
+		// the same literals this body's member layout exists to serve —
+		// so tried in the OLD order (this route below returnMemberStatements,
+		// further down) that arm SHADOWED the member writer every time:
+		// RhsEffect succeeded first, wrote #ret unknown with no member
+		// statement at all, and returned before the member route ever
+		// ran. A shaped body then read COMPLETE with no member exits at
+		// all — the whole reason the layout was built, lost. Trying the
+		// member route first for a shaped body costs nothing where it
+		// declines (an unwrapped spread/call reaches the same RhsEffect
+		// fallback right after), and serves every member the shape
+		// allocated where it doesn't.
+		if context.RetShape != RetShapeNone {
+			if members, ok := returnMemberStatements(context, rs.Expression, raise); ok {
+				out = flush(out)
+				out = append(out, members...)
+				return out, true
+			}
+			dropHoists()
+		}
 		effect, ok := RhsEffect(context, sort, rs.Expression)
 		if ok {
 			// `return this.a(this.b(x)) + 1`: the hoisted calls go out
@@ -278,19 +304,14 @@ func lowerReturnStatement(
 			return out, true
 		}
 		dropHoists()
-		// THE MEMBER-CARRYING RETURN: `return { type, dynamicMetadata }`
-		// / `return [a, b]`, where the layout allocated one slot per
-		// member (returnedLiteralShape). Each member's own effect goes
-		// into its own slot and #ret takes unknown — the object itself
-		// still has no scalar spelling, and the members are what the
-		// caller reads back. Ahead of the inert return, which would
-		// otherwise write the whole literal off as one unknown.
-		if members, ok := returnMemberStatements(context, rs.Expression, raise); ok {
-			out = flush(out)
-			out = append(out, members...)
-			return out, true
-		}
-		dropHoists()
+		// THE MEMBER-CARRYING RETURN (`return { type, dynamicMetadata }`
+		// / `return [a, b]`) is tried EARLIER now, ahead of the plain
+		// effect grammar's own RhsEffect call above — see that call
+		// site's own comment for why the ordering moved. Nothing here
+		// reaches returnMemberStatements a second time: RetShapeNone
+		// means it always declined already, and RetShape != RetShapeNone
+		// means the earlier try already ran (and this whole statement
+		// already returned if it served).
 		// (A return-position member-read arm — `return x.a.b` served as
 		// an unknown-ret COMPLETE — briefly lived here and was RETIRED:
 		// a complete summary serves unconditionally, so its TOP ret

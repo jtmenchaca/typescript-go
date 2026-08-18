@@ -26,6 +26,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
@@ -133,7 +134,7 @@ func AnswerFlowAt(
 	}
 
 	binding := declaration
-	hostType := p.Checker.GetTypeAtLocation(token)
+	hostType := typereading.TypeAtLocation(p.Checker, token)
 	shownByHost := (hostType.Flags() & (checker.TypeFlagsNumberLiteral | checker.TypeFlagsStringLiteral |
 		checker.TypeFlagsBooleanLiteral | checker.TypeFlagsBigIntLiteral |
 		checker.TypeFlagsNull | checker.TypeFlagsUndefined)) != 0

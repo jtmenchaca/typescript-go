@@ -27,13 +27,20 @@ import (
 // unknown, and unknown in one member claims nothing about that member
 // while the readable ones keep their values.
 //
-// What this does NOT do is run code. A member whose value expression
-// would MOVE something — a call, a `new`, a write — is not lowered as an
-// effect at all: the effect grammar has no statement position inside it,
-// so those members take unknown and the statement's own mention havoc is
-// what covers what they moved. A literal whose evaluation is not
-// write-and-call free therefore declines back to the caller's routes,
-// where the opaque return's havoc floor serves it exactly as before.
+// THE ONE EXCEPTION IS A BARE CALL AT A PROPERTY'S OWN TOP LEVEL —
+// objectLiteralMembersAdmitShape's own admitted case (ir_summary_returned_
+// shape.go). objectReturnMemberStatements' per-member RhsEffect call
+// reaches HoistCallEffect (ir_call_hoist.go) as its last resort, which DOES
+// run code — it hoists the call to a statement ahead of the return where
+// the callee resolves to a COMPLETE summary blob and the reordering is
+// order-safe. Every OTHER way a member's value could move something — a
+// `new`, a write, a call buried under an operator, a call whose callee has
+// no complete blob — still has no statement position in the effect grammar
+// and takes unknown, with NoteFirstHavoc naming it; the statement's own
+// mention havoc covers what such a member moved. A literal whose evaluation
+// is not inertValue-safe as a WHOLE (this function's own gate below)
+// declines back to the caller's routes, where the opaque return's havoc
+// floor serves it exactly as before.
 func returnMemberStatements(
 	context *LoweringContext,
 	returned *ast.Node,
@@ -57,7 +64,25 @@ func returnMemberStatements(
 	// own slot takes unknown through the effect grammar) — the same
 	// function-boundary-aware reading returnedLiteralShape now takes, so
 	// the shape layer and this writer admit the same literals.
-	if !inertValue(head) {
+	//
+	// THE OBJECT CASE takes the WIDER gate, objectLiteralMembersAdmitShape,
+	// not the plain inertValue every other shape still uses: the shape
+	// layer (returnedLiteralShape, ir_summary_returned_shape.go) already
+	// allocates member slots under that wider gate, and gating THIS writer
+	// on the narrower inertValue would refuse the whole return for the
+	// exact literals the wider gate exists to admit — allocating slots the
+	// per-member loop below never gets a chance to write, which degrades
+	// silently to the pre-shape opaque-return floor rather than serving or
+	// honestly havoc-noting the individual member. Every other shape
+	// (RetShapeArray) keeps inertValue's own reading unchanged; its own
+	// per-element writer (elementJoinAssignments below) has not been
+	// widened to admit a bare-call element the way the object writer's
+	// per-member loop (objectReturnMemberStatements' RhsEffect call) has.
+	if ast.IsObjectLiteralExpression(head) {
+		if !objectLiteralMembersAdmitShape(head) {
+			return nil, false
+		}
+	} else if !inertValue(head) {
 		return nil, false
 	}
 	switch context.RetShape {
@@ -107,6 +132,19 @@ func objectReturnMemberStatements(
 			// scalar ret's sort decides the whole-value one
 			if read, ok := RhsEffect(context, context.Sorts[slot], value); ok {
 				effect = asVarStateEffect(read)
+			} else {
+				// the effect grammar declined this ONE member's value — the
+				// slot still takes unknown (a partial object beats a whole
+				// unknown), but the body must not report COMPLETE over a
+				// key it never determined: the serving rule
+				// (kernel_summaries.go) reads a complete outcome as license
+				// to hand this exact member value to a caller. Without this
+				// note, a member the effect grammar could not spell served
+				// silently as unknown behind a "complete" summary — the
+				// same fabrication the deleted return-member-read arm was
+				// pulled for (see lowering_to_kernel_ir_return.go's own
+				// retired-arm comment).
+				NoteFirstHavoc(context, "return (object literal, member "+name+")")
 			}
 		}
 		out = append(out, kernelbridge.IrStatement{
@@ -213,6 +251,13 @@ func elementJoinAssignments(
 		if read, ok := RhsEffect(context, context.Sorts[elemSlot], element); ok {
 			return asVarStateEffect(read)
 		}
+		// same fabrication risk as the object writer's member arm: the
+		// join's own doc above says an unspellable element widens ".elem"
+		// to unknown for every position, which is sound only where the
+		// body's outcome ALSO says so — a caller that later reads ".elem"
+		// (an index, a spread) must not find a "complete" summary hiding
+		// an element this writer never determined.
+		NoteFirstHavoc(context, "return (array literal, element)")
 		return unknownEffect
 	}
 	// one element: no join to build, the slot simply holds it

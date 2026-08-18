@@ -38,7 +38,7 @@ func InitialStateOfPlainParameter(p *program.CheckerProgram, parameter *ast.Node
 		}
 		return unread()
 	}
-	if held, ok := typereading.ReadHostType(p.Checker, p.Checker.GetTypeAtLocation(decl.Name()), decl.Name(), 0); ok {
+	if held, ok := typereading.ReadHostType(p.Checker, typereading.TypeAtLocation(p.Checker, decl.Name()), decl.Name(), 0); ok {
 		return held
 	}
 	return unread()

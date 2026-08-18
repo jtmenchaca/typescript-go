@@ -10,6 +10,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/jsnum"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // BindingKind is the sort a binding was READ UNDER — the host-type
@@ -224,7 +225,7 @@ func LocalSortResolved(c *checker.Checker, declaration *ast.Node) BindingKind {
 	if head == nil || !ast.IsCallExpression(head) {
 		return syntactic
 	}
-	t := c.GetTypeAtLocation(head)
+	t := typereading.TypeAtLocation(c, head)
 	if t == nil {
 		return BindingKindUnknown
 	}
@@ -276,7 +277,7 @@ func ResolvedExpressionSort(c *checker.Checker, e *ast.Node) (BindingKind, Typeo
 	if c == nil || e == nil {
 		return BindingKindUnknown, TypeofTagNone
 	}
-	t := c.GetTypeAtLocation(e)
+	t := typereading.TypeAtLocation(c, e)
 	if t == nil {
 		return BindingKindUnknown, TypeofTagNone
 	}

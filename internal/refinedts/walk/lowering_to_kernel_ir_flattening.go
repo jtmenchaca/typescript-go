@@ -70,6 +70,21 @@ func lowerFlatteningRoutes(
 		return out, true
 	}
 	dropHoists()
+	// `const { circleTangency } = getTangentCircle(...)` — a call whose
+	// CALLEE HAS A COMPILED SUMMARY carrying a per-member RetShape
+	// (returnedLiteralShape): each bound name that matches a returned
+	// member reads that member's own exit, not unknown. Tried ahead of
+	// PatternAssignmentsOf, which would otherwise claim this same shape
+	// first and havoc every bound name — PatternAssignmentsOf's own
+	// unknown answer is exactly what stays true for a callee this route
+	// cannot read a summary for (an opaque/imported one, a scalar return,
+	// a nested/nested/rest pattern element), so it remains the fallback.
+	if viaRetMembers, ok := destructuredCallDeclarationStatement(context, s); ok {
+		out = flush(out)
+		out = append(out, viaRetMembers...)
+		return out, true
+	}
+	dropHoists()
 	// `const { a } = call()` and every other pattern source the exact
 	// route above declined: the bound names take unknown — which is
 	// what is true of them — and the source's call lowers through the

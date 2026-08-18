@@ -194,25 +194,41 @@ func usesAreAllDeclaredKeySteps(
 			}
 			return false
 		}
-		// `p[S]` under a stable symbol const — one declared leaf, read or
-		// written the way a dotted step is. The root is consumed here so it
-		// does not reach the bare-name test below.
+		// `p[S]` under a stable symbol const, or `p['a']`/`p["a"]` under a
+		// GROUNDED string-literal (or no-substitution template) key — both
+		// name one declared leaf, read or written the way a dotted step is.
+		// The root is consumed here so it does not reach the bare-name test
+		// below. A DYNAMIC key (a variable, a call, a template with a
+		// substitution) still falls to the "an index nothing spells" refusal
+		// — grounding is the whole point of the admission, and this scan
+		// never guesses a key any more than GroundedComputedMemberSlotOf
+		// (ir_computed_member_grounded.go, the read-side twin this
+		// admission exists to feed) does.
 		if ast.IsElementAccessExpression(node) {
 			element := node.AsElementAccessExpression()
 			if root := Unwrapped(element.Expression); root != nil &&
 				ast.IsIdentifier(root) && root.Text() == name {
-				symbolKey, isSymbolKey := SymbolKeyedFieldName(c, node)
-				if !isSymbolKey {
-					ok = false // an index nothing spells
-					return true
+				if symbolKey, isSymbolKey := SymbolKeyedFieldName(c, node); isSymbolKey {
+					if _, isDeclared := declared[symbolKey]; !isDeclared {
+						ok = false // a leaf the literal never gave a slot
+						return true
+					}
+					// the KEY expression is the const's own name, not a use of
+					// the record — nothing to walk under it
+					return false
 				}
-				if _, isDeclared := declared[symbolKey]; !isDeclared {
-					ok = false // a leaf the literal never gave a slot
-					return true
+				if groundedKey, isGrounded := groundedComputedKeyOf(element.ArgumentExpression); isGrounded {
+					if _, isDeclared := declared[groundedKey]; !isDeclared {
+						ok = false // a leaf the literal never gave a slot
+						return true
+					}
+					// the key is a literal token, not a use of the record —
+					// nothing to walk under it, the same reasoning the symbol-
+					// keyed arm above already carries
+					return false
 				}
-				// the KEY expression is the const's own name, not a use of
-				// the record — nothing to walk under it
-				return false
+				ok = false // an index nothing spells
+				return true
 			}
 		}
 		// Every other occurrence of the bare name — an alias `q = p`, an

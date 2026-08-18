@@ -233,6 +233,64 @@ func arrayShrinkCallOf(node *ast.Node, name string) (string, bool) {
 	return method, true
 }
 
+// arrayArgumentCallOf is `<callee>(…, a, …)` / `new X(…, a, …)` — the
+// array's own bare name sitting at a PLAIN (non-spread) argument
+// position of some call, whatever the callee is. Answers the call's
+// callee expression (unwrapped) and every OTHER argument, still to be
+// scanned for their own occurrences of `name` — the matched positions
+// are the ones this recognizer itself admits.
+//
+// This is the WHOLE-ARRAY ARGUMENT ADMISSION: passing an array to a call
+// hands the callee a reference two scalar slots (length, joined element)
+// still spell soundly PROVIDED the exit side of every such call site
+// re-derives or havocs those two slots afterward — which is
+// arrayArgumentPostCallHavoc's job (ir_summary_call_statement.go), paired
+// with this admission so the unsound half never lands alone. A SPREAD
+// argument (`f(...a)`) is not this shape: it unpacks the array's
+// elements individually, which is a different read from handing over the
+// reference, and stays refused.
+func arrayArgumentCallOf(node *ast.Node, name string) (callee *ast.Node, otherArguments []*ast.Node, matched bool) {
+	var callExpression, newExpression *ast.Node
+	switch {
+	case ast.IsCallExpression(node):
+		callExpression = node
+	case ast.IsNewExpression(node):
+		newExpression = node
+	default:
+		return nil, nil, false
+	}
+	var arguments []*ast.Node
+	if callExpression != nil {
+		call := callExpression.AsCallExpression()
+		callee = call.Expression
+		if call.Arguments != nil {
+			arguments = call.Arguments.Nodes
+		}
+	} else {
+		newCall := newExpression.AsNewExpression()
+		callee = newCall.Expression
+		if newCall.Arguments != nil {
+			arguments = newCall.Arguments.Nodes
+		}
+	}
+	found := false
+	for _, argument := range arguments {
+		if ast.IsSpreadElement(argument) {
+			otherArguments = append(otherArguments, argument)
+			continue
+		}
+		if head := Unwrapped(argument); ast.IsIdentifier(head) && head.Text() == name {
+			found = true
+			continue
+		}
+		otherArguments = append(otherArguments, argument)
+	}
+	if !found {
+		return nil, nil, false
+	}
+	return callee, otherArguments, true
+}
+
 // loneSpreadNameOf is the name a LONE spread of an array literal
 // spreads: `[...a]` answers "a", and `[...a, x]` answers nothing.
 //
@@ -432,9 +490,22 @@ func usesAreAllArrayFormsFrom(body *ast.Node, declarationName *ast.Node, name st
 				}
 			}
 		}
-		// Every other occurrence of the bare name — an alias, an argument,
-		// a return, `a.map(…)`, `a.slice()` — is the WHOLE array in a
-		// position two scalar slots cannot spell.
+		// `<callee>(…, a, …)` / `new X(…, a, …)` — the array handed WHOLE
+		// to a call, admitted PROVIDED the exit side re-derives or havocs
+		// the two slots afterward (arrayArgumentPostCallHavoc's own doc,
+		// ir_summary_call_statement.go — the two-half fix this admission
+		// is only sound alongside). The callee expression and every OTHER
+		// argument still scan for their own occurrences.
+		if callee, otherArguments, matched := arrayArgumentCallOf(node, name); matched {
+			visitIfPresent(Unwrapped(callee))
+			for _, argument := range otherArguments {
+				visitIfPresent(argument)
+			}
+			return false
+		}
+		// Every other occurrence of the bare name — an alias, a return,
+		// `a.map(…)`, `a.slice()` — is the WHOLE array in a position two
+		// scalar slots cannot spell.
 		if ast.IsIdentifier(node) && node.Text() == name && node != declarationName {
 			ok = false
 			return true

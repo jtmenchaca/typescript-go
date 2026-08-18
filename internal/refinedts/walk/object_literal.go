@@ -15,6 +15,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // exactStringName is the ONE property name a computed key writes, where
@@ -81,7 +82,7 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 				// element read derives (keyed_slot_reads.go), so the
 				// value reads back.
 				if ast.IsComputedPropertyName(pa.Name()) &&
-					(ctx.P.Checker.GetTypeAtLocation(pa.Name().AsComputedPropertyName().Expression).Flags()&checker.TypeFlagsESSymbolLike) != 0 {
+					(typereading.TypeAtLocation(ctx.P.Checker, pa.Name().AsComputedPropertyName().Expression).Flags()&checker.TypeFlagsESSymbolLike) != 0 {
 					keyExpression := pa.Name().AsComputedPropertyName().Expression
 					if slot, construction, stable := stableSymbolSlotOf(ctx.P.Checker, keyExpression); stable {
 						// an earlier symbol slot this key is not provably
@@ -318,7 +319,7 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 				// a SYMBOL-keyed member collides with no string key —
 				// every string-key claim survives it untouched, the same
 				// reading the property-assignment case takes
-				if (ctx.P.Checker.GetTypeAtLocation(keyExpression).Flags() & checker.TypeFlagsESSymbolLike) != 0 {
+				if (typereading.TypeAtLocation(ctx.P.Checker, keyExpression).Flags() & checker.TypeFlagsESSymbolLike) != 0 {
 					continue
 				}
 				if exact, ok := exactStringName(evaluateExpression(ctx, env, keyExpression)); ok && !symbolSlotKey(exact) {

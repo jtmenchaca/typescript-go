@@ -229,7 +229,16 @@ func IndexOf(context *LoweringContext, name *ast.Node) (int, bool) {
 	if index, ok := MapSizeSlotOf(context, name); ok {
 		return index, true
 	}
-	return PathSlotIndexOf(context, name)
+	if index, ok := PathSlotIndexOf(context, name); ok {
+		return index, true
+	}
+	// `o['a']` — a GROUNDED computed member (a string-literal or
+	// no-substitution-template key) on a flattened record local — names
+	// the same runtime property a dotted `o.a` step would
+	// (sec-topropertykey), so it resolves to the identical leaf slot.
+	// Tried last, after every dotted-path resolution above has already
+	// missed, exactly where PathSlotIndexOf sits in this chain.
+	return GroundedComputedMemberSlotOf(context, name)
 }
 
 // NumberIndexOf is numberIndexOf in the TS source: a tracked

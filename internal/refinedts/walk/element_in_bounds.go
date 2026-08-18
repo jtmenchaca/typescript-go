@@ -15,6 +15,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // isStringGroundElement is the TS source's isStringGroundElement:
@@ -369,7 +370,7 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 	// work at the vouched arm above, where it is now retired.
 	rep, repOk := refinementsets.AsRepetition(p.Receiver.Set)
 	if repOk && !p.Receiver.NaNElements &&
-		(p.Ctx.P.Checker.GetTypeAtLocation(elem.ArgumentExpression).Flags()&checker.TypeFlagsNumberLike) != 0 {
+		(typereading.TypeAtLocation(p.Ctx.P.Checker, elem.ArgumentExpression).Flags()&checker.TypeFlagsNumberLike) != 0 {
 		// POSITIVELY derived absence: an unvouched index may sit out
 		// of range, where a get answers undefined. A bare-ground
 		// string element wraps the sort's own unknown — the absence

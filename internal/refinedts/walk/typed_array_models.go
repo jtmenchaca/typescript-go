@@ -41,6 +41,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // typedArrayConversion is the ToXxx element conversion a typed array
@@ -243,7 +244,7 @@ func ReadTypedArrayConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstrac
 // (receiverType.Symbol().Name) rather than adding a new AbstractValue
 // field only this one path would read.
 func TypedArrayWriteConversion(ctx *FlowContext, receiverExpression *ast.Node) (func(float64) float64, bool) {
-	receiverType := ctx.P.Checker.GetTypeAtLocation(receiverExpression)
+	receiverType := typereading.TypeAtLocation(ctx.P.Checker, receiverExpression)
 	if receiverType == nil || receiverType.Symbol() == nil {
 		return nil, false
 	}

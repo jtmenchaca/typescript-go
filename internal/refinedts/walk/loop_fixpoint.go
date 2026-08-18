@@ -26,6 +26,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // LoopAnalyzers mirrors the TS LoopAnalyzers interface — the three
@@ -403,7 +404,7 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 			// non-array iterable answers nil and falls through unread, as
 			// it did before. Identity against the checker's own number
 			// type is the element test: no other type is `number`.
-			t := ctx.P.Checker.GetTypeAtLocation(forInOf.Expression)
+			t := typereading.TypeAtLocation(ctx.P.Checker, forInOf.Expression)
 			if t != nil {
 				if element := ctx.P.Checker.GetElementTypeOfArrayType(t); element != nil &&
 					element == ctx.P.Checker.GetNumberType() {

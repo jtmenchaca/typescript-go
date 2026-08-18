@@ -134,21 +134,42 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 		// (its PropertyName is a single identifier), so the pseudo
 		// member's Path is the one-segment path Key already names
 		if pd := parameter.AsParameterDeclaration(); pd.Name() != nil && ast.IsObjectBindingPattern(pd.Name()) {
+			// a TOP-entry row (a rest or defaulted element, or any element
+			// of a defaulted whole pattern) never fills from the argument's
+			// member: the bound value is member-or-default or a fresh rest
+			// object, so the fill is UNKNOWN whether the argument is present
+			// or missing (bodySlot.TopEntry's doc; kernel_summaries.go's
+			// summaryEntryStates makes the same split on this flag)
 			if index >= len(callArguments) {
-				for range entries {
+				for _, entry := range entries {
+					if entry.TopEntry {
+						args = append(args, unknownEffect)
+						continue
+					}
 					args = append(args, kernelbridge.AbsentConst())
 				}
 				continue
 			}
-			pseudo := make([]recordParamMember, len(entries))
-			for at, entry := range entries {
-				pseudo[at] = recordParamMember{Key: entry.Key, Path: []string{entry.Key}, Sort: entry.Sort, TypeofTag: entry.TypeofTag}
+			pseudo := make([]recordParamMember, 0, len(entries))
+			for _, entry := range entries {
+				if entry.TopEntry {
+					continue
+				}
+				pseudo = append(pseudo, recordParamMember{Key: entry.Key, Path: []string{entry.Key}, Sort: entry.Sort, TypeofTag: entry.TypeofTag})
 			}
 			leafEffects, leavesOk := recordArgumentEffects(context, pseudo, callArguments[index])
 			if !leavesOk {
 				return kernelbridge.IrStatement{}, false
 			}
-			args = append(args, leafEffects...)
+			at := 0
+			for _, entry := range entries {
+				if entry.TopEntry {
+					args = append(args, unknownEffect)
+					continue
+				}
+				args = append(args, leafEffects[at])
+				at++
+			}
 			continue
 		}
 		// an ARRAY-TYPED parameter's entries take the caller's own
@@ -319,4 +340,89 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 		Args:   args,
 		Rets:   rets,
 	}, true
+}
+
+// arrayArgumentPostCallHavoc is the EXIT-SIDE half construct (1) needs:
+// for every argument the caller passed WHOLE to an array-typed parameter
+// (the array branch above, which threads "tree.len"/"tree.elem" IN but
+// maps no array-entry EXIT back through Rets), the caller's own len/elem
+// slots (and any ElementMembers leaves) take unknown right after the
+// call statement.
+//
+// WHY UNCONDITIONAL. The callee's summary carries no census of whether
+// its body actually writes the array parameter (no BundleEntries-style
+// Written flag exists for array parameters today — only record/this
+// bundles have one) — so "the callee might have pushed, popped, or
+// written an element" is the only sound reading available, and the
+// conservative answer is the same one OpaqueCallHavoc already gives a
+// call whose callee this lowering cannot summarize at all: unknown,
+// unconditionally, never a joined-with-real-value reading that would
+// still need a proof the callee never grew or shrank the array.
+//
+// Called ALONGSIDE summaryCallStatement at every production call site
+// (ir_call_hoist.go's hoist, ir_summary_call.go's new/method tiers,
+// ir_summary_call_ret_destructure.go's destructured-declaration route) —
+// summaryCallStatement itself keeps returning one IrStatement, so this is
+// a second, additive answer callers append after it rather than a
+// change to that function's own return shape.
+//
+// (nil) wherever no argument fed an array-typed parameter, or the
+// callee/arguments cannot be re-read the same way summaryCallStatement
+// read them — in which case there is nothing this pass could have
+// flattened that the call could have moved.
+func arrayArgumentPostCallHavoc(context *LoweringContext, call *ast.Node) []kernelbridge.IrStatement {
+	if context == nil || context.Flow == nil {
+		return nil
+	}
+	callee := summaryCalleeOf(context, call)
+	if callee == nil {
+		return nil
+	}
+	var callArguments []*ast.Node
+	if ast.IsNewExpression(call) {
+		if newArguments := call.AsNewExpression().Arguments; newArguments != nil {
+			callArguments = newArguments.Nodes
+		}
+	} else if ast.IsCallExpression(call) {
+		if a := call.AsCallExpression().Arguments; a != nil {
+			callArguments = a.Nodes
+		}
+	} else {
+		return nil
+	}
+	parameters := callee.Parameters()
+	slots := map[int]struct{}{}
+	for index, parameter := range parameters {
+		if index >= len(callArguments) {
+			break
+		}
+		local, flattened := arrayParamSlotsIn(context.Flow, parameter)
+		if !flattened {
+			continue
+		}
+		head := Unwrapped(callArguments[index])
+		if !ast.IsIdentifier(head) {
+			continue
+		}
+		name := head.Text()
+		if len(local.ElementMembers) > 0 {
+			if lenSlot, hasLen := slotIndexOfName(context, name+".len"); hasLen {
+				slots[lenSlot] = struct{}{}
+			}
+			for _, member := range local.ElementMembers {
+				if leaf, hasLeaf := slotIndexOfName(context, name+".elem."+strings.Join(member.Path, ".")); hasLeaf {
+					slots[leaf] = struct{}{}
+				}
+			}
+			continue
+		}
+		if lenSlot, elemSlot, isArray := arraySlotsOf(context, name); isArray {
+			slots[lenSlot] = struct{}{}
+			slots[elemSlot] = struct{}{}
+		}
+	}
+	if len(slots) == 0 {
+		return nil
+	}
+	return havocAssignments(slots)
 }

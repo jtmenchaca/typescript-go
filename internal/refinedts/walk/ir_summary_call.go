@@ -161,6 +161,7 @@ func SummaryCallOrHavocNamed(context *LoweringContext, call *ast.Node, target in
 		// call. constructorFieldRets makes exactly those writes.
 		statement = constructorFieldRets(context, call, targetNameOf(context, target), statement)
 		out := []kernelbridge.IrStatement{statement}
+		out = append(out, arrayArgumentPostCallHavoc(context, call)...)
 		if target >= 0 {
 			out = append(out, kernelbridge.IrStatement{
 				Kind:   kernelbridge.IrStatementAssign,
@@ -186,7 +187,8 @@ func SummaryCallOrHavocNamed(context *LoweringContext, call *ast.Node, target in
 	}
 	if methodServes {
 		if statement, ok := summaryCallStatement(context, call, target); ok {
-			return withMethodWrites([]kernelbridge.IrStatement{statement}, true)
+			out := append([]kernelbridge.IrStatement{statement}, arrayArgumentPostCallHavoc(context, call)...)
+			return withMethodWrites(out, true)
 		}
 	}
 	if cycled, ok := summaryCycleHavocNamed(context, call, target, construct); ok {

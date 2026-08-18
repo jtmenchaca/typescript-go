@@ -68,6 +68,28 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			return kernelbridge.LoopEffect{}, false
 		},
 		Opaque: func(node *ast.Node) (kernelbridge.LoopEffect, bool) {
+			// `o['a']` — a GROUNDED computed member on a flattened record
+			// local — is the same runtime property `o.a` names
+			// (sec-topropertykey: ToPropertyKey of a string argument is
+			// that string unchanged), so it reads the identical leaf slot
+			// a dotted read would. An ElementAccessExpression never
+			// reaches LowerEffectExpression's spelled-name or deep-path
+			// arms (SpelledNameOf has no reading for computed syntax), so
+			// every computed member lands here regardless of whether its
+			// key is grounded — tried first, ahead of the array-index
+			// reading below, since GroundedComputedMemberSlotOf itself
+			// declines wherever no record-leaf slot answers the lookup
+			// (an array receiver included), leaving that reading to run
+			// exactly as before. Needed even though IndexOf (this
+			// file's sibling, ir_lowering_context.go) ALSO now tries this
+			// resolver: IndexOf only ever sees the WHOLE right side of an
+			// assignment/return (RhsEffect's own top-level check), so a
+			// grounded member nested inside arithmetic (`o['a'] + 1`)
+			// reaches this Opaque reader through LowerEffectExpression's
+			// recursive descent instead.
+			if slot, ok := GroundedComputedMemberSlotOf(context, node); ok && context.Sorts[slot] == BindingKindNumber {
+				return numberSlot(slot)
+			}
 			// `a[i]`: the element slot, or-absent where nothing bounds i.
 			// Arithmetic admits only a number-sorted element slot, the
 			// same gate every other read here wears.

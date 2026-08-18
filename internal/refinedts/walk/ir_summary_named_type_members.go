@@ -22,8 +22,6 @@ import (
 // to a different declaration, and every shape where that is possible
 // declines below:
 //
-//   - a name carrying TYPE ARGUMENTS (`Box<number>`) — the members would
-//     depend on the arguments, which no entry vector spells;
 //   - a symbol with NO declaration, or with declarations that are none of
 //     the two admitted kinds — nothing to read syntax off;
 //   - a symbol with MORE THAN ONE declaration — an interface declared
@@ -35,6 +33,15 @@ import (
 //   - a CLASS — an instance carries methods, accessors, private state and
 //     aliases the flattening cannot hold, and its fields are not promised
 //     by the annotation alone.
+//
+// THE ONE ARM THAT IS NOT CHECK-INDEPENDENT is a reference carrying
+// TYPE ARGUMENTS (`Box<number>`): its members exist only under the
+// checker's instantiation, so that arm reads them from the checker's
+// own answer and says so on its own doc
+// (instantiatedReferenceMembersOf, ir_summary_instantiated_members.go).
+// The layout/call-site agreement never depended on check-independence —
+// recordParamMembersIn's memo is what pins one answer for both seams,
+// for that arm exactly as for these.
 //
 // AN INTERFACE WITH HERITAGE (`interface Bounds extends Base { … }`)
 // expands: the heritage clause's parent references resolve through the
@@ -87,7 +94,10 @@ import (
 // and declines — the nil-tolerance the ctx-less callers rely on: a
 // lowering that runs without a checker keeps exactly today's behaviour
 // rather than crashing.
-func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]recordParamMember, bool) {
+// `visiting` carries the declaration nodes already on the member-reading
+// path (nil at a fresh entry); it rides into declaredTypeMembersOf so a
+// name reached again through an array or nested-member hop terminates.
+func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node, visiting []*ast.Node) ([]recordParamMember, bool) {
 	// a UNION written straight on the annotation
 	// (`p: Type | DynamicModule`) is not a name to resolve; it expands to
 	// the members EVERY arm declares, read at the ENTRY position so arms
@@ -96,22 +106,26 @@ func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]
 		if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
 			return nil, false
 		}
-		return unionMembersOf(ctx, holder, typeNode, nil, true)
+		return unionMembersOf(ctx, holder, typeNode, visiting, true)
 	}
 	if !ast.IsTypeReferenceNode(typeNode) {
 		return nil, false
 	}
 	reference := typeNode.AsTypeReferenceNode()
-	// `Pick<T, K>` is the ONE type-argument shape this reader resolves
-	// rather than refusing over — the two arguments together spell a
-	// closed member list (T's members, filtered to the K keys), not an
-	// open-ended substitution the way a generic's OWN parameter does
+	// `Pick<T, K>` spells a closed member list of its own (T's members,
+	// filtered to the K keys) and keeps its dedicated reader — checked
+	// before the general instantiated arm below so its per-key absence
+	// fallback stays exactly as pinned
 	if pickMembers, pickOk := pickMembersOf(ctx, holder, reference); pickOk {
 		return pickMembers, true
 	}
-	// type ARGUMENTS make the members depend on what was applied
+	// type ARGUMENTS make the members depend on what was applied — and
+	// the annotation itself spells what was applied, so the reference
+	// resolves through the checker's own INSTANTIATION
+	// (instantiatedReferenceMembersOf, which states where its answer's
+	// authority comes from and what it declines)
 	if reference.TypeArguments != nil && len(reference.TypeArguments.Nodes) > 0 {
-		return nil, false
+		return instantiatedReferenceMembersOf(ctx, holder, typeNode)
 	}
 	typeName := reference.TypeName
 	// a plain identifier or a QUALIFIED name — both name one entity the
@@ -124,7 +138,7 @@ func namedTypeMembersOf(ctx *FlowContext, holder string, typeNode *ast.Node) ([]
 	}
 	// the ENTRY position: a name expanding to no member declines here, so
 	// the holder keeps its single whole-name slot
-	return declaredTypeMembersOf(ctx, holder, typeName, nil, true)
+	return declaredTypeMembersOf(ctx, holder, typeName, visiting, true)
 }
 
 // isResolvableTypeName says whether a type NAME is one the member
@@ -274,9 +288,11 @@ func declaredTypeMembersOf(
 		}
 		if ast.IsTypeReferenceNode(asAlias.Type) {
 			// an alias of a TYPE REFERENCE (`type Picked = Pick<Base, 'lo'>`,
-			// or a plain `type A = B`) recurses through the SAME two readings
-			// namedTypeMembersOf itself takes at the top level — the Pick
-			// shape first, then the general named-type resolution — so an
+			// a plain `type A = B`, or `type NumberBox = Box<number>`)
+			// recurses through the SAME readings namedTypeMembersOf itself
+			// takes at the top level — the Pick shape first, then the
+			// general named-type resolution, then (new) the checker's own
+			// INSTANTIATION for a target carrying type arguments — so an
 			// alias costs nothing beyond one more link on the cycle-guarded
 			// path. A parameterized alias of a reference would have to
 			// substitute into the reference's own arguments first, which
@@ -292,8 +308,22 @@ func declaredTypeMembersOf(
 			if pickMembers, pickOk := pickMembersOf(ctx, holder, innerReference); pickOk {
 				return pickMembers, true
 			}
+			// the alias's own target carries type arguments
+			// (`type NumberBox = Box<number>`): this reader has no
+			// syntax-level substitution to perform, but the checker's own
+			// instantiation already answers exactly this question — the SAME
+			// checker-authority reading a directly-annotated `p: Box<number>`
+			// takes (instantiatedReferenceMembersOf), asked of asAlias.Type
+			// itself. That reader keeps its own class/array/budget guards,
+			// and its own-body-uses guard answers true unconditionally here
+			// (the type node's parent is this TypeAliasDeclaration, never a
+			// ParameterDeclaration) — sound, because the ENTRY-level
+			// whole-name fallback still guards the actual parameter this
+			// alias was reached from: this call only ever contributes
+			// members to a LARGER answer atEntry's own empty-check (or an
+			// enclosing intersection/union reader) still gates.
 			if innerReference.TypeArguments != nil && len(innerReference.TypeArguments.Nodes) > 0 {
-				return nil, false
+				return instantiatedReferenceMembersOf(ctx, holder, asAlias.Type)
 			}
 			if !isResolvableTypeName(innerReference.TypeName) {
 				return nil, false

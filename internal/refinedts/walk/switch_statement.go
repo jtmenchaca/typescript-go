@@ -15,6 +15,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // switchNumberOf reads a numeric literal (through a leading minus)
@@ -444,7 +445,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 	// unless the case labels exhaust its literal union
 	mayFallPast := !hasDefault
 	if mayFallPast {
-		operandType := ctx.P.Checker.GetTypeAtLocation(switchStmt.Expression)
+		operandType := typereading.TypeAtLocation(ctx.P.Checker, switchStmt.Expression)
 		var members []*checker.Type
 		if operandType.IsUnion() {
 			members = operandType.Types()
@@ -456,7 +457,7 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 			if !ast.IsCaseClause(clause) {
 				continue
 			}
-			t := ctx.P.Checker.GetTypeAtLocation(clause.AsCaseOrDefaultClause().Expression)
+			t := typereading.TypeAtLocation(ctx.P.Checker, clause.AsCaseOrDefaultClause().Expression)
 			if t.IsStringLiteral() {
 				if s, ok := t.AsLiteralType().Value().(string); ok {
 					labels["s:"+s] = struct{}{}

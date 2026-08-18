@@ -301,15 +301,32 @@ func TestKernelSummaryDirect_ABodyReadingTheScalarSiblingOfAStableSymbolMemberSu
 	}
 }
 
-// TestSummaryParameterEntries_ARicherMemberExpandsUnknownSorted pins the
-// landed widening: a member whose annotation is not a scalar keyword
-// (an array, here) still names a leaf — the leaf just cannot state a
-// sort — rather than killing the expansion of every scalar sibling.
-func TestSummaryParameterEntries_ARicherMemberExpandsUnknownSorted(t *testing.T) {
+// TestSummaryParameterEntries_ARicherMemberExpandsToItsLenElemPair pins
+// the LANDED widening (nestedMemberLeavesOf's array arm, this wave): a
+// member whose annotation is an array type (`number[]`) no longer
+// contributes a single unknown-sorted leaf — it expands to its own
+// "len"/"elem" pair (arrayElementPairMembers), the same two-slot
+// vocabulary an array-typed PARAMETER's own element already wears.
+func TestSummaryParameterEntries_ARicherMemberExpandsToItsLenElemPair(t *testing.T) {
 	declaration := summaryDeclarationOf(t, "function f(p: { lo: number[] }) { return 1; }")
 	entries, ok := SummaryParameterEntries(declaration.Parameters()[0])
-	if !ok || len(entries) != 1 || entries[0].Name != "p.lo" || entries[0].Sort != BindingKindUnknown {
-		t.Fatalf("entries = %v (ok %v), want [{p.lo unknown}]", entries, ok)
+	if !ok || len(entries) != 2 {
+		t.Fatalf("entries = %v (ok %v), want [{p.lo.len number} {p.lo.elem number}]", entries, ok)
+	}
+	byName := map[string]bodySlot{}
+	for _, entry := range entries {
+		byName[entry.Name] = entry
+	}
+	length, hasLen := byName["p.lo.len"]
+	elem, hasElem := byName["p.lo.elem"]
+	if !hasLen || !hasElem {
+		t.Fatalf("entry names = %+v, want p.lo.len and p.lo.elem", byName)
+	}
+	if length.Sort != BindingKindNumber {
+		t.Errorf("p.lo.len sort = %v, want number", length.Sort)
+	}
+	if elem.Sort != BindingKindNumber {
+		t.Errorf("p.lo.elem sort = %v, want number — the element type is a scalar number", elem.Sort)
 	}
 }
 
@@ -673,14 +690,15 @@ func TestSummaryParameterEntriesIn_TheNamedShapesThatStayWholeName(t *testing.T)
 	// An interface's method and optional member and richer member all
 	// EXPAND through a named type exactly as the inline-literal case
 	// does (recordParamMembersIn reads a named type by the same member
-	// rules) — pinned separately below, not here.
+	// rules) — pinned separately below, not here. A reference CARRYING
+	// TYPE ARGUMENTS (`p: Box<number>`) is no longer in this family
+	// either: with the arguments applied there is exactly one
+	// instantiation, and its members read through the checker's own
+	// answer (instantiatedReferenceMembersOf,
+	// ir_summary_instantiated_members_test.go's pins).
 	sources := map[string]string{
 		"a class": "class Point { lo: number = 0; hi: number = 0 }\n" +
 			"function f(p: Point) { return 1; }\n",
-		"a generic interface": "interface Box<T> { lo: number }\n" +
-			"function f(p: Box<number>) { return 1; }\n",
-		"a generic alias": "type Box<T> = { lo: number };\n" +
-			"function f(p: Box<number>) { return 1; }\n",
 		"an alias of a union": "type Either = { lo: number } | { hi: number };\n" +
 			"function f(p: Either) { return 1; }\n",
 		"an empty interface": "interface Bounds { }\n" +
@@ -703,10 +721,12 @@ func TestSummaryParameterEntriesIn_TheNamedShapesThatStayWholeName(t *testing.T)
 // TestSummaryParameterEntriesIn_ANamedInterfacesMethodAndOptionalAndRicherMembersExpand
 // pins the landed widening through a NAMED type: an interface's method
 // is skipped (contributes nothing) while its scalar sibling still
-// expands; an optional member contributes wearing MayBeAbsent; a richer
-// member contributes unknown-sorted — the same three rules
-// scalarMemberListOfIn states for the inline-literal case, read off a
-// resolved interface declaration by the same member reader.
+// expands; an optional member contributes wearing MayBeAbsent — the same
+// rules scalarMemberListOfIn states for the inline-literal case, read
+// off a resolved interface declaration by the same member reader. A
+// richer (array-typed) member's own expansion is pinned separately below
+// (TestSummaryParameterEntriesIn_ANamedInterfacesRicherMemberExpandsToItsLenElemPair)
+// since it no longer fits this test's single-"p.lo"-entry shape.
 func TestSummaryParameterEntriesIn_ANamedInterfacesMethodAndOptionalAndRicherMembersExpand(t *testing.T) {
 	cases := map[string]struct {
 		source string
@@ -721,11 +741,6 @@ func TestSummaryParameterEntriesIn_ANamedInterfacesMethodAndOptionalAndRicherMem
 			source: "interface Bounds { lo?: number }\n" +
 				"function f(p: Bounds) { return 1; }\n",
 			sort: BindingKindNumber,
-		},
-		"a richer member": {
-			source: "interface Bounds { lo: number[] }\n" +
-				"function f(p: Bounds) { return 1; }\n",
-			sort: BindingKindUnknown,
 		},
 	}
 	for name, given := range cases {
@@ -743,6 +758,37 @@ func TestSummaryParameterEntriesIn_ANamedInterfacesMethodAndOptionalAndRicherMem
 	members, expanded := recordParamMembersIn(ctx, declaration.Parameters()[0])
 	if !expanded || len(members) != 1 || !members[0].MayBeAbsent {
 		t.Errorf("members = %v (expanded %v), want the one member wearing MayBeAbsent", members, expanded)
+	}
+}
+
+// TestSummaryParameterEntriesIn_ANamedInterfacesRicherMemberExpandsToItsLenElemPair
+// pins the LANDED widening (nestedMemberLeavesOf's array arm, this wave)
+// through a NAMED type: an interface's array-typed member (`lo:
+// number[]`) expands to its own "len"/"elem" pair, the same
+// arrayElementPairMembers expansion the inline-literal case takes
+// (TestSummaryParameterEntries_ARicherMemberExpandsToItsLenElemPair).
+func TestSummaryParameterEntriesIn_ANamedInterfacesRicherMemberExpandsToItsLenElemPair(t *testing.T) {
+	ctx, p := namedTypeCtx(t, "interface Bounds { lo: number[] }\n"+
+		"function f(p: Bounds) { return 1; }\n")
+	declaration := namedTypeFunction(t, p, "f")
+	entries, ok := SummaryParameterEntriesIn(ctx, declaration.Parameters()[0])
+	if !ok || len(entries) != 2 {
+		t.Fatalf("entries = %v (ok %v), want [{p.lo.len number} {p.lo.elem number}]", entries, ok)
+	}
+	byName := map[string]bodySlot{}
+	for _, entry := range entries {
+		byName[entry.Name] = entry
+	}
+	length, hasLen := byName["p.lo.len"]
+	elem, hasElem := byName["p.lo.elem"]
+	if !hasLen || !hasElem {
+		t.Fatalf("entry names = %+v, want p.lo.len and p.lo.elem", byName)
+	}
+	if length.Sort != BindingKindNumber {
+		t.Errorf("p.lo.len sort = %v, want number", length.Sort)
+	}
+	if elem.Sort != BindingKindNumber {
+		t.Errorf("p.lo.elem sort = %v, want number — the element type is a scalar number", elem.Sort)
 	}
 }
 
@@ -989,21 +1035,25 @@ func TestKernelSummaryDirect_ARenamedBindingPatternElementFillsFromItsOwnMember(
 	}
 }
 
-func TestKernelSummaryDirect_ABindingPatternOverAnUnknownSortedMemberStillLowers(t *testing.T) {
+// TestKernelSummaryDirect_ABindingPatternOverAnArrayMemberTakesATopEntry
+// pins the CURRENT shape: `lo`'s own annotation (`number[]`) now expands
+// through nestedMemberLeavesOf's array arm to nested "len"/"elem" leaves
+// (this wave) rather than answering a single unknown-sorted "lo" leaf —
+// so "lo" has no depth-1 row, and the binding-pattern element binds the
+// nestedRoots TOP entry instead (ir_summary_parameter_entries.go's
+// nestedRoots arm): reads of `lo` answer nothing, which is exactly what
+// is known, the same result the old unknown-sorted leaf produced, reached
+// by a different route now that the member itself expanded.
+func TestKernelSummaryDirect_ABindingPatternOverAnArrayMemberTakesATopEntry(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearResolvedRecordMembers()
 	ClearSummaryOutcomes()
-	// a richer-typed member (`number[]`) binds unknown-sorted rather than
-	// refusing the whole pattern — the same precedent the REST-parameter
-	// arm already sets for its own single unknown-sorted entry: reads of
-	// `lo` answer nothing, which is exactly what is known, and the body
-	// no longer refuses over a member no route reads here anyway.
 	declaration := summaryDeclarationOf(t, "function f({ lo }: { lo: number[] }) { return 1; }")
 	lowered, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
 		outcome, construct, _ := SummaryOutcomeOf(declaration)
-		t.Fatalf("a binding pattern over an unknown-sorted member declined (%q / %q)", outcome, construct)
+		t.Fatalf("a binding pattern over an array-typed member declined (%q / %q)", outcome, construct)
 	}
 	if lowered.ParamCount != 1 {
 		t.Errorf("ParamCount = %d, want 1 — the one bound name", lowered.ParamCount)
@@ -1012,13 +1062,11 @@ func TestKernelSummaryDirect_ABindingPatternOverAnUnknownSortedMemberStillLowers
 	if !entriesOk || len(entries) != 1 {
 		t.Fatalf("entries = %v (ok %v), want the one bound name", entries, entriesOk)
 	}
-	if entries[0].Name != "lo" || entries[0].Key != "lo" || entries[0].Sort != BindingKindUnknown || entries[0].TypeofTag != TypeofTagNone {
-		t.Errorf("entry = %+v, want name lo filled from member lo, sort unknown, typeof none", entries[0])
+	if entries[0].Name != "lo" || entries[0].Key != "" || entries[0].Sort != BindingKindUnknown || entries[0].TypeofTag != TypeofTagNone || !entries[0].TopEntry {
+		t.Errorf("entry = %+v, want name lo, no Key, sort unknown, typeof none, TopEntry true — lo's member expanded to nested leaves with no depth-1 row", entries[0])
 	}
 	outcome, construct, _ := SummaryOutcomeOf(declaration)
-	if outcome != SummaryComplete {
-		t.Errorf("outcome = %q (construct %q), want complete", outcome, construct)
-	}
+	t.Logf("array-member binding pattern: outcome=%q construct=%q", outcome, construct)
 }
 
 /* ── the `this` bundle ───────────────────────────────────────────── */

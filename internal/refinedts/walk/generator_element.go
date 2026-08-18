@@ -286,7 +286,7 @@ func delegatedElementOf(ctx *FlowContext, env Env, iterable *ast.Node) *abstract
 // too: tsc infers `Generator<number, void, unknown>` for a body
 // yielding numbers, and argument zero is the same T either way.
 func generatorDeclaredElement(ctx *FlowContext, call *ast.Node) (*checker.Type, bool) {
-	t := ctx.P.Checker.GetTypeAtLocation(call)
+	t := typereading.TypeAtLocation(ctx.P.Checker, call)
 	if t == nil {
 		return nil, false
 	}

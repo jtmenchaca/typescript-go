@@ -125,3 +125,62 @@ func TestWholeRecordUseAt_APlainCallArgumentAlreadyHandsOver(t *testing.T) {
 		t.Errorf("`g(p)` classified as %v, want recordParameterHandedOver — call-argument positions already serve; the residual is elsewhere", use)
 	}
 }
+
+// recordParameterUseOneFlatOneNestedMembers is a member list with a
+// FLAT leaf ("lo") and a NESTED family ("inner.deep") — "inner" itself
+// has no depth-1 row, only its child does, the shape a union- or
+// interface-typed member expands to (nestedMemberLeavesOf's own
+// arms) — getCartesianPosition.tsx's own "parentViewBox" shape in
+// miniature.
+func recordParameterUseOneFlatOneNestedMembers() []recordParamMember {
+	return []recordParamMember{
+		{Key: "lo", Path: []string{"lo"}, SlotName: "p.lo", Sort: BindingKindNumber},
+		{Key: "deep", Path: []string{"inner", "deep"}, SlotName: "p.inner.deep", Sort: BindingKindNumber},
+	}
+}
+
+// TestWholeRecordUseAt_ADestructuredNestedRootLowersAsMembersOnly pins
+// the FIX this pass adds: `const { lo, inner } = p;` where "inner" has
+// no depth-1 row of its own (only "inner.deep" does) used to refuse the
+// WHOLE body (destructuresOnlyDeclaredMembers checked "inner" against
+// `declared`, found no exact match, and returned false for every
+// element). It now classifies as members-only: "lo" binds its precise
+// leaf, "inner" binds an untracked alias the caller havocs the leaves
+// under (appendRecordParameterEntries), and the scalar sibling keeps
+// its exact bind.
+func TestWholeRecordUseAt_ADestructuredNestedRootLowersAsMembersOnly(t *testing.T) {
+	use := recordParameterUseFixture(t,
+		"function f(p: { lo: number, inner: { deep: number } }) { const { lo, inner } = p; return lo; }",
+		recordParameterUseOneFlatOneNestedMembers())
+	if use != recordParameterMembersOnly {
+		t.Errorf("`const { lo, inner } = p` classified as %v, want recordParameterMembersOnly — a nested-root element must not refuse the whole body", use)
+	}
+}
+
+// TestWholeRecordUseAt_ARenamedNestedRootLowersAsMembersOnly pins the
+// RENAMED nested-root shape getCartesianPosition.tsx actually uses
+// (`parentViewBox: parentViewBoxFromOptions`): the PropertyName reads
+// the declared key, the bound local takes any other name.
+func TestWholeRecordUseAt_ARenamedNestedRootLowersAsMembersOnly(t *testing.T) {
+	use := recordParameterUseFixture(t,
+		"function f(p: { lo: number, inner: { deep: number } }) { const { lo, inner: alias } = p; return lo; }",
+		recordParameterUseOneFlatOneNestedMembers())
+	if use != recordParameterMembersOnly {
+		t.Errorf("`const { lo, inner: alias } = p` classified as %v, want recordParameterMembersOnly", use)
+	}
+}
+
+// TestWholeRecordUseAt_ADefaultedNestedRootStillRefuses pins the
+// boundary destructuresOnlyDeclaredMembers' own doc states: a nested
+// root has no source SLOT to test definedness against, so a DEFAULTED
+// nested-root element (`inner = {}`) stays refused — unlike a defaulted
+// DECLARED-LEAF element, which destructuresOnlyDeclaredMembers already
+// admits (its own doc, the earlier landed half of this fix wave).
+func TestWholeRecordUseAt_ADefaultedNestedRootStillRefuses(t *testing.T) {
+	use := recordParameterUseFixture(t,
+		"function f(p: { lo: number, inner: { deep: number } }) { const { lo, inner = {} } = p; return lo; }",
+		recordParameterUseOneFlatOneNestedMembers())
+	if use != recordParameterUnreadable {
+		t.Errorf("`const { inner = {} } = p` classified as %v, want recordParameterUnreadable — a nested root has no slot to default against", use)
+	}
+}

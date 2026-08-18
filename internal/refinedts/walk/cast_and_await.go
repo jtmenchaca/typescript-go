@@ -208,7 +208,7 @@ func EvaluateAwait(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstra
 // nothing. The default-lib check is what keeps a user type spelled
 // `Promise` from being read as the built-in one.
 func settledTypeOfOperand(ctx *FlowContext, operand *ast.Node) (abstractdomain.AbstractValue, bool) {
-	t := ctx.P.Checker.GetTypeAtLocation(operand)
+	t := typereading.TypeAtLocation(ctx.P.Checker, operand)
 	if (t.ObjectFlags() & checker.ObjectFlagsReference) == 0 {
 		return abstractdomain.AbstractValue{}, false
 	}
@@ -326,8 +326,8 @@ func EvaluateCast(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	// on `number | undefined` preserves the sort, and a maybe wrapper
 	// survives the `!` — the assertion is the developer's claim, not
 	// a proof
-	from := primitives.SortOfPresent(ctx.P.Checker, ctx.P.Checker.GetTypeAtLocation(innermost))
-	to := primitives.SortOfPresent(ctx.P.Checker, ctx.P.Checker.GetTypeAtLocation(e))
+	from := primitives.SortOfPresent(ctx.P.Checker, typereading.TypeAtLocation(ctx.P.Checker, innermost))
+	to := primitives.SortOfPresent(ctx.P.Checker, typereading.TypeAtLocation(ctx.P.Checker, e))
 	value := evaluateExpression(ctx, env, innermost)
 	// a cast to a BARE type parameter states no sort at all, so there
 	// is no crossing to demote for. `x as T` with T unconstrained does
@@ -376,7 +376,7 @@ func EvaluateCast(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 // A parameter WITH a constraint is not answered here — its constraint
 // is a real stated type and the crossing test judges it.
 func castsToBareTypeParameter(ctx *FlowContext, e *ast.Node) bool {
-	target := ctx.P.Checker.GetTypeAtLocation(e)
+	target := typereading.TypeAtLocation(ctx.P.Checker, e)
 	parts := []*checker.Type{target}
 	if target.IsUnion() {
 		parts = target.Types()

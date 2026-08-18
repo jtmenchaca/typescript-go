@@ -259,6 +259,57 @@ func sequenceEffectOf(context *LoweringContext, e *ast.Node, inSequence bool) (k
 			}
 		}
 	}
+	// `String(x)` called AS A FUNCTION (never `new String(x)`, which this
+	// syntax cannot spell — a `new` node never reaches this reader) is
+	// exactly ToString(x) (sec-string-constructor-string-value,
+	// tmp/ecma262/spec.html: "Let string be ? ToString(value)." with
+	// NewTarget undefined). ToString is TOTAL — no throw completion — over
+	// every operand sort this walk can name a slot for: a Number
+	// (Number::toString), a String (identity, ToString step 1), and the
+	// walk's own number sort ALSO carries every boolean (ToString steps
+	// 5-6, "true"/"false" exactly). It throws only for a Symbol
+	// (sec-tostring step 2) and, for an Object, runs the object's own
+	// ToPrimitive chain (step 10) — neither of which this walk ever tracks
+	// as a number- or string-sorted slot, so an operand this reader can
+	// already lower through EffectOf or sequenceEffectOf is, by
+	// construction, never one of those two refused shapes.
+	//
+	// The CLAIM stops at the sort, exactly as templateSpanEffect's own
+	// number-substitution widening does (see that function's doc): no
+	// digit-shape transfer exists on this grammar's wire to compute the
+	// exact decimal text of a runtime number, so a number/boolean operand
+	// widens to the string root C* (known sort, unknown value) rather than
+	// an exact tuple. A STRING operand is the one case ToString is the
+	// identity (step 1), so it rides through unchanged and exact.
+	if stringOp, ok := stringConstructorCallOf(head); ok {
+		if operandEffect, operandOk := sequenceEffectOf(context, stringOp, true /*inSequence*/); operandOk {
+			// the operand is ALREADY a string — ToString(value) for a
+			// String value returns value unchanged (sec-tostring step 1)
+			return operandEffect, true
+		}
+		if _, operandOk := EffectOf(context, stringOp); operandOk {
+			// the operand is number- or boolean-sorted — ToString's own
+			// Number::toString / "true"/"false" rows apply, and every one
+			// of them is a String; the sort is all this grammar can carry
+			return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.Strings}, true
+		}
+		// `null`/`undefined`: ToString answers the exact literal word
+		// (sec-tostring steps 3-4), read directly rather than through
+		// either sort reader above, since neither EffectOf nor
+		// sequenceEffectOf has a slot reading for the absent keywords
+		if IsAbsentKeyword(stringOp) {
+			word := "undefined"
+			if Unwrapped(stringOp).Kind == ast.KindNullKeyword {
+				word = "null"
+			}
+			return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.StringTuple(word)}, true
+		}
+		// a Symbol operand THROWS (step 2) and an Object operand runs its
+		// own ToPrimitive/toString/valueOf chain (step 10) — neither is a
+		// spec-total read, so the call keeps the decline it had before
+		// this arm existed, exactly as an ungated operand shape always
+		// did.
+	}
 	// a CALL inside the sequence — `"n=" + this.name()`, a template
 	// substitution `${this.name()}` — hoists to a temp-slot call statement
 	// ahead of this statement, and the concatenation reads the temp
@@ -385,5 +436,91 @@ func templateSpanEffect(context *LoweringContext, span *ast.Node) (kernelbridge.
 	if _, ok := EffectOf(context, span); ok {
 		return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.Strings}, true
 	}
-	return kernelbridge.LoopEffect{}, false
+	return templateSpanOpaqueCallEffect(context, span)
+}
+
+// templateSpanOpaqueCallEffect is the LAST reading of a CALL
+// substitution — `${getClipPathId(stackId, index)}` whose callee no
+// stronger route served (the sequence route's HoistCallEffect needs a
+// COMPLETE blob). The call hoists to a temp through the same statement
+// door every statement-position call takes (HoistOpaqueCallTemp), its
+// statements emitted ahead of the statement holding the template, and
+// the span contributes the temp's read.
+//
+// THE GATES, each load-bearing:
+//
+//   - the SORT is read before anything allocates: only a call whose
+//     resolved return type spells string or number rides. ToString is
+//     total on both (sec-tostring, tmp/ecma262/spec.html); an
+//     unknown-sorted result could be a Symbol, whose ToString throws,
+//     and keeps the decline the span always had.
+//   - a RESOLVABLE callee's blob writes PRECISE values, and running it
+//     ahead of the statement is a reordering — the same ordering gate
+//     HoistCallEffect wears (hoistingIsOrderSafe) must prove no slot
+//     the statement reads around the call is one the call writes.
+//   - a BODY-LOCAL CLOSURE callee is refused outright: its served
+//     statement (ClosureCallStatementOf) writes exact capture exits,
+//     and with no resolvable declaration the ordering gate has no
+//     write set to measure — so the reorder cannot be proved safe.
+//
+// An UNRESOLVABLE callee past those gates reaches only tiers whose
+// writes are widenings — the imported-hook and receiver recognizers,
+// the model tiers' joins, the opaque havoc's unknowns — and a widening
+// emitted early can only weaken what an earlier span reads, never
+// falsify it.
+//
+// A string-sorted temp contributes its own read (the callee's ret
+// out-state verbatim — a serving tier's value, or the havoc floor's
+// unknown). A number-sorted one contributes the sort-only string root,
+// the same ToString widening the plain number span above takes.
+func templateSpanOpaqueCallEffect(context *LoweringContext, span *ast.Node) (kernelbridge.LoopEffect, bool) {
+	head := Unwrapped(span)
+	if operand, isAwait := AwaitedOperandOf(head); isAwait {
+		head = Unwrapped(operand)
+	}
+	if head == nil || !ast.IsCallExpression(head) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	sort, _ := ResolvedExpressionSort(hoistCheckerOf(context), Unwrapped(span))
+	if sort != BindingKindString && sort != BindingKindNumber {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if _, isLocalClosure := localClosureOf(context, head.AsCallExpression().Expression); isLocalClosure {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if callee := summaryCalleeOf(context, head); callee != nil && !hoistingIsOrderSafe(context, head, callee) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	temp, hoisted := HoistOpaqueCallTemp(context, span)
+	if !hoisted {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if temp < len(context.Sorts) && context.Sorts[temp] == BindingKindString {
+		return varEffect(temp), true
+	}
+	return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectConst, Set: refinementsets.Strings}, true
+}
+
+// stringConstructorCallOf answers the ONE argument of a bare `String(x)`
+// call — the global `String` identifier called directly, never through a
+// property access (`foo.String(x)` is a different callee) and never as
+// `new String(x)` (a NewExpression is a different AST kind this reader's
+// caller never reaches). Exactly one argument: `String()` (zero
+// arguments) and a rest/spread call are both left alone, since neither is
+// the one-argument ToString row the spec clause states.
+func stringConstructorCallOf(head *ast.Node) (*ast.Node, bool) {
+	if !ast.IsCallExpression(head) {
+		return nil, false
+	}
+	call := head.AsCallExpression()
+	if call.QuestionDotToken != nil || !ast.IsIdentifier(call.Expression) || call.Expression.Text() != "String" {
+		return nil, false
+	}
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+		return nil, false
+	}
+	if ast.IsSpreadElement(call.Arguments.Nodes[0]) {
+		return nil, false
+	}
+	return call.Arguments.Nodes[0], true
 }

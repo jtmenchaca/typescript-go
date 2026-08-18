@@ -29,6 +29,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // nodeDigestClasses: the two hashing classes whose update/digest pair
@@ -62,7 +63,7 @@ func declaredInNodeTypes(symbol *ast.Symbol) bool {
 // class it names was not declared by @types/node — a user's own class
 // called Hash answers nothing here.
 func nodeDigestClassOf(ctx *FlowContext, receiver *ast.Node) (string, bool) {
-	t := ctx.P.Checker.GetTypeAtLocation(receiver)
+	t := typereading.TypeAtLocation(ctx.P.Checker, receiver)
 	if t == nil {
 		return "", false
 	}

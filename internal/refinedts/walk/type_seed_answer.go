@@ -32,7 +32,7 @@ func TypeSeedAnswer(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKer
 	if anyWriteReachesToken(p, token) {
 		return Answer{}, false
 	}
-	worn, ok := typereading.ReadHostType(p.Checker, p.Checker.GetTypeAtLocation(token), token, 0)
+	worn, ok := typereading.ReadHostType(p.Checker, typereading.TypeAtLocation(p.Checker, token), token, 0)
 	if !ok || worn.Kind == abstractdomain.KindUnknown {
 		return Answer{}, false
 	}
@@ -82,7 +82,7 @@ func AnyWrittenNames(p *program.CheckerProgram) map[string][]*ast.Node {
 							found[bin.Left.Text()] = append(found[bin.Left.Text()], bin.Left)
 						}
 					}()
-					if (p.Checker.GetTypeAtLocation(bin.Right).Flags() & checker.TypeFlagsAny) != 0 {
+					if (typereading.TypeAtLocation(p.Checker, bin.Right).Flags() & checker.TypeFlagsAny) != 0 {
 						found[bin.Left.Text()] = append(found[bin.Left.Text()], bin.Left)
 					}
 				}()

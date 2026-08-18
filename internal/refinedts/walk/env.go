@@ -100,17 +100,30 @@ func (e *EnvState) ensureOwned() {
 }
 
 // Set writes a binding. Panics on a nil handle, as the nil map did.
+// The sorted-name cache survives a same-key update — the key set is
+// unchanged, and staling it made every range-then-write pass rebuild
+// and re-sort the names (the walk's hottest pattern).
 func (e *EnvState) Set(name string, v abstractdomain.AbstractValue) {
 	e.ensureOwned()
+	if e.keys != nil {
+		if _, present := e.m[name]; !present {
+			e.keys = nil
+		}
+	}
 	e.m[name] = v
-	e.keys = nil
 }
 
 // Delete removes a binding. Panics on a nil handle, as the nil map did.
+// Deleting an absent key changes no key set, so the sorted-name cache
+// survives it too.
 func (e *EnvState) Delete(name string) {
 	e.ensureOwned()
+	if e.keys != nil {
+		if _, present := e.m[name]; present {
+			e.keys = nil
+		}
+	}
 	delete(e.m, name)
-	e.keys = nil
 }
 
 // Len is the entry count. Nil-safe.

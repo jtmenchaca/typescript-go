@@ -56,6 +56,13 @@ type recordParamMember struct {
 	// because the child is only there at all when inner is. Absence
 	// still rides the entry state, never the sort, at every depth.
 	MayBeAbsent bool
+	// ArrayPair: this member is one of the two an ARRAY-VALUED element
+	// expands to (arrayElementPairMembers) — the inner array's own
+	// "len"/"elem" pair — rather than a record member. The flag is what
+	// keeps a record member that happens to be spelled "len" or "elem"
+	// from being read as the inner pair: the `.length`→".len" mapping
+	// and the inner-pair recognizers gate on it.
+	ArrayPair bool
 }
 
 // scalarMemberListOf reads a list of TYPE ELEMENTS as the member list a
@@ -329,10 +336,36 @@ func scalarMemberListWithCheckerIn(
 		// read — mentions a type parameter, or resolves to nothing
 		// readable — keeps today's single unknown-sorted leaf below, never
 		// a refusal.
+		//
+		// THE RUNNING-TOTAL GUARD. instantiatedReferenceMembersOf's own
+		// width check (ir_summary_instantiated_members.go) only refuses an
+		// instantiation wider than summarySlotBudget BY ITSELF — it has no
+		// view of how many leaves this holder's OTHER members already
+		// contributed. RechartsRootState is the shape that exposed the gap:
+		// sixteen members, each `ReturnType<typeof reducer>`, each one
+		// individually well under the budget, but their SUM crosses it —
+		// so every one of the sixteen expanded, the holder's total flew
+		// past summarySlotBudget, and summarySlotLayoutOf's own final
+		// width check declined the WHOLE BODY ("a body past the slot
+		// budget") where the pre-expansion reading answered a single
+		// unknown-sorted leaf per member and the body lowered same as
+		// always. A decline determines nothing — strictly worse than the
+		// unknown-sorted leaf it replaced. So this loop checks the running
+		// total ITSELF, the one place that sees every sibling contributed
+		// so far: a nested expansion that would push len(out) past the
+		// budget is discarded and the member falls back to the single
+		// unknown-sorted leaf below, exactly the pre-expansion reading —
+		// claims nothing, costs nothing, keeps the body serving. Members
+		// read BEFORE the one that overflows keep their own expansions;
+		// only the member that would tip the total over falls back, and
+		// every member after it does too (out no longer grows from this
+		// arm once the budget is spent).
 		if nested, nestedOk := nestedMemberLeavesOf(
 			c, holder, key, signature.Type, parameterNames, mayBeAbsent, visiting); nestedOk {
-			out = append(out, nested...)
-			continue
+			if len(out)+len(nested) < summarySlotBudget {
+				out = append(out, nested...)
+				continue
+			}
 		}
 		// the member's sort, or UNKNOWN where this reading cannot state
 		// one. Two cases land on unknown, argued above: an annotation that
@@ -373,6 +406,20 @@ func scalarMemberListWithCheckerIn(
 		return nil, true
 	}
 	return out, true
+}
+
+// flowContextOfChecker wraps a bare checker as the minimal *FlowContext
+// arrayParameterElementMembers needs to resolve a NAMED-TYPE array
+// element (`sourceLinks: SankeyNode[]`) — the same wrapping the
+// TypeReferenceNode arm below already builds inline for
+// declaredTypeMembersOf. A nil checker answers a nil context, which
+// arrayParameterElementMembers's own named-type call
+// (namedTypeMembersOf) already declines on.
+func flowContextOfChecker(c *checker.Checker) *FlowContext {
+	if c == nil {
+		return nil
+	}
+	return &FlowContext{P: &program.CheckerProgram{Checker: c}}
 }
 
 // nestedMemberLeavesOf is ONE member's contribution where its own
@@ -423,9 +470,32 @@ func scalarMemberListWithCheckerIn(
 // case is unreadable too and falls back the same way — sound, and no
 // different from any other unresolvable named type.
 //
-// Anything else the member's annotation could be — a scalar keyword, an
-// array, a union — is not this function's business; it answers (nil,
-// false) and the caller's own scalar/unknown reading applies.
+// AN ARRAY-VALUED MEMBER (`ticks: number[]`, Sankey.tsx's `sourceLinks:
+// number[]` on SankeyNode) is a FAMILY too, one this function did not
+// expand before: `p.ticks.length` (axisSelectors' getDomainDefinition
+// callers) and `node.sourceLinks.length` (Sankey's relax loops) both
+// need the array's own ".len"/".elem" pair spelled under the member's
+// holder, exactly as an array-typed PARAMETER's own element expands
+// (arrayElementPairMembers, ir_array_nested_elements.go — READ-ONLY,
+// this agent's own territory calls it rather than re-deriving it). The
+// element's OWN shape (scalar, record, or a further nested array)
+// recurses through arrayParameterElementMembers inside that reader, so
+// `sourceLinks: LinkDataItemDy[]` with a record element expands its own
+// members under "p.sourceLinks.elem.<member>" for free — no separate
+// case is needed here for a record- or array-elemented member array,
+// only the ONE call into the shared reader. `elementTypeNodeOf`
+// recognizes `T[]`, `readonly T[]`, `Array<T>`, and `ReadonlyArray<T>`
+// — the same array-type vocabulary the parameter-level reader uses —
+// so a member array wears exactly the annotations an array parameter
+// does. `arrayElementPairMembers` never declines (a scalar or
+// unreadable element still answers the plain "len"/"elem" pair), so
+// this arm always contributes once the annotation IS an array type; an
+// annotation that is NOT one falls through to the type-reference/type-
+// literal cases below unaffected.
+//
+// Anything else the member's annotation could be — a scalar keyword, a
+// union — is not this function's business; it answers (nil, false) and
+// the caller's own scalar/unknown reading applies.
 func nestedMemberLeavesOf(
 	c *checker.Checker,
 	holder string,
@@ -445,10 +515,27 @@ func nestedMemberLeavesOf(
 	case ast.IsTypeLiteralNode(annotation):
 		children, readable = scalarMemberListWithCheckerIn(
 			c, childHolder, annotation.AsTypeLiteralNode().Members.Nodes, nil, false, visiting)
+	case elementTypeNodeOf(annotation) != nil:
+		children, readable = arrayElementPairMembers(
+			flowContextOfChecker(c), c, annotation, elementTypeNodeOf(annotation), childHolder, visiting)
 	case ast.IsTypeReferenceNode(annotation):
 		reference := annotation.AsTypeReferenceNode()
 		if reference.TypeArguments != nil && len(reference.TypeArguments.Nodes) > 0 {
-			return nil, false
+			// a NESTED member carrying type arguments (`options:
+			// ReturnType<typeof optionsReducer>` on RechartsRootState) — the
+			// same INSTANTIATED reading namedTypeMembersOf takes at the entry
+			// position (instantiatedReferenceMembersOf,
+			// ir_summary_instantiated_members.go), tried here so a member
+			// whose own annotation needs the checker's substitution, not just
+			// its declaration's written syntax, still expands rather than
+			// falling back to a single unknown-sorted leaf. `c == nil` leaves
+			// this unreadable, same as the plain-reference arm below.
+			if c == nil {
+				return nil, false
+			}
+			children, readable = instantiatedReferenceMembersOf(
+				flowContextOfChecker(c), childHolder, annotation)
+			break
 		}
 		if !isResolvableTypeName(reference.TypeName) || c == nil {
 			return nil, false
@@ -470,11 +557,19 @@ func nestedMemberLeavesOf(
 			// Key is this leaf's OWN name — the child's own Key is
 			// unchanged by being nested one level deeper, since Path's
 			// last segment (child.Key) is still path's last segment
-			Key:         child.Key,
-			Path:        path,
-			SlotName:    child.SlotName,
-			Sort:        child.Sort,
-			TypeofTag:   child.TypeofTag,
+			Key:       child.Key,
+			Path:      path,
+			SlotName:  child.SlotName,
+			Sort:      child.Sort,
+			TypeofTag: child.TypeofTag,
+			// ArrayPair rides through unchanged: a "len"/"elem" leaf nested
+			// under an array-typed member (this function's own array arm
+			// above) is still that same pair one level deeper, and the
+			// ".length"→".len" mapping and hasNestedElementPair
+			// (ir_array_nested_elements.go) both gate on this flag — dropping
+			// it here would silently un-mark the pair for every member array
+			// this nesting reaches.
+			ArrayPair:   child.ArrayPair,
 			MayBeAbsent: parentMayBeAbsent || child.MayBeAbsent,
 		})
 	}

@@ -872,6 +872,36 @@ in full before touching code.`
   editing it, anchor on function names never line numbers, and expect
   helpers you planned to write to already exist under the names above.
 
+## The 2026-08-17 wave facts
+
+- A porous "call X" row is always evidence about X's OWN body, never
+  the caller's serving: SummaryCallOrHavocNamed's summary tier
+  requires SummaryOutcomeOf(callee) == SummaryComplete
+  (ir_summary_call_statement.go). Diagnose the callee in isolation
+  first.
+- GetTypeAtLocation on a bare declaration name answers `any`; the
+  SAME ask at a control-flow-reached READ occurrence answers the
+  narrowed type from the assignments. A local's write-derived sort
+  comes from its read sites, not its declaration.
+- The census's construct names spell the SYMPTOM statement (the
+  floor's first-return scan), not the blocking construct — a large
+  "return inside X" tally can be one upstream sort/layout gap
+  (declaredParamSort's keyword-only recognition was the 2026-08-17
+  instance). Verify with RelowerSummaryBody + SummaryOutcomeOf on the
+  isolated shape before reading position gates.
+- "a binding-pattern parameter" is spelled by TWO routes: the plain
+  declared-parameter layout (ir_summary_body_lowering_layout.go) and
+  the arrow-argument route (ir_summary_body_lowering_parameters.go,
+  whose string carries "…of an arrow argument"). Census rows under
+  the short string are the plain family.
+- Agents do not compile or test. Workers read, edit, and write pins
+  only, reporting which tests they expect to fail pre-fix; the parent
+  session runs one build and one suite per batch. Concurrent go
+  builds from several workers serialize on the build-cache lock and
+  jam the machine (observed 2026-08-17).
+- Never redirect shell output (>, >>, 2>, &>) — a hook rejects it;
+  the tool result already captures both streams.
+
 ## Change log
 
 - Seeded 2026-08-15 from the three fix waves' reports (11 + 8 + 6
@@ -896,3 +926,7 @@ in full before touching code.`
   method_this_writes entry above rewritten from "open question" to
   the landed ObjectLiteralMethodWalkCall/ClassMethodWalkCall pair
   with the serving-order rule.
+- 2026-08-17, the census waves: "The 2026-08-17 wave facts" section —
+  callee-completeness precondition, read-site narrowing, symptom-named
+  census constructs, the two binding-pattern routes, the
+  agents-never-compile rule, and the no-redirection rule.

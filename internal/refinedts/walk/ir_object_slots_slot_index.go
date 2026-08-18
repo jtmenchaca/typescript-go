@@ -69,10 +69,51 @@ func PathSlotIndexOf(context *LoweringContext, node *ast.Node) (int, bool) {
 	if root, leaf, ok := symbolKeyedLeafOf(context, head); ok {
 		return slotIndexOfName(context, root+"."+leaf)
 	}
-	if spelling, ok := arrayElementMemberLeafOf(head); ok {
-		return slotIndexOfName(context, spelling)
+	if holder, member, ok := arrayElementMemberLeafOf(head); ok {
+		if index, found := slotIndexOfName(context, holder.Text()+arrayElemSuffix+"."+member); found {
+			return index, true
+		}
+		// `xs[i].length` over an element that is itself an array reads the
+		// inner pair's len slot — the same ".length"→".len" mapping the
+		// flattened array's own length read wears. Tried only after the
+		// literal spelling missed, so a record element declaring its own
+		// "length" member keeps it; gated on the pair itself, so a record
+		// member merely spelled "len" is never served for a length read.
+		if member == "length" {
+			if local, expanded := memberExpandedArrayOf(context, holder); expanded && hasNestedElementPair(local) {
+				return slotIndexOfName(context, local.ElemSlotName+arrayLenSuffix)
+			}
+		}
+		return 0, false
 	}
 	return 0, false
+}
+
+// memberExpandedArrayOf resolves an identifier NODE to the flattened
+// array PARAMETER it names, where that array's element expanded to
+// members (a record's leaves, or the inner array pair) — the shapes
+// whose scalar "xs.elem" slot does not exist, so the two-slot pair
+// resolution misses and the parameter's own layout is the authority.
+func memberExpandedArrayOf(context *LoweringContext, holder *ast.Node) (ArrayLocal, bool) {
+	if context == nil || context.Flow == nil || holder == nil || !ast.IsIdentifier(holder) {
+		return ArrayLocal{}, false
+	}
+	c := checkerOf(context.Flow)
+	if c == nil {
+		return ArrayLocal{}, false
+	}
+	symbol := symbolAt(c, holder)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return ArrayLocal{}, false
+	}
+	if !ast.IsParameterDeclaration(symbol.ValueDeclaration) {
+		return ArrayLocal{}, false
+	}
+	local, flattened := arrayParamSlotsIn(context.Flow, symbol.ValueDeclaration)
+	if !flattened || len(local.ElementMembers) == 0 {
+		return ArrayLocal{}, false
+	}
+	return local, true
 }
 
 // rootIdentifierOf answers the root IDENTIFIER node a plain or
@@ -129,8 +170,26 @@ func elementAliasSlotIndexOf(context *LoweringContext, rootNode *ast.Node, membe
 		return 0, false
 	}
 	for _, candidate := range target.ElementMembers {
+		// a member matches at its OWN level only: a nested leaf (Path
+		// deeper than one) is not a flat member of the element, and a bare
+		// Key match would serve `p.deep` the "inner.deep" slot — a wrong
+		// answer, not a weak one
+		if len(candidate.Path) != 1 {
+			continue
+		}
 		if candidate.Key == member {
 			return slotIndexOfName(context, candidate.SlotName)
+		}
+	}
+	// `p.length` over an element that is itself an array reads the inner
+	// pair's len — the ".length"→".len" mapping the flattened array's own
+	// length read wears, gated on the pair (ArrayPair) so a record member
+	// merely spelled "len" is never served for a length read
+	if member == "length" {
+		for _, candidate := range target.ElementMembers {
+			if candidate.ArrayPair && len(candidate.Path) == 1 && candidate.Path[0] == "len" {
+				return slotIndexOfName(context, candidate.SlotName)
+			}
 		}
 	}
 	return 0, false
@@ -175,13 +234,33 @@ func elementAliasTargetOf(context *LoweringContext, rootNode *ast.Node) (ArrayLo
 	if declaration == nil {
 		return ArrayLocal{}, false
 	}
+	return elementAliasTargetOfDeclaration(context.Flow, c, declaration, nil)
+}
+
+// elementAliasTargetOfDeclaration is the admission keyed on the alias's
+// own DECLARATION node — the memoized half elementAliasTargetOf resolves
+// to, callable directly where the SOURCE of another alias is itself a
+// declaration (`const node = row[j]` resolving `row`). `visiting`
+// carries the declarations already on this admission's path: a source
+// chain that circles back to itself refuses at the revisit instead of
+// recursing forever.
+func elementAliasTargetOfDeclaration(
+	flow *FlowContext, c *checker.Checker, declaration *ast.Node, visiting map[*ast.Node]struct{},
+) (ArrayLocal, bool) {
 	elementAliasedLocalsMu.Lock()
 	held, remembered := elementAliasedLocals[declaration]
 	elementAliasedLocalsMu.Unlock()
 	if remembered {
 		return held, held.Name != ""
 	}
-	local, admitted := admitElementAlias(context.Flow, c, declaration)
+	if _, inFlight := visiting[declaration]; inFlight {
+		return ArrayLocal{}, false
+	}
+	if visiting == nil {
+		visiting = map[*ast.Node]struct{}{}
+	}
+	visiting[declaration] = struct{}{}
+	local, admitted := admitElementAlias(flow, c, declaration, visiting)
 	if !admitted {
 		local = ArrayLocal{}
 	}
@@ -219,7 +298,9 @@ func aliasCandidateDeclarationOf(c *checker.Checker, rootNode *ast.Node) *ast.No
 // initializer shape, the source's own flattening, and the use scan — so a
 // declaration that fails any one keeps the name resolving through no
 // route, which is the honest porous answer AGENT-BRIEF's step 4 pins.
-func admitElementAlias(flow *FlowContext, c *checker.Checker, declaration *ast.Node) (ArrayLocal, bool) {
+func admitElementAlias(
+	flow *FlowContext, c *checker.Checker, declaration *ast.Node, visiting map[*ast.Node]struct{},
+) (ArrayLocal, bool) {
 	decl := declaration.AsVariableDeclaration()
 	if decl.Initializer == nil || decl.Name() == nil || !ast.IsIdentifier(decl.Name()) {
 		return ArrayLocal{}, false
@@ -243,11 +324,23 @@ func admitElementAlias(flow *FlowContext, c *checker.Checker, declaration *ast.N
 	if sourceSymbol == nil || sourceSymbol.ValueDeclaration == nil {
 		return ArrayLocal{}, false
 	}
-	parameter := sourceSymbol.ValueDeclaration
-	if !ast.IsParameterDeclaration(parameter) {
-		return ArrayLocal{}, false
+	source := sourceSymbol.ValueDeclaration
+	var local ArrayLocal
+	var flattened bool
+	switch {
+	case ast.IsParameterDeclaration(source):
+		local, flattened = arrayParamSlotsIn(flow, source)
+	case ast.IsVariableDeclaration(source) &&
+		source.Parent != nil && ast.IsVariableDeclarationList(source.Parent) &&
+		(source.Parent.Flags&ast.NodeFlagsConst) != 0:
+		// the source is itself an admitted element alias (`const row =
+		// xs[i]` feeding `const node = row[j]`) binding an inner ARRAY:
+		// the aliased element's own derived layout is what this alias's
+		// reads live in — composed prefixes, no new slot anywhere
+		if outer, isAlias := elementAliasTargetOfDeclaration(flow, c, source, visiting); isAlias {
+			local, flattened = elementArrayLocalOf(outer)
+		}
 	}
-	local, flattened := arrayParamSlotsIn(flow, parameter)
 	if !flattened || len(local.ElementMembers) == 0 {
 		return ArrayLocal{}, false
 	}
@@ -263,15 +356,15 @@ func admitElementAlias(flow *FlowContext, c *checker.Checker, declaration *ast.N
 	keys := make([]ObjectLocalKey, 0, len(local.ElementMembers))
 	for _, member := range local.ElementMembers {
 		keys = append(keys, ObjectLocalKey{
-			Path:      []string{member.Key},
+			Path:      member.Path,
 			Key:       member.Key,
-			SlotName:  aliasName + "." + member.Key,
+			SlotName:  aliasName + "." + strings.Join(member.Path, "."),
 			Declared:  true,
 			Sort:      member.Sort,
 			TypeofTag: member.TypeofTag,
 		})
 	}
-	if !aliasUsesAdmissible(body, declaration, aliasName, keys) {
+	if !aliasUsesAdmissible(body, declaration, aliasName, keys, hasNestedElementPair(local)) {
 		return ArrayLocal{}, false
 	}
 	return local, true
@@ -292,15 +385,28 @@ func admitElementAlias(flow *FlowContext, c *checker.Checker, declaration *ast.N
 //   - a bare occurrence as a direct CALL ARGUMENT — a hand-over. The
 //     opaque havoc enumerator names the aliased element's member
 //     slots for exactly this shape (elementAliasHavocSlots), so the
-//     callee's possible writes through the reference are covered.
+//     callee's possible writes through the reference are covered;
+//   - where the aliased element is itself an ARRAY (`nestedPair`): an
+//     index READ (`p[j]`, the inner elem join) and a `p.length` READ
+//     (the inner len join). The WRITE side of both stays refused —
+//     `p[j] = v`, `p.length = k`, and their stepped forms would need
+//     the join-write route these shapes do not have yet, and `delete
+//     p[j]` changes a length no slot here spells.
 //
-// Everything else — `return p`, `const q = p`, `p[e]`, `delete p.k`,
-// a reassignment of p itself — still refuses the aliasing whole.
-func aliasUsesAdmissible(body *ast.Node, declaration *ast.Node, name string, keys []ObjectLocalKey) bool {
+// Everything else — `return p`, `const q = p`, `delete p.k`, a
+// reassignment of p itself — still refuses the aliasing whole.
+func aliasUsesAdmissible(
+	body *ast.Node, declaration *ast.Node, name string, keys []ObjectLocalKey, nestedPair bool,
+) bool {
 	declared := declaredLeafPaths(keys)
 	declarationName := declaration.AsVariableDeclaration().Name()
 	ok := true
 	var visit func(node *ast.Node) bool
+	visitIfPresent := func(node *ast.Node) {
+		if node != nil {
+			visit(node)
+		}
+	}
 	visit = func(node *ast.Node) bool {
 		if !ok {
 			return true
@@ -311,9 +417,75 @@ func aliasUsesAdmissible(body *ast.Node, declaration *ast.Node, name string, key
 				ok = false
 				return true
 			}
+			// `delete p[j]` shrinks the inner array and leaves a hole —
+			// neither is a fact the joined pair can carry
+			if _, isIndex := indexAccessOf(operand, name); isIndex {
+				ok = false
+				return true
+			}
+		}
+		// a WRITE through the pair shapes — `p[j] = v`, `p.length = k` —
+		// refuses: no join-write route exists for either spelling here,
+		// and a length write truncates
+		if ast.IsBinaryExpression(node) {
+			bin := node.AsBinaryExpression()
+			if bin.OperatorToken.Kind >= ast.KindFirstAssignment &&
+				bin.OperatorToken.Kind <= ast.KindLastAssignment {
+				left := Unwrapped(bin.Left)
+				if _, isIndex := indexAccessOf(left, name); isIndex {
+					ok = false
+					return true
+				}
+				if root, path, isPath := propertyPathAdmittingRootOptionalStep(left); isPath &&
+					root == name && len(path) == 1 && path[0] == "length" {
+					ok = false
+					return true
+				}
+			}
+		}
+		// `p[j]++` / `--p.length` — the same writes, spelled as steps
+		if ast.IsPrefixUnaryExpression(node) || ast.IsPostfixUnaryExpression(node) {
+			var operator ast.Kind
+			var operand *ast.Node
+			if ast.IsPrefixUnaryExpression(node) {
+				unary := node.AsPrefixUnaryExpression()
+				operator, operand = unary.Operator, unary.Operand
+			} else {
+				unary := node.AsPostfixUnaryExpression()
+				operator, operand = unary.Operator, unary.Operand
+			}
+			if operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken {
+				stepped := Unwrapped(operand)
+				if _, isIndex := indexAccessOf(stepped, name); isIndex {
+					ok = false
+					return true
+				}
+				if root, path, isPath := propertyPathAdmittingRootOptionalStep(stepped); isPath &&
+					root == name && len(path) == 1 && path[0] == "length" {
+					ok = false
+					return true
+				}
+			}
+		}
+		// `p[j]` read — the inner elem join, admitted only where the
+		// element carries the pair; the index expression still scans
+		if index, isIndex := indexAccessOf(node, name); isIndex {
+			if !nestedPair {
+				ok = false
+				return true
+			}
+			visitIfPresent(index)
+			return false
 		}
 		if root, path, isPath := propertyPathAdmittingRootOptionalStep(node); isPath && root == name {
-			if _, isDeclared := declared[strings.Join(path, ".")]; !isDeclared {
+			joined := strings.Join(path, ".")
+			// `p.length` read — the inner len join, under the same
+			// ".length"→".len" mapping the flattened array's own length
+			// read wears
+			if nestedPair && joined == "length" {
+				return false
+			}
+			if _, isDeclared := declared[joined]; !isDeclared {
 				ok = false
 				return true
 			}
@@ -488,35 +660,37 @@ func enclosingFunctionBodyOf(node *ast.Node) *ast.Node {
 // step adjacent to an index, mirroring symbolKeyedLeafOf's own one-step
 // shape.
 //
-// Only the SPELLING is built here; whether "xs.elem.a" resolves to an
-// actual slot is slotIndexOfName's own question — a name whose array
+// Only the SPELLING is derived from this answer; whether it resolves to
+// an actual slot is slotIndexOfName's own question — a name whose array
 // never expanded per-member (a scalar-elemented array, or an array whose
 // element record only PARTIALLY matches this step) answers false there,
-// exactly as an unresolved plain path already does.
-func arrayElementMemberLeafOf(node *ast.Node) (spelling string, ok bool) {
+// exactly as an unresolved plain path already does. The HOLDER node
+// rides out beside the member so the caller can gate the
+// ".length"→".len" mapping on the holder's own layout.
+func arrayElementMemberLeafOf(node *ast.Node) (holder *ast.Node, member string, ok bool) {
 	if !ast.IsPropertyAccessExpression(node) {
-		return "", false
+		return nil, "", false
 	}
 	access := node.AsPropertyAccessExpression()
 	if access.QuestionDotToken != nil {
-		return "", false
+		return nil, "", false
 	}
 	if !ast.IsIdentifier(access.Name()) {
-		return "", false
+		return nil, "", false
 	}
 	receiver := Unwrapped(access.Expression)
 	if !ast.IsElementAccessExpression(receiver) {
-		return "", false
+		return nil, "", false
 	}
 	element := receiver.AsElementAccessExpression()
 	if element.QuestionDotToken != nil {
-		return "", false
+		return nil, "", false
 	}
-	holder := Unwrapped(element.Expression)
-	if !ast.IsIdentifier(holder) {
-		return "", false
+	head := Unwrapped(element.Expression)
+	if !ast.IsIdentifier(head) {
+		return nil, "", false
 	}
-	return holder.Text() + arrayElemSuffix + "." + access.Name().Text(), true
+	return head, access.Name().Text(), true
 }
 
 // symbolKeyedLeafOf reads `p[S]` as the holder and the derived `#sym:`

@@ -5,6 +5,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // summarySlotLayout is the body's statements beside the MUTABLE binding
@@ -19,6 +20,82 @@ type summarySlotLayout struct {
 	RetIndex   int
 	RetShape   RetShapeKind
 	RetMembers []RetMemberEntry
+}
+
+// retDeclaredStringSort is the one sort #ret may wear beyond unknown:
+// the STRING the body's own return annotation states. A `: string` body
+// returns a string on every path — the annotation's own word, the same
+// trust grade declaredParamSort carries for a parameter — and the string
+// sort is what routes a returned template or `+`-concatenation through
+// the sequence grammar: under the unconditional unknown, the return
+// route's sort fallback read every summary-lowered return numerically,
+// so a template holding a call had no reading at all and the body went
+// porous at "return (template over call …)".
+//
+// Every other annotation keeps the unknown sort #ret always wore. A
+// number or boolean annotation changes nothing the return route does
+// not already do (its fallback sort IS number), and an absent or
+// unspelled one claims nothing — so this deliberately moves only the
+// sort that unlocks a reading nothing else reaches.
+//
+// The keyword spelling reads syntactically (annotationSort); an aliased
+// annotation (`: D3ScaleType`, a union of string literals) resolves
+// through the checker, constituent by constituent — a union type's own
+// flags word says only "union", so the mask walks its members. Two
+// member families are admitted:
+//
+//   - STRING-LIKE: string, a string literal, a template-literal type,
+//     a string mapping — each is a subtype of string.
+//   - ABSENT: undefined, null, void. `: string | undefined` still
+//     returns a STRING wherever it returns a VALUE — the absent arms
+//     ride the ret slot's own state (RhsEffect's absent-keyword arm
+//     writes the absent constant under any sort), never its sort, so
+//     admitting them here widens nothing the state does not already
+//     carry. At least one string-like member must be present.
+//
+// An async body's `Promise<string>` wears object flags and stays
+// unknown — the ret-as-inner convention is not read here.
+func retDeclaredStringSort(ctx *FlowContext, body *ast.Node) BindingKind {
+	if body == nil || body.Parent == nil {
+		return BindingKindUnknown
+	}
+	typeNode := body.Parent.Type()
+	if typeNode == nil {
+		return BindingKindUnknown
+	}
+	if sort, _ := annotationSort(typeNode); sort == BindingKindString {
+		return BindingKindString
+	}
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+		return BindingKindUnknown
+	}
+	t := typereading.TypeAtLocation(ctx.P.Checker, typeNode)
+	if t == nil {
+		return BindingKindUnknown
+	}
+	constituents := []*checker.Type{t}
+	if t.IsUnion() {
+		constituents = t.Types()
+	}
+	strLike := checker.TypeFlagsString | checker.TypeFlagsStringLiteral |
+		checker.TypeFlagsTemplateLiteral | checker.TypeFlagsStringMapping
+	absent := checker.TypeFlagsUndefined | checker.TypeFlagsNull | checker.TypeFlagsVoid
+	sawString := false
+	for _, member := range constituents {
+		flags := member.Flags()
+		switch {
+		case (flags&strLike) != 0 && (flags & ^strLike) == 0:
+			sawString = true
+		case (flags&absent) != 0 && (flags & ^absent) == 0:
+			// rides the state, not the sort
+		default:
+			return BindingKindUnknown
+		}
+	}
+	if sawString {
+		return BindingKindString
+	}
+	return BindingKindUnknown
 }
 
 // summarySlotLayoutOf reads the body's statements and its locals and
@@ -95,7 +172,7 @@ func summarySlotLayoutOf(
 		typeofs = append(typeofs, slot.TypeofTag)
 	}
 	bindings = append(bindings, "#done", "#ret")
-	sorts = append(sorts, BindingKindNumber, BindingKindUnknown)
+	sorts = append(sorts, BindingKindNumber, retDeclaredStringSort(ctx, body))
 	typeofs = append(typeofs, TypeofTagNumber, TypeofTagNone)
 	doneIndex := len(bindings) - 2
 	retIndex := len(bindings) - 1

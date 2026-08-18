@@ -171,6 +171,12 @@ func HoistCallEffect(context *LoweringContext, call *ast.Node) (kernelbridge.Loo
 		return kernelbridge.LoopEffect{}, false
 	}
 	context.Hoisted = append(context.Hoisted, statement)
+	// a whole-array argument's len/elem slots take unknown right after
+	// the call — the callee's own summary carries no census of whether
+	// it wrote the array (arrayArgumentPostCallHavoc's own doc,
+	// ir_summary_call_statement.go), and this hoisted position is one of
+	// the sites the composed call statement itself never covers.
+	context.Hoisted = append(context.Hoisted, arrayArgumentPostCallHavoc(context, head)...)
 	if context.HoistedTemp == nil {
 		context.HoistedTemp = map[*ast.Node]int{}
 	}
