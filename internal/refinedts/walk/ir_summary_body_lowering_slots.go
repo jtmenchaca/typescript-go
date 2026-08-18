@@ -240,9 +240,6 @@ func summarySlotLayoutOf(
 			}
 		}
 	}
-	if len(bindings) > summarySlotBudget {
-		return slotLayout, "a body past the slot budget", false
-	}
 	return summarySlotLayout{
 		Statements: statements,
 		Bindings:   bindings,

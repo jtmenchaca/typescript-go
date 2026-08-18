@@ -165,24 +165,28 @@ func TestRecordParamMembersIn_AnArrayLikeInstantiationDeclines(t *testing.T) {
 	}
 }
 
-// TestRecordParamMembersIn_AnInstantiationPastTheSlotBudgetDeclines pins
-// the width guard: an instantiation spelling at least summarySlotBudget
-// data members can never fit a body's slot vector (the layout still
-// needs done/ret and every local beside them), so expanding it could
-// only trade today's whole-name lowering for a certain budget decline —
-// the parameter keeps its single slot instead.
-func TestRecordParamMembersIn_AnInstantiationPastTheSlotBudgetDeclines(t *testing.T) {
+// TestRecordParamMembersIn_AWideInstantiationExpandsInFull pins the
+// no-budget behavior: capability is never refused for cost, so an
+// instantiation spelling many data members expands every one of them —
+// the parameter's entry vector carries whatever width the interface
+// declares, and cost shows at the wall, never as a decline here.
+func TestRecordParamMembersIn_AWideInstantiationExpandsInFull(t *testing.T) {
+	const memberCount = 32
 	var b strings.Builder
 	b.WriteString("interface Wide<T> { first: T;\n")
-	for i := 0; i < summarySlotBudget; i++ {
+	for i := 0; i < memberCount; i++ {
 		fmt.Fprintf(&b, "  m%d: number;\n", i)
 	}
 	b.WriteString("}\n")
 	b.WriteString("function w(p: Wide<number>) { return p.first; }\n")
 	ctx, p := namedTypeCtx(t, b.String())
 	declaration := namedTypeFunction(t, p, "w")
-	if _, expanded := recordParamMembersIn(ctx, declaration.Parameters()[0]); expanded {
-		t.Errorf("an instantiation wider than the slot budget expanded — no body could carry its entry vector")
+	members, expanded := recordParamMembersIn(ctx, declaration.Parameters()[0])
+	if !expanded {
+		t.Fatalf("a wide instantiation declined — capability must never be refused for cost")
+	}
+	if len(members) != memberCount+1 {
+		t.Errorf("len(members) = %d, want %d (first plus every mN)", len(members), memberCount+1)
 	}
 }
 
@@ -240,25 +244,19 @@ func TestRecordParamMembersIn_ANestedInstantiatedMemberExpands(t *testing.T) {
 	}
 }
 
-// TestRecordParamMembersIn_NestedInstantiatedMembersPastTheBudgetFallBack
-// pins the RUNNING-TOTAL guard (nestedMemberLeavesOf's caller,
-// scalarMemberListWithCheckerIn in ir_summary_record_member_reading.go):
-// a holder with EIGHT members, each `ReturnType<typeof reducerN>`
-// carrying five leaves of its own — forty leaves total, each single
-// nested member well under summarySlotBudget (32) by itself, same as
-// RechartsRootState's own sixteen `ReturnType<typeof reducer>` members
-// on recharts' corpus. Before the running-total guard every member
-// expanded regardless of the others already accumulated, the holder's
-// combined member list flew past the budget, and
-// summarySlotLayoutOf's final width check declined the WHOLE BODY ("a
-// body past the slot budget") — where the pre-expansion reading (a
-// single unknown-sorted leaf per member) left the body serving. This
-// pins that the body still LOWERS — not necessarily complete (a wide
-// object read is porous at the read site on its own terms), but never
-// declined for the slot budget, and never through a fabricated sort:
-// once the running total is spent, the remaining members fall back to
-// the single unknown-sorted leaf, claiming nothing about their value.
-func TestRecordParamMembersIn_NestedInstantiatedMembersPastTheBudgetFallBack(t *testing.T) {
+// TestRecordParamMembersIn_WideNestedInstantiatedMembersExpandInFull pins
+// the no-budget behavior at the HOLDER level: a holder with EIGHT
+// members, each `ReturnType<typeof reducerN>` carrying five leaves of
+// its own — forty leaves total — expands every one of them. This is
+// RechartsRootState's own shape (sixteen `ReturnType<typeof reducer>`
+// members on recharts' corpus): capability is never refused for cost,
+// so nested-instantiated members append their expanded leaves
+// unconditionally, exactly like a plain type-literal or array-pair
+// nested member always has. The construct string "a body past the slot
+// budget" no longer exists anywhere in this tree — a wide body attempts
+// real lowering and its fate is read off SummaryOutcomeOf, not
+// pre-declined here.
+func TestRecordParamMembersIn_WideNestedInstantiatedMembersExpandInFull(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	var b strings.Builder
@@ -271,47 +269,32 @@ func TestRecordParamMembersIn_NestedInstantiatedMembersPastTheBudgetFallBack(t *
 		fmt.Fprintf(&b, "  slice%d: ReturnType<typeof reducer%d>;\n", i, i)
 	}
 	b.WriteString("};\n")
-	b.WriteString("function f(state: RootState) { return state.slice0.a0; }\n")
+	b.WriteString("function f(state: RootState) { return state.slice0; }\n")
 	ctx, p := namedTypeCtx(t, b.String())
 	declaration := namedTypeFunction(t, p, "f")
 	members, expanded := recordParamMembersIn(ctx, declaration.Parameters()[0])
 	if !expanded {
 		t.Fatalf("RootState did not expand at all — the top-level alias-of-a-literal arm should still answer its own eight members")
 	}
-	if len(members) > summarySlotBudget {
-		t.Fatalf("len(members) = %d, want at most summarySlotBudget (%d) — the layout declines only past the budget, and the guard's fallback may land exactly on it", len(members), summarySlotBudget)
+	if len(members) != 40 {
+		t.Fatalf("len(members) = %d, want 40 (eight slices, five leaves each): %+v", len(members), members)
 	}
 	byPath := map[string]recordParamMember{}
 	for _, member := range members {
 		byPath[strings.Join(member.Path, " ")] = member
 	}
-	// slice0's own nested expansion fits inside the budget on its own and
-	// is read FIRST, so it keeps its five real leaves
-	a0, hasA0 := byPath["slice0 a0"]
-	if !hasA0 {
-		t.Fatalf("member paths = %+v, want slice0 a0 among the early members (the running total had room for it)", byPath)
-	}
-	if a0.Sort != BindingKindNumber || a0.TypeofTag != TypeofTagNumber {
-		t.Errorf("slice0.a0 sort = %v/%v, want number/number — the instantiation's own leaf", a0.Sort, a0.TypeofTag)
-	}
-	// a LATER member, once the running total is spent, falls back to its
-	// own single unknown-sorted whole-name leaf rather than expanding —
-	// find it by checking that not every slice contributed five leaves
-	sliceLeafCounts := map[string]int{}
-	for _, member := range members {
-		if len(member.Path) > 0 {
-			sliceLeafCounts[member.Path[0]]++
+	for i := 0; i < 8; i++ {
+		slice := fmt.Sprintf("slice%d", i)
+		for _, leaf := range []string{"a", "b", "c", "d", "e"} {
+			path := fmt.Sprintf("%s %s%d", slice, leaf, i)
+			member, has := byPath[path]
+			if !has {
+				t.Fatalf("member paths = %+v, want a nested leaf %q — every slice's five leaves must expand", byPath, path)
+			}
+			if member.Sort != BindingKindNumber || member.TypeofTag != TypeofTagNumber {
+				t.Errorf("%s sort = %v/%v, want number/number — the reducer's own return leaf", path, member.Sort, member.TypeofTag)
+			}
 		}
-	}
-	fellBack := false
-	for slice, count := range sliceLeafCounts {
-		if count == 1 {
-			fellBack = true
-			t.Logf("slice %q fell back to its single whole-name leaf once the running total was spent", slice)
-		}
-	}
-	if !fellBack {
-		t.Fatalf("sliceLeafCounts = %+v, want at least one slice member with exactly 1 leaf (the fallback) once the budget filled up", sliceLeafCounts)
 	}
 	RelowerSummaryBody(ctx, declaration)
 	outcome, construct, recorded := SummaryOutcomeOf(declaration)
@@ -320,7 +303,7 @@ func TestRecordParamMembersIn_NestedInstantiatedMembersPastTheBudgetFallBack(t *
 	}
 	t.Logf("outcome=%q construct=%q", outcome, construct)
 	if construct == "a body past the slot budget" {
-		t.Errorf("construct = %q — the running-total guard did not stop the holder's combined expansion from overflowing the body's own slot budget", construct)
+		t.Errorf("construct = %q — this string must never appear; the budget and its decline are gone", construct)
 	}
 }
 

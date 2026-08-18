@@ -6,11 +6,6 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 )
 
-// summarySlotBudget is the summary route's own slot ceiling — the same
-// figure the whole-body route uses, kept here so the two routes admit
-// the same bodies.
-const summarySlotBudget = 32
-
 // lowerSummaryBodyReporting is the lowering itself. Beyond the summary
 // and its ok flag it answers TWO strings, at most one of them non-empty:
 // `havoc` names the first construct that havocked on a lowering that
@@ -86,11 +81,10 @@ func lowerSummaryBodyReporting(
 	// allocate grows the CONTEXT's own vectors, not copies of them: a slot
 	// handed out past the initial layout must be readable through
 	// context.Sorts at the index it was given, and a Go slice header
-	// copied before the growth would not carry it.
+	// copied before the growth would not carry it. Capability is never
+	// refused for cost — a body needing forty slots gets forty; cost
+	// shows at the wall, never as a decline here.
 	context.Allocate = func(name string, sort BindingKind, typeofTag TypeofTag) (int, bool) {
-		if len(context.Bindings) >= summarySlotBudget {
-			return 0, false
-		}
 		context.Bindings = append(context.Bindings, name)
 		context.Sorts = append(context.Sorts, sort)
 		context.Typeofs = append(context.Typeofs, typeofTag)

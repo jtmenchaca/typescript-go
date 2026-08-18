@@ -37,9 +37,6 @@ func accessorLoweringContext(ctx *FlowContext, bindings []string, sorts []Bindin
 		CanHoist:     true,
 	}
 	context.Allocate = func(name string, sort BindingKind, tag TypeofTag) (int, bool) {
-		if len(context.Bindings) >= summarySlotBudget {
-			return 0, false
-		}
 		context.Bindings = append(context.Bindings, name)
 		context.Sorts = append(context.Sorts, sort)
 		context.Typeofs = append(context.Typeofs, tag)

@@ -329,43 +329,23 @@ func scalarMemberListWithCheckerIn(
 		}
 		seen[key] = struct{}{}
 		// a NESTED FAMILY: the member's own annotation is itself a type
-		// literal, or a type reference the named-type reader can resolve —
+		// literal, a type reference the named-type reader can resolve, an
+		// INSTANTIATED type reference carrying its own type arguments
+		// (`ReturnType<typeof reducer>`, nestedMemberLeavesOf's
+		// TypeReferenceNode-with-arguments arm), or an array-typed member —
 		// read at any depth by the SAME reading, one recursion per level
 		// (nestedMemberLeavesOf argues the path, the absence composition,
-		// and the cycle guard). A nested annotation this recursion cannot
-		// read — mentions a type parameter, or resolves to nothing
-		// readable — keeps today's single unknown-sorted leaf below, never
-		// a refusal.
-		//
-		// THE RUNNING-TOTAL GUARD. instantiatedReferenceMembersOf's own
-		// width check (ir_summary_instantiated_members.go) only refuses an
-		// instantiation wider than summarySlotBudget BY ITSELF — it has no
-		// view of how many leaves this holder's OTHER members already
-		// contributed. RechartsRootState is the shape that exposed the gap:
-		// sixteen members, each `ReturnType<typeof reducer>`, each one
-		// individually well under the budget, but their SUM crosses it —
-		// so every one of the sixteen expanded, the holder's total flew
-		// past summarySlotBudget, and summarySlotLayoutOf's own final
-		// width check declined the WHOLE BODY ("a body past the slot
-		// budget") where the pre-expansion reading answered a single
-		// unknown-sorted leaf per member and the body lowered same as
-		// always. A decline determines nothing — strictly worse than the
-		// unknown-sorted leaf it replaced. So this loop checks the running
-		// total ITSELF, the one place that sees every sibling contributed
-		// so far: a nested expansion that would push len(out) past the
-		// budget is discarded and the member falls back to the single
-		// unknown-sorted leaf below, exactly the pre-expansion reading —
-		// claims nothing, costs nothing, keeps the body serving. Members
-		// read BEFORE the one that overflows keep their own expansions;
-		// only the member that would tip the total over falls back, and
-		// every member after it does too (out no longer grows from this
-		// arm once the budget is spent).
+		// and the cycle guard), and appended UNCONDITIONALLY like every
+		// other nested kind: capability is never refused for cost, so a
+		// holder whose members expand wide gets every leaf; the body's own
+		// slot count is measured at the wall, not guarded against here. A
+		// nested annotation this recursion cannot read — mentions a type
+		// parameter, or resolves to nothing readable — keeps today's single
+		// unknown-sorted leaf below, never a refusal.
 		if nested, nestedOk := nestedMemberLeavesOf(
 			c, holder, key, signature.Type, parameterNames, mayBeAbsent, visiting); nestedOk {
-			if len(out)+len(nested) < summarySlotBudget {
-				out = append(out, nested...)
-				continue
-			}
+			out = append(out, nested...)
+			continue
 		}
 		// the member's sort, or UNKNOWN where this reading cannot state
 		// one. Two cases land on unknown, argued above: an annotation that

@@ -58,14 +58,9 @@ const instantiatedMemberBudget = 64
 //     its whole-name slot (declaredTypeMembersOf's entry rule; this arm
 //     is only reached from the entry position).
 //
-// TWO GUARDS THE INSTANTIATED ARM ADDS, each keeping an expansion from
-// serving LESS than the whole-name slot it replaces:
+// ONE GUARD THE INSTANTIATED ARM ADDS, keeping an expansion from serving
+// LESS than the whole-name slot it replaces:
 //
-//   - AN EXPANSION WIDER THAN THE SLOT BUDGET declines. The layout
-//     refuses any body holding more than summarySlotBudget bindings,
-//     and an entry vector alone at that width can never fit beside the
-//     done/ret slots and the body's own locals — expanding would trade
-//     today's whole-name lowering for a certain budget decline.
 //   - AN EXPANSION THE OWNING BODY'S OWN USES WOULD ONLY HAVOC OR
 //     REFUSE declines (instantiatedExpansionServesOwnBody). The scan's
 //     unreadable answer refuses the body outright, and its hand-over
@@ -135,7 +130,7 @@ func instantiatedReferenceMembersOf(ctx *FlowContext, holder string, typeNode *a
 			MayBeAbsent: mayBeAbsent,
 		})
 	}
-	if len(out) == 0 || len(out) >= summarySlotBudget {
+	if len(out) == 0 {
 		return nil, false
 	}
 	if !instantiatedExpansionServesOwnBody(typeNode, out) {
