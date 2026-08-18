@@ -10,11 +10,6 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 )
 
-// instantiatedMemberBudget bounds how many properties the instantiated
-// reading walks — host_type.go's own member budget, for the same
-// reason: what a lib-declared shape really costs is its SIZE.
-const instantiatedMemberBudget = 64
-
 // instantiatedReferenceMembersOf resolves a type reference that CARRIES
 // TYPE ARGUMENTS — `p: Box<number>` — to the members its INSTANTIATION
 // stands for, or (false).
@@ -89,7 +84,7 @@ func instantiatedReferenceMembersOf(ctx *FlowContext, holder string, typeNode *a
 		return nil, false
 	}
 	properties := c.GetPropertiesOfType(t)
-	if len(properties) == 0 || len(properties) > instantiatedMemberBudget {
+	if len(properties) == 0 {
 		return nil, false
 	}
 	seen := map[string]struct{}{}

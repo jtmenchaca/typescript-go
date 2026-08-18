@@ -169,16 +169,18 @@ func TestRecordParamMembersIn_AnArrayLikeInstantiationDeclines(t *testing.T) {
 // no-budget behavior: capability is never refused for cost, so an
 // instantiation spelling many data members expands every one of them —
 // the parameter's entry vector carries whatever width the interface
-// declares, and cost shows at the wall, never as a decline here.
+// declares, and cost shows at the wall, never as a decline here. The
+// member count (70) sits past the removed instantiatedMemberBudget (64),
+// so this fixture is the one that would have refused under the old cap.
 func TestRecordParamMembersIn_AWideInstantiationExpandsInFull(t *testing.T) {
-	const memberCount = 32
+	const memberCount = 70
 	var b strings.Builder
-	b.WriteString("interface Wide<T> { first: T;\n")
+	b.WriteString("interface Big<T> { first: T;\n")
 	for i := 0; i < memberCount; i++ {
 		fmt.Fprintf(&b, "  m%d: number;\n", i)
 	}
 	b.WriteString("}\n")
-	b.WriteString("function w(p: Wide<number>) { return p.first; }\n")
+	b.WriteString("function w(p: Big<number>) { return p.first; }\n")
 	ctx, p := namedTypeCtx(t, b.String())
 	declaration := namedTypeFunction(t, p, "w")
 	members, expanded := recordParamMembersIn(ctx, declaration.Parameters()[0])
