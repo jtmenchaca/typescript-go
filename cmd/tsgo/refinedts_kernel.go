@@ -27,37 +27,40 @@ import (
 // still flow.
 func configureRefinedTSKernel() {
 	if derived, ok := refinedtsRepoRelative(
-		"refined-ts-lean/native/build/librefinedts_kernel.dylib"); ok {
+		"refined-lean/native/build/librefined_kernel.dylib"); ok {
 		kernelbridge.SetDylibPath(derived)
 	}
 }
 
-// refinedtsRepoRelative resolves a path relative to packages/refinedts/,
-// first against this binary's own location (the built tsgo binary sits
-// inside refined-ts-go, so one level up is packages/refinedts; a
-// `go run ./cmd/tsgo` build sits three deeper), then against the
-// working directory's ancestry. ok=false when neither holds the file.
-// A copy of cmd/refinedts-check/main.go's repoRelative — the two
-// binaries derive the same layout and neither can import the other's
-// main package.
-func refinedtsRepoRelative(underRefinedts string) (string, bool) {
+// refinedtsRepoRelative resolves a path relative to packages/, first
+// against this binary's own location (the built tsgo binary sits
+// inside packages/refinedts/refined-ts-go, so two levels up is
+// packages/; a `go run ./cmd/tsgo` build sits one deeper), then
+// against the working directory's ancestry. ok=false when neither
+// holds the file. A copy of cmd/refinedts-check/main.go's
+// repoRelative — the two binaries derive the same layout and neither
+// can import the other's main package. refined-lean sits beside
+// refinedts under packages/ (moved out from under
+// refinedts/refined-ts-lean), so callers spell their target from
+// packages/ down — "refined-lean/…" here.
+func refinedtsRepoRelative(underPackages string) (string, bool) {
 	var roots []string
 	if exe, err := os.Executable(); err == nil {
 		// <repo>/packages/refinedts/refined-ts-go/<binary>
-		roots = append(roots, filepath.Join(filepath.Dir(exe), ".."))
+		roots = append(roots, filepath.Join(filepath.Dir(exe), "..", ".."))
 		// <repo>/packages/refinedts/refined-ts-go/cmd/tsgo/<binary>
-		roots = append(roots, filepath.Join(filepath.Dir(exe), "..", "..", ".."))
+		roots = append(roots, filepath.Join(filepath.Dir(exe), "..", "..", "..", ".."))
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		for dir := cwd; ; dir = filepath.Dir(dir) {
-			roots = append(roots, filepath.Join(dir, "packages", "refinedts"))
+			roots = append(roots, filepath.Join(dir, "packages"))
 			if dir == filepath.Dir(dir) {
 				break
 			}
 		}
 	}
 	for _, root := range roots {
-		candidate := filepath.Join(root, underRefinedts)
+		candidate := filepath.Join(root, underPackages)
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, true
 		}

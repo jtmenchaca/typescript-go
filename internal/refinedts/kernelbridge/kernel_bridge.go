@@ -11,7 +11,7 @@
 // the native path — there is no wasm substrate and no Go analogue of
 // import.meta.url, so DylibPath is a parameter instead of a
 // self-locating constant. See instantiate_kernel.go's own test
-// (../../../../refined-ts-lean/native/build/librefinedts_kernel.dylib,
+// (../../../../../refined-lean/native/build/librefined_kernel.dylib,
 // relative to the package) for the convention this mirrors.
 package kernelbridge
 
@@ -29,7 +29,7 @@ import (
 // at the same tree depth, internal/refinedts/<pkg>) — never true for a
 // built binary run from an arbitrary cwd. Binaries must resolve
 // through ResolveDylibPath instead.
-const DylibPath = "../../../../refined-ts-lean/native/build/librefinedts_kernel.dylib"
+const DylibPath = "../../../../../refined-lean/native/build/librefined_kernel.dylib"
 
 // dylibPathMu guards explicitDylibPath and kernelArtifactPath below —
 // both are set once at process/sweep startup (SetDylibPath, LoadKernel)

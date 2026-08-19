@@ -460,7 +460,7 @@ func mod(a, b float64) float64 {
 // read it on the approximated branch.
 //
 // The one further case that computes is the kernel's own carve-out
-// (refined-ts-lean/transfers/integer_pow.lean): an integer base with
+// (refined-lean/proofs/integer_pow.lean): an integer base with
 // a non-negative integer exponent whose exact power fits binary64's
 // mantissa is REPRESENTABLE, so every correctly rounded
 // implementation returns it and there is nothing left to approximate.

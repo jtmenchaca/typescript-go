@@ -55,7 +55,7 @@ func main() {
 	surfaceFlag := flag.String("surface", "",
 		"path to refined-ts-typescript/surface/z.ts (default: derived from this binary's location)")
 	kernelFlag := flag.String("kernel", "",
-		"path to librefinedts_kernel.dylib (default: derived from this binary's location)")
+		"path to librefined_kernel.dylib (default: derived from this binary's location)")
 	listFlag := flag.String("list", "",
 		"file holding newline-separated .ts paths to check (joins any positional args)")
 	wallFlag := flag.Bool("wall", false,
@@ -100,7 +100,7 @@ func main() {
 	if *kernelFlag != "" {
 		kernelbridge.SetDylibPath(*kernelFlag)
 	} else if derived, ok := repoRelative(
-		"refined-ts-lean/native/build/librefinedts_kernel.dylib"); ok {
+		"refined-lean/native/build/librefined_kernel.dylib"); ok {
 		kernelbridge.SetDylibPath(derived)
 	}
 
@@ -272,31 +272,35 @@ func lineOf(lineStarts []int, pos int) int {
 	return lo + 1
 }
 
-// repoRelative resolves a path relative to packages/refinedts/, first
-// against this binary's own location (os.Executable — the Go stand-in
-// for import.meta.url; the built binary sits inside refined-ts-go),
-// then against the working directory's ancestry. ok=false when
-// neither holds the file. No environment variables — behavior is
-// configured by arguments and the binary's own position, never by
-// ambient process state (the standing rule).
-func repoRelative(underRefinedts string) (string, bool) {
+// repoRelative resolves a path relative to packages/, first against
+// this binary's own location (os.Executable — the Go stand-in for
+// import.meta.url; the built binary sits inside
+// packages/refinedts/refined-ts-go), then against the working
+// directory's ancestry. ok=false when neither holds the file. No
+// environment variables — behavior is configured by arguments and the
+// binary's own position, never by ambient process state (the standing
+// rule). refined-lean sits beside refinedts under packages/ (moved
+// out from under refinedts/refined-ts-lean), so callers now spell
+// their target from packages/ down — "refinedts/refined-ts-typescript/…"
+// or "refined-lean/…" — rather than from packages/refinedts/ down.
+func repoRelative(underPackages string) (string, bool) {
 	var roots []string
 	if exe, err := os.Executable(); err == nil {
 		// <repo>/packages/refinedts/refined-ts-go/<binary>
-		roots = append(roots, filepath.Join(filepath.Dir(exe), ".."))
+		roots = append(roots, filepath.Join(filepath.Dir(exe), "..", ".."))
 		// <repo>/packages/refinedts/refined-ts-go/cmd/refinedts-check/<binary>
-		roots = append(roots, filepath.Join(filepath.Dir(exe), "..", "..", ".."))
+		roots = append(roots, filepath.Join(filepath.Dir(exe), "..", "..", "..", ".."))
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		for dir := cwd; ; dir = filepath.Dir(dir) {
-			roots = append(roots, filepath.Join(dir, "packages", "refinedts"))
+			roots = append(roots, filepath.Join(dir, "packages"))
 			if dir == filepath.Dir(dir) {
 				break
 			}
 		}
 	}
 	for _, root := range roots {
-		candidate := filepath.Join(root, underRefinedts)
+		candidate := filepath.Join(root, underPackages)
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, true
 		}
@@ -312,7 +316,7 @@ func surfaceZPath(flagValue string) (string, error) {
 	if flagValue != "" {
 		return flagValue, nil
 	}
-	if derived, ok := repoRelative("refined-ts-typescript/surface/z.ts"); ok {
+	if derived, ok := repoRelative("refinedts/refined-ts-typescript/surface/z.ts"); ok {
 		return derived, nil
 	}
 	return "", fmt.Errorf("cannot locate refined-ts-typescript/surface/z.ts — pass -surface")

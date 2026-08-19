@@ -36,7 +36,7 @@ import (
 // relative to this package's directory (the `go test` cwd)
 const (
 	refinedtsSurfaceDir = "../../../refined-ts-typescript"
-	refinedtsKernel     = "../../../refined-ts-lean/native/build/librefinedts_kernel.dylib"
+	refinedtsKernel     = "../../../../refined-lean/native/build/librefined_kernel.dylib"
 )
 
 // refinedtsSurfaceFiles reads the shipped surface module and its

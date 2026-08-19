@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-const dylibPath = "../../../../refined-ts-lean/native/build/librefinedts_kernel.dylib"
+const dylibPath = "../../../../../refined-lean/native/build/librefined_kernel.dylib"
 
 func loadForTest(t *testing.T) *NativeKernel {
 	t.Helper()

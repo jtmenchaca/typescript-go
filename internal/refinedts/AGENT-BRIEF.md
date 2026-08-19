@@ -553,13 +553,13 @@ in full before touching code.`
 
 ## Kernel proof facts
 
-- **`compileStmt`/`summarize` (refined-ts-lean/set_functions/summary.lean)
+- **`compileStmt`/`summarize` (refined-lean/set_functions/summary.lean)
   are TOTAL — no `Option`/`Except` in their signature.** They mirror
   `walkStmt` case for case and always return a `SumBuild`/`Summary`.
   There is no Lean-side refusal channel inside the compiler itself for
   a statement kind the summary form can't capture faithfully.
 - **The real refusal channel for an uncertifiable statement is the
-  `IrStmt.inRange` HYPOTHESIS** (transfers/summary_correct.lean),
+  `IrStmt.inRange` HYPOTHESIS** (proofs/summary_inrange.lean),
   which `summarize_eq`/`summarize_admits`/`summarize_ok` all take as a
   premise. Define a constructor's case as `False` there and no caller
   can ever discharge the faithfulness theorem for a body containing
@@ -568,7 +568,7 @@ in full before touching code.`
   reaching for a return-type change: it costs one `Prop`-level case
   per site, not a signature rewrite through every caller.
 - **`Sim` (the compile/walk simulation invariant,
-  transfers/summary_correct.lean `structure Sim`) demands STRICT
+  proofs/summary_sim.lean `structure Sim`) demands STRICT
   EQUALITY in its `rows` field, never a containment/admission
   relation.** `compileStmt_sim`'s conclusion is
   `Sim entries (compiled row) (walkStmt tbl env s)` — exactly equal,
@@ -586,19 +586,23 @@ in full before touching code.`
   instead, and `compileStmt_sim`'s case for it is one line:
   `intro hin _; nomatch hin`.
 - **Every exhaustive `match`/`mutual` over `IrStmt` in
-  refined-ts-lean spans SIX sites, not the four/five a task
+  refined-lean spans SIX sites, not the four/five a task
   description may name**: `IrStmt.writes` and `walkStmt`
   (set_functions/walk.lean), `compileStmt` (set_functions/summary.lean),
-  and `IrStmt.inRange`, `compileStmt_width`, `compileStmt_appends`,
-  `compileStmt_sim`, `compileStmt_curBound` (transfers/summary_correct.lean)
+  and `IrStmt.inRange` (proofs/summary_inrange.lean),
+  `compileStmt_width` (proofs/summary_width.lean),
+  `compileStmt_appends` (proofs/summary_appends.lean),
+  `compileStmt_sim` (proofs/summary_stmt_sim.lean),
+  `compileStmt_curBound` (proofs/summary_curbound_stmt.lean)
   — `compileStmt_curBound` is easy to miss (it feeds `summarize_ok`,
   the well-formedness closing lemma) since it isn't named beside the
-  width/appends/sim trio in the file's own header comment. `Runs` and
-  `RunsC` (set_functions/walk.lean, transfers/walk_correct.lean) are
+  width/appends/sim trio in the file's own header comment. `Runs`
+  (set_functions/walk_runs.lean) and `RunsC`
+  (proofs/walk_concrete_runs.lean) are
   `Prop` inductives, additive-only, not exhaustive matches — a new
   constructor there breaks nothing already compiled, but any
   `induction`/`cases` tactic block over them DOES need the new case.
-  `RecRuns` (transfers/recursion_correct.lean) is a SEPARATE Prop
+  `RecRuns` (proofs/recursion_correct.lean) is a SEPARATE Prop
   inductive from `Runs`/`RunsC`, not automatically extended by either
   — a new `IrStmt` constructor with no `RecRuns` case simply means no
   concrete run can ever be derived through it (a silent capability
@@ -613,8 +617,8 @@ in full before touching code.`
 - **A new `RecRuns` constructor for an `IrStmt` kind whose `Runs`
   version has a free-form solver premise (e.g. `.loop`) still mirrors
   `RunsC`'s premise, not `Runs`'s.** `RecRuns.loop`
-  (transfers/recursion_correct.lean) copies `RunsC.loop`
-  (transfers/walk_correct.lean) field for field — the depth-indexed
+  (proofs/recursion_correct.lean) copies `RunsC.loop`
+  (proofs/walk_concrete_runs.lean) field for field — the depth-indexed
   form mirrors the CLOSED run relation throughout, since `RecRuns`
   itself plays `RunsC`'s role (concrete, discharge-shaped premises)
   one level up; `Runs`'s own `.loop`/`.loopCounted` cases carry an
