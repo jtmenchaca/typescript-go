@@ -642,15 +642,15 @@ func TestToInt32TheBitwiseOperatorsAndTheCountProduct(t *testing.T) {
 			}
 		}
 	}
-	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpToInt32, A: single(3.7)}), 3)
-	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpToInt32, A: single(-3.7)}), -3)
-	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpToInt32, A: single(4294967301)}), 5)
-	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpToInt32, A: single(2147483648)}), -2147483648)
-	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpToInt32, A: single(math.Inf(1))}), 0)
+	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpInt32Wrap, A: single(3.7)}), 3)
+	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpInt32Wrap, A: single(-3.7)}), -3)
+	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpInt32Wrap, A: single(4294967301)}), 5)
+	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpInt32Wrap, A: single(2147483648)}), -2147483648)
+	wantValues(t, kernel.Transfer(TransferQuestion{Op: TransferOpInt32Wrap, A: single(math.Inf(1))}), 0)
 
 	// the range rule: in-window bounds truncate, integrality lands
 	ranged := kernel.Transfer(TransferQuestion{
-		Op: TransferOpToInt32,
+		Op: TransferOpInt32Wrap,
 		A:  refinementsets.MakeRefinedSet(refinementsets.AtLeast(0.5), refinementsets.AtMost(10.9)),
 	})
 	if ranged.Kind != TransferAnswerSet {
@@ -660,7 +660,7 @@ func TestToInt32TheBitwiseOperatorsAndTheCountProduct(t *testing.T) {
 		t.Errorf("ranged.Set ⊆ [0,10]∩ℤ = false, want true")
 	}
 	// out of the window: still inside int32, always
-	wide := kernel.Transfer(TransferQuestion{Op: TransferOpToInt32, A: refinementsets.MakeRefinedSet(refinementsets.AtLeast(0))})
+	wide := kernel.Transfer(TransferQuestion{Op: TransferOpInt32Wrap, A: refinementsets.MakeRefinedSet(refinementsets.AtLeast(0))})
 	if wide.Kind != TransferAnswerSet {
 		t.Fatalf("wide.Kind = %v, want set", wide.Kind)
 	}

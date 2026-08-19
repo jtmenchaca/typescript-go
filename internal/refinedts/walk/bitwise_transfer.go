@@ -95,7 +95,7 @@ func bitwiseImage(op BitwiseOperator, rawA, rawB abstractdomain.AbstractValue) a
 			return silence.Residue()
 		}
 		return abstractdomain.AtTrustLevel(
-			KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpToInt32, A: A})),
+			KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpInt32Wrap, A: A})),
 			grade,
 		)
 	}
@@ -105,7 +105,7 @@ func bitwiseImage(op BitwiseOperator, rawA, rawB abstractdomain.AbstractValue) a
 			return silence.Residue()
 		}
 		return abstractdomain.AtTrustLevel(
-			KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpToInt32, A: A})),
+			KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpInt32Wrap, A: A})),
 			grade,
 		)
 	}

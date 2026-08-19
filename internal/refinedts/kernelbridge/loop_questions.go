@@ -117,29 +117,29 @@ const (
 type LoopEffectOp string
 
 const (
-	LoopOpNeg   LoopEffectOp = "neg"
-	LoopOpFloor LoopEffectOp = "floor"
-	LoopOpCeil  LoopEffectOp = "ceil"
-	LoopOpRound LoopEffectOp = "round"
-	LoopOpTrunc LoopEffectOp = "trunc"
-	LoopOpAbs   LoopEffectOp = "abs"
-	LoopOpAdd   LoopEffectOp = "add"
-	LoopOpSub   LoopEffectOp = "sub"
-	LoopOpMul   LoopEffectOp = "mul"
-	LoopOpDiv   LoopEffectOp = "div"
-	LoopOpRem   LoopEffectOp = "rem"
-	LoopOpMin   LoopEffectOp = "min"
-	LoopOpMax   LoopEffectOp = "max"
+	LoopOpNeg   LoopEffectOp = LoopEffectOp(TransferOpNeg)
+	LoopOpFloor LoopEffectOp = LoopEffectOp(TransferOpFloor)
+	LoopOpCeil  LoopEffectOp = LoopEffectOp(TransferOpCeil)
+	LoopOpRound LoopEffectOp = LoopEffectOp(TransferOpRound)
+	LoopOpTrunc LoopEffectOp = LoopEffectOp(TransferOpTrunc)
+	LoopOpAbs   LoopEffectOp = LoopEffectOp(TransferOpAbs)
+	LoopOpAdd   LoopEffectOp = LoopEffectOp(TransferOpAdd)
+	LoopOpSub   LoopEffectOp = LoopEffectOp(TransferOpSub)
+	LoopOpMul   LoopEffectOp = LoopEffectOp(TransferOpMul)
+	LoopOpDiv   LoopEffectOp = LoopEffectOp(TransferOpDiv)
+	LoopOpRem   LoopEffectOp = LoopEffectOp(TransferOpRem)
+	LoopOpMin   LoopEffectOp = LoopEffectOp(TransferOpMin)
+	LoopOpMax   LoopEffectOp = LoopEffectOp(TransferOpMax)
 	// The bitwise and shift operators. These spell the same six names
 	// the transfer wire uses, and the kernel's loopOp2Of reads them
 	// into the effect grammar's LoopOp2; their images come from
 	// transferBitwise, the exactly-specified int32/uint32 functions.
-	LoopOpBitOr  LoopEffectOp = "bitOr"
-	LoopOpBitAnd LoopEffectOp = "bitAnd"
-	LoopOpBitXor LoopEffectOp = "bitXor"
-	LoopOpShl    LoopEffectOp = "shl"
-	LoopOpSar    LoopEffectOp = "sar"
-	LoopOpShr    LoopEffectOp = "shr"
+	LoopOpBitOr  LoopEffectOp = LoopEffectOp(TransferOpBitOr)
+	LoopOpBitAnd LoopEffectOp = LoopEffectOp(TransferOpBitAnd)
+	LoopOpBitXor LoopEffectOp = LoopEffectOp(TransferOpBitXor)
+	LoopOpShl    LoopEffectOp = LoopEffectOp(TransferOpShl)
+	LoopOpSar    LoopEffectOp = LoopEffectOp(TransferOpSar)
+	LoopOpShr    LoopEffectOp = LoopEffectOp(TransferOpShr)
 	// The bounded-image unaries. These spell the same names the
 	// transfer wire uses, and the kernel's loopOp1Of reads them into
 	// LoopOp1. On the EFFECT wire their image is the interval each
@@ -153,20 +153,20 @@ const (
 	//   cos  → [-1, 1]   (sec-math.cos)
 	//   atan → [-2, 2]   (sec-math.atan: "in the inclusive interval
 	//                     from 𝔽(-π / 2) to 𝔽(π / 2)")
-	LoopOpSqrt LoopEffectOp = "sqrt"
-	LoopOpSin  LoopEffectOp = "sin"
-	LoopOpCos  LoopEffectOp = "cos"
-	LoopOpAtan LoopEffectOp = "atan"
+	LoopOpSqrt LoopEffectOp = LoopEffectOp(TransferOpSqrt)
+	LoopOpSin  LoopEffectOp = LoopEffectOp(TransferOpSin)
+	LoopOpCos  LoopEffectOp = LoopEffectOp(TransferOpCos)
+	LoopOpAtan LoopEffectOp = LoopEffectOp(TransferOpAtan)
 	// LoopOpPow is `**` and Math.pow, which the kernel evaluates with
 	// the same transferPow the transfer wire answers with: the pinned
 	// Number::exponentiate rows (sec-numeric-types-number-exponentiate)
 	// plus the exact integer path, and unknown where the
 	// implementation-approximated remainder is reachable.
-	LoopOpPow LoopEffectOp = "pow"
+	LoopOpPow LoopEffectOp = LoopEffectOp(TransferOpPow)
 	// LoopOpAtan2 is the two-argument inverse tangent, bounded by its
 	// own clause's interval: sec-math.atan2 states the result "is in
 	// the inclusive interval from -π to +π", so [-4, 4] encloses it.
-	LoopOpAtan2 LoopEffectOp = "atan2"
+	LoopOpAtan2 LoopEffectOp = LoopEffectOp(TransferOpAtan2)
 	// The SEQUENCE unaries, read by the kernel's seqOp1Of. These are the
 	// string methods whose result set is provable from the receiver's
 	// set alone, and the claim they carry is the DRAWN-FROM one: every
@@ -178,9 +178,9 @@ const (
 	// This is sound because sec-trimstring removes leading and/or
 	// trailing white space by CODE POINT, so no surrogate pair is split
 	// and no scalar the receiver never held can appear.
-	LoopOpTrim      LoopEffectOp = "trim"
-	LoopOpTrimStart LoopEffectOp = "trimStart"
-	LoopOpTrimEnd   LoopEffectOp = "trimEnd"
+	LoopOpTrim      LoopEffectOp = "seq.trim"
+	LoopOpTrimStart LoopEffectOp = "seq.trimStart"
+	LoopOpTrimEnd   LoopEffectOp = "seq.trimEnd"
 	// LoopOpSplitElemSafe is the ELEM half of `s.split(sep)`: what one
 	// piece may hold. A piece is a contiguous stretch of the receiver, so
 	// its scalars all occurred there and it is no longer than the
@@ -197,7 +197,7 @@ const (
 	// receiver established astral-free; the kernel refuses a bare
 	// "split", so an ungated lowering gets no claim rather than a wrong
 	// one.
-	LoopOpSplitElemSafe LoopEffectOp = "splitElemSafe"
+	LoopOpSplitElemSafe LoopEffectOp = "seq.splitElem"
 	// LoopOpIndexOf is the numeric-from-sequence op: the UTF-16 index of
 	// a first match, or -1 (sec-string.prototype.indexof). The kernel
 	// answers the window the receiver's set supports -- {-1} u [0, 2*hi)
@@ -205,7 +205,7 @@ const (
 	// pins a scalar-count-n word's code-unit length at n <= length <= 2n
 	// -- and {-1} u [0, +inf) with integrality when the receiver states
 	// no ceiling. Nothing gates it: the window holds for every needle.
-	LoopOpIndexOf LoopEffectOp = "indexOf"
+	LoopOpIndexOf LoopEffectOp = "seq.indexOf"
 	// LoopOpSliceBmp is `s.slice(...)` over a receiver whose alphabet the
 	// KERNEL proves astral-free. String.prototype.slice cuts at UTF-16
 	// code UNIT positions (sec-string.prototype.slice), so on an
@@ -224,7 +224,7 @@ const (
 	// (`bmpAlphabetB`, set_functions/walk.lean) and answers top on a
 	// receiver whose set does not state the bound. Send it on syntax
 	// alone; an ungated receiver costs the claim, never soundness.
-	LoopOpSliceBmp LoopEffectOp = "sliceBmp"
+	LoopOpSliceBmp LoopEffectOp = "seq.sliceBmp"
 	// LoopOpUpperAscii and LoopOpLowerAscii are `toUpperCase` and
 	// `toLowerCase` over a receiver whose alphabet the KERNEL proves
 	// ASCII. Case mapping REPLACES scalars, so no drawn-from claim holds
@@ -248,8 +248,8 @@ const (
 	// itself, rather than trusting a mapped class off this wire. The
 	// adapter cannot be the authority on a Unicode mapping the kernel is
 	// claiming soundness for.
-	LoopOpUpperAscii LoopEffectOp = "toUpperCaseAscii"
-	LoopOpLowerAscii LoopEffectOp = "toLowerCaseAscii"
+	LoopOpUpperAscii LoopEffectOp = "seq.upperAscii"
+	LoopOpLowerAscii LoopEffectOp = "seq.lowerAscii"
 	// LoopOpTan is Math.tan. Its image is the whole line -- the tangent
 	// runs to both infinities between consecutive poles -- so the row
 	// claims no bound on the VALUE. What it claims is the SORT, and that
@@ -263,7 +263,7 @@ const (
 	// answers NaN at both infinities, step 4 is the
 	// implementation-approximated tangent. Every non-NaN outcome is a
 	// Number, and the claimed interval is [-inf, +inf].
-	LoopOpTan LoopEffectOp = "tan"
+	LoopOpTan LoopEffectOp = LoopEffectOp(TransferOpTan)
 	// LoopOpReplaceUnionSafe is `s.replace(pattern, replacement)` and
 	// `s.replaceAll(...)` where the REPLACEMENT is a string this side
 	// holds exactly. It replaced the old outright decline, whose reason
@@ -312,7 +312,7 @@ const (
 	// hole is split's hole -- a pattern that is itself a lone surrogate
 	// can match half an astral pair. Send this op ONLY with the pattern
 	// and the replacement established astral-safe.
-	LoopOpReplaceUnionSafe LoopEffectOp = "replaceUnionSafe"
+	LoopOpReplaceUnionSafe LoopEffectOp = "seq.replaceUnion"
 	// LoopOpReplaceSortSafe is the replace family's SORT row -- the
 	// string world's LoopOpTan. Where the union row's gates fail, an
 	// outright refusal answers the kernel's `top`, which admits the
@@ -349,7 +349,7 @@ const (
 	// GetSubstitution is invoked with `!` (captures empty,
 	// namedCaptures undefined), and the regex road runs over a regex
 	// literal's intrinsic behaviour, none of which throws.
-	LoopOpReplaceSortSafe LoopEffectOp = "replaceSortSafe"
+	LoopOpReplaceSortSafe LoopEffectOp = "seq.replaceSort"
 	// LoopOpReplaceSortThrowSafe is the replace family's
 	// FUNCTIONAL-REPLACER row -- LoopOpReplaceSortSafe's claim, PLUS the
 	// thrown flag, for a REPLACEMENT that is caller code rather than an
@@ -379,7 +379,7 @@ const (
 	// this op only alongside havocking the replacer's write set
 	// (ClosureEscapesTrackedWrite names the boundary) -- exactly as any
 	// other escaping-closure call site is handled.
-	LoopOpReplaceSortThrowSafe LoopEffectOp = "replaceSortThrowSafe"
+	LoopOpReplaceSortThrowSafe LoopEffectOp = "seq.replaceSortThrow"
 )
 
 // LoopEffect is one binding's body effect, lowered for the kernel's
@@ -614,7 +614,7 @@ const (
 type IrBranchTest string
 
 const (
-	IrTestDefined IrBranchTest = "defined"
+	IrTestDefined IrBranchTest = "js.defined"
 	// IrTestEqUndef and IrTestEqNull are the STRICT flavored tests split
 	// out of the old conflated absent marker: `x === undefined` /
 	// `x === null` decide exactly one admission, leaving the other
@@ -623,11 +623,11 @@ const (
 	// either-admission split. Neither carries a `w` operand — the tested
 	// value is fixed by the test's own name, the same shape
 	// defined/truthyNum/truthyStr/isNan already have.
-	IrTestEqUndef   IrBranchTest = "eqUndef"
-	IrTestEqNull    IrBranchTest = "eqNull"
-	IrTestTruthyNum IrBranchTest = "truthyNum"
-	IrTestTruthyStr IrBranchTest = "truthyStr"
-	IrTestIsNan     IrBranchTest = "isNan"
+	IrTestEqUndef   IrBranchTest = "js.eqUndef"
+	IrTestEqNull    IrBranchTest = "js.eqNull"
+	IrTestTruthyNum IrBranchTest = "js.truthyNum"
+	IrTestTruthyStr IrBranchTest = "js.truthyStr"
+	IrTestIsNan     IrBranchTest = "binary64.isNan"
 	IrTestEq        IrBranchTest = "eq"
 	IrTestEqSeq     IrBranchTest = "eqSeq"
 	IrTestLt        IrBranchTest = "lt"

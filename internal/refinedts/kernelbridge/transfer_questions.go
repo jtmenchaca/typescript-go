@@ -43,50 +43,50 @@ type TransferQuestionOp string
 
 const (
 	TransferOpSubOrdGap    TransferQuestionOp = "subOrdGap"
-	TransferOpAdd          TransferQuestionOp = "add"
-	TransferOpSub          TransferQuestionOp = "sub"
+	TransferOpAdd          TransferQuestionOp = "binary64.add"
+	TransferOpSub          TransferQuestionOp = "binary64.sub"
 	TransferOpSubOrd       TransferQuestionOp = "subOrd"
-	TransferOpMul          TransferQuestionOp = "mul"
-	TransferOpDiv          TransferQuestionOp = "div"
-	TransferOpRem          TransferQuestionOp = "rem"
-	TransferOpMin          TransferQuestionOp = "min"
-	TransferOpMax          TransferQuestionOp = "max"
-	TransferOpBitOr        TransferQuestionOp = "bitOr"
-	TransferOpBitAnd       TransferQuestionOp = "bitAnd"
-	TransferOpBitXor       TransferQuestionOp = "bitXor"
-	TransferOpShl          TransferQuestionOp = "shl"
-	TransferOpSar          TransferQuestionOp = "sar"
-	TransferOpShr          TransferQuestionOp = "shr"
+	TransferOpMul          TransferQuestionOp = "binary64.mul"
+	TransferOpDiv          TransferQuestionOp = "binary64.div"
+	TransferOpRem          TransferQuestionOp = "rem.truncDividendSign"
+	TransferOpMin          TransferQuestionOp = "binary64.min"
+	TransferOpMax          TransferQuestionOp = "binary64.max"
+	TransferOpBitOr        TransferQuestionOp = "int32.bitOr"
+	TransferOpBitAnd       TransferQuestionOp = "int32.bitAnd"
+	TransferOpBitXor       TransferQuestionOp = "int32.bitXor"
+	TransferOpShl          TransferQuestionOp = "int32.shl"
+	TransferOpSar          TransferQuestionOp = "int32.sar"
+	TransferOpShr          TransferQuestionOp = "int32.shr"
 	TransferOpCountProduct TransferQuestionOp = "countProduct"
-	TransferOpHypot        TransferQuestionOp = "hypot"
-	TransferOpAtan2        TransferQuestionOp = "atan2"
-	TransferOpNeg          TransferQuestionOp = "neg"
-	TransferOpFloor        TransferQuestionOp = "floor"
-	TransferOpCeil         TransferQuestionOp = "ceil"
-	TransferOpRound        TransferQuestionOp = "round"
-	TransferOpTrunc        TransferQuestionOp = "trunc"
-	TransferOpAbs          TransferQuestionOp = "abs"
-	TransferOpExp          TransferQuestionOp = "exp"
-	TransferOpSqrt         TransferQuestionOp = "sqrt"
-	TransferOpLog          TransferQuestionOp = "log"
-	TransferOpLog2         TransferQuestionOp = "log2"
-	TransferOpLog10        TransferQuestionOp = "log10"
-	TransferOpExpm1        TransferQuestionOp = "expm1"
-	TransferOpLog1p        TransferQuestionOp = "log1p"
-	TransferOpCbrt         TransferQuestionOp = "cbrt"
-	TransferOpSin          TransferQuestionOp = "sin"
-	TransferOpCos          TransferQuestionOp = "cos"
-	TransferOpTan          TransferQuestionOp = "tan"
-	TransferOpSinh         TransferQuestionOp = "sinh"
-	TransferOpCosh         TransferQuestionOp = "cosh"
-	TransferOpTanh         TransferQuestionOp = "tanh"
-	TransferOpAtan         TransferQuestionOp = "atan"
-	TransferOpAsin         TransferQuestionOp = "asin"
-	TransferOpAtanh        TransferQuestionOp = "atanh"
-	TransferOpAsinh        TransferQuestionOp = "asinh"
-	TransferOpAcosh        TransferQuestionOp = "acosh"
-	TransferOpToInt32      TransferQuestionOp = "toInt32"
-	TransferOpPow          TransferQuestionOp = "pow"
+	TransferOpHypot        TransferQuestionOp = "js.hypot"
+	TransferOpAtan2        TransferQuestionOp = "js.atan2"
+	TransferOpNeg          TransferQuestionOp = "binary64.neg"
+	TransferOpFloor        TransferQuestionOp = "binary64.floor"
+	TransferOpCeil         TransferQuestionOp = "binary64.ceil"
+	TransferOpRound        TransferQuestionOp = "js.round"
+	TransferOpTrunc        TransferQuestionOp = "binary64.trunc"
+	TransferOpAbs          TransferQuestionOp = "binary64.abs"
+	TransferOpExp          TransferQuestionOp = "js.exp"
+	TransferOpSqrt         TransferQuestionOp = "binary64.sqrt"
+	TransferOpLog          TransferQuestionOp = "js.log"
+	TransferOpLog2         TransferQuestionOp = "js.log2"
+	TransferOpLog10        TransferQuestionOp = "js.log10"
+	TransferOpExpm1        TransferQuestionOp = "js.expm1"
+	TransferOpLog1p        TransferQuestionOp = "js.log1p"
+	TransferOpCbrt         TransferQuestionOp = "js.cbrt"
+	TransferOpSin          TransferQuestionOp = "js.sin"
+	TransferOpCos          TransferQuestionOp = "js.cos"
+	TransferOpTan          TransferQuestionOp = "js.tan"
+	TransferOpSinh         TransferQuestionOp = "js.sinh"
+	TransferOpCosh         TransferQuestionOp = "js.cosh"
+	TransferOpTanh         TransferQuestionOp = "js.tanh"
+	TransferOpAtan         TransferQuestionOp = "js.atan"
+	TransferOpAsin         TransferQuestionOp = "js.asin"
+	TransferOpAtanh        TransferQuestionOp = "js.atanh"
+	TransferOpAsinh        TransferQuestionOp = "js.asinh"
+	TransferOpAcosh        TransferQuestionOp = "js.acosh"
+	TransferOpInt32Wrap    TransferQuestionOp = "int32.wrap"
+	TransferOpPow          TransferQuestionOp = "pow.binary64"
 )
 
 func transferOpIsUnary(op TransferQuestionOp) bool {
@@ -97,7 +97,7 @@ func transferOpIsUnary(op TransferQuestionOp) bool {
 		TransferOpLog1p, TransferOpCbrt, TransferOpSin, TransferOpCos,
 		TransferOpTan, TransferOpSinh, TransferOpCosh, TransferOpTanh,
 		TransferOpAtan, TransferOpAsin, TransferOpAtanh, TransferOpAsinh,
-		TransferOpAcosh, TransferOpToInt32:
+		TransferOpAcosh, TransferOpInt32Wrap:
 		return true
 	default:
 		return false
@@ -150,14 +150,14 @@ func TransferWire(question TransferQuestion) string {
 			panic(fmt.Sprintf("TransferWire: subOrdGap: %v", err))
 		}
 		return fmt.Sprintf(
-			`{"op":"subOrdGap","A":%s,"B":%s,"c":{"num":%d,"exp":%d}}`,
-			EncodeSet(question.A), EncodeSet(question.B), c.Num, c.Exp,
+			`{"op":"%s","A":%s,"B":%s,"c":{"num":%d,"exp":%d}}`,
+			TransferOpSubOrdGap, EncodeSet(question.A), EncodeSet(question.B), c.Num, c.Exp,
 		)
 	}
 	if question.Op == TransferOpPow {
 		base := marshalWireValue(powOperandWire(question.Base))
 		exp := marshalWireValue(powOperandWire(question.Exp))
-		return fmt.Sprintf(`{"op":"pow","base":%s,"exp":%s}`, base, exp)
+		return fmt.Sprintf(`{"op":"%s","base":%s,"exp":%s}`, TransferOpPow, base, exp)
 	}
 	if !transferOpIsUnary(question.Op) {
 		return fmt.Sprintf(

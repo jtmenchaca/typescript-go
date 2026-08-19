@@ -41,10 +41,10 @@ const (
 type NarrowCmpOp string
 
 const (
-	NarrowOpGe NarrowCmpOp = "ge"
-	NarrowOpGt NarrowCmpOp = "gt"
-	NarrowOpLe NarrowCmpOp = "le"
-	NarrowOpLt NarrowCmpOp = "lt"
+	NarrowOpGe NarrowCmpOp = NarrowCmpOp(IrTestGe)
+	NarrowOpGt NarrowCmpOp = NarrowCmpOp(IrTestGt)
+	NarrowOpLe NarrowCmpOp = NarrowCmpOp(IrTestLe)
+	NarrowOpLt NarrowCmpOp = NarrowCmpOp(IrTestLt)
 )
 
 // NarrowTree is a condition on ONE place, lowered for the kernel's

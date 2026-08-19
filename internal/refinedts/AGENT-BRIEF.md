@@ -320,8 +320,8 @@ in full before touching code.`
   sub-patterns yourself; FormatGrammar alone pads substring-anywhere.
 - **kernelbridge IrBranchTest**: new no-operand tests must be added to `StmtWire`'s
   w-suppression guard (the else-if chain at the branch tail of the function, ~line 833
-  area) or they emit a spurious "w" field. `IrTestEqUndef` ("eqUndef") and
-  `IrTestEqNull` ("eqNull") exist; their true arm is "the slot IS that absent value".
+  area) or they emit a spurious "w" field. `IrTestEqUndef` ("js.eqUndef") and
+  `IrTestEqNull` ("js.eqNull") exist; their true arm is "the slot IS that absent value".
 - **Kernel question wire tracing** (kernel_trace.go): every question funnels through
   `KernelFromCalls`'s `ask1`/`ask2` closures (ask_kernel.go) into one shared `timed`
   seam — call `kernelbridge.TraceKernelTo(func(line string) { t.Logf("%s", line) })`

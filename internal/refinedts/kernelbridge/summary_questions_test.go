@@ -111,7 +111,7 @@ func TestTheWalkWireGainsTheTableWhenSummariesRideAlong(t *testing.T) {
 }
 
 func TestASummaryAnswerIsCapturedWholeWithoutBeingRead(t *testing.T) {
-	raw := `{"arity":1,"steps":[{"cutT":{"test":"defined","src":0}}],"out":[1]}`
+	raw := `{"arity":1,"steps":[{"cutT":{"test":"js.defined","src":0}}],"out":[1]}`
 	if got := DecodeSummaryBlob(raw); string(got) != raw {
 		t.Errorf("DecodeSummaryBlob = %q, want the answer verbatim %q", string(got), raw)
 	}

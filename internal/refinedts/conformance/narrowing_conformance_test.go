@@ -57,7 +57,7 @@ func TestTheStructuralNarrowingsFilterTheWayTheProofsSay(t *testing.T) {
 
 	// definedness: truth strips the absent flag and nothing else;
 	// falsity leaves only the absent value
-	definedTrue, definedFalse := kernel.NarrowState(wide, "defined", 0, false)
+	definedTrue, definedFalse := kernel.NarrowState(wide, "js.defined", 0, false)
 	if got, want := flagged(t, definedTrue), (narrowingFlags{absent: false, nan: true}); got != want {
 		t.Errorf("defined.whenTrue flags = %+v, want %+v", got, want)
 	}
@@ -73,7 +73,7 @@ func TestTheStructuralNarrowingsFilterTheWayTheProofsSay(t *testing.T) {
 
 	// numeric truthiness: truth removes 0, absence, and NaN;
 	// falsity keeps exactly 0 and the two flags
-	truthyTrue, truthyFalse := kernel.NarrowState(wide, "truthyNum", 0, false)
+	truthyTrue, truthyFalse := kernel.NarrowState(wide, "js.truthyNum", 0, false)
 	if got, want := flagged(t, truthyTrue), (narrowingFlags{absent: false, nan: false}); got != want {
 		t.Errorf("truthyNum.whenTrue flags = %+v, want %+v", got, want)
 	}
@@ -98,7 +98,7 @@ func TestTheStructuralNarrowingsFilterTheWayTheProofsSay(t *testing.T) {
 
 	// string truthiness from no knowledge at all: truth is every
 	// nonempty tuple, falsity exactly the empty one
-	strTrue, strFalse := kernel.NarrowState(kernelbridge.KnownStateWire{Top: true}, "truthyStr", 0, false)
+	strTrue, strFalse := kernel.NarrowState(kernelbridge.KnownStateWire{Top: true}, "js.truthyStr", 0, false)
 	if got, want := flagged(t, strTrue), (narrowingFlags{absent: false, nan: false}); got != want {
 		t.Errorf("truthyStr.whenTrue flags = %+v, want %+v", got, want)
 	}
@@ -143,7 +143,7 @@ func TestTheStructuralNarrowingsFilterTheWayTheProofsSay(t *testing.T) {
 		kernelbridge.KnownStateWire{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf(nil)), Undef: true, Null: true, Nan: false},
 		kernelbridge.KnownStateWire{Set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{7})), Undef: false, Null: false, Nan: false},
 	)
-	splitTrue, splitFalse := kernel.NarrowState(absentOnly, "defined", 0, false)
+	splitTrue, splitFalse := kernel.NarrowState(absentOnly, "js.defined", 0, false)
 	if got := kernel.Member(setOf(t, splitTrue), []float64{7}); !got {
 		t.Errorf("member(split.whenTrue, [7]) = %v, want true", got)
 	}

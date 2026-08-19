@@ -124,7 +124,7 @@ func TestTheEqUndefAndEqNullBranchTestsWireBareWithNoWOperand(t *testing.T) {
 		On:   0,
 		Test: IrTestEqUndef,
 	})
-	wantUndef := `{"branch":{"on":0,"test":"eqUndef","then":[],"else":[]}}`
+	wantUndef := `{"branch":{"on":0,"test":"js.eqUndef","then":[],"else":[]}}`
 	if gotUndef != wantUndef {
 		t.Errorf("StmtWire(eqUndef) = %q, want %q", gotUndef, wantUndef)
 	}
@@ -133,7 +133,7 @@ func TestTheEqUndefAndEqNullBranchTestsWireBareWithNoWOperand(t *testing.T) {
 		On:   1,
 		Test: IrTestEqNull,
 	})
-	wantNull := `{"branch":{"on":1,"test":"eqNull","then":[],"else":[]}}`
+	wantNull := `{"branch":{"on":1,"test":"js.eqNull","then":[],"else":[]}}`
 	if gotNull != wantNull {
 		t.Errorf("StmtWire(eqNull) = %q, want %q", gotNull, wantNull)
 	}

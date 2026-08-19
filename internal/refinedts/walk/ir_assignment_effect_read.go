@@ -194,11 +194,11 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 // with no ceiling stated it is {-1} u [0, +inf), and the integrality
 // rides either way.
 //
-// BOTH methods ride the SAME wire op, LoopOpIndexOf ("indexOf"). The
+// BOTH methods ride the SAME wire op, LoopOpIndexOf ("seq.indexOf"). The
 // kernel's evalSeqNum (set_functions/walk.lean) does not read its op
 // argument at all — every SeqNumOp answers the identical indexOfWindow
 // — and the wire's own decoder (seqNumOpOf, boundary/exports.lean)
-// accepts only the string "indexOf", so "indexOf" is the one legal
+// accepts only the string "seq.indexOf", so "seq.indexOf" is the one legal
 // spelling for this whole row; the op tag names the FAMILY (a bounded
 // search returning an index-or-(-1)), not a search direction. The
 // [-1, 2*hi) claim is sound for lastIndexOf on its own clause exactly as
@@ -339,7 +339,7 @@ const stringMaxLength = 9007199254740991
 // case; a slot's own value, even a fully-string-sorted one, is not
 // available to this Go-side reader at all — only the KERNEL sees a
 // slot's entry set, and no wire op exists to ask it for a length (the
-// numeric-from-sequence family, seqNumOpOf, decodes only "indexOf").
+// numeric-from-sequence family, seqNumOpOf, decodes only "seq.indexOf").
 //
 // The SORT-ONLY case. Everywhere else the receiver reads as a sequence
 // (a name, a concatenation, a template, …) but this side cannot state

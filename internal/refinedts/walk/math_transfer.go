@@ -110,8 +110,8 @@ func callTransferForImul(kernel *kernelbridge.RefinedTSKernel, A, B refinementse
 			ok = false
 		}
 	}()
-	ia, iaOk := setOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpToInt32, A: A}))
-	ib, ibOk := setOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpToInt32, A: B}))
+	ia, iaOk := setOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpInt32Wrap, A: A}))
+	ib, ibOk := setOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpInt32Wrap, A: B}))
 	if !iaOk || !ibOk {
 		return abstractdomain.AbstractValue{}, false
 	}
@@ -119,7 +119,7 @@ func callTransferForImul(kernel *kernelbridge.RefinedTSKernel, A, B refinementse
 	if !productOk {
 		return abstractdomain.AbstractValue{}, false
 	}
-	return KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpToInt32, A: product})), true
+	return KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpInt32Wrap, A: product})), true
 }
 
 // setOfAnswer is the TS source's setOfAnswer: a transfer answer read

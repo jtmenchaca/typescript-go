@@ -12,8 +12,8 @@ func TestTransferWireBinaryUnaryPowSubOrdGap(t *testing.T) {
 	B := refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1}))
 
 	add := parseWire(t, TransferWire(TransferQuestion{Op: TransferOpAdd, A: A, B: B})).(map[string]any)
-	if add["op"] != "add" {
-		t.Errorf("add.op = %v, want add", add["op"])
+	if add["op"] != string(TransferOpAdd) {
+		t.Errorf("add.op = %v, want %s", add["op"], TransferOpAdd)
 	}
 	if !reflect.DeepEqual(add["A"], parseWire(t, EncodeSet(A))) {
 		t.Errorf("add.A mismatch")
@@ -23,8 +23,8 @@ func TestTransferWireBinaryUnaryPowSubOrdGap(t *testing.T) {
 	}
 
 	neg := parseWire(t, TransferWire(TransferQuestion{Op: TransferOpNeg, A: A})).(map[string]any)
-	if neg["op"] != "neg" {
-		t.Errorf("neg.op = %v, want neg", neg["op"])
+	if neg["op"] != string(TransferOpNeg) {
+		t.Errorf("neg.op = %v, want %s", neg["op"], TransferOpNeg)
 	}
 	if !reflect.DeepEqual(neg["A"], parseWire(t, EncodeSet(A))) {
 		t.Errorf("neg.A mismatch")
@@ -38,8 +38,8 @@ func TestTransferWireBinaryUnaryPowSubOrdGap(t *testing.T) {
 		Base: PowOperandWire{Kind: PowOperandNaN},
 		Exp:  PowOperandWire{Kind: PowOperandSet, Set: B},
 	})).(map[string]any)
-	if pow["op"] != "pow" {
-		t.Errorf("pow.op = %v, want pow", pow["op"])
+	if pow["op"] != string(TransferOpPow) {
+		t.Errorf("pow.op = %v, want %s", pow["op"], TransferOpPow)
 	}
 	base := pow["base"].(map[string]any)
 	if base["kind"] != "nan" {
@@ -54,8 +54,8 @@ func TestTransferWireBinaryUnaryPowSubOrdGap(t *testing.T) {
 	}
 
 	gap := parseWire(t, TransferWire(TransferQuestion{Op: TransferOpSubOrdGap, A: A, B: B, C: 2})).(map[string]any)
-	if gap["op"] != "subOrdGap" {
-		t.Errorf("gap.op = %v, want subOrdGap", gap["op"])
+	if gap["op"] != string(TransferOpSubOrdGap) {
+		t.Errorf("gap.op = %v, want %s", gap["op"], TransferOpSubOrdGap)
 	}
 	c := gap["c"].(map[string]any)
 	if c["num"].(float64)*pow2(c["exp"].(float64)) != 2 {
