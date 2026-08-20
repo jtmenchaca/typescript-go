@@ -94,6 +94,18 @@ func evaluateExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.A
 		}
 		analysisDepthMu.Unlock()
 	}()
+	// a value a caller PROVED for this exact node answers instead of the
+	// walk's own reading — the relational accumulation's folded division,
+	// whose quotient comes from a kernel relation no re-walk can reach
+	// (flow_context.go's NodeOverrides carries the whole rule). The map
+	// is nil for nearly every walk, so the ordinary path pays this
+	// predictable branch and never a lookup; reads do not consume, so a
+	// speculative probe walking the node first leaves it for the real one.
+	if ctx.NodeOverrides != nil {
+		if pinned, isPinned := ctx.NodeOverrides[e]; isPinned {
+			return pinned
+		}
+	}
 	known := evaluateForm(ctx, env, e)
 	// a call `this` reaches — as method receiver, argument, or
 	// inside a closure handed over — can run class code that writes

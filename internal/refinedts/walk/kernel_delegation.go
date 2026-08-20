@@ -485,6 +485,11 @@ func writtenTargets(stmts []kernelbridge.IrStatement, into map[int]struct{}) {
 					into[i] = struct{}{}
 				}
 			}
+		case kernelbridge.IrStatementLoopAccum:
+			// the accumulation writes exactly one slot: the running total.
+			// The element and count slots are read every pass and never
+			// moved, so meeting them back could only restate what is held.
+			into[s.AccumTotal] = struct{}{}
 		}
 	}
 }

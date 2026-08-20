@@ -108,13 +108,64 @@ func ContextAfterStatements(ctx *FlowContext, statements []*ast.Node) *FlowConte
 
 func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotations.DeclaredRefinement) bool {
 	running := ctx
-	for _, statement := range statements {
+	// walked: the index this list has already reached. The relational
+	// accumulation consumes the statement AFTER the loop as well, so the
+	// list resumes past it rather than walking it a second time.
+	walked := 0
+	for index, statement := range statements {
+		if index < walked {
+			continue
+		}
+		// accumulate-then-divide-by-count spans TWO statements, and the
+		// relation tying the sum to the count dies at a kernel program
+		// boundary — so the pair is harvested here, from the states as
+		// they stand before either runs, and lowered into one program
+		// (relational_accumulation.go). Both statements still walk
+		// ordinarily below; what the kernel proved MEETS what they left.
+		accumulation, hasAccumulation := RelationalAccumulationOf(running, env, statements, index)
 		if AnalyzeStatement(running, env, statement, result) {
 			return true
 		}
 		// a condition-tested loop hands its NEGATED condition to the
 		// rest of this list — the continuation the loop cannot reach
 		running = ContextWithExitRows(running, statement)
+		walked = index + 1
+		if !hasAccumulation {
+			continue
+		}
+		// the kernel is asked BEFORE the second statement walks: a return
+		// shape needs the proved quotient in hand to pin it on the
+		// division node the walk is about to reach. A refusal leaves both
+		// answers unset and the statement walks exactly as it would have.
+		answer, answered := AskRelationalAccumulation(accumulation)
+		if answered {
+			MeetRelationalTotalInto(env, accumulation, answer)
+		}
+		division := statements[index+1]
+		exits := func() bool {
+			// the override is set around THIS ONE statement and restored
+			// after — flow_context.go's NodeOverrides states the obligation,
+			// and it is ReturnSink's own set-then-restore discipline
+			if answered {
+				if override, pinned := RelationalQuotientOverride(running, env, accumulation, answer); pinned {
+					pinning := *running
+					pinning.NodeOverrides = override
+					return AnalyzeStatement(&pinning, env, division, result)
+				}
+			}
+			return AnalyzeStatement(running, env, division, result)
+		}()
+		// the declaration shape's quotient lands on its bound name AFTER
+		// the declaration walked it; the return shape bound nothing and
+		// already consumed its answer through the override above
+		if answered {
+			MeetRelationalQuotientInto(env, accumulation, answer)
+		}
+		if exits {
+			return true
+		}
+		running = ContextWithExitRows(running, division)
+		walked = index + 2
 	}
 	return false
 }

@@ -1177,16 +1177,32 @@ func integerRunOf(set refinementsets.RefinedSet) (integerRun, bool) {
 	isIntegerAlone := func(s refinementsets.RefinedSet) bool {
 		return len(s.Forms) == 1 && s.Forms[0].Form == refinementsets.FormInteger
 	}
+	// isInfinities recognizes the mark's ±∞ arm. The flag derivation
+	// below (negInf/posInf) reads a match as "BOTH infinities are
+	// members" — that is the only shape any producer emits: the
+	// kernel's intOrInfForm hardcodes w: ["-inf", "+inf"]
+	// (encode_sets.lean, the authority), and the Go-side mirror in
+	// coercion_models.go emits OneOf{+Inf, -Inf} the same way; nothing
+	// narrows one side off a mark once built. A one-sided or empty
+	// all-infinities list is not that shape, so it must decline here
+	// rather than let the caller assert an infinity the set does not
+	// hold.
 	isInfinities := func(s refinementsets.RefinedSet) bool {
 		if len(s.Forms) != 1 || s.Forms[0].Form != refinementsets.FormOneOf {
 			return false
 		}
+		hasNegInf := false
+		hasPosInf := false
 		for _, v := range s.Forms[0].W {
-			if v != math.Inf(1) && v != math.Inf(-1) {
+			if v == math.Inf(-1) {
+				hasNegInf = true
+			} else if v == math.Inf(1) {
+				hasPosInf = true
+			} else {
 				return false
 			}
 		}
-		return true
+		return hasNegInf && hasPosInf
 	}
 	for _, form := range set.Forms {
 		switch form.Form {

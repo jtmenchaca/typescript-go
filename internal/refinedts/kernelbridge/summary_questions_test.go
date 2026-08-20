@@ -83,11 +83,58 @@ func TestAWalkQuestionWithATableAppendsItAfterTheStatements(t *testing.T) {
 // The walk question's own wire, rebuilt from the shared encoders — the
 // spelling kernel_asks.go sends, held here so the zero-table form is
 // pinned without a kernel to ask.
+//
+// This is the PLAIN body: exactly what kernel.WalkRelational sends, and
+// what kernel.Walk sends before it appends `,"certify":true`.
 func walkWire(states []KnownStateWire, stmts []IrStatement, table []SummaryBlob) string {
 	return fmt.Sprintf(
 		`{"states":[%s],"stmts":[%s]%s}`,
 		joinComma(StateWires(states)), joinComma(StmtWires(stmts)), TableField(table),
 	)
+}
+
+// certifiedWalkWire is kernel.Walk's own spelling — the plain body with
+// the certify field appended.
+func certifiedWalkWire(states []KnownStateWire, stmts []IrStatement, table []SummaryBlob) string {
+	return fmt.Sprintf(
+		`{"states":[%s],"stmts":[%s]%s,"certify":true}`,
+		joinComma(StateWires(states)), joinComma(StmtWires(stmts)), TableField(table),
+	)
+}
+
+func TestTheRelationalWalkOmitsTheCertifyFieldTheOrdinaryWalkSends(t *testing.T) {
+	// a loopAccum program: the accumulation, then the division that
+	// consumes the relation it left behind
+	element := LoopEffect{Kind: LoopEffectVar, Index: 1}
+	total := LoopEffect{Kind: LoopEffectVar, Index: 0}
+	length := LoopEffect{Kind: LoopEffectVar, Index: 2}
+	states := []KnownStateWire{{Top: true}}
+	stmts := []IrStatement{
+		{
+			Kind: IrStatementLoopAccum, AccumTotal: 0, AccumSrc: 1, AccumLen: 2,
+			AccumBody: LoopEffect{Kind: LoopEffectBinary, Op: LoopOpMul, A: &element, B: &element},
+		},
+		{
+			Kind: IrStatementAssign, Target: 3,
+			Effect: LoopEffect{Kind: LoopEffectBinary, Op: LoopOpDiv, A: &total, B: &length},
+		},
+	}
+	body := `{"states":[{"top":true}],"stmts":[` +
+		`{"loopAccum":{"total":0,"src":1,"len":2,"body":{"op":"binary64.mul","A":{"var":1},"B":{"var":1}}}},` +
+		`{"assign":{"target":3,"e":{"op":"binary64.div","A":{"var":0},"B":{"var":2}}}}` +
+		`]}`
+	if got := walkWire(states, stmts, nil); got != body {
+		t.Errorf("relational walk wire = %q, want %q", got, body)
+	}
+	// `"certify":true` selects walkStmtsCert, which drops the linear
+	// ledger — so the relation the loopAccum leaves would never reach the
+	// division. The two wires must differ in exactly this field, and the
+	// difference is what keeps the two asks separate in the question
+	// cache (whose key is the op plus the wire itself).
+	wantCertified := body[:len(body)-1] + `,"certify":true}`
+	if got := certifiedWalkWire(states, stmts, nil); got != wantCertified {
+		t.Errorf("certified walk wire = %q, want %q", got, wantCertified)
+	}
 }
 
 func TestTheZeroTableWalkWireIsUnchangedFromBeforeSummariesExisted(t *testing.T) {

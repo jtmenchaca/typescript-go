@@ -217,16 +217,11 @@ func GuardFix(node *ast.Node, target annotations.DeclaredRefinement) (GuardFixRe
 // DEMONSTRABLY states a sequence — a string or an array shape: a
 // star, a concatenation, a repetition, or the empty tuple sits among
 // its forms. A positive test: relation-shaped or empty sets answer
-// false and keep their own paths.
+// false and keep their own paths. The one implementation lives in
+// refinementsets (objectgraphs' value encoder asks it too); this name
+// stays for the walk's many call sites.
 func StatesSequence(set refinementsets.RefinedSet) bool {
-	for _, f := range set.Forms {
-		if f.Form == refinementsets.FormStar || f.Form == refinementsets.FormConcatenation ||
-			f.Form == refinementsets.FormRepeat || f.Form == refinementsets.FormRepeatWord ||
-			f.Form == refinementsets.FormEmptyTuple {
-			return true
-		}
-	}
-	return false
+	return refinementsets.StatesSequence(set)
 }
 
 // CodepointScalar is codepointScalar in the TS source: one admitted

@@ -366,6 +366,25 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 		}
 		return DecodeWalkStates(Answered(raw), "walk")
 	}
+	kernel.WalkRelational = func(states []KnownStateWire, stmts []IrStatement, table ...SummaryBlob) []KnownStateWire {
+		// NO certify field at all — not `false`, absent. `"certify":true`
+		// above selects walkStmtsCert (boundary/exports_walk.lean), which
+		// drops the linear ledger, so a "loopAccum" statement's relation
+		// never reaches the division that consumes it. The plain path runs
+		// walkProgramRel, which carries the ledger across the statement
+		// list. Everything else about the ask — the states, the statements,
+		// the table field, the symbol, and the panic-on-error discipline —
+		// is Walk's, byte for byte.
+		wire := fmt.Sprintf(
+			`{"states":[%s],"stmts":[%s]%s}`,
+			joinComma(StateWires(states)), joinComma(StmtWires(stmts)), TableField(table),
+		)
+		raw, err := ask1("walk", "kernel_walk", wire)
+		if err != nil {
+			panic(err.Error())
+		}
+		return DecodeWalkStates(Answered(raw), "walk")
+	}
 	kernel.Summarize = func(arity int, stmts []IrStatement, table []SummaryBlob) SummaryBlob {
 		wire := SummarizeWire(arity, stmts, table)
 		raw, err := ask1("summarize", "kernel_summarize", wire)

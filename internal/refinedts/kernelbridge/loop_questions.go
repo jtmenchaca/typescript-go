@@ -608,6 +608,25 @@ const (
 	// wire never carries a count past the budget — the Go lowering
 	// falls back to the ordinary loop/loopStmts form there).
 	IrStatementLoopCounted IrStatementKind = "loopCounted"
+	// IrStatementLoopAccum is the ACCUMULATION over a sequence: slot
+	// AccumSrc holds the sequence's ELEMENT state, slot AccumLen holds
+	// the element COUNT, and the loop runs AccumLen times evaluating
+	// AccumBody — an ordinary effect over the slot environment reading
+	// the iteration value from AccumSrc — and adding its result into slot
+	// AccumTotal, which starts at 0.
+	//
+	// What separates it from every loop form above is the RELATION it
+	// leaves behind. The counted and solved loops answer one enclosure per
+	// slot, so `total` exits as [0, +inf) whenever the count is a runtime
+	// length, and a later `total / len` divides two unrelated enclosures.
+	// This form ties the two: the kernel carries `total <= count * elemHi`
+	// (and the lower twin) internally, so a division of AccumTotal by
+	// AccumLen LATER IN THE SAME LOWERED PROGRAM is narrowed by the
+	// relation before the plain division transfer runs. The relation lives
+	// kernel-side for the length of one walk — it does not cross a program
+	// boundary — so the loop and the division it feeds must lower into ONE
+	// statement list.
+	IrStatementLoopAccum IrStatementKind = "loopAccum"
 )
 
 // IrBranchTest is the test field of a branch IrStatement.
@@ -739,6 +758,23 @@ type IrStatement struct {
 	// kernel composes this with itself Count times from the entry
 	// state, no widening.
 	CountedBody []LoopEffect
+
+	// "loopAccum"
+	// AccumTotal: the slot the running sum lands in. It holds the
+	// accumulator's start value at entry and the summed total at exit.
+	AccumTotal int
+	// AccumSrc: the slot holding the sequence's ELEMENT state — one
+	// value drawn from it per pass, which AccumBody reads as `{"var":
+	// AccumSrc}`.
+	AccumSrc int
+	// AccumLen: the slot holding the element COUNT — how many passes run,
+	// and the denominator the relation ties the total to.
+	AccumLen int
+	// AccumBody: the term one pass adds, as one effect over the slot
+	// environment. `total += s * s` sends `mul(var AccumSrc, var
+	// AccumSrc)` here — the ADDITION into AccumTotal is the form's own,
+	// never spelled in this effect.
+	AccumBody LoopEffect
 }
 
 // IrLoopCondCmp is a loop head comparing two tracked slots: On
@@ -838,6 +874,17 @@ func StmtWire(s IrStatement) string {
 		return fmt.Sprintf(
 			`{"loopCounted":{"count":%d,"body":[%s]}}`,
 			s.Count, strings.Join(body, ","),
+		)
+	}
+	if s.Kind == IrStatementLoopAccum {
+		// three slot indices and ONE effect — no per-binding vector at
+		// all: every slot but AccumTotal is left exactly as it stood, and
+		// AccumTotal's own step is the form's addition, not a spelled
+		// effect. The kernel reads the iteration value off AccumSrc and
+		// the pass count off AccumLen.
+		return fmt.Sprintf(
+			`{"loopAccum":{"total":%d,"src":%d,"len":%d,"body":%s}}`,
+			s.AccumTotal, s.AccumSrc, s.AccumLen, EffectWire(s.AccumBody),
 		)
 	}
 	if s.Kind == IrStatementLoopStmts {

@@ -297,6 +297,24 @@ func WordOf(set RefinedSet) ([]float64, bool) {
 	return word, true
 }
 
+// StatesSequence is whether a set DEMONSTRABLY states a sequence -- a
+// string or an array shape: a star, a concatenation, a repetition, or
+// the empty tuple sits among its forms. A positive test:
+// relation-shaped or empty sets answer false and keep their own
+// paths. (Hoisted from walk's sequence_measures.go so objectgraphs'
+// value encoder asks the same question the walk does;
+// walk.StatesSequence delegates here.)
+func StatesSequence(set RefinedSet) bool {
+	for _, f := range set.Forms {
+		if f.Form == FormStar || f.Form == FormConcatenation ||
+			f.Form == FormRepeat || f.Form == FormRepeatWord ||
+			f.Form == FormEmptyTuple {
+			return true
+		}
+	}
+	return false
+}
+
 // OnOneTupleLayer stays on the 1-tuple layer: only the 1-tuple forms,
 // through union and difference. (The bare root is NOT -- it holds
 // every tuple.)

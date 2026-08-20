@@ -242,11 +242,18 @@ func NarrowingsOf(
 				// a refused question narrows nothing — never a guess
 				continue
 			}
-			// a side already pinned EXACTLY by the structural pass keeps
-			// its pin; the set claim would only restate it
+			// a side already claimed by the structural pass keeps its
+			// claim; the kernel's answer would only restate it — an
+			// EXACT pin (a held string/boolean equality), or a set of
+			// FORMS already stated (array_shape_narrowing.go's
+			// `.includes` whenTrue, the one other structural leaf that
+			// states a set on the tested argument's place)
 			pinned := func(side []Narrowed) bool {
 				for _, n := range side {
-					if n.Exact != nil && n.Binding == place.Binding && joinPath(n.Path) == joinPath(place.Path) {
+					if n.Binding != place.Binding || joinPath(n.Path) != joinPath(place.Path) {
+						continue
+					}
+					if n.Exact != nil || len(n.Forms) > 0 {
 						return true
 					}
 				}

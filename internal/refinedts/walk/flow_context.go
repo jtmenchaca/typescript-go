@@ -205,4 +205,37 @@ type FlowContext struct {
 	// under that seeding is false for today's callers, not for every
 	// admissible input — so the dead-guard report stays quiet here.
 	CallSiteSeeded bool
+	// NodeOverrides: a value a caller PROVED for one specific expression
+	// node, which evaluateExpression answers for that node instead of
+	// walking it. The relational accumulation is the one producer today:
+	// the kernel derives the quotient of a folded `total / len` division
+	// from the linear relation the accumulation left behind, and no
+	// re-walk of that division can reach the same answer — the relation
+	// is the whole point, and it lives kernel-side, not in the env. So
+	// the proved quotient is pinned on the division NODE and the return
+	// statement walks ordinarily around it.
+	//
+	// THE SCOPING OBLIGATION IS THE CALLER'S, and it is ReturnSink's
+	// discipline exactly: the caller sets this around ONE statement's
+	// walk and restores what it found afterwards. A *FlowContext is
+	// value-copied into sub-walks at dozens of sites (inliner.go,
+	// constructed_instance.go, loop_unroll.go, the callback routes), so
+	// a map left set outlives its statement and travels into inlined
+	// callee bodies — where a node pointer cannot collide (pointers are
+	// unique per program) but an override has no business surviving.
+	// Set it, walk the one statement, restore.
+	//
+	// READS DO NOT CONSUME. The entry stays until the caller restores,
+	// which is what makes the SPECULATIVE walks harmless: the silent
+	// recovery passes (inliner.go's `silent := *ctx`) and the
+	// assignability probes (object_assignability.go, maybe_and_union.go)
+	// evaluate expressions and discard the answers, and a consumed
+	// override would be spent on a discarded walk and missing from the
+	// real one. Idempotent, so every walk over the node sees the same
+	// proved value.
+	//
+	// Nil for every walk that pins nothing, which is nearly all of them —
+	// evaluateExpression's read nil-checks before it looks anything up,
+	// so the ordinary path pays a predictable branch and no hash.
+	NodeOverrides map[*ast.Node]abstractdomain.AbstractValue
 }

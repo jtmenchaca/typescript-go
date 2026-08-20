@@ -173,6 +173,15 @@ func CheckObjectTarget(
 	if known.Stated != nil && known.Stated == objectAnnotationRefOf(target.Object) {
 		return
 	}
+	// the kernel's value-instantiation judgment lands ahead of the
+	// per-key walk: where the annotation's whole claim lowers to the
+	// graph, the proved verdict serves — refutations report,
+	// acceptance is silent — and any decline (a gate, the encoder,
+	// the wire, a kernel refusal) falls through to the walk below,
+	// unchanged.
+	if KernelObjectVerdict(ctx, known, target, node, what) {
+		return
+	}
 	knownKeys := make(map[string]abstractdomain.AbstractValue, len(known.Keys))
 	for _, k := range known.Keys {
 		knownKeys[k.Name] = k.Value

@@ -171,6 +171,25 @@ type RefinedTSKernel struct {
 	// leaves the wire byte-identical to what it was before summaries
 	// existed, so every cached walk question stays valid.
 	Walk func(states []KnownStateWire, stmts []IrStatement, table ...SummaryBlob) []KnownStateWire
+	// WalkRelational: the SAME walk, asked on the PLAIN path — the wire
+	// omits the certify field entirely rather than sending false.
+	//
+	// The two coexist because the kernel routes them to two different
+	// walks. `"certify":true` selects walkStmtsCert
+	// (boundary/exports_walk.lean), whose statement-loop exits carry the
+	// certified entry-cut invariant — and which drops the linear ledger
+	// entirely, so a "loopAccum" statement's relation
+	// (`total <= count * elemHi`) never reaches the division that
+	// consumes it and the answer is plain interval division. The plain
+	// path runs walkProgramRel, which carries the ledger across the
+	// statement list. A relational program must therefore ask HERE;
+	// everything else keeps asking Walk, whose certified answer can only
+	// tighten a loop exit and is what every existing caller relies on.
+	//
+	// States, statements and table encode identically, the symbol is the
+	// same, and the refusal discipline is the same — the certify field is
+	// the whole difference.
+	WalkRelational func(states []KnownStateWire, stmts []IrStatement, table ...SummaryBlob) []KnownStateWire
 	// Summarize: compile one lowered body to its summary — a
 	// straight-line program over an indexed state space, quantified over
 	// every entry, so it is built once per declaration and applied

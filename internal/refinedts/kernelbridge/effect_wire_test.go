@@ -154,3 +154,25 @@ func TestTheSequenceEqualityGuardWiresWithOnBLikeTheScalarTwoSlotTests(t *testin
 		t.Errorf("StmtWire(eqSeqSlot) = %q, want %q", got, want)
 	}
 }
+
+func TestTheAccumulationWiresThreeSlotsAndOnePerPassTerm(t *testing.T) {
+	element := LoopEffect{Kind: LoopEffectVar, Index: 1}
+	got := StmtWire(IrStatement{
+		Kind:       IrStatementLoopAccum,
+		AccumTotal: 0,
+		AccumSrc:   1,
+		AccumLen:   2,
+		AccumBody: LoopEffect{
+			Kind: LoopEffectBinary,
+			Op:   LoopOpMul,
+			A:    &element,
+			B:    &element,
+		},
+	})
+	// no per-binding vector: every slot but the total stands, and the
+	// total's own step is the form's addition rather than a spelled effect
+	want := `{"loopAccum":{"total":0,"src":1,"len":2,"body":{"op":"binary64.mul","A":{"var":1},"B":{"var":1}}}}`
+	if got != want {
+		t.Errorf("StmtWire(loopAccum) = %q, want %q", got, want)
+	}
+}

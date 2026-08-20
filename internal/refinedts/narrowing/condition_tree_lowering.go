@@ -88,6 +88,14 @@ func leafTreeOf(
 		if lifted, ok := liftedPredicateTree(c, e, place, isTracked, depth); ok {
 			return lifted
 		}
+		// `[...].includes(x)`: the whenTrue pin already lives in
+		// array_shape_narrowing.go's StructuralLeaf path (ADD-ALONGSIDE
+		// — this tree only carries the fold the general ask loop
+		// (condition_analysis.go) can also answer whenFalse from)
+		includes := IncludesMembershipTree(c, e, place, isTracked)
+		if includes.Kind != kernelbridge.NarrowKindOther {
+			return includes
+		}
 		stringy := StringTestLeaf(c, e, place, isTracked)
 		if stringy.Kind != kernelbridge.NarrowKindOther {
 			return stringy

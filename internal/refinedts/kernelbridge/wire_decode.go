@@ -164,6 +164,12 @@ type KernelFault struct {
 	Path        int64
 	Code        int64
 	MessageText string
+	// Key is the dotted key path a VALUE-judgment fault (codes
+	// 3008-3014, boundary/exports_graph.lean's valueFaultRow) wears
+	// instead of a path index; "" on every specification-level fault.
+	// 3014 (subset undecided on the shape pair) is the one code a
+	// caller reads as a decline, never a program verdict.
+	Key string
 }
 
 // JudgeAnswer is the anonymous return shape of decodeJudgeAnswer in the
@@ -173,6 +179,12 @@ type JudgeAnswer struct {
 	Faults       []KernelFault
 	Witnessed    bool
 	WitnessBound float64
+	// Value/HasValue: the value-instantiation verdict, present only
+	// when the question carried a "values" field — true is a proved
+	// instantiation (instantiateB_iff); false arrives with its
+	// 3008-3012 faults.
+	Value    bool
+	HasValue bool
 }
 
 // DecodeJudgeAnswer is decodeJudgeAnswer in the TS source.
@@ -194,17 +206,22 @@ func DecodeJudgeAnswer(parsed map[string]any) JudgeAnswer {
 				"kernel checkAssignability answered an unexpected shape: %v", parsed,
 			))
 		}
+		key, _ := f["key"].(string)
 		faults[i] = KernelFault{
 			Path:        int64(asFloat(f["path"])),
 			Code:        int64(asFloat(f["code"])),
 			MessageText: fmt.Sprintf("%v", f["messageText"]),
+			Key:         key,
 		}
 	}
+	value, hasValue := parsed["value"].(bool)
 	return JudgeAnswer{
 		Structural:   structural,
 		Faults:       faults,
 		Witnessed:    witnessed,
 		WitnessBound: witnessBound,
+		Value:        value,
+		HasValue:     hasValue,
 	}
 }
 
