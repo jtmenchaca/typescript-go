@@ -39,6 +39,32 @@ type RefinedTSKernel struct {
 	// theorem (seqSubsetB_true); `false` means no positional proof —
 	// read it conservatively (the counterexample construction is owed).
 	SeqSubset func(a, b refinementsets.RefinedSet) bool
+	// SeqLexLt: A < B under code-unit lexicographic order (cmp.7),
+	// exact on two concrete words (theories/seq/ordering.lean's
+	// lexLtB) — both true and false are theorems there. Panics where
+	// either side is not recognized as one concrete word; the caller
+	// recovers exactly like Member's refusal.
+	SeqLexLt func(a, b refinementsets.RefinedSet) bool
+	// SeqEqWords: A = B under code-unit-by-code-unit equality
+	// (cmp.3's word case, theories/seq/eq.lean's eqWordsB) — exact on
+	// two concrete words, both directions theorems. Panics where
+	// either side is not recognized as one concrete word.
+	SeqEqWords func(a, b refinementsets.RefinedSet) bool
+	// SeqStartsWith: receiver.startsWith(needle) (str.15), exact on
+	// two concrete words (theories/seq/starts_with.lean's
+	// startsWithB). Panics where either side is not recognized as
+	// one concrete word.
+	SeqStartsWith func(receiver, needle refinementsets.RefinedSet) bool
+	// SeqEndsWith: receiver.endsWith(needle) (str.16), exact on two
+	// concrete words (theories/seq/ends_with.lean's endsWithB).
+	// Panics where either side is not recognized as one concrete
+	// word.
+	SeqEndsWith func(receiver, needle refinementsets.RefinedSet) bool
+	// SeqIncludes: receiver.includes(needle) (str.17), exact on two
+	// concrete words (theories/seq/includes.lean's includesB).
+	// Panics where either side is not recognized as one concrete
+	// word.
+	SeqIncludes func(receiver, needle refinementsets.RefinedSet) bool
 	// Structural: does the graph specification hold structurally —
 	// the wire-string form of the TS structural(spec); the parameter
 	// is objectgraphs.EncodeSpecification's output (the typed wrapper

@@ -106,30 +106,30 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 	if a.Kind != abstractdomain.KindValues || b.Kind != abstractdomain.KindValues {
 		return silence.Residue()
 	}
-	// strings: equality is tuple equality
+	// strings: equality is tuple equality; ordering is code-unit
+	// lexicographic (cmp.7)
 	if a.KindTag == abstractdomain.PrimitiveString && b.KindTag == abstractdomain.PrimitiveString {
-		if op != CompareEq && op != CompareNe {
-			return silence.Residue() // lexicographic order: later
-		}
 		if len(a.Values) == 0 || len(b.Values) == 0 {
-			equal := len(a.Values) == 0 && len(b.Values) == 0
-			if op == CompareEq {
-				return boolAt(equal)
+			return compareKnownEmptyString(op, boolAt, len(a.Values), len(b.Values))
+		}
+		switch op {
+		case CompareEq, CompareNe:
+			target, ok := abstractdomain.SetOfKnown(b)
+			if !ok {
+				return silence.Residue()
 			}
-			return boolAt(!equal)
+			equal, err := callMember(ctx.Kernel, target, a.Values)
+			if err != nil {
+				return silence.Residue()
+			}
+			if op == CompareEq {
+				return kernelRow(equal)
+			}
+			return kernelRow(!equal)
+		case CompareLt, CompareGt, CompareLe, CompareGe:
+			return compareKnownStringOrder(ctx, op, kernelRow, a, b)
 		}
-		target, ok := abstractdomain.SetOfKnown(b)
-		if !ok {
-			return silence.Residue()
-		}
-		equal, err := callMember(ctx.Kernel, target, a.Values)
-		if err != nil {
-			return silence.Residue()
-		}
-		if op == CompareEq {
-			return kernelRow(equal)
-		}
-		return kernelRow(!equal)
+		return silence.Residue()
 	}
 	// strict equality across sorts is decided by type alone: when the
 	// sides wear different sorts, IsStrictlyEqual answers false before
@@ -228,4 +228,81 @@ func callMember(kernel *kernelbridge.RefinedTSKernel, set refinementsets.Refined
 		}
 	}()
 	return kernel.Member(set, tuple), nil
+}
+
+// callSeqLexLt recovers a refused SeqLexLt ask the same way callMember
+// recovers Member — the kernel panics on a refusal, never returns an
+// error value, so every ask needs its own recovering wrapper.
+func callSeqLexLt(kernel *kernelbridge.RefinedTSKernel, a, b refinementsets.RefinedSet) (lt bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errKernelRefused
+		}
+	}()
+	return kernel.SeqLexLt(a, b), nil
+}
+
+// compareKnownEmptyString decides a comparison where at least one side
+// is the empty string, without asking the kernel: `""` is the least
+// word under lexLtB (lexLtB [] l = (l ≠ [])), so ordering against an
+// empty operand reads off length alone, and equality is length
+// equality at this corner (both sides length 0).
+func compareKnownEmptyString(op ComparisonOp, boolAt func(bool) abstractdomain.AbstractValue, aLen, bLen int) abstractdomain.AbstractValue {
+	switch op {
+	case CompareEq:
+		return boolAt(aLen == 0 && bLen == 0)
+	case CompareNe:
+		return boolAt(!(aLen == 0 && bLen == 0))
+	case CompareLt:
+		return boolAt(aLen == 0 && bLen > 0)
+	case CompareLe:
+		return boolAt(aLen == 0)
+	case CompareGt:
+		return boolAt(bLen == 0 && aLen > 0)
+	case CompareGe:
+		return boolAt(bLen == 0)
+	}
+	return silence.Residue()
+}
+
+// compareKnownStringOrder decides `<`/`>`/`<=`/`>=` on two known
+// nonempty strings — cmp.7, code-unit lexicographic order. Every row
+// is phrased as ONE SeqLexLt ask: `<` and `>` ask it directly (in
+// swapped operand order for `>`), and `<=`/`>=` are lt's negation the
+// other way (a <= b iff not (b < a), the total order's trichotomy —
+// lexLtB_asymm plus totality mean exactly one of a<b, a=b, b<a holds,
+// so "not b<a" is exactly "a<=b").
+func compareKnownStringOrder(ctx *FlowContext, op ComparisonOp, kernelRow func(bool) abstractdomain.AbstractValue, a, b abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	setA, okA := abstractdomain.SetOfKnown(a)
+	setB, okB := abstractdomain.SetOfKnown(b)
+	if !okA || !okB {
+		return silence.Residue()
+	}
+	switch op {
+	case CompareLt:
+		v, err := callSeqLexLt(ctx.Kernel, setA, setB)
+		if err != nil {
+			return silence.Residue()
+		}
+		return kernelRow(v)
+	case CompareGt:
+		v, err := callSeqLexLt(ctx.Kernel, setB, setA)
+		if err != nil {
+			return silence.Residue()
+		}
+		return kernelRow(v)
+	case CompareLe:
+		v, err := callSeqLexLt(ctx.Kernel, setB, setA)
+		if err != nil {
+			return silence.Residue()
+		}
+		return kernelRow(!v)
+	case CompareGe:
+		v, err := callSeqLexLt(ctx.Kernel, setA, setB)
+		if err != nil {
+			return silence.Residue()
+		}
+		return kernelRow(!v)
+	}
+	return silence.Residue()
 }

@@ -86,3 +86,36 @@ func TestThePatternChainsReadAsTheirPatterns(t *testing.T) {
 		t.Errorf("stacked = %q, want %q", got, want)
 	}
 }
+
+// TestANumericUnionOfPrintableCodepointsSpellsAsNumbersNotCharacters
+// pins the garble a returned `"b" < "a" ? 200 : 40` diagnostic showed:
+// Union(OneOf([200]), OneOf([40])) is a plain SCALAR union — 200 and 40
+// happen to sit in the printable Unicode range (È and (), which used to
+// let unionWords misread each one-member OneOf as a one-character
+// string literal (StringLiteralPoints reads any singleton chain, and
+// the old printability gate never checked length). unionWords now
+// requires >= 2 codepoints before reading a chain as a word — the same
+// "admitted-language rule" threshold abstractdomain.stringWordSet
+// already enforces on the join side (a length-one word is the one a
+// scalar position could reread) — so this union falls through to
+// scalarUnionValuesOf and spells its actual numbers.
+func TestANumericUnionOfPrintableCodepointsSpellsAsNumbersNotCharacters(t *testing.T) {
+	joined := MakeRefinedSet(Union(MakeRefinedSet(OneOf([]float64{200})), MakeRefinedSet(OneOf([]float64{40}))))
+	got := FormatForDiagnostics(joined)
+	if got != "200 | 40" {
+		t.Errorf(`FormatForDiagnostics(200|40) = %q, want "200 | 40" (not a garbled character reading)`, got)
+	}
+}
+
+// TestATwoOrMoreCharacterStringEnumStillSpellsAsWords confirms the
+// >= 2 codepoint floor above does not regress the legitimate case
+// unionWords exists for: an enum of real multi-character string
+// literals still spells as quoted words, never as a numeric or
+// codepoint reading.
+func TestATwoOrMoreCharacterStringEnumStillSpellsAsWords(t *testing.T) {
+	joined := MakeRefinedSet(Union(StringTuple("margin"), StringTuple("border")))
+	got := FormatForDiagnostics(joined)
+	if want := `"margin" | "border"`; got != want {
+		t.Errorf("FormatForDiagnostics(margin|border) = %q, want %q", got, want)
+	}
+}

@@ -394,37 +394,6 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 			arg0 = args[0]
 		}
 		return abstractdomain.AtTrustLevel(transferSign(arg0, hasArg0), operandTrustLevel), true
-	case "fround":
-		// exactly specified: roundTiesToEven into binary32 and back —
-		// deterministic, so the host computes the exact row (the
-		// string-read oracle rule)
-		if len(args) > 0 {
-			only := args[0]
-			if only.Kind == abstractdomain.KindValues && len(only.Values) == 1 {
-				return abstractdomain.KnownValues(
-					[]float64{float64(float32(only.Values[0]))},
-					abstractdomain.PrimitiveNumber,
-					abstractdomain.MinTrustLevel(operandTrustLevel, abstractdomain.TrustSpec),
-				), true
-			}
-			// a WINDOW maps through the same conversion: correct rounding
-			// is monotone, so the image of [lo, hi] is exactly
-			// [fround(lo), fround(hi)] — both endpoints the host's own
-			// rows (sec-math.fround)
-			window := RangeOfKnown(only)
-			if window != nil && isFinite(window.Lo) && isFinite(window.Hi) {
-				return abstractdomain.KnownSet(
-					refinementsets.MakeRefinedSet(
-						refinementsets.AtLeast(float64(float32(window.Lo))),
-						refinementsets.AtMost(float64(float32(window.Hi))),
-					),
-					nil,
-					abstractdomain.MinTrustLevel(operandTrustLevel, abstractdomain.TrustSpec),
-					abstractdomain.SetKindTagNone,
-				), true
-			}
-		}
-		return silence.Residue(), true
 	default:
 		// corner tables are TS-transcribed spec rows
 		var arg0 abstractdomain.AbstractValue

@@ -20,9 +20,7 @@ import (
 // functions ECMA-262 leaves implementation-approximated — exact reads
 // are impossible, interval enclosures are the kernel work that
 // answers them (the kernel map's enclosure family).
-var approximatedMath = map[string]struct{}{
-	"acos": {},
-}
+var approximatedMath = map[string]struct{}{}
 
 // readMathBuiltin is readMathBuiltin in the TS source: Math.f(…) when
 // Math resolves to the default library. Nil when the call is not a

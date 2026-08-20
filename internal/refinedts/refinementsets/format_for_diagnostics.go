@@ -33,6 +33,16 @@ func unionWords(r RefinedSet) ([]string, bool) {
 	if !ok {
 		return nil, false
 	}
+	// a SINGLE codepoint is exactly the shape a scalar singleton wears
+	// too ({40}, a numeric enum's member, and the one-character chain
+	// {"("} are the same RefinedSet) -- this caller has no sort at
+	// hand to tell them apart, so a lone point declines here and falls
+	// to scalarUnionValuesOf's numeric reading instead. Only a chain of
+	// TWO OR MORE codepoints is unambiguous: no scalar union member is
+	// itself a multi-point tuple, so length alone settles it there.
+	if len(points) < 2 {
+		return nil, false
+	}
 	for _, p := range points {
 		if !(p >= 0x20 && p != 0x7f) {
 			return nil, false

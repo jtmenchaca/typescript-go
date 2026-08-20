@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
@@ -72,9 +73,12 @@ func ReadUnary(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.AbstractV
 			return complemented, true
 		}
 		// `+x` is ToNumber (sec-unary-plus-operator): already-numeric
-		// knowledge passes through unchanged, NaN stays NaN. A string or
-		// object operand would need the conversion grammar — those stay
-		// unread, carrying their provenance.
+		// knowledge passes through unchanged, NaN stays NaN. A known
+		// string reads through StringToNumber's core grammar (conv.2),
+		// kernel-side, exact or correctly rounded — never a decline
+		// (StringToNumber is total: unparseable answers NaN). An object
+		// operand still needs the ToPrimitive grammar this file does not
+		// carry, so it stays unread.
 		if unary.Operator == ast.KindPlusToken {
 			operand := evaluateExpression(ctx, env, unary.Operand)
 			if operand.Kind == abstractdomain.KindNaN {
@@ -89,6 +93,11 @@ func ReadUnary(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.AbstractV
 			if operand.Kind == abstractdomain.KindSet && operand.SetKindTag == abstractdomain.SetKindTagNone {
 				return operand, true
 			}
+			if operand.Kind == abstractdomain.KindValues && operand.KindTag == abstractdomain.PrimitiveString {
+				if parsed, ok := stringToNumberOfKnown(ctx, operand); ok {
+					return parsed, true
+				}
+			}
 			return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{operand}), true
 		}
 	}
@@ -96,6 +105,42 @@ func ReadUnary(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.AbstractV
 		return stepped, true
 	}
 	return abstractdomain.AbstractValue{}, false
+}
+
+// stringToNumberOfKnown asks the kernel's StringToNumber transfer
+// (conv.2, TransferOpStringToNumber) for a known string's ToNumber
+// image: `js.stringToNumber`'s Lean arm reads the word, parses conv.2's
+// core grammar, and answers NaN (unparseable — the grammar excludes
+// numeric separators, so `"1_2"` is NaN same as `"abc"`) or the exact
+// (or correctly rounded) value through the same nan/values vocabulary
+// every other transfer answers in. `ok` is false only where the
+// operand does not read as one concrete word (SetOfKnown's refusal —
+// not reachable for a PrimitiveString KindValues operand in practice)
+// or the kernel itself is absent/refuses, in which case the caller's
+// existing decline stands.
+func stringToNumberOfKnown(ctx *FlowContext, operand abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
+	if ctx.Kernel == nil {
+		return abstractdomain.AbstractValue{}, false
+	}
+	set, ok := abstractdomain.SetOfKnown(operand)
+	if !ok {
+		return abstractdomain.AbstractValue{}, false
+	}
+	var result abstractdomain.AbstractValue
+	answered := func() (ok bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				ok = false
+			}
+		}()
+		answer := ctx.Kernel.Transfer(kernelbridge.TransferQuestion{
+			Op: kernelbridge.TransferOpStringToNumber,
+			A:  set,
+		})
+		result = abstractdomain.AtTrustLevel(KnownOfAnswer(answer), abstractdomain.TrustLevelOf(operand))
+		return true
+	}()
+	return result, answered
 }
 
 // ReadConditional is readConditional in the TS source: `c ? a : b` —

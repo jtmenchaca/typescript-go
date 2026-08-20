@@ -1,8 +1,9 @@
 // from evaluation/math_unary_transfer.ts
 //
-// Unary Math.* kernel questions: floor/ceil/round/trunc/abs, the
-// exp/log family, trig, and sqrt. (AbstractValue{}, false) when the
-// name is not one of those — the caller continues its switch.
+// Unary Math.* kernel questions: floor/ceil/round/trunc/abs/fround/
+// f16round, the exp/log family, trig, and sqrt. (AbstractValue{},
+// false) when the name is not one of those — the caller continues
+// its switch.
 
 package walk
 
@@ -16,30 +17,33 @@ import (
 )
 
 var unaryMathOpWire = map[string]kernelbridge.TransferQuestionOp{
-	"floor": kernelbridge.TransferOpFloor,
-	"ceil":  kernelbridge.TransferOpCeil,
-	"round": kernelbridge.TransferOpRound,
-	"trunc": kernelbridge.TransferOpTrunc,
-	"abs":   kernelbridge.TransferOpAbs,
-	"sqrt":  kernelbridge.TransferOpSqrt,
-	"exp":   kernelbridge.TransferOpExp,
-	"log":   kernelbridge.TransferOpLog,
-	"log2":  kernelbridge.TransferOpLog2,
-	"log10": kernelbridge.TransferOpLog10,
-	"expm1": kernelbridge.TransferOpExpm1,
-	"log1p": kernelbridge.TransferOpLog1p,
-	"cbrt":  kernelbridge.TransferOpCbrt,
-	"sin":   kernelbridge.TransferOpSin,
-	"cos":   kernelbridge.TransferOpCos,
-	"tan":   kernelbridge.TransferOpTan,
-	"sinh":  kernelbridge.TransferOpSinh,
-	"cosh":  kernelbridge.TransferOpCosh,
-	"tanh":  kernelbridge.TransferOpTanh,
-	"atan":  kernelbridge.TransferOpAtan,
-	"asin":  kernelbridge.TransferOpAsin,
-	"atanh": kernelbridge.TransferOpAtanh,
-	"asinh": kernelbridge.TransferOpAsinh,
-	"acosh": kernelbridge.TransferOpAcosh,
+	"floor":    kernelbridge.TransferOpFloor,
+	"ceil":     kernelbridge.TransferOpCeil,
+	"round":    kernelbridge.TransferOpRound,
+	"trunc":    kernelbridge.TransferOpTrunc,
+	"abs":      kernelbridge.TransferOpAbs,
+	"fround":   kernelbridge.TransferOpFround,
+	"f16round": kernelbridge.TransferOpF16round,
+	"sqrt":     kernelbridge.TransferOpSqrt,
+	"exp":      kernelbridge.TransferOpExp,
+	"log":      kernelbridge.TransferOpLog,
+	"log2":     kernelbridge.TransferOpLog2,
+	"log10":    kernelbridge.TransferOpLog10,
+	"expm1":    kernelbridge.TransferOpExpm1,
+	"log1p":    kernelbridge.TransferOpLog1p,
+	"cbrt":     kernelbridge.TransferOpCbrt,
+	"sin":      kernelbridge.TransferOpSin,
+	"cos":      kernelbridge.TransferOpCos,
+	"tan":      kernelbridge.TransferOpTan,
+	"sinh":     kernelbridge.TransferOpSinh,
+	"cosh":     kernelbridge.TransferOpCosh,
+	"tanh":     kernelbridge.TransferOpTanh,
+	"atan":     kernelbridge.TransferOpAtan,
+	"asin":     kernelbridge.TransferOpAsin,
+	"acos":     kernelbridge.TransferOpAcos,
+	"atanh":    kernelbridge.TransferOpAtanh,
+	"asinh":    kernelbridge.TransferOpAsinh,
+	"acosh":    kernelbridge.TransferOpAcosh,
 }
 
 func unaryTransfer(op string, args []abstractdomain.AbstractValue, operandTrustLevel abstractdomain.TrustLevel) abstractdomain.AbstractValue {
@@ -65,10 +69,10 @@ func unaryTransfer(op string, args []abstractdomain.AbstractValue, operandTrustL
 // reads — the caller continues.
 func UnaryMathImage(name string, args []abstractdomain.AbstractValue, operandTrustLevel abstractdomain.TrustLevel) (abstractdomain.AbstractValue, bool) {
 	switch name {
-	case "floor", "ceil", "round", "trunc", "abs":
+	case "floor", "ceil", "round", "trunc", "abs", "fround", "f16round":
 		return unaryTransfer(name, args, operandTrustLevel), true
 	case "exp", "expm1", "cbrt", "sin", "cos", "tan", "sinh", "cosh", "tanh",
-		"atan", "asin", "atanh", "asinh", "acosh":
+		"atan", "asin", "acos", "atanh", "asinh", "acosh":
 		// the kernel's tight enclosure under the k-ulp assumption —
 		// total on the reals, so no gate; the window's authority is
 		// the transcription-plus-assumption tier, never the operands'

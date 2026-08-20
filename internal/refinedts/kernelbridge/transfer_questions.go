@@ -66,6 +66,8 @@ const (
 	TransferOpRound        TransferQuestionOp = "js.round"
 	TransferOpTrunc        TransferQuestionOp = "binary64.trunc"
 	TransferOpAbs          TransferQuestionOp = "binary64.abs"
+	TransferOpFround       TransferQuestionOp = "binary64.fround"
+	TransferOpF16round     TransferQuestionOp = "binary64.f16round"
 	TransferOpExp          TransferQuestionOp = "js.exp"
 	TransferOpSqrt         TransferQuestionOp = "binary64.sqrt"
 	TransferOpLog          TransferQuestionOp = "js.log"
@@ -82,11 +84,19 @@ const (
 	TransferOpTanh         TransferQuestionOp = "js.tanh"
 	TransferOpAtan         TransferQuestionOp = "js.atan"
 	TransferOpAsin         TransferQuestionOp = "js.asin"
+	TransferOpAcos         TransferQuestionOp = "js.acos"
 	TransferOpAtanh        TransferQuestionOp = "js.atanh"
 	TransferOpAsinh        TransferQuestionOp = "js.asinh"
 	TransferOpAcosh        TransferQuestionOp = "js.acosh"
 	TransferOpInt32Wrap    TransferQuestionOp = "int32.wrap"
 	TransferOpPow          TransferQuestionOp = "pow.binary64"
+	// TransferOpStringToNumber (conv.2): StringToNumber's core grammar,
+	// parsed kernel-side (languages/javascript/conversions/
+	// string_to_number.lean). `A` carries the concrete word, encoded
+	// the same way SeqLexLt/SeqEqWords/SeqStartsWith encode a word
+	// operand — a RefinedSet reading as one concrete word, never an
+	// Enclosure the way every other transfer op's `A` does.
+	TransferOpStringToNumber TransferQuestionOp = "js.stringToNumber"
 )
 
 func transferOpIsUnary(op TransferQuestionOp) bool {
@@ -96,8 +106,9 @@ func transferOpIsUnary(op TransferQuestionOp) bool {
 		TransferOpLog, TransferOpLog2, TransferOpLog10, TransferOpExpm1,
 		TransferOpLog1p, TransferOpCbrt, TransferOpSin, TransferOpCos,
 		TransferOpTan, TransferOpSinh, TransferOpCosh, TransferOpTanh,
-		TransferOpAtan, TransferOpAsin, TransferOpAtanh, TransferOpAsinh,
-		TransferOpAcosh, TransferOpInt32Wrap:
+		TransferOpAtan, TransferOpAsin, TransferOpAcos, TransferOpAtanh,
+		TransferOpAsinh, TransferOpAcosh, TransferOpInt32Wrap,
+		TransferOpFround, TransferOpF16round, TransferOpStringToNumber:
 		return true
 	default:
 		return false

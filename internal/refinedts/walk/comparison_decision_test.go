@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
 // wantTrue/wantFalse read a decided CompareKnown boolean answer; wantUnknown
@@ -115,4 +116,73 @@ func TestCompareKnownExactAbsentVsNonAbsentStrictFalse(t *testing.T) {
 	wantFalse(t, CompareKnown(ctx, CompareEq, true, abstractdomain.Null, num), "Null === 40")
 	wantTrue(t, CompareKnown(ctx, CompareNe, true, abstractdomain.Null, num), "Null !== 40")
 	wantFalse(t, CompareKnown(ctx, CompareEq, true, num, abstractdomain.Null), "40 === Null")
+}
+
+// stringOfCompareKnown builds a known string AbstractValue the way the
+// walk's own literal evaluation does — codepoints in, PrimitiveString
+// tagged.
+func stringOfCompareKnown(s string) abstractdomain.AbstractValue {
+	return abstractdomain.KnownValues(refinementsets.CodepointsOf(s), abstractdomain.PrimitiveString, abstractdomain.TrustProved)
+}
+
+// TestCompareKnownStringOrderAAndAB pins cmp.7's prefix rule: "a" < "ab"
+// — equal prefix, the shorter word is less (lexLtB_prefix).
+func TestCompareKnownStringOrderAAndAB(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	ctx := &FlowContext{Kernel: kernel}
+	a, ab := stringOfCompareKnown("a"), stringOfCompareKnown("ab")
+	wantTrue(t, CompareKnown(ctx, CompareLt, true, a, ab), `"a" < "ab"`)
+	wantFalse(t, CompareKnown(ctx, CompareGt, true, a, ab), `"a" > "ab"`)
+	wantTrue(t, CompareKnown(ctx, CompareLe, true, a, ab), `"a" <= "ab"`)
+	wantFalse(t, CompareKnown(ctx, CompareGe, true, a, ab), `"a" >= "ab"`)
+}
+
+// TestCompareKnownStringOrderBBeforeA pins the first-differing-unit rule:
+// "b" < "a" is false (98 > 97).
+func TestCompareKnownStringOrderBBeforeA(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	ctx := &FlowContext{Kernel: kernel}
+	b, a := stringOfCompareKnown("b"), stringOfCompareKnown("a")
+	wantFalse(t, CompareKnown(ctx, CompareLt, true, b, a), `"b" < "a"`)
+	wantTrue(t, CompareKnown(ctx, CompareGt, true, b, a), `"b" > "a"`)
+}
+
+// TestCompareKnownStringOrderEqualWords pins irreflexivity (lexLtB_irrefl):
+// "a" < "a" is false, and both non-strict orderings hold at once (a <= a,
+// a >= a) — the equal-words corner of the total order.
+func TestCompareKnownStringOrderEqualWords(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	ctx := &FlowContext{Kernel: kernel}
+	a1, a2 := stringOfCompareKnown("a"), stringOfCompareKnown("a")
+	wantFalse(t, CompareKnown(ctx, CompareLt, true, a1, a2), `"a" < "a"`)
+	wantFalse(t, CompareKnown(ctx, CompareGt, true, a1, a2), `"a" > "a"`)
+	wantTrue(t, CompareKnown(ctx, CompareLe, true, a1, a2), `"a" <= "a"`)
+	wantTrue(t, CompareKnown(ctx, CompareGe, true, a1, a2), `"a" >= "a"`)
+}
+
+// TestCompareKnownStringEqualityPair pins cmp.3's word case riding the
+// existing Member ask (eqWords is reserved for the wire's op-name family
+// but string equality itself already routes through kernel_member, per
+// SetOfKnown — this test pins that equality still decides correctly
+// alongside the newly wired ordering rows in the same file).
+func TestCompareKnownStringEqualityPair(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	ctx := &FlowContext{Kernel: kernel}
+	abc1, abc2, abd := stringOfCompareKnown("abc"), stringOfCompareKnown("abc"), stringOfCompareKnown("abd")
+	wantTrue(t, CompareKnown(ctx, CompareEq, true, abc1, abc2), `"abc" === "abc"`)
+	wantFalse(t, CompareKnown(ctx, CompareNe, true, abc1, abc2), `"abc" !== "abc"`)
+	wantFalse(t, CompareKnown(ctx, CompareEq, true, abc1, abd), `"abc" === "abd"`)
+	wantTrue(t, CompareKnown(ctx, CompareNe, true, abc1, abd), `"abc" !== "abd"`)
+}
+
+// TestCompareKnownStringOrderEmptyOperand pins the empty-string corner
+// decided natively (lexLtB [] l = (l ≠ [])), without an ask: "" is the
+// least word, so "" < "a" and "" <= "" hold, and "" > "a" fails.
+func TestCompareKnownStringOrderEmptyOperand(t *testing.T) {
+	ctx := &FlowContext{}
+	empty, a := stringOfCompareKnown(""), stringOfCompareKnown("a")
+	wantTrue(t, CompareKnown(ctx, CompareLt, true, empty, a), `"" < "a"`)
+	wantFalse(t, CompareKnown(ctx, CompareGt, true, empty, a), `"" > "a"`)
+	wantTrue(t, CompareKnown(ctx, CompareLe, true, empty, empty), `"" <= ""`)
+	wantTrue(t, CompareKnown(ctx, CompareGe, true, empty, empty), `"" >= ""`)
 }

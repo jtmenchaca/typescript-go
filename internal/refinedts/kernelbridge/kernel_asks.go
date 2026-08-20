@@ -111,6 +111,46 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 		}
 		return BooleanField(raw, "subset")
 	}
+	kernel.SeqLexLt = func(a, b refinementsets.RefinedSet) bool {
+		key, hasKey := CanonicalPair(CanonicalKeyOf(wireSet(a)), CanonicalKeyOf(wireSet(b)))
+		raw, err := ask2WithOptionalKey(ask2, "seq.lexLt", "kernel_seq_lex_lt", EncodeSet(a), EncodeSet(b), key, hasKey)
+		if err != nil {
+			panic(err.Error())
+		}
+		return BooleanField(raw, "lt")
+	}
+	kernel.SeqEqWords = func(a, b refinementsets.RefinedSet) bool {
+		key, hasKey := CanonicalPair(CanonicalKeyOf(wireSet(a)), CanonicalKeyOf(wireSet(b)))
+		raw, err := ask2WithOptionalKey(ask2, "seq.eqWords", "kernel_seq_eq_words", EncodeSet(a), EncodeSet(b), key, hasKey)
+		if err != nil {
+			panic(err.Error())
+		}
+		return BooleanField(raw, "eq")
+	}
+	kernel.SeqStartsWith = func(receiver, needle refinementsets.RefinedSet) bool {
+		key, hasKey := CanonicalPair(CanonicalKeyOf(wireSet(receiver)), CanonicalKeyOf(wireSet(needle)))
+		raw, err := ask2WithOptionalKey(ask2, "seq.startsWith", "kernel_seq_starts_with", EncodeSet(receiver), EncodeSet(needle), key, hasKey)
+		if err != nil {
+			panic(err.Error())
+		}
+		return BooleanField(raw, "startsWith")
+	}
+	kernel.SeqEndsWith = func(receiver, needle refinementsets.RefinedSet) bool {
+		key, hasKey := CanonicalPair(CanonicalKeyOf(wireSet(receiver)), CanonicalKeyOf(wireSet(needle)))
+		raw, err := ask2WithOptionalKey(ask2, "seq.endsWith", "kernel_seq_ends_with", EncodeSet(receiver), EncodeSet(needle), key, hasKey)
+		if err != nil {
+			panic(err.Error())
+		}
+		return BooleanField(raw, "endsWith")
+	}
+	kernel.SeqIncludes = func(receiver, needle refinementsets.RefinedSet) bool {
+		key, hasKey := CanonicalPair(CanonicalKeyOf(wireSet(receiver)), CanonicalKeyOf(wireSet(needle)))
+		raw, err := ask2WithOptionalKey(ask2, "seq.includes", "kernel_seq_includes", EncodeSet(receiver), EncodeSet(needle), key, hasKey)
+		if err != nil {
+			panic(err.Error())
+		}
+		return BooleanField(raw, "includes")
+	}
 	// Structural and CheckAssignability take the specification ALREADY
 	// ENCODED (objectgraphs.EncodeSpecification): the Specification
 	// type lives in objectgraphs, which imports this package for its

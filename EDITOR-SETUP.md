@@ -34,7 +34,7 @@ under TS7/tsgo).
 
 The kernel dylib resolves from the binary's own location
 (`cmd/tsgo/refinedts_kernel.go`), so `pnpm kernel:native` must have built
-`refined-ts-lean/native/build/librefinedts_kernel.dylib`; without it
+`packages/refined-lean/native/build/librefined_kernel.dylib`; without it
 the server still runs, and every kernel-gated judgment declines.
 (`pnpm kernel` only builds the static `kernel:static` intermediate.)
 Surface recognition is discovery: any program file ending in

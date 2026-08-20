@@ -35,7 +35,7 @@ import (
 	"unsafe"
 )
 
-// The 25 question symbols the dylib exports (boundary/exports.lean),
+// The 29 question symbols the dylib exports (boundary/exports.lean),
 // split by arity exactly as the TS FFI table splits them.
 var oneArgSymbols = []string{
 	"kernel_scalar_empty",
@@ -65,6 +65,11 @@ var twoArgSymbols = []string{
 	"kernel_scalar_subset",
 	"kernel_scalar_disjoint",
 	"kernel_seq_subset",
+	"kernel_seq_lex_lt",
+	"kernel_seq_eq_words",
+	"kernel_seq_starts_with",
+	"kernel_seq_ends_with",
+	"kernel_seq_includes",
 	"kernel_members",
 }
 
