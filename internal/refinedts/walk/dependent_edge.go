@@ -8,6 +8,8 @@
 package walk
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
@@ -20,6 +22,30 @@ var dependsSymbols = map[string]string{
 	"gt": ">",
 	"le": "<=",
 	"lt": "<",
+}
+
+// objectKeyInitializer is the position a sibling KEY occupies, for
+// hanging a related step on it: the key's initializer inside an object
+// literal, and nil for everything else. It differs from
+// keyInitializerNode (object_kernel_judgment.go) in what it answers
+// when there is no such position — nil, so no step is added, rather
+// than the whole node, which would only repeat the finding's own span.
+// A dotted name has no single initializer and answers nil.
+func objectKeyInitializer(node *ast.Node, key string) *ast.Node {
+	if node == nil || strings.Contains(key, ".") || !ast.IsObjectLiteralExpression(node) {
+		return nil
+	}
+	for _, candidate := range node.AsObjectLiteralExpression().Properties.Nodes {
+		if !ast.IsPropertyAssignment(candidate) {
+			continue
+		}
+		assignment := candidate.AsPropertyAssignment()
+		name := assignment.Name()
+		if (ast.IsIdentifier(name) || ast.IsStringLiteral(name)) && name.Text() == key {
+			return assignment.Initializer
+		}
+	}
+	return nil
 }
 
 // DependentRelation is the { op, param } shape the TS source spells
@@ -68,14 +94,27 @@ func JudgeDependentRelation(
 		}
 		// the standard assignability frame, with the bound's ORIGIN
 		// appended — the target set was instantiated from the sibling,
-		// and the reader should see where its number came from
+		// and the reader should see where its number came from. Where
+		// the sibling is a key of an object LITERAL, its initializer is
+		// a real position, so the origin is also a related step the
+		// reader can click through to.
+		spelled := formatJSNumberLocal(single)
 		origin := " (" + symbol + " '" + relation.Param + "', which is " +
-			formatJSNumberLocal(single) + " here)"
+			spelled + " here)"
+		var steps []assignability.RelatedStep
+		if siblingNode := objectKeyInitializer(node, relation.Param); siblingNode != nil {
+			steps = append(steps, assignability.StepAt(
+				siblingNode,
+				"'"+relation.Param+"' is "+spelled+" here — the bound '"+
+					symbol+" "+relation.Param+"' was instantiated from it",
+			))
+		}
 		originalReport := ctx.Report
 		withOrigin := *ctx
 		withOrigin.Report = func(d assignability.RefinementDiagnostic) {
 			if d.Code == 7001 {
 				d.MessageText = d.MessageText + origin
+				d = d.WithSteps(steps...)
 			}
 			originalReport(d)
 		}
@@ -191,13 +230,21 @@ func callDependentEdgeQuestions(
 			edge = refinementsets.AtMost(window.Hi)
 			edgeWords = "at most " + formatJSNumberLocal(window.Hi)
 		}
-		ctx.Report(assignability.At(
+		refutation := assignability.At(
 			node,
 			7001,
 			what+" of type '"+refinementsets.FormatForDiagnostics(valueSet)+"' is not "+
 				"assignable to type '"+refinementsets.FormatForDiagnostics(refinementsets.MakeRefinedSet(edge))+"' "+
 				"("+symbol+" '"+relation.Param+"', which is "+edgeWords+" here)",
-		))
+		)
+		if siblingNode := objectKeyInitializer(node, relation.Param); siblingNode != nil {
+			refutation = refutation.WithSteps(assignability.StepAt(
+				siblingNode,
+				"'"+relation.Param+"' is "+edgeWords+" here — the edge the bound '"+
+					symbol+" "+relation.Param+"' was judged against",
+			))
+		}
+		ctx.Report(refutation)
 		return true
 	}
 	return false

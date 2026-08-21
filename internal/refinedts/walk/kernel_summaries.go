@@ -573,6 +573,23 @@ func applySummary(
 		if exact && (declarationHasRestParameter(declaration) || declarationHasArrayParameter(ctx, declaration)) {
 			return abstractdomain.AbstractValue{}, false
 		}
+		// THE THIRD CARVE-OUT: a body whose return is an array-producing
+		// collection call off a receiver returnedLiteralShape's own
+		// collectionCallOf cannot spell (an interior path — a record
+		// parameter's own array-typed member, `request.samples.map(cb)` —
+		// rather than a flattened local's bare name) never allocated the
+		// "#ret.len"/"#ret.elem" pair, so this scalar #ret is TOP by
+		// construction (declarationReturnsArrayProducingCall's own doc): the
+		// member-shaped result has nowhere a scalar slot could have held it,
+		// which is not the same claim as "this body's return is
+		// unconstrained." Unlike the rest/array-parameter carve-outs above,
+		// this one does not need EXACT to distinguish the limit from a
+		// genuine unconstrained answer — the pair is either allocated or it
+		// is not, independent of what this call's own arguments are — so it
+		// runs unconditionally.
+		if declarationReturnsArrayProducingCall(declaration) {
+			return abstractdomain.AbstractValue{}, false
+		}
 		tracing.Count("summaryServed", 0)
 		return promiseWrappedIfAsync(declaration, silence.Residue()), true
 	}
@@ -710,23 +727,20 @@ func summaryMemberResult(
 		}
 		return abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false), true
 	case RetShapeArray:
-		// the array's own knowledge is its LENGTH — the element slot holds
-		// the join of the positions, which no sequence value in this domain
-		// carries as one field, so the length is what rides out. A read of
-		// `.length` on the answer then determines, which is the whole reason
-		// the pair was allocated.
-		for _, member := range summary.RetMembers {
-			if member.Name != "len" {
-				continue
-			}
-			length, has := memberValue(member.Index)
-			if !has || length.Kind != abstractdomain.KindValues {
-				return abstractdomain.AbstractValue{}, false
-			}
-			return abstractdomain.KnownObject(
-				[]abstractdomain.ObjectKey{{Name: "length", Value: length}},
-				nil, false, abstractdomain.TrustProved, false), true
-		}
+		// both the ".len" and ".elem" exits are computed here, but this
+		// route has no single-value spelling for the pair yet: serving
+		// length alone as a KnownObject was a claim strictly weaker than
+		// the inline walk's own answer for the same return (MapOutcome,
+		// callback_element_outcome.go, builds the real element-bounded
+		// repetition set from the same exits) — every element consumer
+		// downstream (an inline parameter meet, iteration, division) then
+		// read a length-only object where an element-bounded array should
+		// have been. Declining here instead routes the call to that
+		// walk-based recovery, which is what this file's own decline
+		// discipline (applySummary's comment, and the false-ok returns
+		// throughout this function) already requires: no claim rather
+		// than a weaker one.
+		return abstractdomain.AbstractValue{}, false
 	}
 	return abstractdomain.AbstractValue{}, false
 }
@@ -895,6 +909,85 @@ func declarationHasArrayParameter(ctx *FlowContext, declaration *ast.Node) bool 
 		}
 	}
 	return false
+}
+
+// declarationReturnsArrayProducingCall: whether ANY return in the
+// declaration's body carries an array-producing collection call
+// (`.map`/`.filter`, or a `.reduce` whose accumulator spells an array —
+// isArrayProducingCollectionCall's own reading, ir_summary_returned_shape.go)
+// as its head. The THIRD carve-out applySummary's TOP-ret gate reads,
+// beside declarationHasRestParameter and declarationHasArrayParameter.
+//
+// Those two carve-outs exist because summaryEntryStates feeds an entry TOP
+// for a reason that has nothing to do with the body's own return — the
+// encoding cannot spell one call's exact rest tail or array contents, ever,
+// for any body. This carve-out is the RETURN side of the same idea: a
+// return whose head is `xs.map(cb)` off a receiver returnedLiteralShape's
+// own collectionCallOf cannot spell — because collectionCallOf demands a
+// BARE IDENTIFIER receiver (ir_callback_shapes.go), and this return's
+// receiver is an interior path (`request.samples`, a record-parameter
+// member) rather than a flattened local's own name — never allocates the
+// "#ret.len"/"#ret.elem" pair the SAME construct DOES allocate for a bare-
+// name receiver. The scalar #ret then holds TOP by construction (a
+// member-shaped result written nowhere a scalar slot can hold it), not
+// because the return value is unconstrained — the same "TOP is the
+// encoding's own limit, not the body's" reasoning the rest/array-parameter
+// carve-outs rest on, one layer over: there, an ENTRY the encoding cannot
+// carry; here, a RETURN the encoding cannot carry.
+//
+// Declining lets the caller fall to the walk-based recovery
+// (InlineContractBody's general walk, whose MapOutcome derives the real
+// element-bounded array off the receiver as it is actually bound at the
+// call) instead of the kernel-summary route serving bare silence — the
+// SAME declared-return-star answer wornReturnTypeIfUnknown would have
+// handed back anyway, minus everything the walk could have proven.
+//
+// Mirrors returnedExpressionsOf's own body scan (ir_summary_returned_shape.go)
+// rather than a fresh AST walk: the same nested-function-skip, the same
+// concise-arrow-is-its-own-return reading, so this answers exactly the set
+// of returns returnedLiteralShape itself would have looked at.
+func declarationReturnsArrayProducingCall(declaration *ast.Node) bool {
+	body := declaration.Body()
+	if body == nil {
+		return false
+	}
+	for _, returned := range returnedExpressionsOf(body) {
+		head := Unwrapped(returned)
+		if head == nil {
+			continue
+		}
+		// isArrayProducingCollectionCall covers the bare-identifier
+		// receiver and the array-accumulator reduce; the direct test
+		// below covers the INTERIOR-PATH receiver (`request.samples
+		// .map(cb)`) that collectionCallOf's identifier gate cannot
+		// see — the exact shape whose pair never allocates and whose
+		// scalar #ret is therefore TOP by construction. A broader test
+		// is safe here: this helper only ever DECLINES a serve.
+		if isArrayProducingCollectionCall(head) || returnHeadIsCollectionMapOrFilter(head) {
+			return true
+		}
+	}
+	return false
+}
+
+// returnHeadIsCollectionMapOrFilter: the return's head is a call whose
+// callee is a `.map`/`.filter` property access, whatever the receiver's
+// shape — the receiver-agnostic reading the carve-out needs, since the
+// pair-allocating reader's own receiver gate (collectionCallOf's bare
+// identifier) is exactly what makes this body's scalar ret TOP.
+func returnHeadIsCollectionMapOrFilter(head *ast.Node) bool {
+	if head == nil || !ast.IsCallExpression(head) {
+		return false
+	}
+	callee := head.AsCallExpression().Expression
+	if callee == nil || !ast.IsPropertyAccessExpression(callee) {
+		return false
+	}
+	name := callee.AsPropertyAccessExpression().Name()
+	if name == nil || !ast.IsIdentifier(name) {
+		return false
+	}
+	return name.Text() == "map" || name.Text() == "filter"
 }
 
 // summaryEntryStates builds the entry states a call sends, one per

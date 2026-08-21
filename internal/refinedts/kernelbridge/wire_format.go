@@ -1,8 +1,11 @@
 // The JSON the kernel decodes (boundary/exports.lean's wire forms),
 // produced from the checker's working values. Numbers cross as exact
 // integer pairs via ground/dyadics — the −∞/+∞ elements as the strings
-// "-inf"/"+inf". This file is encoding only; the kernel's answers are
-// plain JSON and parse with JSON.parse at the loader.
+// "-inf"/"+inf", and IEEE negative zero as the string "-0" (the
+// kernel's own ExtendedReal.negZero, distinct from the ordinary
+// {num:0, exp:0} dyadic pair +0 shares). This file is encoding only;
+// the kernel's answers are plain JSON and parse with JSON.parse at the
+// loader.
 //
 // encodeSpecification and its CardinalityPath/Specification inputs are
 // NOT ported here: object_graphs/graph_specification.ts (Specification,
@@ -23,20 +26,25 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
-// WireNumber is the TS union `{ num: number; exp: number } | "-inf" | "+inf"`
-// — a dyadic pair for a finite value, or one of the two infinity strings.
-// Marshals to exactly the TS wire shape.
+// WireNumber is the TS union
+// `{ num: number; exp: number } | "-inf" | "+inf" | "-0"` — a dyadic pair
+// for a finite value, one of the two infinity strings, or the negative-zero
+// string. Marshals to exactly the TS wire shape.
 type WireNumber struct {
-	Dyadic  primitives.Dyadic
-	IsInf   bool
-	InfWord string // "-inf" or "+inf", meaningful only when IsInf
+	Dyadic    primitives.Dyadic
+	IsInf     bool
+	InfWord   string // "-inf" or "+inf", meaningful only when IsInf
+	IsNegZero bool   // −0: the kernel's separate ExtendedReal constructor
 }
 
-// MarshalJSON writes the dyadic pair {"num":…,"exp":…}, or the bare
-// infinity string.
+// MarshalJSON writes the dyadic pair {"num":…,"exp":…}, the bare infinity
+// string, or the bare "-0" string.
 func (w WireNumber) MarshalJSON() ([]byte, error) {
 	if w.IsInf {
 		return json.Marshal(w.InfWord)
+	}
+	if w.IsNegZero {
+		return json.Marshal("-0")
 	}
 	return json.Marshal(struct {
 		Num int64 `json:"num"`
@@ -51,6 +59,13 @@ func WireNumberOf(x float64) WireNumber {
 	}
 	if math.IsInf(x, -1) {
 		return WireNumber{IsInf: true, InfWord: "-inf"}
+	}
+	// −0 is IEEE negative zero: math.Signbit is what distinguishes it from
+	// +0 (x == 0 is true for both). The kernel now holds a separate
+	// ExtendedReal constructor for it, so the sign must survive the wire
+	// rather than collapse into the ordinary {num:0, exp:0} dyadic pair.
+	if x == 0 && math.Signbit(x) {
+		return WireNumber{IsNegZero: true}
 	}
 	d, err := primitives.DyadicOfNumber(x)
 	if err != nil {

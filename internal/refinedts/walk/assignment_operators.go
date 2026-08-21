@@ -275,7 +275,7 @@ func ReadAssignment(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 		}
 		// `&&=` / `||=`: decided by TRUTHINESS
 		isAnd := bin.OperatorToken.Kind == ast.KindAmpersandAmpersandEqualsToken
-		verdict, hasVerdict := abstractdomain.Truthiness(before)
+		verdict, hasVerdict := abstractdomain.TruthinessDecided(before)
 		if hasVerdict {
 			wantsAnd := isAnd && !verdict
 			wantsOr := !isAnd && verdict

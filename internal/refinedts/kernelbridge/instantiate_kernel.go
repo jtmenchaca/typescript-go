@@ -35,11 +35,12 @@ import (
 	"unsafe"
 )
 
-// The 29 question symbols the dylib exports (boundary/exports.lean),
+// The 30 question symbols the dylib exports (boundary/exports.lean),
 // split by arity exactly as the TS FFI table splits them.
 var oneArgSymbols = []string{
 	"kernel_scalar_empty",
 	"kernel_seq_empty",
+	"kernel_seq_no_scalar_reread",
 	"kernel_structural",
 	"kernel_judge",
 	"kernel_validate_chain",

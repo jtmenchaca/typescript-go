@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microsoft/typescript-go/internal/locale"
+	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/service"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
@@ -181,6 +182,12 @@ func main() {
 			}
 			fired = true
 			fmt.Fprintln(os.Stderr, spelled)
+			// a finding's related steps print under it, one per line,
+			// each at its own file and position — the terminal's form of
+			// what the editor shows as relatedInformation
+			for _, step := range d.Steps {
+				fmt.Fprintln(os.Stderr, "  "+spellStep(step))
+			}
 		}
 		for _, e := range expectations {
 			if e.Used {
@@ -255,6 +262,32 @@ func lineStartsOf(text string) []int {
 		}
 	}
 	return starts
+}
+
+// spellStep prints one related step at its own file and position. A
+// step in the compiled program reads its line from the SourceFile the
+// checker already holds; a foreign step (a place in a file the
+// TypeScript program never compiled) reads it from the text the
+// adapter carried alongside the path. Where neither supplies a text,
+// the step still names its file and its sentence, without a position
+// it cannot compute.
+func spellStep(step assignability.RelatedStep) string {
+	name := step.ForeignFile
+	text := step.ForeignText
+	if step.File != nil {
+		name = step.File.FileName()
+		text = step.File.Text()
+	}
+	if text == "" || step.Start < 0 || step.Start > len(text) {
+		if name == "" {
+			return step.Sentence
+		}
+		return fmt.Sprintf("%s: %s", name, step.Sentence)
+	}
+	starts := lineStartsOf(text)
+	line := lineOf(starts, step.Start)
+	character := step.Start - starts[line-1]
+	return fmt.Sprintf("%s:%d:%d %s", name, line, character+1, step.Sentence)
 }
 
 // lineOf is the TS source's `source.getLineAndCharacterOfPosition(d.start).line + 1`

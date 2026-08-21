@@ -164,6 +164,11 @@ func CheckContractArguments(ctx *FlowContext, contract *FunctionContract, effect
 			}
 			var exactForms []refinementsets.Refinement
 			origin := ""
+			// where the sibling ARGUMENT is a node in this file, the
+			// origin also becomes a related step hung on that argument —
+			// so the reader clicks through to the number the bound was
+			// instantiated from instead of only reading about it
+			var originSteps []assignability.RelatedStep
 			for _, r := range resolved {
 				if !r.hasV {
 					continue
@@ -178,8 +183,16 @@ func CheckContractArguments(ctx *FlowContext, contract *FunctionContract, effect
 				default:
 					exactForms = append(exactForms, refinementsets.Below(r.v))
 				}
+				spelled := strconv.FormatFloat(r.v, 'g', -1, 64)
 				origin += " (" + dependsOpWord(r.depends.Op) + " '" + r.depends.Param + "', which is " +
-					strconv.FormatFloat(r.v, 'g', -1, 64) + " here)"
+					spelled + " here)"
+				if r.j >= 0 && r.j < len(argumentNodes) && argumentNodes[r.j] != nil {
+					originSteps = append(originSteps, assignability.StepAt(
+						argumentNodes[r.j],
+						"'"+r.depends.Param+"' is "+spelled+" here — the bound '"+
+							dependsOpWord(r.depends.Op)+" "+r.depends.Param+"' was instantiated from it",
+					))
+				}
 			}
 			// the RELATION itself may be a held theorem: a guard or an
 			// early return recorded `value op sibling` in the order
@@ -236,6 +249,7 @@ func CheckContractArguments(ctx *FlowContext, contract *FunctionContract, effect
 				}
 			}
 			originText := origin
+			steps := originSteps
 			frame := ctx
 			if originText != "" {
 				originalReport := ctx.Report
@@ -243,6 +257,7 @@ func CheckContractArguments(ctx *FlowContext, contract *FunctionContract, effect
 				withOrigin.Report = func(d assignability.RefinementDiagnostic) {
 					if d.Code == 7001 {
 						d.MessageText = d.MessageText + originText
+						d = d.WithSteps(steps...)
 					}
 					originalReport(d)
 				}

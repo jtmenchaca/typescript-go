@@ -43,7 +43,7 @@ func ReadUnary(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.AbstractV
 		// (sec-logical-not-operator)
 		if unary.Operator == ast.KindExclamationToken {
 			operand := evaluateExpression(ctx, env, unary.Operand)
-			verdict, known := abstractdomain.Truthiness(operand)
+			verdict, known := abstractdomain.TruthinessDecided(operand)
 			if !known {
 				return abstractdomain.KnownSet(
 					refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1})),
@@ -151,7 +151,7 @@ func stringToNumberOfKnown(ctx *FlowContext, operand abstractdomain.AbstractValu
 func ReadConditional(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractValue {
 	cond := e.AsConditionalExpression()
 	conditionKnown := evaluateExpression(ctx, env, cond.Condition)
-	verdict, hasVerdict := abstractdomain.Truthiness(conditionKnown)
+	verdict, hasVerdict := abstractdomain.TruthinessDecided(conditionKnown)
 	assumed := assumeCondition(ctx, env, cond.Condition, AssumeConditionScope{
 		WhenTrueScope:  cond.WhenTrue,
 		WhenFalseScope: cond.WhenFalse,
@@ -200,7 +200,7 @@ func ReadBinary(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractV
 		isAnd := bin.OperatorToken.Kind == ast.KindAmpersandAmpersandToken
 		leftKnown := evaluateExpression(ctx, env, bin.Left)
 		// a correlation pass decides its own gate the assumed way
-		verdict, hasVerdict := abstractdomain.Truthiness(leftKnown)
+		verdict, hasVerdict := abstractdomain.TruthinessDecided(leftKnown)
 		if !hasVerdict {
 			assumedV, assumedOk := AssumedVerdict(ctx, ctx.GateAssumptions, bin.Left)
 			verdict, hasVerdict = assumedV, assumedOk

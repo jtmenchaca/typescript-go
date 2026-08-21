@@ -13,28 +13,35 @@
 //
 // THE DETERMINATION-GAP LEDGER (slice 9's "Truthiness answers
 // (false,false) for KindSet outright — never asks the kernel's truthy
-// narrowing; a concrete B row"). Each row below is the adapter
-// DECLINING where the kernel decides. None is a failure; each is a
-// named migration target, and each is ASSERTED as a decline, so a row
-// that starts answering fails this file and forces the ledger current.
+// narrowing; a concrete B row"). The ledger's determining rows are
+// CLOSED: abstractdomain.TruthinessDecided (lattice_kernel.go) asks the
+// kernel's js.truthyNum / js.truthyStr narrowing wherever the local
+// Truthiness declines on a set- or multi-value-shaped operand, and
+// reads the verdict off the two filtered sides the way kernelTruthiness
+// below does. The rows that used to be asserted DECLINES are asserted
+// AGREEMENTS now, per this file's own flip discipline.
 //
-//   gap-1  KindSet [1, 10]          adapter (false,false)  kernel TRUE
+//   gap-1  KindSet [1, 10]          CLOSED → TRUE
 //          — every member is nonzero, so the falsy side is empty.
-//   gap-2  KindSet {0}              adapter (false,false)  kernel FALSE
+//   gap-2  KindSet {0}              CLOSED → FALSE
 //          — the one member is zero, so the truthy side is empty.
-//   gap-3  KindSet [1, ∞)           adapter (false,false)  kernel TRUE
+//   gap-3  KindSet [1, ∞)           CLOSED → TRUE
 //          — an unbounded window, still wholly nonzero.
-//   gap-4  KindSet [-10, -1]        adapter (false,false)  kernel TRUE
+//   gap-4  KindSet [-10, -1]        CLOSED → TRUE
 //          — negatives are truthy; the sign is not the question.
-//   gap-5  KindSet [0, 10]          adapter (false,false)  kernel UNDECIDED
-//          — the only ledger row where the kernel ALSO declines, and it
-//          is here on purpose: it pins that the gap is the adapter's
-//          silence and not the kernel's, everywhere ELSE in this table.
-//   gap-6  KindValues 2+ numbers    adapter (false,false)  kernel TRUE
+//   gap-5  KindSet [0, 10]          OPEN, and not a gap: the kernel
+//          declines here too (the window holds 0 and nonzero alike), so
+//          both routes are honestly undecided. It stays asserted as a
+//          decline — it pins that the remaining silence is the
+//          QUESTION's and not the adapter's.
+//   gap-6  KindValues 2+ numbers    CLOSED → TRUE
 //          — Truthiness's KindValues arm answers only for a SINGLE
-//          value (lattice_operations.go:110); a multi-value word
-//          declines even when every member agrees. The audit names the
-//          KindSet arm; this row is the same silence one arm over.
+//          value; a multi-value word declined even when every member
+//          agreed. TruthinessDecided sends it as a OneOf set.
+//
+// Truthiness ITSELF is unchanged: every arm it already decided still
+// decides locally, with no question asked. Only the declining arms
+// reach the kernel, and only through TruthinessDecided.
 //
 // THE SCRUTINY CLASS. Truthiness ANSWERS, unconditionally and without
 // asking, for every object-ish kind: KindObject, KindList, KindObjectStar,
@@ -62,6 +69,34 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
+// scalarEmptyRecovered asks kernel.ScalarEmpty(set) and turns a refusal
+// panic (a non-scalar-shaped set) into ok=false, rather than letting it
+// crash the test — the same deferred-recover idiom
+// differential_harness_test.go's scalarSubsetRecovered/
+// seqSubsetRecovered hold every kernel ask in this package to (itself
+// mirroring walk/nan_wrapper.go's checkPossiblyNaNSubset and
+// abstractdomain/lattice_kernel.go's kernelNoScalarReread).
+func scalarEmptyRecovered(kernel *kernelbridge.RefinedTSKernel, set refinementsets.RefinedSet) (empty bool, ok bool) {
+	defer func() {
+		if recover() != nil {
+			empty, ok = false, false
+		}
+	}()
+	return kernel.ScalarEmpty(set), true
+}
+
+// seqEmptyRecovered is scalarEmptyRecovered's SeqEmpty twin — asks
+// kernel.SeqEmpty(set) and turns a refusal panic ("the set is not a
+// recognized sequence shape") into ok=false.
+func seqEmptyRecovered(kernel *kernelbridge.RefinedTSKernel, set refinementsets.RefinedSet) (empty bool, ok bool) {
+	defer func() {
+		if recover() != nil {
+			empty, ok = false, false
+		}
+	}()
+	return kernel.SeqEmpty(set), true
+}
+
 // kernelTruthiness reads the kernel's proved verdict for a state under
 // one truthiness sort: (value, known), the same three-valued shape
 // abstractdomain.Truthiness answers in. A side that admits nothing at
@@ -72,6 +107,16 @@ import (
 // whose set is empty but whose undef flag is up still admits the
 // undefined value, which is falsy, so the set alone is not the whole
 // question.
+//
+// The set a narrowed side carries is not always scalar-shaped:
+// ScalarEmpty refuses (panics through the bridge) on a sequence/tuple
+// spelling, so this tries it under recover first and, on a refusal,
+// tries SeqEmpty the same way — the same routing-by-shape and
+// recover discipline differential_harness_test.go's sameSet holds
+// every kernel ask in this package to. A double refusal means neither
+// decider spoke to this set's shape: read as "not dead" (live), the
+// same reading a genuinely live side gets — a refusal is never a claim
+// that a side is empty.
 func kernelTruthiness(
 	kernel *kernelbridge.RefinedTSKernel,
 	state kernelbridge.KnownStateWire,
@@ -85,7 +130,11 @@ func kernelTruthiness(
 		if s.Undef || s.Null || s.Nan {
 			return false
 		}
-		return kernel.ScalarEmpty(s.Set)
+		if empty, ok := scalarEmptyRecovered(kernel, s.Set); ok {
+			return empty
+		}
+		empty, ok := seqEmptyRecovered(kernel, s.Set)
+		return ok && empty
 	}
 	trueDead := dead(whenTrue)
 	falseDead := dead(whenFalse)
@@ -109,8 +158,8 @@ func numberState(set refinementsets.RefinedSet) kernelbridge.KnownStateWire {
 
 // TestTruthinessAgreesWithTheKernelWhereTheAdapterAnswers is the
 // AGREEMENT half: every row where abstractdomain.Truthiness DOES decide
-// a numeric verdict, held to the kernel's js.truthyNum narrowing. Drift
-// is a failure.
+// a numeric verdict LOCALLY, held to the kernel's js.truthyNum
+// narrowing. Drift is a failure.
 func TestTruthinessAgreesWithTheKernelWhereTheAdapterAnswers(t *testing.T) {
 	kernel := differentialKernel(t)
 
@@ -155,12 +204,96 @@ func TestTruthinessAgreesWithTheKernelWhereTheAdapterAnswers(t *testing.T) {
 	}
 }
 
-// TestTruthinessDeclinesWhereTheKernelDecides is the DETERMINATION-GAP
-// half: each ledger row above, asserted as a decline. A row that starts
-// answering fails here — which is the point: the ledger cannot go stale
-// without this file going red.
-func TestTruthinessDeclinesWhereTheKernelDecides(t *testing.T) {
+// TestTruthinessDecidedClosesTheLedgerGaps is the flipped half: each
+// ledger row the kernel decides, asserted as an AGREEMENT now.
+// TruthinessDecided must answer, and answer what the kernel answers.
+// The local Truthiness is asserted to still decline on the same row —
+// that is what makes each row a genuine kernel determination rather
+// than a local one, and it keeps the two functions' division honest.
+func TestTruthinessDecidedClosesTheLedgerGaps(t *testing.T) {
 	kernel := differentialKernel(t)
+	abstractdomain.SetLatticeKernel(kernel)
+	t.Cleanup(func() { abstractdomain.SetLatticeKernel(nil) })
+
+	rows := []struct {
+		ledger string
+		value  abstractdomain.AbstractValue
+		set    refinementsets.RefinedSet
+		want   bool
+	}{
+		{
+			ledger: "gap-1 KindSet [1, 10]",
+			value: abstractdomain.KnownSet(
+				refinementsets.MakeRefinedSet(refinementsets.AtLeast(1), refinementsets.AtMost(10)),
+				nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
+			set:  refinementsets.MakeRefinedSet(refinementsets.AtLeast(1), refinementsets.AtMost(10)),
+			want: true,
+		},
+		{
+			ledger: "gap-2 KindSet {0}",
+			value: abstractdomain.KnownSet(exactSet(0), nil, abstractdomain.TrustProved,
+				abstractdomain.SetKindTagNone),
+			set:  exactSet(0),
+			want: false,
+		},
+		{
+			ledger: "gap-3 KindSet [1, inf)",
+			value: abstractdomain.KnownSet(
+				refinementsets.MakeRefinedSet(refinementsets.AtLeast(1)),
+				nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
+			set:  refinementsets.MakeRefinedSet(refinementsets.AtLeast(1)),
+			want: true,
+		},
+		{
+			ledger: "gap-4 KindSet [-10, -1]",
+			value: abstractdomain.KnownSet(
+				refinementsets.MakeRefinedSet(refinementsets.AtLeast(-10), refinementsets.AtMost(-1)),
+				nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
+			set: refinementsets.MakeRefinedSet(refinementsets.AtLeast(-10),
+				refinementsets.AtMost(-1)),
+			want: true,
+		},
+		{
+			ledger: "gap-6 KindValues {1, 2} — a multi-value word",
+			value: abstractdomain.KnownValues([]float64{1, 2},
+				abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+			set:  refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1, 2})),
+			want: true,
+		},
+	}
+
+	for _, row := range rows {
+		if _, localKnown := abstractdomain.Truthiness(row.value); localKnown {
+			t.Errorf("%s: the LOCAL Truthiness now answers — this row is no longer a kernel determination and the ledger's split is stale", row.ledger)
+			continue
+		}
+		value, known := abstractdomain.TruthinessDecided(row.value)
+		if !known {
+			t.Errorf("%s: TruthinessDecided declined — the gap the kernel closes is open again", row.ledger)
+			continue
+		}
+		if value != row.want {
+			t.Errorf("%s: TruthinessDecided = %v, want %v", row.ledger, value, row.want)
+		}
+		kernelValue, kernelKnown := kernelTruthiness(kernel, numberState(row.set), "js.truthyNum")
+		if !kernelKnown {
+			t.Errorf("%s: the kernel declined while the adapter answered %v — SCRUTINY", row.ledger, value)
+			continue
+		}
+		if kernelValue != value {
+			t.Errorf("%s: TruthinessDecided = %v, kernel js.truthyNum = %v — the two routes disagree", row.ledger, value, kernelValue)
+		}
+	}
+}
+
+// TestTruthinessStillDeclinesWhereTheKernelDoesToo is the ledger's one
+// remaining OPEN row (gap-5). Both routes are honestly undecided on a
+// window holding 0 and nonzero alike, so this is not a determination
+// gap at all — it pins that the silence left is the question's.
+func TestTruthinessStillDeclinesWhereTheKernelDoesToo(t *testing.T) {
+	kernel := differentialKernel(t)
+	abstractdomain.SetLatticeKernel(kernel)
+	t.Cleanup(func() { abstractdomain.SetLatticeKernel(nil) })
 
 	rows := []struct {
 		ledger      string
@@ -170,38 +303,6 @@ func TestTruthinessDeclinesWhereTheKernelDecides(t *testing.T) {
 		kernelKnown bool
 	}{
 		{
-			ledger: "gap-1 KindSet [1, 10]",
-			value: abstractdomain.KnownSet(
-				refinementsets.MakeRefinedSet(refinementsets.AtLeast(1), refinementsets.AtMost(10)),
-				nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
-			set: refinementsets.MakeRefinedSet(refinementsets.AtLeast(1), refinementsets.AtMost(10)),
-			kernelValue: true, kernelKnown: true,
-		},
-		{
-			ledger: "gap-2 KindSet {0}",
-			value: abstractdomain.KnownSet(exactSet(0), nil, abstractdomain.TrustProved,
-				abstractdomain.SetKindTagNone),
-			set:         exactSet(0),
-			kernelValue: false, kernelKnown: true,
-		},
-		{
-			ledger: "gap-3 KindSet [1, inf)",
-			value: abstractdomain.KnownSet(
-				refinementsets.MakeRefinedSet(refinementsets.AtLeast(1)),
-				nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
-			set:         refinementsets.MakeRefinedSet(refinementsets.AtLeast(1)),
-			kernelValue: true, kernelKnown: true,
-		},
-		{
-			ledger: "gap-4 KindSet [-10, -1]",
-			value: abstractdomain.KnownSet(
-				refinementsets.MakeRefinedSet(refinementsets.AtLeast(-10), refinementsets.AtMost(-1)),
-				nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
-			set: refinementsets.MakeRefinedSet(refinementsets.AtLeast(-10),
-				refinementsets.AtMost(-1)),
-			kernelValue: true, kernelKnown: true,
-		},
-		{
 			ledger: "gap-5 KindSet [0, 10] — the kernel declines here too",
 			value: abstractdomain.KnownSet(
 				refinementsets.MakeRefinedSet(refinementsets.AtLeast(0), refinementsets.AtMost(10)),
@@ -210,19 +311,18 @@ func TestTruthinessDeclinesWhereTheKernelDecides(t *testing.T) {
 				refinementsets.AtMost(10)),
 			kernelValue: false, kernelKnown: false,
 		},
-		{
-			ledger: "gap-6 KindValues {1, 2} — a multi-value word",
-			value: abstractdomain.KnownValues([]float64{1, 2},
-				abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
-			set:         refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1, 2})),
-			kernelValue: true, kernelKnown: true,
-		},
 	}
 
 	for _, row := range rows {
-		_, adapterKnown := abstractdomain.Truthiness(row.value)
-		if adapterKnown {
-			t.Errorf("%s: Truthiness now ANSWERS — the determination gap closed and this file's ledger is stale; move the row to TestTruthinessAgreesWithTheKernelWhereTheAdapterAnswers", row.ledger)
+		// BOTH routes must stay silent: the local one because it never
+		// looks at a set, the kernel-asking one because the question
+		// itself has no verdict here
+		if _, localKnown := abstractdomain.Truthiness(row.value); localKnown {
+			t.Errorf("%s: the local Truthiness now ANSWERS — the ledger is stale", row.ledger)
+			continue
+		}
+		if _, decidedKnown := abstractdomain.TruthinessDecided(row.value); decidedKnown {
+			t.Errorf("%s: TruthinessDecided now ANSWERS — the kernel gained a verdict here and this row belongs in TestTruthinessDecidedClosesTheLedgerGaps", row.ledger)
 			continue
 		}
 		kernelValue, kernelKnown := kernelTruthiness(kernel, numberState(row.set), "js.truthyNum")
@@ -241,12 +341,12 @@ func TestTruthinessDeclinesWhereTheKernelDecides(t *testing.T) {
 // its LENGTH (lattice_operations.go:104-106); the kernel filters the
 // tuple layer with js.truthyStr, where truth is every nonempty tuple.
 //
-// Only the two ENDS are comparable: the empty word (both say false) and
-// a word the adapter reads as nonempty. A string-sorted KindSet is a
-// SCRUTINY-adjacent gap — Truthiness's KindSet arm declines for strings
-// exactly as it does for numbers (it never looks at SetKindTag at all),
-// and the kernel answers, so the gap-1..gap-5 ledger above covers the
-// string sort too, one narrowing op over.
+// Only the two ENDS are comparable here: the empty word (both say
+// false) and a word the adapter reads as nonempty. A string-sorted
+// KindSet declined for the same reason the numeric ones did —
+// Truthiness's KindSet arm never looks at a set at all — and
+// TruthinessDecided closes it the same way, routing a sequence-shaped
+// set to js.truthyStr (lattice_kernel.go's truthinessOperand).
 func TestStringTruthinessAgreesWhereBothRoutesSpeak(t *testing.T) {
 	kernel := differentialKernel(t)
 
@@ -295,7 +395,13 @@ func TestStringTruthinessAgreesWhereBothRoutesSpeak(t *testing.T) {
 		if whenTrue.Top || whenFalse.Top {
 			t.Fatalf("%s: kernel js.truthyStr answered a top side on a concrete state", row.name)
 		}
-		kernelValue := !kernel.SeqEmpty(whenTrue.Set)
+		empty, ok := seqEmptyRecovered(kernel, whenTrue.Set)
+		if !ok {
+			t.Errorf("%s: kernel SeqEmpty refused whenTrue.Set=%s — the row is unverifiable, not silently skipped",
+				row.name, refinementsets.FormatForDiagnostics(whenTrue.Set))
+			continue
+		}
+		kernelValue := !empty
 		if adapterValue != kernelValue {
 			t.Errorf("Truthiness(%s) = %v, kernel js.truthyStr admits-on-truth = %v — the two routes disagree",
 				row.name, adapterValue, kernelValue)

@@ -111,6 +111,13 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 		}
 		return BooleanField(raw, "subset")
 	}
+	kernel.SeqNoScalarReread = func(set refinementsets.RefinedSet) bool {
+		raw, err := ask1WithOptionalKey(ask1, "seqNoScalarReread", "kernel_seq_no_scalar_reread", EncodeSet(set), CanonicalKeyOf(wireSet(set)))
+		if err != nil {
+			panic(err.Error())
+		}
+		return BooleanField(raw, "safe")
+	}
 	kernel.SeqLexLt = func(a, b refinementsets.RefinedSet) bool {
 		key, hasKey := CanonicalPair(CanonicalKeyOf(wireSet(a)), CanonicalKeyOf(wireSet(b)))
 		raw, err := ask2WithOptionalKey(ask2, "seq.lexLt", "kernel_seq_lex_lt", EncodeSet(a), EncodeSet(b), key, hasKey)

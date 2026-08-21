@@ -76,22 +76,100 @@ func MeetKnown(a, b AbstractValue) AbstractValue {
 	if a.Kind == KindSet && b.Kind == KindSet &&
 		a.Temporal == nil && b.Temporal == nil &&
 		a.SetKindTag == SetKindTagNone && b.SetKindTag == SetKindTagNone {
-		combined := append(append([]refinementsets.Refinement{}, a.Set.Forms...), b.Set.Forms...)
 		measures := a.Measures
 		if measures == nil {
 			measures = b.Measures
 		}
+		grade := MinTrustLevel(TrustLevelOf(a), TrustLevelOf(b))
+		if met, ok := metRepetition(a.Set, b.Set); ok {
+			return KnownWithMeasures(KnownSet(met, nil, grade, SetKindTagNone), measures)
+		}
+		combined := append(append([]refinementsets.Refinement{}, a.Set.Forms...), b.Set.Forms...)
 		return KnownWithMeasures(
 			KnownSet(
 				refinementsets.MakeRefinedSet(combined...),
 				nil,
-				MinTrustLevel(TrustLevelOf(a), TrustLevelOf(b)),
+				grade,
 				SetKindTagNone,
 			),
 			measures,
 		)
 	}
 	return a
+}
+
+// metRepetition is the meet of two SEQUENCE claims that both hold of the
+// same runtime value, kept as ONE repetition form instead of the plain
+// form concatenation the scalar arm above uses.
+//
+// Concatenating is sound but unreadable: every repetition reader in the
+// tree (refinementsets.AsRepetition, and so ElementOf, the `.length`
+// read, MapOutcome's window carry) requires the set to hold exactly one
+// form, and declines a two-form conjunction outright. So a computed
+// sequence met with its own declared type — the inline parameter binding
+// meets the caller's value with the parameter's annotation
+// (BoundParameterKnown) — lost every length fact it arrived with the
+// moment `xs: number[]` restated it as a star. That is a claim DROPPED by
+// the meet, which entryStateMeet's contract says never happens: the
+// annotation is a ceiling and a value inside it passes through whole.
+//
+// Both sides describe the same value, so: every position satisfies both
+// element claims (the elements MEET, their forms conjoined the same way
+// the scalar arm conjoins), and the length satisfies both windows (the
+// windows INTERSECT). An empty intersection means no such value exists,
+// which is a contradiction this layer does not spell — the caller keeps
+// the plain concatenation there, exactly as before.
+//
+// (zero, false) whenever either side is not a lone repetition, so every
+// shape but this one takes the unchanged path.
+func metRepetition(a, b refinementsets.RefinedSet) (refinementsets.RefinedSet, bool) {
+	repA, okA := refinementsets.AsRepetition(a)
+	repB, okB := refinementsets.AsRepetition(b)
+	if !okA || !okB {
+		return refinementsets.RefinedSet{}, false
+	}
+	lo := repA.Lo
+	if repB.Lo > lo {
+		lo = repB.Lo
+	}
+	var hi *int
+	switch {
+	case repA.Hi == nil:
+		hi = repB.Hi
+	case repB.Hi == nil:
+		hi = repA.Hi
+	case *repA.Hi <= *repB.Hi:
+		hi = repA.Hi
+	default:
+		hi = repB.Hi
+	}
+	// an empty window states that no value is on either side at once;
+	// this layer has no spelling for that, so the caller's plain
+	// concatenation stands
+	if hi != nil && *hi < lo {
+		return refinementsets.RefinedSet{}, false
+	}
+	element := refinementsets.MakeRefinedSet(
+		append(append([]refinementsets.Refinement{}, repA.Element.Forms...),
+			repB.Element.Forms...)...,
+	)
+	built, ok := repetitionOrNothing(element, lo, hi)
+	if !ok {
+		return refinementsets.RefinedSet{}, false
+	}
+	return built, true
+}
+
+// repetitionOrNothing wraps refinementsets.Repetition's construction
+// refusals (it panics on a window it cannot build) as a (value, ok) pair
+// — the same reading TightenRepetition's own repetitionSafe takes.
+func repetitionOrNothing(element refinementsets.RefinedSet, lo int, hi *int) (result refinementsets.RefinedSet, ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	return refinementsets.Repetition(element, lo, hi), true
 }
 
 // Truthiness is truthiness in the TS source.
@@ -504,10 +582,35 @@ func UnknownOver(operands []AbstractValue) AbstractValue {
 	return Unknown
 }
 
+// noScalarReread is the reread-safety gate the string-word join rests
+// on: does the set's language MISS the 1-tuple layer entirely, so no
+// member can be reread as a bare number at a scalar position?
+//
+// The KERNEL answers first (refined_seq_no_scalar_reread, proved by
+// noScalarRereadF_sound). Only where it refuses does the local
+// recursion below stand in — and the local one is strictly weaker in
+// one direction that matters: it admits a Concatenation WITHOUT
+// inspecting its operands, so `Concatenation (OneOf [w]) EmptyTuple` —
+// a genuine 1-tuple — passes locally and is refused by the kernel. The
+// kernel is therefore never weaker here, and asking it first can only
+// tighten the gate.
+func noScalarReread(set refinementsets.RefinedSet) bool {
+	if safe, ok := kernelNoScalarReread(set); ok {
+		return safe
+	}
+	return statesOnlyLongSequences(set)
+}
+
 // statesOnlyLongSequences is the TS source's statesOnlyLongSequences:
 // whether every member the set admits is a sequence of length two or
 // more — every form spells tuples, and no tuple is short enough to
-// double as a scalar. The positive test the string-word join rests on.
+// double as a scalar.
+//
+// THE DECLINE FALLBACK ONLY — noScalarReread above asks the kernel
+// first and reaches this recursion only where the kernel refused. It
+// walks the kernel's own grammar by hand and admits a concatenation
+// without checking its operands (see noScalarReread's note), which the
+// proved decider does not.
 func statesOnlyLongSequences(set refinementsets.RefinedSet) bool {
 	if len(set.Forms) == 0 {
 		return false
@@ -548,7 +651,7 @@ func stringWordSet(k AbstractValue) (refinementsets.RefinedSet, bool) {
 		}
 		return refinementsets.RefinedSet{}, false
 	}
-	if k.Kind == KindSet && k.SetKindTag == SetKindTagNone && statesOnlyLongSequences(k.Set) {
+	if k.Kind == KindSet && k.SetKindTag == SetKindTagNone && noScalarReread(k.Set) {
 		return k.Set, true
 	}
 	return refinementsets.RefinedSet{}, false

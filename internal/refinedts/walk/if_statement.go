@@ -76,7 +76,7 @@ func AnalyzeIfStatement(
 	// the assume operator's (assume_condition.ts), the same routine
 	// every branching site consumes
 	conditionKnown := evaluateExpression(ctx, env, ifStmt.Expression)
-	computedValue, computedKnown := abstractdomain.Truthiness(conditionKnown)
+	computedValue, computedKnown := abstractdomain.TruthinessDecided(conditionKnown)
 	// a PROVABLY FALSE test speaks: the walk already kills the branch
 	// below, and a determination the walk acts on is a determination
 	// the code's author needs to hear (the vacuous-guard bug class —

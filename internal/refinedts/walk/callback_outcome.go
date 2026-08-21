@@ -352,7 +352,7 @@ func findOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.Ab
 			if hasOwnerParameter {
 				bindings[ownerParameter] = receiver
 			}
-			verdict, known := abstractdomain.Truthiness(evalBody(silent, bindings))
+			verdict, known := abstractdomain.TruthinessDecided(evalBody(silent, bindings))
 			if !known {
 				decided = false
 				break

@@ -258,12 +258,20 @@ func CheckOneDependentReturn(
 		if op == "gt" {
 			comparative = "greater"
 		}
-		ctx.Report(assignability.At(
+		refutation := assignability.At(
 			expression,
 			7001,
 			"a returned value equal to '"+param+"' is never strictly "+
 				comparative+" than '"+param+"'",
-		))
+		)
+		if declared := dependentParamDeclaration(fn, param); declared != nil {
+			refutation = refutation.WithSteps(assignability.StepAt(
+				declared,
+				"'"+param+"' is declared here — the name the returned value has to be strictly "+
+					comparative+" than",
+			))
+		}
+		ctx.Report(refutation)
 		return
 	}
 	nanFree := func(k *abstractdomain.AbstractValue) bool {
@@ -369,12 +377,19 @@ func CheckOneDependentReturn(
 		} else {
 			admits = "values down to " + formatJSNumberLocal(siblingRange.Lo)
 		}
-		ctx.Report(assignability.At(
+		refutation := assignability.At(
 			expression,
 			7001,
 			"a returned value of '"+formatJSNumberLocal(c)+"' is not assignable to '"+bound+"' — "+
 				"'"+param+"' admits "+admits+" at this return",
-		))
+		)
+		if declared := dependentParamDeclaration(fn, param); declared != nil {
+			refutation = refutation.WithSteps(assignability.StepAt(
+				declared,
+				"'"+param+"' is declared here, admitting "+admits,
+			))
+		}
+		ctx.Report(refutation)
 		return
 	}
 	// set-against-set still PROVES the uncorrelated direction: the
@@ -408,6 +423,26 @@ func CheckOneDependentReturn(
 		7002,
 		"a returned value could not be proved '"+bound+"' — "+assignability.AlertText,
 	))
+}
+
+// dependentParamDeclaration is the PARAMETER a dependent bound's name
+// points at, as a node — the position a related step hangs on so the
+// reader can click from a refutation to the declaration whose name the
+// bound spells. A dotted name ("config.min") names a key of that
+// parameter, which has no declaration node here, so its head parameter
+// stands for it. Nil when no parameter carries the head name.
+func dependentParamDeclaration(fn *ast.Node, param string) *ast.Node {
+	if fn == nil {
+		return nil
+	}
+	head := strings.Split(param, ".")[0]
+	for _, p := range fn.Parameters() {
+		name := p.Name()
+		if name != nil && ast.IsIdentifier(name) && name.Text() == head {
+			return p
+		}
+	}
+	return nil
 }
 
 // dependentParamPlace is the place a dependent bound's NAME points

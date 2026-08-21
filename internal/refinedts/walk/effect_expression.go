@@ -390,6 +390,26 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 		if !ok {
 			return reader.Opaque(e)
 		}
+		// `s * s`: THE STRUCTURAL SQUARE, recognized here from the AST
+		// alone — the two operands are the SAME SOURCE IDENTIFIER
+		// (SpelledNameOf's own spelling, compared as text), never a
+		// coincidence of two operand effects that happen to read the
+		// same slot index by some other route. The kernel no longer
+		// recognizes x*x by syntax (unsound under renaming), so this is
+		// the one place that claim now originates — and it must fire
+		// before the general mul lowering below, which would otherwise
+		// answer the sign-straddling product of two INDEPENDENT operand
+		// readings for the identical term.
+		if op == kernelbridge.LoopOpMul {
+			if left, leftOk := SpelledNameOf(Unwrapped(bin.Left)); leftOk {
+				if right, rightOk := SpelledNameOf(Unwrapped(bin.Right)); rightOk && left == right {
+					if effect, effectOk := LowerEffectExpression(bin.Left, reader); effectOk &&
+						effect.Kind == kernelbridge.LoopEffectVar {
+						return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectSquare, Index: effect.Index}, true
+					}
+				}
+			}
+		}
 		a, aOk := LowerEffectExpression(bin.Left, reader)
 		b, bOk := LowerEffectExpression(bin.Right, reader)
 		if !aOk || !bOk {

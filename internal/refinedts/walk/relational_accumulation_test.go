@@ -88,10 +88,11 @@ function audioLevel(clamped: number[]): number {
 		t.Fatalf("len(Stmts) = %d, want 2 — the accumulation and the division it feeds: %+v",
 			len(accumulation.Stmts), accumulation.Stmts)
 	}
-	// the loopAccum's own wire: three slot indices and the per-pass term,
-	// which reads its iteration value from the src slot on both sides of
-	// the multiply
-	wantAccum := `{"loopAccum":{"total":0,"src":1,"len":2,"body":{"op":"binary64.mul","A":{"var":1},"B":{"var":1}}}}`
+	// the loopAccum's own wire: three slot indices and the per-pass term.
+	// `s * s` is the SAME source identifier on both sides of the
+	// multiply, so it lowers to the structural square over the src slot
+	// rather than a binary mul of two identical reads.
+	wantAccum := `{"loopAccum":{"total":0,"src":1,"len":2,"body":{"sq":1}}}`
 	if got := kernelbridge.StmtWire(accumulation.Stmts[0]); got != wantAccum {
 		t.Errorf("StmtWire(loopAccum) =\n  %s\nwant\n  %s", got, wantAccum)
 	}
@@ -246,8 +247,10 @@ function audioLevel(clamped: number[]): number {
 			accumulation.DivisionNode.Kind)
 	}
 	// the lowered program is the SAME two statements the declaration shape
-	// builds — the shapes differ only in how the quotient reaches the walk
-	wantAccum := `{"loopAccum":{"total":0,"src":1,"len":2,"body":{"op":"binary64.mul","A":{"var":1},"B":{"var":1}}}}`
+	// builds — the shapes differ only in how the quotient reaches the walk.
+	// `s * s` is the same identifier on both sides, so it lowers to the
+	// structural square, same as the declaration shape's own assertion.
+	wantAccum := `{"loopAccum":{"total":0,"src":1,"len":2,"body":{"sq":1}}}`
 	if got := kernelbridge.StmtWire(accumulation.Stmts[0]); got != wantAccum {
 		t.Errorf("StmtWire(loopAccum) =\n  %s\nwant\n  %s", got, wantAccum)
 	}

@@ -172,6 +172,7 @@ func TransformImage(
 	}
 	walk.SetTransferKernel(kernel)
 	narrowing.SetNarrowKernel(kernel)
+	abstractdomain.SetLatticeKernel(kernel)
 	facts := programFactsCached(p, nil, nil)
 	// a codec's input is its FIRST argument; a transform's is its
 	// receiver chain

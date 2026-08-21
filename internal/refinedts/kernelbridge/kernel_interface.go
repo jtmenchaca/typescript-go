@@ -39,6 +39,14 @@ type RefinedTSKernel struct {
 	// theorem (seqSubsetB_true); `false` means no positional proof —
 	// read it conservatively (the counterexample construction is owed).
 	SeqSubset func(a, b refinementsets.RefinedSet) bool
+	// SeqNoScalarReread: does the set's language MISS the 1-tuple layer
+	// entirely — so a union built from it holds no member a scalar
+	// position could reread as a bare number? `true` is a theorem
+	// (noScalarRereadF_sound); `false` is a decline that proves nothing,
+	// and the caller keeps its own conservative answer there. The kernel
+	// recurses into a concatenation's OPERANDS, which the adapter's local
+	// hand-recursion does not.
+	SeqNoScalarReread func(set refinementsets.RefinedSet) bool
 	// SeqLexLt: A < B under code-unit lexicographic order (cmp.7),
 	// exact on two concrete words (theories/seq/ordering.lean's
 	// lexLtB) — both true and false are theorems there. Panics where

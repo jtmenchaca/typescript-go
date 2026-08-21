@@ -539,7 +539,7 @@ func AccessorLogicalReadModifyWrite(
 
 	// `&&=` / `||=`: decided by TRUTHINESS
 	isAnd := kind == ast.KindAmpersandAmpersandEqualsToken
-	verdict, hasVerdict := abstractdomain.Truthiness(held)
+	verdict, hasVerdict := abstractdomain.TruthinessDecided(held)
 	if hasVerdict {
 		wantsAnd := isAnd && !verdict
 		wantsOr := !isAnd && verdict

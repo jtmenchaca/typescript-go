@@ -163,7 +163,7 @@ func FilterOutcome(walk *CallbackWalk) abstractdomain.AbstractValue {
 			if hasOwnerParameter {
 				bindings[ownerParameter] = receiver
 			}
-			verdict, known := abstractdomain.Truthiness(evalBody(silent, bindings))
+			verdict, known := abstractdomain.TruthinessDecided(evalBody(silent, bindings))
 			if !known {
 				decided = false
 			} else if verdict {

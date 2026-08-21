@@ -27,7 +27,9 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
@@ -112,8 +114,39 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 	// accumulation consumes the statement AFTER the loop as well, so the
 	// list resumes past it rather than walking it a second time.
 	walked := 0
+	// foreignOverride: the CROSS-LANGUAGE edge's pinned parse result, and
+	// which statement of this list it belongs to (foreign_edge.go). The
+	// edge's call and the JSON.parse that reads its stdout are two
+	// statements, and the fact on the parse comes from another language's
+	// checker — nothing this walk does to that node can reach it. So the
+	// value rides ctx.NodeOverrides for exactly the one statement that
+	// contains the parse, set below and restored by leaving the copy.
+	var foreignOverride map[*ast.Node]abstractdomain.AbstractValue
+	foreignOverrideAt := -1
 	for index, statement := range statements {
 		if index < walked {
+			continue
+		}
+		// a recognized cross-language call: its premises are discharged
+		// here, where the environment still holds what crosses out
+		if outcome, isEdge := ForeignEdgeAt(running, env, statements, index); isEdge {
+			if outcome.Decline != "" && outcome.DeclineNode != nil {
+				running.Report(assignability.At(outcome.DeclineNode, 7002, outcome.Decline))
+			}
+			if outcome.Override != nil {
+				foreignOverride, foreignOverrideAt = outcome.Override, outcome.OverrideStatement
+			}
+		}
+		if index == foreignOverrideAt && foreignOverride != nil {
+			pinning := *running
+			pinning.NodeOverrides = foreignOverride
+			exits := AnalyzeStatement(&pinning, env, statement, result)
+			foreignOverride, foreignOverrideAt = nil, -1
+			if exits {
+				return true
+			}
+			running = ContextWithExitRows(running, statement)
+			walked = index + 1
 			continue
 		}
 		// accumulate-then-divide-by-count spans TWO statements, and the

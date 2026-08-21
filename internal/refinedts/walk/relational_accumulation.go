@@ -553,9 +553,11 @@ func accumulationProgram(
 	}
 	context := &LoweringContext{
 		// the element slot wears the PASS BINDING's own name, so the term
-		// `s * s` reads through EffectOf as `mul(var 1, var 1)` — the
-		// loopAccum body reading its iteration value from slot src, with no
-		// substitution step of its own
+		// `s * s` reads through EffectOf as `sq(var 1)` — the same source
+		// identifier on both sides of the multiply, recognized structurally
+		// (LowerEffectExpression's own sq arm) rather than as a mul of two
+		// identical reads — the loopAccum body reading its iteration value
+		// from slot src, with no substitution step of its own
 		Bindings: []string{loop.TotalName, loop.ElementName, accumLenSlotName, division.MeanName},
 		Sorts: []BindingKind{
 			BindingKindNumber, BindingKindNumber, BindingKindNumber, BindingKindNumber,
@@ -621,7 +623,7 @@ const accumLenSlotName = "#accum.len"
 // alone; a term reading the total or the count breaks that premise.
 func accumulationTermReadsElementOnly(e kernelbridge.LoopEffect) bool {
 	switch e.Kind {
-	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectVarState:
+	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectVarState, kernelbridge.LoopEffectSquare:
 		return e.Index == accumElementSlot
 	case kernelbridge.LoopEffectConst, kernelbridge.LoopEffectConstState:
 		return true

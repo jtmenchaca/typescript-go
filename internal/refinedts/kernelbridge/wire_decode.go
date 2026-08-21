@@ -12,7 +12,7 @@ import (
 )
 
 // wireNumberRaw mirrors the `unknown` the TS decoder reads: either the
-// bare string "-inf"/"+inf", or {"num":…,"exp":…}.
+// bare string "-inf"/"+inf"/"-0", or {"num":…,"exp":…}.
 func decodeRawNumber(raw any) (float64, error) {
 	if s, ok := raw.(string); ok {
 		switch s {
@@ -20,6 +20,12 @@ func decodeRawNumber(raw any) (float64, error) {
 			return math.Inf(-1), nil
 		case "+inf":
 			return math.Inf(1), nil
+		case "-0":
+			// IEEE negative zero: the kernel's own ExtendedReal.negZero,
+			// distinct from +0 by math.Signbit alone (x == 0 is true for
+			// both) — math.Copysign(0, -1) is how a float64 carries that
+			// sign.
+			return math.Copysign(0, -1), nil
 		default:
 			return 0, fmt.Errorf("kernel: unexpected wire number string %q", s)
 		}

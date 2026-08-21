@@ -14,6 +14,7 @@ import (
 func EffectNodes(e kernelbridge.LoopEffect) int {
 	switch e.Kind {
 	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectVarState,
+		kernelbridge.LoopEffectSquare,
 		kernelbridge.LoopEffectConst,
 		kernelbridge.LoopEffectConstState, kernelbridge.LoopEffectUnknown:
 		return 1
@@ -35,6 +36,28 @@ func SubstituteVars(e kernelbridge.LoopEffect, current []kernelbridge.LoopEffect
 	case kernelbridge.LoopEffectVar:
 		if e.Index >= 0 && e.Index < len(current) {
 			return current[e.Index]
+		}
+		return e
+	// LoopEffectSquare names "slot Index, squared" — substituting the
+	// slot's CURRENT effect in for a plain var swaps the whole effect;
+	// a square cannot do that in general, since the wire's `sq` shape
+	// only ever takes an index, never an arbitrary operand. Where the
+	// current effect is itself a bare var (the common case: no write to
+	// the squared name happened since entry, or the write was a plain
+	// copy), the square stays exact and cheap over that var's own
+	// index. Anywhere else — the slot's current value is already a
+	// composed effect — there is no `sq`-shaped wire for "this composed
+	// effect, squared", so it falls back to the general product of the
+	// substituted effect with itself, the same claim the pre-`sq` mul
+	// lowering always gave.
+	case kernelbridge.LoopEffectSquare:
+		if e.Index >= 0 && e.Index < len(current) {
+			substituted := current[e.Index]
+			if substituted.Kind == kernelbridge.LoopEffectVar {
+				return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectSquare, Index: substituted.Index}
+			}
+			a, b := substituted, substituted
+			return kernelbridge.LoopEffect{Kind: kernelbridge.LoopEffectBinary, Op: kernelbridge.LoopOpMul, A: &a, B: &b}
 		}
 		return e
 	// LoopEffectVarState never reaches here in practice — every producer
@@ -133,7 +156,7 @@ func effectsEqual(a, b kernelbridge.LoopEffect) bool {
 		return false
 	}
 	switch a.Kind {
-	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectVarState:
+	case kernelbridge.LoopEffectVar, kernelbridge.LoopEffectVarState, kernelbridge.LoopEffectSquare:
 		return a.Index == b.Index
 	case kernelbridge.LoopEffectConst:
 		return setsEqualForFold(a.Set, b.Set)

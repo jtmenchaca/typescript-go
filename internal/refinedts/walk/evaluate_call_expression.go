@@ -13,13 +13,52 @@
 package walk
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
+
+// debugCallExpressionName names a call expression's callee for an
+// "inline-debug:" line — the plain identifier text where the callee is
+// one, "?" otherwise (a property access, a call result, …).
+func debugCallExpressionName(call *ast.CallExpression) string {
+	if call == nil || call.Expression == nil {
+		return "?"
+	}
+	if ast.IsIdentifier(call.Expression) {
+		return call.Expression.Text()
+	}
+	return "?"
+}
+
+// debugPrintValue is one "inline-debug:" line: the callee, the stage
+// label, and the value's Kind/SetKindTag/whether AsRepetition reads its
+// Set. Plain data, no interpretation — removable.
+func debugPrintValue(call *ast.CallExpression, stage string, value abstractdomain.AbstractValue) {
+	_, repOk := refinementsets.AsRepetition(value.Set)
+	fmt.Fprintf(os.Stderr, "inline-debug: %s callee=%s kind=%v setKindTag=%v asRepetition=%v\n",
+		stage, debugCallExpressionName(call), value.Kind, value.SetKindTag, repOk)
+}
+
+// debugPrintMeetInputs is one "inline-debug:" line per side of the
+// declared-return meet (MeetKnown(recovered, *statedResult)) — the
+// recovered value's own shape, and the stated result's shape where one
+// exists. Plain data, no interpretation — removable.
+func debugPrintMeetInputs(call *ast.CallExpression, stage string, recovered abstractdomain.AbstractValue, statedResult *abstractdomain.AbstractValue) {
+	debugPrintValue(call, "before-meet-recovered("+stage+")", recovered)
+	if statedResult != nil {
+		debugPrintValue(call, "before-meet-stated("+stage+")", *statedResult)
+	} else {
+		fmt.Fprintf(os.Stderr, "inline-debug: before-meet-stated(%s) callee=%s statedResult=nil\n", stage, debugCallExpressionName(call))
+	}
+}
 
 // EvaluateCallExpression is evaluateCallExpression in the TS source.
 func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractValue {
@@ -251,10 +290,20 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			tracing.Count("inlineSkipped", 0)
 			if summary.SelfContained && !superRooted {
 				recovered := RecoverPure(ctx, e, *contract, effective, true)
+				if debugInlineEnabled() {
+					debugPrintMeetInputs(call, "RecoverPure", recovered, statedResult)
+				}
 				if statedResult != nil {
 					recovered = abstractdomain.MeetKnown(recovered, *statedResult)
 				}
-				return wornReturnTypeIfUnknown(ctx, e, recovered)
+				if debugInlineEnabled() {
+					debugPrintValue(call, "after-meet(RecoverPure)", recovered)
+				}
+				result := wornReturnTypeIfUnknown(ctx, e, recovered)
+				if debugInlineEnabled() && !abstractdomain.SameKnown(result, recovered) {
+					debugPrintValue(call, "wornReturnTypeIfUnknown REPLACED(RecoverPure)", result)
+				}
+				return result
 			}
 			// effect-free but reads the caller's world: fall through to
 			// the full inline, whose copied environment keeps captures
@@ -268,10 +317,20 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			return wornReturnTypeIfUnknown(ctx, e, silence.Residue())
 		}
 		recovered := InlineContractCall(ctx, env, e, contract, effective)
+		if debugInlineEnabled() {
+			debugPrintMeetInputs(call, "InlineContractCall", recovered, statedResult)
+		}
 		if statedResult != nil {
 			recovered = abstractdomain.MeetKnown(recovered, *statedResult)
 		}
-		return wornReturnTypeIfUnknown(ctx, e, recovered)
+		if debugInlineEnabled() {
+			debugPrintValue(call, "after-meet(InlineContractCall)", recovered)
+		}
+		finalResult := wornReturnTypeIfUnknown(ctx, e, recovered)
+		if debugInlineEnabled() && !abstractdomain.SameKnown(finalResult, recovered) {
+			debugPrintValue(call, "wornReturnTypeIfUnknown REPLACED(InlineContractCall)", finalResult)
+		}
+		return finalResult
 	}
 	// a body-less callee (an ambient declaration): reference
 	// arguments forget — the implementation is outside the checked

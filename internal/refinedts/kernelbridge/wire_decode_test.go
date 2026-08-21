@@ -19,7 +19,7 @@ func parseWire(t *testing.T, wire string) any {
 }
 
 func TestDecodeWireNumberTheDyadicPairAndTheInfinities(t *testing.T) {
-	cases := []float64{0, 1, -8, 0.5, math.Inf(1), math.Inf(-1)}
+	cases := []float64{0, math.Copysign(0, -1), 1, -8, 0.5, math.Inf(1), math.Inf(-1)}
 	for _, x := range cases {
 		wire := marshalWireValue(WireNumberOf(x))
 		var raw any
@@ -27,8 +27,13 @@ func TestDecodeWireNumberTheDyadicPairAndTheInfinities(t *testing.T) {
 			t.Fatalf("unparseable wire %q: %v", wire, err)
 		}
 		got := DecodeWireNumber(raw)
-		if got != x {
-			t.Errorf("DecodeWireNumber(WireNumberOf(%v)) = %v, want %v", x, got, x)
+		// `!=` alone would not catch a sign erasure: -0 != 0 is false for
+		// IEEE floats under Go's ordinary comparison, so +0 and -0 round
+		// off as equal there — math.Signbit is what tells them apart,
+		// same as WireNumberOf's own encode-side check.
+		if got != x || math.Signbit(got) != math.Signbit(x) {
+			t.Errorf("DecodeWireNumber(WireNumberOf(%v)) = %v (signbit %v), want %v (signbit %v)",
+				x, got, math.Signbit(got), x, math.Signbit(x))
 		}
 	}
 }

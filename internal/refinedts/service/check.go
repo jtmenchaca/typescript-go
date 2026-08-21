@@ -500,6 +500,7 @@ func setupKernel() *kernelbridge.RefinedTSKernel {
 	walk.SetTransferKernel(kernel)
 	walk.SetEngineKernel(kernel)
 	narrowing.SetNarrowKernel(kernel)
+	abstractdomain.SetLatticeKernel(kernel)
 	return kernel
 }
 
@@ -660,7 +661,10 @@ func runRefinements(p *program.CheckerProgram, shape []*ast.Diagnostic, kernel *
 }
 
 // reportKey is the TS source's `${d.start}:${d.length}:${d.code}:${d.messageText}`
-// dedupe key.
+// dedupe key. Related steps are deliberately NOT part of it: the
+// duplicate this collapses is the same judgment reached twice by a
+// correlation pass, which computes the same steps both times, so
+// keying on them would only turn one finding back into two.
 func reportKey(d assignability.RefinementDiagnostic) string {
 	return itoa(d.Start) + ":" + itoa(d.Length) + ":" + itoa(d.Code) + ":" + d.MessageText
 }

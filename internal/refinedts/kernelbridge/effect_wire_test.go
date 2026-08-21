@@ -38,6 +38,14 @@ func TestAVarStateEffectWiresTheVerbatimCopyByIndex(t *testing.T) {
 	}
 }
 
+func TestAStructuralSquareEffectWiresTheOneIndexShapeLikeVar(t *testing.T) {
+	got := EffectWire(LoopEffect{Kind: LoopEffectSquare, Index: 1})
+	want := `{"sq":1}`
+	if got != want {
+		t.Errorf("EffectWire(sq) = %q, want %q", got, want)
+	}
+}
+
 func TestAConcatenationEffectWiresItsTwoOperands(t *testing.T) {
 	a := LoopEffect{Kind: LoopEffectVar, Index: 0}
 	b := LoopEffect{Kind: LoopEffectVar, Index: 1}

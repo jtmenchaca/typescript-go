@@ -8,6 +8,8 @@
 package walk
 
 import (
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -15,9 +17,27 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
+
+// debugInlineEnabled gates the "inline-debug:" trace lines this file and
+// evaluate_call_expression.go print — REFINEDTS_DEBUG_INLINE, checked once
+// per call so a disabled run pays only the env lookup. Diagnostic only:
+// removable, no interpretation baked in.
+func debugInlineEnabled() bool {
+	return os.Getenv("REFINEDTS_DEBUG_INLINE") != ""
+}
+
+// debugCalleeName names the callee for an inline-debug line, or "?" where
+// no identifier node is available.
+func debugCalleeName(calleeName *ast.Node) string {
+	if calleeName == nil {
+		return "?"
+	}
+	return calleeName.Text()
+}
 
 // SummaryCallReceiver is the abstract value a METHOD call's receiver
 // holds in the CALLER's environment — what the summary route fills a
@@ -447,7 +467,17 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	if effective.Exact {
 		kernelSummaryDirect = KernelSummaryDirectExactOn
 	}
-	if summarized, ok := kernelSummaryDirect(ctx, argKnowns, contract, receiver); ok {
+	debugSummarized, summaryOk := kernelSummaryDirect(ctx, argKnowns, contract, receiver)
+	if debugInlineEnabled() {
+		if summaryOk {
+			_, repOk := refinementsets.AsRepetition(debugSummarized.Set)
+			fmt.Fprintf(os.Stderr, "inline-debug: kernel-summary callee=%s ok=%v kind=%v setKindTag=%v asRepetition=%v\n",
+				debugCalleeName(calleeName), summaryOk, debugSummarized.Kind, debugSummarized.SetKindTag, repOk)
+		} else {
+			fmt.Fprintf(os.Stderr, "inline-debug: kernel-summary callee=%s ok=%v\n", debugCalleeName(calleeName), summaryOk)
+		}
+	}
+	if summarized, ok := debugSummarized, summaryOk; ok {
 		tracing.Count("inline.summaryDirect", 0)
 		// THE SERVED-CALL FORGET: a summary whose body writes receiver
 		// fields, writes a parameter bundle's fields, or returns its
@@ -743,5 +773,11 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		memo[memoKey] = InlineOutcome{Returned: returned, PostByName: postByName, ParamPosts: paramPosts}
 		inlineMemoMu.Unlock()
 	}
-	return AsCalleeResult(*contract, returned)
+	debugCalleeResult := AsCalleeResult(*contract, returned)
+	if debugInlineEnabled() {
+		_, repOk := refinementsets.AsRepetition(debugCalleeResult.Set)
+		fmt.Fprintf(os.Stderr, "inline-debug: general-walk callee=%s kind=%v setKindTag=%v asRepetition=%v\n",
+			debugCalleeName(calleeName), debugCalleeResult.Kind, debugCalleeResult.SetKindTag, repOk)
+	}
+	return debugCalleeResult
 }

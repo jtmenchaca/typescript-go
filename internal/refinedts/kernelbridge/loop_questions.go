@@ -60,7 +60,19 @@ const (
 	// another does at every other sort. Rides the Index field, like
 	// LoopEffectVar.
 	LoopEffectVarState LoopEffectKind = "varState"
-	LoopEffectConst    LoopEffectKind = "const"
+	// LoopEffectSquare is the STRUCTURAL SQUARE: the value at variable
+	// index Index, squared — one variable read twice, recognized at
+	// lowering time where "same variable" is a fact about the SOURCE
+	// (the same identifier on both sides of a `*`), never inferred from
+	// two operand effects that merely happen to coincide. Rides the
+	// Index field, the same one-index shape as LoopEffectVar. The
+	// kernel answers the correlated square image [0, max²] for this —
+	// tighter than the sign-straddling product transferMul gives two
+	// INDEPENDENT operands — and no longer recognizes `x*x` by syntax
+	// (that branch was removed as unsound under renaming), so the
+	// adapter is the only source of this claim now.
+	LoopEffectSquare LoopEffectKind = "sq"
+	LoopEffectConst  LoopEffectKind = "const"
 	// LoopEffectConstState is the const leaf carrying the WHOLE state:
 	// the set beside the Undef, Null, and NaN flags. `x = null` and
 	// `return undefined` write one of the two absent outcomes, which
@@ -392,7 +404,7 @@ const (
 type LoopEffect struct {
 	Kind LoopEffectKind
 
-	Index int                       // "var" / "varState"
+	Index int                       // "var" / "varState" / "sq"
 	Set   refinementsets.RefinedSet // "const" / "constState"
 
 	// Undef, Null, Nan: "constState" only — whether the written constant
@@ -486,6 +498,8 @@ func EffectWire(e LoopEffect) string {
 		return fmt.Sprintf(`{"var":%d}`, e.Index)
 	case LoopEffectVarState:
 		return fmt.Sprintf(`{"varState":%d}`, e.Index)
+	case LoopEffectSquare:
+		return fmt.Sprintf(`{"sq":%d}`, e.Index)
 	case LoopEffectConst:
 		return fmt.Sprintf(`{"set":%s}`, EncodeSet(e.Set))
 	case LoopEffectConstState:

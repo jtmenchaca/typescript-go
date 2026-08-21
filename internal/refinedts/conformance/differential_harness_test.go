@@ -60,7 +60,9 @@
 package conformance
 
 import (
+	"fmt"
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
@@ -86,8 +88,61 @@ func differentialKernel(t *testing.T) *kernelbridge.RefinedTSKernel {
 // sameSet is sameState's set half, lifted for the rows that compare
 // bare sets rather than whole states: mutual containment, since the two
 // routes may spell one set two ways (the same argument sameState makes).
+//
+// ScalarSubset speaks only to scalar-shaped sets and panics through the
+// bridge on a refusal (a set outside that shape — e.g. a sequence/tuple
+// spelling); scalarSubsetRecovered's deferred recover() turns that back
+// into ok=false, the same idiom walk/nan_wrapper.go's
+// checkPossiblyNaNSubset and abstractdomain/lattice_kernel.go's
+// kernelNoScalarReread already hold every kernel ask in this tree to.
+// On a scalar refusal, SeqSubset is tried the same way — the kernel's
+// own sequence-shape decider, which speaks to what ScalarSubset does
+// not. If BOTH refuse, there is no proof either way; the two wire sets
+// are compared by their own structural spelling instead
+// (reflect.DeepEqual, the refinementsets package's own equalSet
+// discipline) — equal spellings still agree, and an unequal spelling
+// under a double refusal panics naming the refused set, so the row gets
+// pinned on the next run rather than the panic hiding it.
 func sameSet(kernel *kernelbridge.RefinedTSKernel, a, b refinementsets.RefinedSet) bool {
-	return kernel.ScalarSubset(a, b) && kernel.ScalarSubset(b, a)
+	aInB, aInBOk := scalarSubsetRecovered(kernel, a, b)
+	bInA, bInAOk := scalarSubsetRecovered(kernel, b, a)
+	if aInBOk && bInAOk {
+		return aInB && bInA
+	}
+	seqAInB, seqAInBOk := seqSubsetRecovered(kernel, a, b)
+	seqBInA, seqBInAOk := seqSubsetRecovered(kernel, b, a)
+	if seqAInBOk && seqBInAOk {
+		return seqAInB && seqBInA
+	}
+	if reflect.DeepEqual(a, b) {
+		return true
+	}
+	panic(fmt.Sprintf(
+		"sameSet: ScalarSubset/SeqSubset both refused a set shape they do not decide, and the "+
+			"two wire sets disagree by spelling — a=%s, b=%s",
+		refinementsets.FormatForDiagnostics(a), refinementsets.FormatForDiagnostics(b),
+	))
+}
+
+// scalarSubsetRecovered asks kernel.ScalarSubset(a, b) and turns a
+// refusal panic into ok=false rather than letting it crash the test.
+func scalarSubsetRecovered(kernel *kernelbridge.RefinedTSKernel, a, b refinementsets.RefinedSet) (subset bool, ok bool) {
+	defer func() {
+		if recover() != nil {
+			subset, ok = false, false
+		}
+	}()
+	return kernel.ScalarSubset(a, b), true
+}
+
+// seqSubsetRecovered is scalarSubsetRecovered's SeqSubset twin.
+func seqSubsetRecovered(kernel *kernelbridge.RefinedTSKernel, a, b refinementsets.RefinedSet) (subset bool, ok bool) {
+	defer func() {
+		if recover() != nil {
+			subset, ok = false, false
+		}
+	}()
+	return kernel.SeqSubset(a, b), true
 }
 
 // exactSet spells one exact value as the singleton set a transfer
@@ -135,6 +190,63 @@ func kernelExactly(answer kernelbridge.TransferAnswer) (float64, bool) {
 		return answer.Set.Forms[0].W[0], true
 	}
 	return 0, false
+}
+
+// sameMultiValues compares two float lists as sets, order-insensitive:
+// every value on one side has a matching value on the other
+// (sameFloatBits-aware, so −0 and +0 stay distinct and NaN would match
+// NaN — though the kernel never answers NaN inside Values, only its own
+// "nan" Kind). Duplicate counts must match too, since a value appearing
+// twice is a different answer from it appearing once.
+func sameMultiValues(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	usedB := make([]bool, len(b))
+	for _, va := range a {
+		matched := false
+		for j, vb := range b {
+			if !usedB[j] && sameFloatBits(va, vb) {
+				usedB[j] = true
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// kernelValuesAdmittedByAdapterSet checks the "adapter answered a SET,
+// kernel answered several exact Values" shape: every kernel value must
+// be a member of the adapter's set (kernel.Member, decided outright —
+// no refusal path), and the adapter's set must admit nothing beyond
+// those values WHERE THAT IS DECIDABLE — the adapter set ⊆ oneOf(kernel
+// values), asked through the same recovered ScalarSubset/SeqSubset pair
+// sameSet uses, so an undecidable shape reads as "not decided" rather
+// than forcing a pass or a crash. (decided=false, contains=false) means
+// the containment side is undecided and the caller should not fail the
+// row on that ground alone.
+func kernelValuesAdmittedByAdapterSet(
+	kernel *kernelbridge.RefinedTSKernel, adapterSet refinementsets.RefinedSet, kernelValues []float64,
+) (allMembers bool, boundedOk bool, boundedDecided bool) {
+	allMembers = true
+	for _, v := range kernelValues {
+		if !kernel.Member(adapterSet, []float64{v}) {
+			allMembers = false
+			break
+		}
+	}
+	named := refinementsets.MakeRefinedSet(refinementsets.OneOf(kernelValues))
+	if scalarIn, scalarOk := scalarSubsetRecovered(kernel, adapterSet, named); scalarOk {
+		return allMembers, scalarIn, true
+	}
+	if seqIn, seqOk := seqSubsetRecovered(kernel, adapterSet, named); seqOk {
+		return allMembers, seqIn, true
+	}
+	return allMembers, false, false
 }
 
 // sameFloatBits compares two answered floats the way the ECMA rows

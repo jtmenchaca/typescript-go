@@ -144,6 +144,37 @@ func TestTransferBinaryAgreesWithADirectKernelTransferOnEveryEdgePair(t *testing
 					// test, not a disagreement here
 					continue
 				}
+				// a MULTI-value Values answer (e.g. the unsigned {−Inf,
+				// +Inf} div-by-zero cell): DecodeTransferAnswer's "values"
+				// case never populates answer.Set (transfer_questions.go's
+				// own decode leaves it the zero RefinedSet), so this reads
+				// answer.Values directly rather than falling into the
+				// set-comparison branch below, which would compare against
+				// an empty struct and report every such row as "different
+				// values" regardless of the real answer underneath.
+				if answer.Kind == kernelbridge.TransferAnswerValues && len(answer.Values) > 1 {
+					if adapter.Kind == abstractdomain.KindValues && adapter.KindTag == abstractdomain.PrimitiveNumber {
+						if !sameMultiValues(adapter.Values, answer.Values) {
+							t.Errorf("%v %s %v: adapter values = %v, kernel values = %v — the two routes disagree",
+								a, pair.name, b, adapter.Values, answer.Values)
+						}
+						continue
+					}
+					adapterSet, ok := abstractdomain.SetOfKnown(adapter)
+					if !ok {
+						if declined(adapter) {
+							t.Errorf("%v %s %v: kernel pinned values %v, adapter declined — a determination gap this operation's ledger does not name",
+								a, pair.name, b, answer.Values)
+						}
+						continue
+					}
+					allMembers, boundedOk, boundedDecided := kernelValuesAdmittedByAdapterSet(kernel, adapterSet, answer.Values)
+					if !allMembers || (boundedDecided && !boundedOk) {
+						t.Errorf("%v %s %v: kernel values %v, adapter set %s — the adapter's set does not agree with the kernel's exact values",
+							a, pair.name, b, answer.Values, refinementsets.FormatForDiagnostics(adapterSet))
+					}
+					continue
+				}
 				kernelValue, kernelPinned := kernelExactly(answer)
 				adapterValue, adapterPinned := answeredExactly(adapter)
 				if !kernelPinned {
