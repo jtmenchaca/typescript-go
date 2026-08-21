@@ -8,18 +8,35 @@
 // CROSS-LANGUAGE-EDGE.md §5's target-integrity premise and not a
 // convenience.
 //
-// The schema is frozen (§17 E2); the Python side's exporter writes it
-// and this side consumes it verbatim:
+// The only accepted envelope is schema v2
+// (docs/one-checker/schema-v2.md) — one kind shared by every language,
+// distinguished by the `language` field rather than by a per-language
+// kind string:
 //
-//	{"refined": {"kind": "python-fact-artifact", "version": 1},
+//	{"refined": {"kind": "fact-artifact", "version": 2},
 //	 "target": {"file", "contentHash": "sha256:<hex>"},
-//	 "runtime": {"band": "cpython-3.11+"},
-//	 "harness": {"stdin": "json", "stdout": "json", "calls": "<fn>"},
+//	 "language": "python" | "typescript",
+//	 "runtime": {"band": "cpython-3.11+" | "node-23+"},
+//	 "surface": {"kind": "stdin-json", "stdin": "json", "stdout": "json", "calls": "<fn>"}
+//	          | {"kind": "argv-scalar", "argIndex": n, "parse": "float", "stdout": "json", "calls": "<fn>"},
 //	 "functions": {"<name>": {
 //	   "entry": [{"name", "sequence": {"element": <set>, "lengthAtLeast": n}}
 //	            |{"name", "set": <set>}],
 //	   "return": {"set": <set>, "stdoutPure": bool},
 //	   "provenance": {"line": n, "said": "..."}}}}
+//
+// The two surface kinds are different INBOUND channels: stdin-json's
+// one crossing value arrives as JSON on stdin; argv-scalar's arrives as
+// one string at sys.argv[argIndex], parsed with Python's float() — it
+// carries no stdin field, since nothing crosses on stdin for that
+// surface. A call crossing on the wrong channel for the target's own
+// surface is a channel mismatch (foreign_edge.go), not a fit question.
+//
+// `language` selects which runtime pins the band is checked against
+// ("adding a language does not add an artifact kind").
+// `dispatchArtifactEnvelope` routes the (kind, version, language)
+// triple to the reader whose field meanings it pins; any other triple
+// declines by name.
 //
 // Every <set> is the kernel's own forms JSON, decoded by
 // kernelbridge.DecodeWireSet — the SAME decoder every kernel answer
@@ -62,12 +79,15 @@ const ForeignArtifactSuffix = ".refined.json"
 // tooling, never consulted here.
 var ForeignCacheDir = filepath.Join(".refined", "cache")
 
-// ForeignArtifactKind and ForeignArtifactVersion are the envelope this
-// consumer admits. A different kind or version is a decline, never a
-// best-effort read: the fields' meanings are what the version pins.
+// FactArtifactKindV2 and FactArtifactVersionV2 are the one envelope
+// this consumer admits (docs/one-checker/schema-v2.md) — one kind
+// shared by every language, distinguished by the `language` field
+// rather than by a per-language kind string. A different kind or
+// version is a decline, never a best-effort read: the fields'
+// meanings are what the version pins.
 const (
-	ForeignArtifactKind    = "python-fact-artifact"
-	ForeignArtifactVersion = 1
+	FactArtifactKindV2    = "fact-artifact"
+	FactArtifactVersionV2 = 2
 )
 
 // ForeignRuntimeBand is the interpreter band the Python pins commit to
@@ -103,13 +123,26 @@ type ForeignReturn struct {
 }
 
 // ForeignProvenance is where the target's claim came from: the line in
-// the Python file and the sentence its checker said. Rendered as the
-// second step of a cross-language message (§9's chain, in its
-// message-text form until relatedInformation carries it).
+// the Python file and the sentence its checker said. Rendered as a
+// related-information step in the foreign file (foreign_edge.go's
+// four call sites), pointing at the line's own span.
+//
+// Text/Start/Length are filled together at read time from the SAME
+// bytes checkTargetIntegrity already read for the hash (never re-read
+// here): Text is the target's whole source, and Start/Length are the
+// provenance line's own byte span within it — column 1, whole line,
+// no trailing newline — computed once so foreign_edge.go can call
+// StepInForeignFile(File, Text, Start, Length, Said) directly. Zero
+// Length (no provenance line stated, or the line is out of range)
+// means StepInForeignFile degrades to the file's head, same as an
+// empty Text does.
 type ForeignProvenance struct {
-	File string
-	Line int
-	Said string
+	File   string
+	Line   int
+	Said   string
+	Text   string
+	Start  int
+	Length int
 }
 
 // ForeignFunctionFact is one target function's whole exported fact.
@@ -120,9 +153,22 @@ type ForeignFunctionFact struct {
 	Provenance ForeignProvenance
 }
 
+// ForeignSurfaceChannel is which inbound channel the target's __main__
+// block reads its one crossing value from — "stdin-json" (the value
+// arrives as JSON on stdin) or "argv-scalar" (the value arrives as one
+// argv string, parsed with float()). The two channels are mutually
+// exclusive: a target states exactly one, and a caller crossing on the
+// other channel is a channel mismatch, not a fit question.
+type ForeignSurfaceChannel string
+
+const (
+	ForeignSurfaceStdinJSON  ForeignSurfaceChannel = "stdin-json"
+	ForeignSurfaceArgvScalar ForeignSurfaceChannel = "argv-scalar"
+)
+
 // ForeignArtifact is the artifact as consumed: the runtime band it
-// commits to, the harness the __main__ block runs, and the ONE function
-// the harness calls, already selected.
+// commits to, the surface the __main__ block runs, and the ONE function
+// the surface calls, already selected.
 type ForeignArtifact struct {
 	// Path: the artifact file itself, for the diagnostics.
 	Path string
@@ -130,8 +176,16 @@ type ForeignArtifact struct {
 	// (not as the artifact spells it — the hash is what ties them).
 	TargetFile  string
 	RuntimeBand string
-	// Called: the fact of harness.calls — the function the stdin/stdout
-	// harness actually invokes, which is the only one this edge consumes.
+	// Surface: which inbound channel the target reads (stdin-json or
+	// argv-scalar) — the consumer checks the caller's own crossing
+	// channel against this before judging fit at all.
+	Surface ForeignSurfaceChannel
+	// ArgvIndex: the argv position the target reads its scalar from,
+	// meaningful only when Surface is ForeignSurfaceArgvScalar (schema
+	// v2's "argIndex" field).
+	ArgvIndex int
+	// Called: the fact of surface.calls — the function the stdin/stdout
+	// surface actually invokes, which is the only one this edge consumes.
 	Called ForeignFunctionFact
 }
 
@@ -161,7 +215,7 @@ var (
 // ReadForeignArtifact resolves the target's project-cache entry,
 // filling it through the resolved producer when it is missing or
 // stale, checks every premise this file owns, and answers the
-// harness-called function's fact — or ("", one sentence) saying which
+// surface-called function's fact — or ("", one sentence) saying which
 // premise broke.
 //
 // The premises discharged HERE, each a real check and none assumed:
@@ -175,8 +229,9 @@ var (
 //     claim is about code that is not the code being checked;
 //   - RUNTIME IDENTITY (§5): the stated band is the one the pins commit
 //     to;
-//   - the harness reads json on stdin and writes json on stdout, and
-//     names a function the artifact actually carries a fact for.
+//   - the surface is a recognized channel (stdin-json or argv-scalar),
+//     writes json on stdout, and names a function the artifact
+//     actually carries a fact for.
 //
 // CHANNEL PURITY (§5) is NOT checked here: it is a property of the
 // consumed function's return, so the edge checks it where it consumes
@@ -211,6 +266,20 @@ func ReadForeignArtifact(targetPath string) (*ForeignArtifact, string) {
 	}
 	foreignArtifactsMu.Unlock()
 	return artifact, sentence
+}
+
+// InvalidateForeignArtifact drops the memoized row for path (the
+// target file — the same string ReadForeignArtifact is keyed by, not
+// the .refined.json artifact path) so the next ReadForeignArtifact
+// call re-reads and re-verifies rather than serving what an earlier
+// call held. For an LSP that can OBSERVE a save (unlike this package's
+// own mtime stopgap, which only notices a rewrite on the NEXT read),
+// calling this on didSave is the push-based invalidation the
+// mtime-polling comment above stands in for until it lands.
+func InvalidateForeignArtifact(path string) {
+	foreignArtifactsMu.Lock()
+	delete(foreignArtifacts, path)
+	foreignArtifactsMu.Unlock()
 }
 
 // artifactModTime answers the artifact file's modification time as a
@@ -262,12 +331,38 @@ func ForeignCacheArtifactPath(targetPath string) string {
 	return filepath.Join(root, ForeignCacheDir, rel+ForeignArtifactSuffix)
 }
 
+// projectRootOverrideMu guards projectRootOverride, mirroring
+// explicitProducerPyPath's discipline: a plain setter, never an
+// environment variable.
+var (
+	projectRootOverrideMu sync.Mutex
+	projectRootOverride   string
+)
+
+// SetProjectRootOverride states the project root outright (typically
+// cmd/refinedts-check's `-project-root` flag, set by a caller — the
+// `refined` front door — that already resolved it), bypassing the
+// `.git`-walk below for both the cache path and producer resolution.
+// "" (the default) restores the walk.
+func SetProjectRootOverride(root string) {
+	projectRootOverrideMu.Lock()
+	defer projectRootOverrideMu.Unlock()
+	projectRootOverride = root
+}
+
 // projectRootOf is the nearest ancestor of an absolute path holding
-// `.git` — the target's own directory when none is found. Shared by
+// `.git` — the target's own directory when none is found — unless
+// SetProjectRootOverride named the root outright. Shared by
 // ForeignCacheArtifactPath (where the cache entry lives) and
 // exportForeignArtifact (where a project-local producer build lives),
 // so the two never derive the root two different ways.
 func projectRootOf(abs string) string {
+	projectRootOverrideMu.Lock()
+	override := projectRootOverride
+	projectRootOverrideMu.Unlock()
+	if override != "" {
+		return override
+	}
 	root := filepath.Dir(abs)
 	for dir := filepath.Dir(abs); ; {
 		if _, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil {
@@ -355,8 +450,8 @@ func exportForeignArtifact(targetPath string, artifactPath string) string {
 	return ""
 }
 
-// readAndVerifyForeignArtifact is the read itself — every premise
-// checked against the given cache entry.
+// readAndVerifyForeignArtifact is the read itself: parse, then dispatch
+// on the envelope triple to the reader whose field meanings it pins.
 func readAndVerifyForeignArtifact(targetPath string, artifactPath string) (*ForeignArtifact, string) {
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
@@ -368,15 +463,42 @@ func readAndVerifyForeignArtifact(targetPath string, artifactPath string) (*Fore
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, artifactPath + " is not readable JSON, so the target states nothing this edge can use"
 	}
-	if sentence := checkArtifactEnvelope(parsed, artifactPath); sentence != "" {
+	return dispatchArtifactEnvelope(parsed, targetPath, artifactPath)
+}
+
+// dispatchArtifactEnvelope reads the `refined` envelope and the v2
+// `language` field, then routes to the reader whose field meanings the
+// (kind, version, language) triple pins: only ("fact-artifact", 2,
+// "python") is read. Any other triple declines by name, naming the one
+// accepted form.
+func dispatchArtifactEnvelope(parsed map[string]any, targetPath string, artifactPath string) (*ForeignArtifact, string) {
+	envelope, ok := parsed["refined"].(map[string]any)
+	if !ok {
+		return nil, artifactPath + ` carries no "refined" envelope, so nothing identifies it as a fact artifact`
+	}
+	kind, _ := envelope["kind"].(string)
+	version, versionOk := envelope["version"].(float64)
+	language, _ := parsed["language"].(string)
+
+	switch {
+	case kind == FactArtifactKindV2 && versionOk && int(version) == FactArtifactVersionV2 && language == "python":
+		return readPythonArtifact(parsed, targetPath, artifactPath)
+	default:
+		return nil, artifactPath + ` states (kind "` + kind + `", version ` + jsonNumberString(version) +
+			`, language "` + language + `"), and this edge reads only ("` +
+			FactArtifactKindV2 + `", ` + strconv.Itoa(FactArtifactVersionV2) + `, "python")`
+	}
+}
+
+// readPythonArtifact is the body reader for language "python": target
+// integrity, runtime band, then one called function named through
+// `surface`, whose `kind` is either "stdin-json" or "argv-scalar"
+// (schema-v2.md's two modeled transports).
+func readPythonArtifact(parsed map[string]any, targetPath string, artifactPath string) (*ForeignArtifact, string) {
+	sentence, targetBytes := checkTargetIntegrity(parsed, targetPath, artifactPath)
+	if sentence != "" {
 		return nil, sentence
 	}
-	// TARGET INTEGRITY (§5): the claim holds of a run only if the code
-	// that runs is the code that was checked
-	if sentence := checkTargetIntegrity(parsed, targetPath, artifactPath); sentence != "" {
-		return nil, sentence
-	}
-	// RUNTIME IDENTITY (§5): the pins commit to a band, not to "Python"
 	band, bandOk := nestedString(parsed, "runtime", "band")
 	if !bandOk {
 		return nil, artifactPath + " names no runtime band, and the edge's claim inherits " +
@@ -387,11 +509,11 @@ func readAndVerifyForeignArtifact(targetPath string, artifactPath string) (*Fore
 			", and this checker's Python pins commit to " + ForeignRuntimeBand +
 			" — the edge cannot inherit semantics it has not transcribed"
 	}
-	calledName, sentence := harnessCalledName(parsed, artifactPath)
-	if sentence != "" {
-		return nil, sentence
+	surface, surfaceSentence := surfaceOf(parsed, artifactPath)
+	if surfaceSentence != "" {
+		return nil, surfaceSentence
 	}
-	fact, factSentence := functionFactOf(parsed, calledName, artifactPath, targetPath)
+	fact, factSentence := functionFactOf(parsed, surface.calls, artifactPath, targetPath, targetBytes)
 	if factSentence != "" {
 		return nil, factSentence
 	}
@@ -399,30 +521,104 @@ func readAndVerifyForeignArtifact(targetPath string, artifactPath string) (*Fore
 		Path:        artifactPath,
 		TargetFile:  targetPath,
 		RuntimeBand: band,
+		Surface:     surface.channel,
+		ArgvIndex:   surface.argIndex,
 		Called:      *fact,
 	}, ""
 }
 
-// checkArtifactEnvelope reads the `refined` envelope: the kind this
-// consumer knows and the version whose field meanings it was written
-// against.
-func checkArtifactEnvelope(parsed map[string]any, artifactPath string) string {
-	envelope, ok := parsed["refined"].(map[string]any)
+// foreignSurface is surfaceOf's whole reading: which channel the target
+// serves, the argv position for an argv-scalar surface, and the one
+// function the __main__ block calls.
+type foreignSurface struct {
+	channel  ForeignSurfaceChannel
+	argIndex int
+	calls    string
+}
+
+// surfaceOf reads the target's inbound/outbound channel: the wire is
+// JSON in both directions for "stdin-json", or one argv string parsed
+// as a float for "argv-scalar" — the outbound leg (stdout) is JSON
+// either way, since both transports still print `json.dumps(...)`. The
+// edge's whole claim is about the ONE named function — a target whose
+// surface names a kind other than these two, or calls nothing this
+// artifact names, transports something the JSON model does not
+// describe.
+func surfaceOf(parsed map[string]any, artifactPath string) (foreignSurface, string) {
+	surface, ok := parsed["surface"].(map[string]any)
 	if !ok {
-		return artifactPath + ` carries no "refined" envelope, so nothing identifies it as a fact artifact`
+		// the producer emits no surface key at all for a harness shape it
+		// does not recognize — a mixed stdin+argv __main__ block (values
+		// crossing on BOTH channels at once) is exactly this case today:
+		// neither stdin-json nor argv-scalar names one inbound channel for
+		// the whole call, so the target states no callable surface
+		return foreignSurface{}, artifactPath + " states no callable surface for its __main__ block " +
+			"— a harness shape (such as one mixing stdin and argv data in the same call) that this " +
+			"producer does not export a surface for — so nothing says what the target does with its input and output"
 	}
-	kind, _ := envelope["kind"].(string)
-	if kind != ForeignArtifactKind {
-		return artifactPath + ` states the kind "` + kind + `", and this edge consumes "` +
-			ForeignArtifactKind + `" — nothing else`
+	kind, _ := surface["kind"].(string)
+	switch kind {
+	case string(ForeignSurfaceStdinJSON):
+		return surfaceOfStdinJSON(surface, artifactPath)
+	case string(ForeignSurfaceArgvScalar):
+		return surfaceOfArgvScalar(surface, artifactPath)
+	default:
+		return foreignSurface{}, artifactPath + ` states a surface of kind ` + quotedOrNone(kind) +
+			`, and this edge applies the JSON transport model only to "stdin-json" or "argv-scalar"`
 	}
-	version, versionOk := envelope["version"].(float64)
-	if !versionOk || int(version) != ForeignArtifactVersion {
-		return artifactPath + " states artifact version " + jsonNumberString(version) +
-			", and this edge reads version " + strconv.Itoa(ForeignArtifactVersion) +
-			" — the field meanings are what the version pins"
+}
+
+// surfaceOfStdinJSON reads the stdio surface: JSON in both directions.
+func surfaceOfStdinJSON(surface map[string]any, artifactPath string) (foreignSurface, string) {
+	stdin, _ := surface["stdin"].(string)
+	stdout, _ := surface["stdout"].(string)
+	if stdin != "json" || stdout != "json" {
+		return foreignSurface{}, artifactPath + " states a surface reading " + quotedOrNone(stdin) +
+			" on stdin and writing " + quotedOrNone(stdout) +
+			" on stdout, and this edge applies the JSON transport model to both legs"
 	}
-	return ""
+	called, calledOk := surface["calls"].(string)
+	if !calledOk || called == "" {
+		return foreignSurface{}, artifactPath + " states no surface.calls function, so nothing names the code " +
+			"that runs when this call executes"
+	}
+	return foreignSurface{channel: ForeignSurfaceStdinJSON, calls: called}, ""
+}
+
+// surfaceOfArgvScalar reads the argv-scalar surface: the crossing value
+// arrives as one argv string at `argIndex`, parsed with Python's
+// float(); stdout is still JSON (schema-v2.md's exact spec: {"kind":
+// "argv-scalar", "argIndex": 1, "parse": "float", "stdout": "json",
+// "calls": "<fn>"} — no stdin field, since nothing crosses on stdin for
+// this surface).
+func surfaceOfArgvScalar(surface map[string]any, artifactPath string) (foreignSurface, string) {
+	stdout, _ := surface["stdout"].(string)
+	if stdout != "json" {
+		return foreignSurface{}, artifactPath + " states an argv-scalar surface writing " +
+			quotedOrNone(stdout) + " on stdout, and this edge applies the JSON transport model " +
+			"to the return leg"
+	}
+	parse, _ := surface["parse"].(string)
+	if parse != "float" {
+		return foreignSurface{}, artifactPath + " states an argv-scalar surface parsing " +
+			quotedOrNone(parse) + ", and this edge reads only the \"float\" parse — Python's " +
+			"float(sys.argv[n])"
+	}
+	argIndexFloat, hasIndex := surface["argIndex"].(float64)
+	if !hasIndex {
+		return foreignSurface{}, artifactPath + " states an argv-scalar surface with no argIndex, " +
+			"so nothing says which argv position the target reads its value from"
+	}
+	called, calledOk := surface["calls"].(string)
+	if !calledOk || called == "" {
+		return foreignSurface{}, artifactPath + " states no surface.calls function, so nothing names the code " +
+			"that runs when this call executes"
+	}
+	return foreignSurface{
+		channel:  ForeignSurfaceArgvScalar,
+		argIndex: int(argIndexFloat),
+		calls:    called,
+	}, ""
 }
 
 // checkTargetIntegrity is CROSS-LANGUAGE-EDGE.md §5's target-integrity
@@ -430,15 +626,20 @@ func checkArtifactEnvelope(parsed map[string]any, artifactPath string) string {
 // and comparing it to the hash the producer recorded. The artifact's
 // own `target.file` string is NOT trusted as the identity — a path can
 // be stale or relative to another root; the hash is the identity.
-func checkTargetIntegrity(parsed map[string]any, targetPath string, artifactPath string) string {
+//
+// Answers the bytes it read alongside the sentence, so a caller past
+// this premise (functionFactOf, building the provenance step) can
+// place a line in the target's text without a second read of the same
+// file — nil whenever the sentence is non-empty.
+func checkTargetIntegrity(parsed map[string]any, targetPath string, artifactPath string) (string, []byte) {
 	stated, statedOk := nestedString(parsed, "target", "contentHash")
 	if !statedOk {
 		return artifactPath + " records no target contentHash, so nothing ties its claim to " +
-			targetPath + " — the target-integrity premise cannot be discharged"
+			targetPath + " — the target-integrity premise cannot be discharged", nil
 	}
 	bytes, err := os.ReadFile(targetPath)
 	if err != nil {
-		return "the Python target " + targetPath + " cannot be read, so its stated fact cannot be tied to it"
+		return "the Python target " + targetPath + " cannot be read, so its stated fact cannot be tied to it", nil
 	}
 	sum := sha256.Sum256(bytes)
 	actual := "sha256:" + hex.EncodeToString(sum[:])
@@ -446,41 +647,18 @@ func checkTargetIntegrity(parsed map[string]any, targetPath string, artifactPath
 		return artifactPath + " states the fact of a target whose contents hash to " + stated +
 			", and " + targetPath + " hashes to " + actual +
 			" — the exported fact is about different code than the code being checked; " +
-			"re-export it with `" + ForeignExportCommand + " " + targetPath + "`"
+			"re-export it with `" + ForeignExportCommand + " " + targetPath + "`", nil
 	}
-	return ""
-}
-
-// harnessCalledName reads the stdio harness: the wire is JSON in both
-// directions, and one named function is what the __main__ block calls.
-// The edge's whole claim is about THAT function — a target whose
-// harness reads a different encoding, or calls nothing this artifact
-// names, transports something the JSON model does not describe.
-func harnessCalledName(parsed map[string]any, artifactPath string) (string, string) {
-	harness, ok := parsed["harness"].(map[string]any)
-	if !ok {
-		return "", artifactPath + " describes no harness, so nothing says what the target does " +
-			"with stdin and stdout — the JSON transport model has nothing to apply to"
-	}
-	stdin, _ := harness["stdin"].(string)
-	stdout, _ := harness["stdout"].(string)
-	if stdin != "json" || stdout != "json" {
-		return "", artifactPath + " states a harness reading " + quotedOrNone(stdin) +
-			" on stdin and writing " + quotedOrNone(stdout) +
-			" on stdout, and this edge applies the JSON transport model to both legs"
-	}
-	called, calledOk := harness["calls"].(string)
-	if !calledOk || called == "" {
-		return "", artifactPath + " states no harness.calls function, so nothing names the code " +
-			"that runs when this call executes"
-	}
-	return called, ""
+	return "", bytes
 }
 
 // functionFactOf reads one named function's row: its entry positions,
 // its return, and the provenance a cross-language message renders.
+// targetBytes is the target's own bytes, already read (and hash-
+// verified) by checkTargetIntegrity — passed through so the provenance
+// step's line span is computed from that one read, never a second one.
 func functionFactOf(
-	parsed map[string]any, name string, artifactPath string, targetPath string,
+	parsed map[string]any, name string, artifactPath string, targetPath string, targetBytes []byte,
 ) (fact *ForeignFunctionFact, sentence string) {
 	// DecodeWireSet panics on a form it does not know — its own stated
 	// contract for kernel answers. An artifact is a file another program
@@ -497,7 +675,7 @@ func functionFactOf(
 	}
 	row, ok := functions[name].(map[string]any)
 	if !ok {
-		return nil, artifactPath + " names " + name + " as the harness's called function and " +
+		return nil, artifactPath + " names " + name + " as the surface's called function and " +
 			"then states no fact for it"
 	}
 	entries, entriesSentence := artifactEntriesOf(row, name, artifactPath)
@@ -522,7 +700,7 @@ func functionFactOf(
 			Set:        kernelbridge.DecodeWireSet(rawSet),
 			StdoutPure: stdoutPure,
 		},
-		Provenance: artifactProvenanceOf(row, targetPath),
+		Provenance: artifactProvenanceOf(row, targetPath, targetBytes),
 	}, ""
 }
 
@@ -576,28 +754,70 @@ func artifactEntriesOf(
 // artifactProvenanceOf reads where the target's claim was made. Absent
 // fields leave the provenance empty rather than declining — provenance
 // makes a message readable; it is not a premise of the crossing.
-func artifactProvenanceOf(row map[string]any, targetPath string) ForeignProvenance {
+//
+// targetBytes is the SAME bytes checkTargetIntegrity already read (nil
+// when that premise failed, in which case reading gets no further than
+// here anyway) — the line's byte span is computed from them, never
+// from a fresh read.
+func artifactProvenanceOf(row map[string]any, targetPath string, targetBytes []byte) ForeignProvenance {
 	provenance, ok := row["provenance"].(map[string]any)
 	if !ok {
 		return ForeignProvenance{File: targetPath}
 	}
 	line, _ := provenance["line"].(float64)
 	said, _ := provenance["said"].(string)
-	return ForeignProvenance{File: targetPath, Line: int(line), Said: said}
+	result := ForeignProvenance{File: targetPath, Line: int(line), Said: said}
+	if result.Line > 0 && targetBytes != nil {
+		text := string(targetBytes)
+		if start, length, ok := lineSpan(text, result.Line); ok {
+			result.Text = text
+			result.Start = start
+			result.Length = length
+		}
+	}
+	return result
 }
 
-// ProvenanceSentence renders the target's own step of the explanation:
-// where the fact was said, and what was said there.
+// lineSpan answers the byte offset and length of ONE-BASED line
+// number `line` in text, spanning column 1 to the line's last byte
+// before its terminating '\n' (or before EOF, on the file's last
+// line) — never including the newline itself. Answers ok=false for a
+// line number the text does not have (the artifact and the target
+// have drifted, or line is 0/negative), and the caller leaves the
+// provenance step to degrade to the file's head, exactly as
+// StepInForeignFile already does for an empty Text.
 //
-// TODO(§9 / R5): this is the MESSAGE-TEXT form of a two-step blame
-// chain. tsc's diagnostic type already carries relatedInformation
-// (internal/ast/diagnostic.go:165-166) with a working LSP renderer, and
-// each link is a full diagnostic with its own file and location — but
-// RefinedTS's own payload (assignability.RefinementDiagnostic) has no
-// field for it and assignability.At cannot construct one, so a second
-// step cannot be attached without widening that type and every reporter
-// that relays it. Named work item: carry the Python step as a real
-// related-information link once RefinementDiagnostic grows the field.
+// Mirrors fact_export.rs's own line_starts_of/line_of: line starts are
+// offset 0 and every offset right after a '\n', so line N's start is
+// starts[N-1] and its own 1-based number is what the producer writes
+// as provenance.line.
+func lineSpan(text string, line int) (start int, length int, ok bool) {
+	if line <= 0 {
+		return 0, 0, false
+	}
+	lineStart := 0
+	lineIndex := 1
+	for lineIndex < line {
+		next := strings.IndexByte(text[lineStart:], '\n')
+		if next < 0 {
+			return 0, 0, false
+		}
+		lineStart += next + 1
+		lineIndex++
+	}
+	end := strings.IndexByte(text[lineStart:], '\n')
+	if end < 0 {
+		end = len(text) - lineStart
+	}
+	return lineStart, end, true
+}
+
+// ProvenanceSentence renders the target's own step of the explanation
+// as flat text: where the fact was said, and what was said there.
+// foreign_edge.go's four diagnostic sites carry the same information
+// as a real related-information step instead (StepInForeignFile,
+// built from this same File/Text/Start/Length); this renderer stays
+// for a caller that only has message text to work with.
 func (p ForeignProvenance) ProvenanceSentence() string {
 	if p.File == "" {
 		return ""
@@ -622,7 +842,7 @@ func nestedString(parsed map[string]any, outer string, inner string) (string, bo
 	return value, ok
 }
 
-// quotedOrNone spells a harness channel for a message: the word it
+// quotedOrNone spells a surface channel for a message: the word it
 // states, or "nothing" where the field is absent.
 func quotedOrNone(word string) string {
 	if word == "" {

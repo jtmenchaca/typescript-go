@@ -131,6 +131,24 @@ type FlowContext struct {
 	// its environment here — the states an exception can carry out to
 	// a caller's catch.
 	ThrowSink *[]Env
+	// ConsumedForeignSink: when non-nil, every cross-language target
+	// path this check's walk actually consumed (foreign_edge.go's
+	// ForeignEdgeAt recognizing an edge, whichever premise it reaches)
+	// is recorded here — the consumer-index prerequisite
+	// docs/one-checker/lsp-coordinator.md's build plan item 3 names,
+	// read back through service.CheckResult.ConsumedForeignTargets.
+	//
+	// NOT YET POPULATED: ForeignEdgeOutcome (foreign_edge.go) carries
+	// no TargetPath field today, so the one call site that could push
+	// into this sink (analyze_statement.go's ForeignEdgeAt call) has
+	// nothing to push. The hook this sink is built for:
+	// ForeignEdgeOutcome needs a `TargetPath string` field, set
+	// wherever foreignEdgeOf resolves an edge (both the recognized-edge
+	// return in ForeignEdgeAt and the decline-with-sentence return),
+	// so a caller can record a target whether the crossing fired,
+	// declined, or served — "consumed" means the check looked at that
+	// foreign file, not that it approved of what it found.
+	ConsumedForeignSink *[]string
 	// SnapshotOwner: the declaration whose DEDICATED walk this is
 	// (pass 3's own), whose lexically-contained call sites record
 	// their environments as read-once snapshots (call_site_snapshots.ts).

@@ -66,6 +66,21 @@ type CheckResult struct {
 	// WallMs is this entry's own refinement-walk wall — the honest
 	// (untraced) per-file number the CLI's -wall decomposition prints.
 	WallMs float64
+	// ConsumedForeignTargets: the cross-language target paths (.py
+	// files reached through a recognized execFileSync edge) this
+	// check's walk consumed — the coordinator's consumer-index
+	// prerequisite (docs/one-checker/lsp-coordinator.md build plan
+	// item 3), read by a caller that must know which foreign saves
+	// should invalidate and re-pull THIS file's diagnostics.
+	//
+	// ALWAYS EMPTY TODAY: the plumbing (walk.FlowContext.ConsumedForeignSink,
+	// wired through runRefinements below) is in place, but nothing pushes
+	// into it — ForeignEdgeOutcome (walk/foreign_edge.go) carries no
+	// TargetPath field, so the one call site that could populate it
+	// (walk/analyze_statement.go's ForeignEdgeAt call) has nothing to
+	// record. See ConsumedForeignSink's own doc comment for the exact
+	// one-line hook that closes this.
+	ConsumedForeignTargets []string
 }
 
 // SweepPhases holds the last CheckFiles run's phase walls, summed
@@ -589,6 +604,14 @@ func runRefinements(p *program.CheckerProgram, shape []*ast.Diagnostic, kernel *
 		refinements = append(refinements, d)
 	}
 
+	// the consumer-index prerequisite: every foreign target this
+	// check's walk consumes lands here, shared across every ctx copy
+	// (topLevelCtx, walkContractBodies' per-body ctx) the same way
+	// ReturnSink/ThrowSink already share their pointee across value
+	// copies. See CheckResult.ConsumedForeignTargets' own doc comment
+	// for why this stays empty until foreign_edge.go grows TargetPath.
+	var consumedForeign []string
+
 	// ── passes 1 and 2: per-FILE facts ────────────────────────────
 	tFacts := time.Now()
 	facts := programFactsCached(p, kernel, factsCache)
@@ -607,14 +630,15 @@ func runRefinements(p *program.CheckerProgram, shape []*ast.Diagnostic, kernel *
 
 	// ── pass 3: facts flow; the kernel judges ────────────────────────
 	ctx := &walk.FlowContext{
-		P:         p,
-		Kernel:    kernel,
-		Registry:  facts.registry,
-		Objects:   facts.objects,
-		Contracts: facts.contracts,
-		Report:    report,
-		Aliases:   dataflowfacts.NewAliasClasses(),
-		Declared:  map[string]*annotations.DeclaredRefinement{},
+		P:                   p,
+		Kernel:              kernel,
+		Registry:            facts.registry,
+		Objects:             facts.objects,
+		Contracts:           facts.contracts,
+		Report:              report,
+		Aliases:             dataflowfacts.NewAliasClasses(),
+		Declared:            map[string]*annotations.DeclaredRefinement{},
+		ConsumedForeignSink: &consumedForeign,
 	}
 	tTop := time.Now()
 	tracing.Span("pass3.topLevel", func() any {
@@ -657,7 +681,7 @@ func runRefinements(p *program.CheckerProgram, shape []*ast.Diagnostic, kernel *
 	// twin — this tree's checker is always in-process, so there is no
 	// out-of-process span ledger to flush.
 
-	return CheckResult{Shape: shape, Refinements: refinements}
+	return CheckResult{Shape: shape, Refinements: refinements, ConsumedForeignTargets: consumedForeign}
 }
 
 // reportKey is the TS source's `${d.start}:${d.length}:${d.code}:${d.messageText}`

@@ -27,12 +27,15 @@ import { readFileSync } from "node:fs";
 function audioLevel(samples) { return samples.length; }
 console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
 `)
-	name, ok := HarnessCallOf(file)
+	name, shape, _, ok := HarnessCallOf(file)
 	if !ok {
 		t.Fatalf("the exact shape did not recognize")
 	}
 	if name != "audioLevel" {
 		t.Errorf("got name %q, want %q", name, "audioLevel")
+	}
+	if shape != HarnessShapeStdinJSON {
+		t.Errorf("got shape %v, want HarnessShapeStdinJSON", shape)
 	}
 }
 
@@ -42,12 +45,15 @@ import * as fs from "node:fs";
 function audioLevel(samples) { return samples.length; }
 console.log(JSON.stringify(audioLevel(JSON.parse(fs.readFileSync(0, "utf8")))));
 `)
-	name, ok := HarnessCallOf(file)
+	name, shape, _, ok := HarnessCallOf(file)
 	if !ok {
 		t.Fatalf("the fs.readFileSync namespace spelling did not recognize")
 	}
 	if name != "audioLevel" {
 		t.Errorf("got name %q, want %q", name, "audioLevel")
+	}
+	if shape != HarnessShapeStdinJSON {
+		t.Errorf("got shape %v, want HarnessShapeStdinJSON", shape)
 	}
 }
 
@@ -59,7 +65,7 @@ if (require.main === module) {
   console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
 }
 `)
-	if _, ok := HarnessCallOf(file); ok {
+	if _, _, _, ok := HarnessCallOf(file); ok {
 		t.Fatalf("a guarded statement recognized — v1 declines guards, the target file has no import surface a guard would protect")
 	}
 }
@@ -71,7 +77,7 @@ function audioLevel(samples) { return samples.length; }
 const raw = readFileSync(0, "utf8");
 console.log(JSON.stringify(audioLevel(JSON.parse(raw))));
 `)
-	if _, ok := HarnessCallOf(file); ok {
+	if _, _, _, ok := HarnessCallOf(file); ok {
 		t.Fatalf("JSON.parse of a bare variable (not the stdin read directly) recognized")
 	}
 }
@@ -84,7 +90,7 @@ function otherLevel(samples) { return samples.length; }
 console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
 console.log(JSON.stringify(otherLevel(JSON.parse(readFileSync(0, "utf8")))));
 `)
-	if _, ok := HarnessCallOf(file); ok {
+	if _, _, _, ok := HarnessCallOf(file); ok {
 		t.Fatalf("two matching top-level statements recognized — one harness fact cannot stand for two")
 	}
 }
@@ -95,7 +101,7 @@ import { readFileSync } from "node:fs";
 function audioLevel(samples) { return samples.length; }
 process.stdout.write(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))) + "\n");
 `)
-	if _, ok := HarnessCallOf(file); ok {
+	if _, _, _, ok := HarnessCallOf(file); ok {
 		t.Fatalf("process.stdout.write recognized — console.log is the one recognized sink")
 	}
 }
@@ -109,7 +115,7 @@ function run() {
   console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
 }
 `)
-	if _, ok := HarnessCallOf(file); ok {
+	if _, _, _, ok := HarnessCallOf(file); ok {
 		t.Fatalf("a shadowed readFileSync recognized — the call is not a top-level statement and the name is not node:fs's own binding at that scope")
 	}
 }
@@ -120,7 +126,7 @@ function readFileSync(fd, encoding) { return "{}"; }
 function audioLevel(samples) { return samples.length; }
 console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
 `)
-	if _, ok := HarnessCallOf(file); ok {
+	if _, _, _, ok := HarnessCallOf(file); ok {
 		t.Fatalf("a locally declared readFileSync (never imported from node:fs) recognized")
 	}
 }
@@ -130,7 +136,51 @@ func TestHarnessCallOf_NoMatchingStatementDeclines(t *testing.T) {
 import { readFileSync } from "node:fs";
 function audioLevel(samples) { return samples.length; }
 `)
-	if _, ok := HarnessCallOf(file); ok {
+	if _, _, _, ok := HarnessCallOf(file); ok {
 		t.Fatalf("a file with no harness statement at all recognized")
+	}
+}
+
+func TestHarnessCallOf_ArgvJSONShapeNamesTheFunctionAndIndex(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+function audioLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(process.argv[2]))));
+`)
+	name, shape, argIndex, ok := HarnessCallOf(file)
+	if !ok {
+		t.Fatalf("the argv-json shape did not recognize")
+	}
+	if name != "audioLevel" {
+		t.Errorf("got name %q, want %q", name, "audioLevel")
+	}
+	if shape != HarnessShapeArgvJSON {
+		t.Errorf("got shape %v, want HarnessShapeArgvJSON", shape)
+	}
+	if argIndex != 2 {
+		t.Errorf("got argIndex %v, want 2", argIndex)
+	}
+}
+
+func TestHarnessCallOf_ArgvJSONNonLiteralIndexDeclines(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+function audioLevel(samples) { return samples.length; }
+const i = 2;
+console.log(JSON.stringify(audioLevel(JSON.parse(process.argv[i]))));
+`)
+	if _, _, _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("a non-literal argv index (a variable) recognized — the exporter can only pin an argIndex read directly off the source")
+	}
+}
+
+func TestHarnessCallOf_BothShapesInOneFileDecline(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+function otherLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
+console.log(JSON.stringify(otherLevel(JSON.parse(process.argv[2]))));
+`)
+	if _, _, _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("a stdin-json statement and an argv-json statement together recognized — one harness fact cannot stand for two, whatever their shapes")
 	}
 }

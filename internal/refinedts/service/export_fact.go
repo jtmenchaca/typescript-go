@@ -4,9 +4,9 @@
 // (docs/one-checker/reverse-pair.md, Half A — the mirror of
 // refinedpy_check.rs's export_file/export_module).
 //
-// The envelope is the v1 mirror of the Python producer's own frozen
-// shape (walk/foreign_edge_artifact.go's doc comment), spelled with
-// "typescript-fact-artifact" as the kind and "node-23+" as the runtime
+// The envelope is schema v2 (docs/one-checker/schema-v2.md,
+// walk/foreign_edge_artifact.go's doc comment): kind "fact-artifact",
+// version 2, language "typescript", and "node-23+" as the runtime
 // band — PROVISIONAL: bare `node x.ts` runs natively from Node 23, and
 // the final band string awaits the js.* naming ruling (§17 K2).
 //
@@ -34,14 +34,17 @@ import (
 )
 
 // ExportFactArtifactKind and ExportFactArtifactVersion are the
-// envelope this producer writes. version 1 is the v1-style mirror of
-// the Python side's own schema; schema v2 (docs/one-checker/schema-v2.md)
-// lands as its own version bump, never a silent field change under
-// version 1.
+// envelope this producer writes: schema v2's one kind shared by every
+// language (walk.FactArtifactKindV2/FactArtifactVersionV2), rather
+// than a per-language kind string.
 const (
-	ExportFactArtifactKind    = "typescript-fact-artifact"
-	ExportFactArtifactVersion = 1
+	ExportFactArtifactKind    = walk.FactArtifactKindV2
+	ExportFactArtifactVersion = walk.FactArtifactVersionV2
 )
+
+// ExportFactLanguage is the v2 `language` field this producer states —
+// it selects which pins the runtime band is checked against.
+const ExportFactLanguage = "typescript"
 
 // ExportFactRuntimeBand is PROVISIONAL — see the file banner.
 const ExportFactRuntimeBand = "node-23+"
@@ -79,10 +82,11 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 		entryContracts[symbol] = contract
 	}
 
-	calledName, harnessOk := walk.HarnessCallOf(p.Entry)
+	calledName, harnessShape, argIndex, harnessOk := walk.HarnessCallOf(p.Entry)
 	if !harnessOk {
 		return "", []string{entryFilePath + ": no recognized stdio harness — " +
-			`a bare top-level console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(0, "utf8"))))) is the only shape read`}, nil
+			`a bare top-level console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(0, "utf8"))))) ` +
+			`or console.log(JSON.stringify(<fn>(JSON.parse(process.argv[<literal int>])))) is the only shape read`}, nil
 	}
 
 	var calledContract *walk.FunctionContract
@@ -125,7 +129,7 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 	provenanceSaid := walk.ProvenanceSaidOf(entryRows, returnSet)
 
 	rendered, marshalErr := json.MarshalIndent(
-		exportFactEnvelope(filepath.Base(entryFilePath), contentHash, calledName, entryRows, returnSet, stdoutPure, provenanceLine, provenanceSaid),
+		exportFactEnvelope(filepath.Base(entryFilePath), contentHash, calledName, harnessShape, argIndex, entryRows, returnSet, stdoutPure, provenanceLine, provenanceSaid),
 		"", "  ")
 	if marshalErr != nil {
 		return "", nil, fmt.Errorf("rendering the artifact for %s: %w", entryFilePath, marshalErr)
@@ -142,12 +146,18 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 }
 
 // exportFactEnvelope builds the artifact as raw JSON-serializable maps
-// — the frozen shape foreign_edge_artifact.go's doc comment states,
-// mirrored with "typescript-fact-artifact" as the kind. Every <set> is
+// — schema v2's shape (walk/foreign_edge_artifact.go's doc comment),
+// with `language` "typescript" and `surface.kind` either "stdin-json"
+// (unchanged) or "argv-json" (harnessShape ==
+// walk.HarnessShapeArgvJSON): {"kind": "argv-json", "argIndex": <int>,
+// "stdout": "json", "calls": <fn>} — the same JSON.parse transport as
+// stdin-json, carried through process.argv[argIndex] instead of stdin,
+// so there is no "stdin" field on this surface. Every <set> is
 // kernelbridge.EncodeSet's own wire text, embedded as json.RawMessage
 // so it is never re-encoded through a second string builder.
 func exportFactEnvelope(
 	targetFile string, contentHash string, harnessCalls string,
+	harnessShape walk.HarnessShape, argIndex float64,
 	entryRows []walk.ForeignEntryRow, returnSet refinementsets.RefinedSet, stdoutPure bool,
 	provenanceLine int, provenanceSaid string,
 ) map[string]any {
@@ -177,14 +187,11 @@ func exportFactEnvelope(
 			"file":        targetFile,
 			"contentHash": contentHash,
 		},
+		"language": ExportFactLanguage,
 		"runtime": map[string]any{
 			"band": ExportFactRuntimeBand,
 		},
-		"harness": map[string]any{
-			"stdin":  "json",
-			"stdout": "json",
-			"calls":  harnessCalls,
-		},
+		"surface": exportFactSurface(harnessShape, argIndex, harnessCalls),
 		"functions": map[string]any{
 			harnessCalls: map[string]any{
 				"entry": entries,
@@ -198,6 +205,28 @@ func exportFactEnvelope(
 				},
 			},
 		},
+	}
+}
+
+// exportFactSurface builds the `surface` field per the recognized
+// harness shape: stdin-json (unchanged v2 shape) or argv-json
+// ({"kind": "argv-json", "argIndex": <int>, "stdout": "json", "calls":
+// <fn>} — no "stdin" field; the payload rides process.argv[argIndex]
+// instead).
+func exportFactSurface(harnessShape walk.HarnessShape, argIndex float64, harnessCalls string) map[string]any {
+	if harnessShape == walk.HarnessShapeArgvJSON {
+		return map[string]any{
+			"kind":     "argv-json",
+			"argIndex": int(argIndex),
+			"stdout":   "json",
+			"calls":    harnessCalls,
+		}
+	}
+	return map[string]any{
+		"kind":   "stdin-json",
+		"stdin":  "json",
+		"stdout": "json",
+		"calls":  harnessCalls,
 	}
 }
 

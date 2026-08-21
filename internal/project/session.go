@@ -28,6 +28,8 @@ import (
 	"github.com/microsoft/typescript-go/internal/project/ata"
 	"github.com/microsoft/typescript-go/internal/project/background"
 	"github.com/microsoft/typescript-go/internal/project/logging"
+	refinedtsservice "github.com/microsoft/typescript-go/internal/refinedts/service"
+	"github.com/microsoft/typescript-go/internal/refinedts/walk"
 	"github.com/microsoft/typescript-go/internal/tspath"
 	"github.com/microsoft/typescript-go/internal/vfs"
 )
@@ -465,11 +467,61 @@ func (s *Session) isContentMapperFile(uri lsproto.DocumentUri) bool {
 func (s *Session) DidSaveFile(ctx context.Context, uri lsproto.DocumentUri) {
 	s.scheduleIdleCacheClean()
 	s.pendingFileChangesMu.Lock()
-	defer s.pendingFileChangesMu.Unlock()
 	s.pendingFileChanges = append(s.pendingFileChanges, FileChange{
 		Kind: FileChangeKindSave,
 		URI:  uri,
 	})
+	s.pendingFileChangesMu.Unlock()
+	s.scheduleForeignFactSideEffects(uri)
+}
+
+// scheduleForeignFactSideEffects is the save-time half of
+// docs/one-checker/fact-freshness.md (TypeScript side) and item 1 of
+// docs/one-checker/lsp-coordinator.md's build plan: extending
+// DidSaveFile's existing background-task idiom (the same
+// queue-then-return shape scheduleIdleCacheClean already uses) rather
+// than blocking the didSave notification on a checker lease.
+//
+// A saved .ts/.tsx file with at least one exported harness-called
+// function exports its fact artifact in-process — never by spawning,
+// mirroring the Python producer's own in-process discipline
+// (fact-freshness.md). A saved .py file drops that path's foreign-
+// artifact memo row, so the NEXT check re-reads the file a live
+// producer (or a coordinator) may have just rewritten.
+//
+// Both effects are fire-and-forget: a failed export or a missing
+// project is not a session error, it is simply nothing happening on
+// this save — the next save or the next check's own miss-triggers-
+// export path (foreign_edge_artifact.go's exportForeignArtifact)
+// still covers it.
+func (s *Session) scheduleForeignFactSideEffects(uri lsproto.DocumentUri) {
+	fileName := uri.FileName()
+	isTs := strings.HasSuffix(fileName, ".ts") || strings.HasSuffix(fileName, ".tsx")
+	isPy := strings.HasSuffix(fileName, ".py")
+	if !isTs && !isPy {
+		return
+	}
+	go func() {
+		ctx := s.backgroundContext()
+		if isPy {
+			walk.InvalidateForeignArtifact(fileName)
+			return
+		}
+		languageService, err := s.GetLanguageService(ctx, uri)
+		if err != nil || languageService == nil {
+			return
+		}
+		program := languageService.GetProgram()
+		if program == nil {
+			return
+		}
+		// errors and omissions are both ordinary "nothing exported"
+		// outcomes here — the same silent-unless-asked posture the CLI's
+		// own -export-fact mode does NOT take (that mode reports
+		// omissions to a human), but a save-time background export has
+		// no reader waiting on its outcome.
+		_, _, _ = refinedtsservice.ExportFactOnSave(ctx, program, fileName, refinedtsservice.SurfacePathsOf(program))
+	}()
 }
 
 func (s *Session) DidChangeWatchedFiles(ctx context.Context, changes []*lsproto.FileEvent) {

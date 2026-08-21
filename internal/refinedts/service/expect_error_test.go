@@ -9,6 +9,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
@@ -160,5 +161,88 @@ func TestFileWithoutMarkersPassesThrough(t *testing.T) {
 	viewed := EditorView("plain();\n", fires)
 	if len(viewed) != 1 || viewed[0].Code != fires[0].Code || viewed[0].Start != fires[0].Start {
 		t.Fatalf("expected the fires to pass through untouched, got %+v", viewed)
+	}
+}
+
+// TestStandaloneMarkerSkipsCommentLines: a standalone marker covers
+// the next line that is not itself a comment-only line — one or more
+// host-marker or explanatory comment lines may sit between the marker
+// and the code it covers, matching markers.rs's own skip.
+func TestStandaloneMarkerSkipsCommentLines(t *testing.T) {
+	testCases := []struct {
+		name     string
+		text     string
+		wantLine int
+	}{
+		{
+			name: "one comment line between marker and code",
+			text: "// @refinedts-expect-error\n" + // marker, line 1
+				"// a host-marker line explaining the fire\n" + // line 2, skipped
+				"bad();\n", // line 3, covered
+			wantLine: 3,
+		},
+		{
+			name: "two comment lines between marker and code",
+			text: "// @refinedts-expect-error\n" + // marker, line 1
+				"// first explanatory line\n" + // line 2, skipped
+				"// second explanatory line\n" + // line 3, skipped
+				"bad();\n", // line 4, covered
+			wantLine: 4,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			read := ExpectationsOf(testCase.text)
+			if len(read) != 1 {
+				t.Fatalf("expected 1 expectation, got %+v", read)
+			}
+			if read[0].Line != testCase.wantLine {
+				t.Fatalf("expected line %d, got %+v", testCase.wantLine, read[0])
+			}
+		})
+	}
+}
+
+// TestReasonTextCapturedAndPrintedWhenStale: text after the marker
+// (and its optional code) is the reason, ported from markers.rs's own
+// reason capture — read here, and surfaced in the 7005 sentence when
+// the marker goes stale.
+func TestReasonTextCapturedAndPrintedWhenStale(t *testing.T) {
+	testCases := []struct {
+		name       string
+		text       string
+		wantReason string
+	}{
+		{
+			name:       "standalone marker with reason, no code",
+			text:       "// @refinedts-expect-error narrows on the callee's return type\n" + "bad();\n",
+			wantReason: "narrows on the callee's return type",
+		},
+		{
+			name:       "trailing marker with reason after a code",
+			text:       "bad(); // @refinedts-expect-error 7001 narrows on the callee's return type\n",
+			wantReason: "narrows on the callee's return type",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			read := ExpectationsOf(testCase.text)
+			if len(read) != 1 {
+				t.Fatalf("expected 1 expectation, got %+v", read)
+			}
+			if read[0].Reason != testCase.wantReason {
+				t.Fatalf("expected reason %q, got %+v", testCase.wantReason, read[0])
+			}
+			// nothing fires, so the marker goes stale and its 7005
+			// sentence must carry the reason text.
+			viewed := EditorView(testCase.text, nil)
+			if len(viewed) != 1 || viewed[0].Code != 7005 {
+				t.Fatalf("expected exactly 1 stale 7005, got %+v", viewed)
+			}
+			if !strings.Contains(viewed[0].MessageText, testCase.wantReason) {
+				t.Fatalf("expected the stale sentence to carry the reason %q, got %q",
+					testCase.wantReason, viewed[0].MessageText)
+			}
+		})
 	}
 }

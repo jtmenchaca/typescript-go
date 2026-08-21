@@ -1,10 +1,13 @@
 // The @refinedts-expect-error reader — ONE recognizer for every
 // consumer. A marker declares that a line is EXPECTED to fire: a
-// standalone comment line covers the NEXT line (tsc's own
-// expect-error convention), a trailing comment covers its own line,
-// and an optional code (`@refinedts-expect-error 7001`) narrows the
-// expectation to that code. RTS7002 (the undetermined channel) is
-// never matched by any marker, coded or not — see Covers.
+// standalone comment line covers the next line that is not itself a
+// comment-only line — comment lines between the marker and the code
+// are skipped, matching markers.rs — a trailing comment covers its
+// own line, and an optional code (`@refinedts-expect-error 7001`)
+// narrows the expectation to that code. Any text remaining after the
+// marker and its optional code is the reason, printed when the marker
+// goes stale. RTS7002 (the undetermined channel) is never matched by
+// any marker, coded or not — see Covers.
 //
 // Two presentations share this reader, and both go through Covers so
 // the exclusion holds in one place:
@@ -15,7 +18,8 @@
 //	surfaces each stale marker as its own 7005 diagnostic — tsc's
 //	expect-error semantics, in the refinement layer.
 //
-// Ported 1:1 from service/expect_error.ts.
+// Ported 1:1 from service/expect_error.ts, with the comment-skip and
+// reason capture adopted from markers.rs for marker-grammar parity.
 package service
 
 import (
@@ -30,8 +34,10 @@ import (
 
 const expectErrorMarker = "@refinedts-expect-error"
 
-var expectErrorLinePattern = regexp.MustCompile(`(^|\s)(//|/\*|\*)?[^\n]*@refinedts-expect-error(?:\s+(\d+))?`)
+var expectErrorLinePattern = regexp.MustCompile(`(^|\s)(//|/\*|\*)?[^\n]*@refinedts-expect-error(?:\s+(\d+))?(.*)$`)
 var commentStartPattern = regexp.MustCompile(`//|/\*`)
+var commentOnlyLinePattern = regexp.MustCompile(`^\s*//`)
+var reasonSeparatorPattern = regexp.MustCompile(`^[\s—-]+`)
 
 // Expectation is the TS Expectation interface.
 type Expectation struct {
@@ -44,7 +50,12 @@ type Expectation struct {
 	// RefinementDiagnostic code, so it is unambiguous here).
 	Code    int
 	HasCode bool
-	Used    bool
+	// Reason is the text after the marker token (and its optional
+	// numeric code), leading separators (space, `-`, `—`) trimmed —
+	// ported from markers.rs's own reason capture. Empty when the
+	// marker carries no trailing text.
+	Reason string
+	Used   bool
 }
 
 // undeterminedCode is RTS7002, the undetermined channel: nothing was
@@ -82,7 +93,7 @@ func ExpectationsOf(text string) []*Expectation {
 		standalone := commentStart >= 0 && strings.TrimSpace(lineText[:commentStart]) == ""
 		line := i + 1
 		if standalone {
-			line = i + 2
+			line = coveredLineAfterComments(lines, i)
 		}
 		code := 0
 		hasCode := false
@@ -93,15 +104,37 @@ func ExpectationsOf(text string) []*Expectation {
 				hasCode = true
 			}
 		}
+		reason := ""
+		if match[8] >= 0 && match[9] >= 0 {
+			reason = reasonSeparatorPattern.ReplaceAllString(lineText[match[8]:match[9]], "")
+			reason = strings.TrimSpace(reason)
+		}
 		markers = append(markers, &Expectation{
 			Line:       line,
 			MarkerLine: i + 1,
 			Code:       code,
 			HasCode:    hasCode,
+			Reason:     reason,
 			Used:       false,
 		})
 	}
 	return markers
+}
+
+// coveredLineAfterComments is markers.rs's own skip: a standalone
+// marker at 0-based line markerIndex covers the next line that is not
+// itself a comment-only line (trimmed content starting with `//`) —
+// host-marker or explanatory comment lines may sit between the marker
+// and the code it covers. Blank lines are not skipped; they become
+// the covered line, same as any other non-comment line. Falls back to
+// one past the last line when every remaining line is a comment.
+func coveredLineAfterComments(lines []string, markerIndex int) int {
+	for j := markerIndex + 1; j < len(lines); j++ {
+		if !commentOnlyLinePattern.MatchString(lines[j]) {
+			return j + 1 // 1-based
+		}
+	}
+	return markerIndex + 2
 }
 
 // indexOfCommentStart is the TS `lineText.search(/\/\/|\/\*/)` — the
@@ -186,12 +219,16 @@ func EditorView(text string, refinements []assignability.RefinementDiagnostic) [
 		if e.HasCode {
 			codeSuffix = fmt.Sprintf(" (RTS%d)", e.Code)
 		}
+		reasonSuffix := ""
+		if e.Reason != "" {
+			reasonSuffix = fmt.Sprintf(" (%s)", e.Reason)
+		}
 		kept = append(kept, assignability.RefinementDiagnostic{
 			Code: 7005,
 			MessageText: fmt.Sprintf(
 				"Expected a refinement error on line %d%s and nothing fired — "+
-					"remove the %s marker or restore the failing code.",
-				e.Line, codeSuffix, expectErrorMarker,
+					"remove the %s marker or restore the failing code%s.",
+				e.Line, codeSuffix, expectErrorMarker, reasonSuffix,
 			),
 			Start:  start,
 			Length: length,

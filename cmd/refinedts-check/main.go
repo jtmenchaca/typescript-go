@@ -82,6 +82,8 @@ func main() {
 		"artifact output path for -export-fact (default: the project-cache entry -export-fact's target reads by)")
 	producerPyFlag := flag.String("producer-py", "",
 		"path to the refinedpy-check binary, for the Python foreign-edge auto-export (default: a project-root build, then PATH)")
+	projectRootFlag := flag.String("project-root", "",
+		"the project root outright, bypassing the .git-walk (default: walk up from each target's directory)")
 	flag.Parse()
 	files := flag.Args()
 	if *listFlag != "" {
@@ -124,6 +126,9 @@ func main() {
 	}
 	if *producerPyFlag != "" {
 		walk.SetPythonProducerPath(*producerPyFlag)
+	}
+	if *projectRootFlag != "" {
+		walk.SetProjectRootOverride(*projectRootFlag)
 	}
 
 	if *exportFactFlag != "" {

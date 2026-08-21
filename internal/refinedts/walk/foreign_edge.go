@@ -61,12 +61,21 @@ package walk
 import (
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
+
+// foreignArgvIndexModeled is the one argv position this edge reads a
+// scalar from — schema-v2.md's argv-scalar surface states its own
+// argIndex, and this is the only value this reader was built against:
+// argv[1], the position a plain interpreter's two-element argv (`[<script>,
+// <data>]`) puts the data element at. A surface naming any other index
+// is recognized-and-declined by name, not silently accepted.
+const foreignArgvIndexModeled = 1
 
 // pythonSpellings are the argv[0] words this recognizer reads as "the
 // CPython interpreter". Anything else declines by name: `python3.11`
@@ -93,11 +102,41 @@ type ForeignEdge struct {
 	// wrote it, which is the only reading that survives a moved cwd).
 	TargetPath string
 	// Payload: the expression handed to JSON.stringify — the value that
-	// actually crosses out.
+	// actually crosses out on stdin. Nil when the crossing rides on argv
+	// instead (ArgvValue set).
 	Payload *ast.Node
+	// ArgvValue: the argv element carrying the crossing value — set only
+	// for the two-element python argv shape (`[<script>, <data>]`), nil
+	// for the ordinary one-element/stdin shape. Exactly one of Payload
+	// and ArgvValue is ever set for a recognized edge: the two are
+	// different inbound channels, never both at once.
+	ArgvValue *ast.Node
 	// StdoutName: the name the call's result binds, whose sole
 	// JSON.parse consumer receives the return fact.
 	StdoutName string
+}
+
+// SpawnReturnLeg is a RECOGNIZED spawn (async) return leg: the
+// accumulator name the 'data' handler writes into and the JSON.parse
+// node the 'close' handler reads it through. Recognizing this pair is
+// only stage one — nothing here SERVES the fact yet (no NodeOverrides
+// wiring, no callback-body walk route); a caller that finds this leg
+// still names the same "not yet served" construct spawnAsyncEdgeOf's
+// decline sentence always named, just narrower: the accumulator and
+// the parse node are no longer missing, only the walk that would carry
+// a fact onto ParseNode.
+type SpawnReturnLeg struct {
+	// AccumulatorName: the name the 'data' handler's `+=` writes, read
+	// back by the 'close' handler's JSON.parse.
+	AccumulatorName string
+	// DataHandler: the 'data' callback whose body owns the `+=`.
+	DataHandler *ast.Node
+	// CloseHandler: the 'close' callback whose body owns the parse.
+	CloseHandler *ast.Node
+	// ParseNode: the `JSON.parse(<AccumulatorName>)` node inside
+	// CloseHandler's body — where a served fact would attach, once a
+	// callback-body walk route exists to reach it.
+	ParseNode *ast.Node
 }
 
 // ForeignEdgeOutcome is what the route decided at one statement. Exactly
@@ -124,6 +163,11 @@ type ForeignEdgeOutcome struct {
 	Decline string
 	// DeclineNode: where the decline sentence points.
 	DeclineNode *ast.Node
+	// TargetPath: the resolved foreign file this edge names, set on
+	// every returned outcome (fired, declined, or served) — "consumed"
+	// means the check looked at that file, not that it approved of what
+	// it found. Read back through FlowContext.ConsumedForeignSink.
+	TargetPath string
 }
 
 // ForeignEdgeAt recognizes a cross-language call at statements[index]
@@ -139,22 +183,23 @@ type ForeignEdgeOutcome struct {
 func ForeignEdgeAt(
 	ctx *FlowContext, env Env, statements []*ast.Node, index int,
 ) (*ForeignEdgeOutcome, bool) {
-	edge, recognized, declineSentence, declineNode := foreignEdgeOf(ctx, statements[index])
+	edge, recognized, declineSentence, declineNode, targetPath := foreignEdgeOf(ctx, statements, index)
 	if !recognized {
 		if declineSentence == "" {
 			return nil, false
 		}
 		// the call WAS an execFileSync-to-python invocation and something
 		// about its spelling stopped the resolution — say which
-		return &ForeignEdgeOutcome{Decline: declineSentence, DeclineNode: declineNode}, true
+		return &ForeignEdgeOutcome{Decline: declineSentence, DeclineNode: declineNode, TargetPath: targetPath}, true
 	}
 	artifact, artifactSentence := ReadForeignArtifact(edge.TargetPath)
 	if artifactSentence != "" {
-		return &ForeignEdgeOutcome{Decline: artifactSentence, DeclineNode: edge.Call}, true
+		return &ForeignEdgeOutcome{Decline: artifactSentence, DeclineNode: edge.Call, TargetPath: edge.TargetPath}, true
 	}
 	// the OUTBOUND leg: every §4/§5 premise about what crosses out,
 	// discharged against the value the walk holds for it
 	if outcome := checkOutboundLeg(ctx, env, edge, artifact); outcome != nil {
+		outcome.TargetPath = edge.TargetPath
 		return outcome, true
 	}
 	// CHANNEL PURITY (§5): the wire is stdout, and the claim assumes
@@ -165,18 +210,20 @@ func ForeignEdgeAt(
 				"nothing else to stdout, and this edge reads its result off stdout — " +
 				"the channel-purity premise is undischarged",
 			DeclineNode: edge.Call,
+			TargetPath:  edge.TargetPath,
 		}, true
 	}
 	// the RETURN leg: the target's own fact, attached to the parse
 	parse, at, parseSentence := soleParseConsumerOf(statements, index, edge.StdoutName)
 	if parseSentence != "" {
-		return &ForeignEdgeOutcome{Decline: parseSentence, DeclineNode: edge.Call}, true
+		return &ForeignEdgeOutcome{Decline: parseSentence, DeclineNode: edge.Call, TargetPath: edge.TargetPath}, true
 	}
 	return &ForeignEdgeOutcome{
 		Override: map[*ast.Node]abstractdomain.AbstractValue{
 			parse: foreignReturnValue(artifact),
 		},
 		OverrideStatement: at,
+		TargetPath:        edge.TargetPath,
 	}, true
 }
 
@@ -199,90 +246,440 @@ func foreignReturnValue(artifact *ForeignArtifact) abstractdomain.AbstractValue 
 
 /* ── recognition (Q1 side) ───────────────────────────────────────── */
 
-// foreignEdgeOf reads one statement as `const <name> = execFileSync(
-// <python>, [<script>], {input: JSON.stringify(<payload>), encoding:
-// <string encoding>})`.
+// foreignEdgeOf reads statements[index] as one of the recognized
+// invocation-function shapes: `const <name> = execFileSync(<runner>,
+// <argv>, {input: JSON.stringify(<payload>), encoding: <string
+// encoding>})`, the same call through `spawnSync` (whose result is an
+// object, read at `.stdout`), or `execSync` given a single written
+// shell-command string. `spawn` (async) is recognized on the same
+// argv-naming basis; its return leg reads the following statements for
+// the accumulate-then-parse `.on()` pair (spawnAsyncEdgeOf), and answers
+// its own sentence naming whatever construct still blocks it rather than
+// falling through to "not this shape". statements/index are threaded
+// through for that look-ahead alone — every other invocation function
+// reads its own statement only.
 //
-// The four answers it can give:
+// The shapes it can answer (targetPath, the fifth value, rides
+// alongside every one of them — "" wherever the reader has not yet
+// resolved a script path to name):
 //
 //	(edge, true,  "", nil)     — recognized whole
 //	(nil,  false, "", nil)     — not this shape at all; no sentence owed
-//	(nil,  false, said, node)  — an execFileSync-to-python call whose
+//	(nil,  false, said, node)  — a recognized cross-language call whose
 //	                             spelling stopped the resolution
 //
 // The declines that DO owe a sentence are exactly those where the
 // reader can see a cross-language call and cannot serve it. A call to
-// some other program, or a `spawn` of a shell, is not this edge and
-// says nothing.
-func foreignEdgeOf(ctx *FlowContext, statement *ast.Node) (*ForeignEdge, bool, string, *ast.Node) {
-	name, call, ok := execFileSyncBindingOf(statement)
+// some other program is not this edge and says nothing.
+func foreignEdgeOf(ctx *FlowContext, statements []*ast.Node, index int) (edge *ForeignEdge, recognized bool, declineSentence string, declineNode *ast.Node, targetPath string) {
+	statement := statements[index]
+	name, call, ok := constBoundCallOf(statement)
 	if !ok {
-		return nil, false, "", nil
+		return nil, false, "", nil, ""
 	}
-	if !resolvesToChildProcessExecFileSync(ctx, calleeOf(call)) {
-		// a local helper named execFileSync is not the Node built-in, and
-		// nothing here knows what it runs — an ordinary call
-		return nil, false, "", nil
+	callee := calleeOf(call)
+	switch {
+	case resolvesToChildProcessMember(ctx, callee, "execFileSync"):
+		return execFileSyncEdgeOf(ctx, call, name)
+	case resolvesToChildProcessMember(ctx, callee, "spawnSync"):
+		return spawnSyncEdgeOf(ctx, call, name)
+	case resolvesToChildProcessMember(ctx, callee, "execSync"):
+		return execSyncEdgeOf(call, name)
+	case resolvesToChildProcessMember(ctx, callee, "spawn"):
+		return spawnAsyncEdgeOf(ctx, call, name, statements, index)
 	}
+	// a local helper of the same name is not the Node built-in, and
+	// nothing here knows what it runs — an ordinary call
+	return nil, false, "", nil, ""
+}
+
+// execFileSyncEdgeOf reads `execFileSync(<runner>, <argv>, {input:
+// JSON.stringify(<payload>), encoding: <string encoding>})` — the
+// sync exec whose bound name is itself the stdout string. The argv
+// itself may ALSO carry a two-element [script, dataElement] shape (the
+// argv-value leg); a call sending a value on both stdin and argv[1] at
+// once is a mixed channel this reader does not model and declines by
+// name, rather than silently picking one of the two.
+func execFileSyncEdgeOf(ctx *FlowContext, call *ast.Node, name string) (*ForeignEdge, bool, string, *ast.Node, string) {
 	args, _ := callArguments(call)
 	if len(args) < 3 {
-		return nil, false, "", nil
+		return nil, false, "", nil, ""
 	}
-	interpreter, interpreterOk := stringLiteralText(args[0])
-	if !interpreterOk || !pythonSpellings[interpreter] {
-		// some other program: not a Python edge, nothing owed
-		return nil, false, "", nil
+	runnerWord, script, dataElement, scriptOk, sentence, sentenceNode := runnerAndScriptArgvOf(ctx, args[0], args[1])
+	if sentence != "" {
+		return nil, false, sentence, sentenceNode, ""
 	}
-	// past this point the reader KNOWS it is looking at a python
-	// invocation, so every remaining decline names what stopped it
-	script, scriptOk := singleScriptArgvOf(args[1])
 	if !scriptOk {
-		return nil, false, "this call runs python3, and its argv is not one written string naming " +
-			"a script — the checker cannot name the code that runs next, so it models no edge here", call
+		return nil, false, "", nil, ""
 	}
-	if filepath.Ext(script) != ".py" {
-		return nil, false, "this call runs python3 on " + script +
-			", which is not a .py file — the checker models the edge only where the argv " +
-			"names Python source it can read a fact for", call
+	resolvedPath, pathSentence := resolveForeignScriptPath(call, runnerWord, script)
+	if pathSentence != "" {
+		return nil, false, pathSentence, call, resolvedPath
 	}
-	sourceFile := ast.GetSourceFileOfNode(call)
-	if sourceFile == nil {
-		return nil, false, "", nil
-	}
-	// a RELATIVE argv entry is relative to the file that wrote it: the
-	// cwd of the eventual run is deployment, and resolving against it
-	// would make the checker's answer depend on where it was invoked
-	targetPath := script
-	if !filepath.IsAbs(targetPath) {
-		targetPath = filepath.Join(filepath.Dir(sourceFile.FileName()), script)
+	if resolvedPath == "" {
+		return nil, false, "", nil, ""
 	}
 	payload, encodingOk, optionsSentence := execFileSyncOptionsOf(args[2])
 	if optionsSentence != "" {
-		return nil, false, optionsSentence, args[2]
+		return nil, false, optionsSentence, args[2], resolvedPath
 	}
 	if !encodingOk {
-		return nil, false, "this call runs python3 on " + script + " without a string encoding, " +
+		return nil, false, "this call runs " + runnerWord + " on " + script + " without a string encoding, " +
 			"so its result is a Buffer rather than the target's JSON text — " +
-			"the return leg has no text to parse", args[2]
+			"the return leg has no text to parse", args[2], resolvedPath
 	}
-	if payload == nil {
-		return nil, false, "this call runs python3 on " + script + " and sends it no " +
+	if payload == nil && dataElement == nil {
+		return nil, false, "this call runs " + runnerWord + " on " + script + " and sends it no " +
 			"JSON.stringify(...) input, so nothing crosses out on stdin and the transport " +
-			"model has no outbound leg to apply", args[2]
+			"model has no outbound leg to apply", args[2], resolvedPath
+	}
+	if payload != nil && dataElement != nil {
+		// BOTH channels carry a value in this one call: the target's own
+		// __main__ block may read one, the other, or both, and this reader
+		// models one inbound channel per call, never a mix
+		return nil, false, "this call runs " + runnerWord + " on " + script + " and sends a value " +
+			"on BOTH stdin (JSON.stringify(...) input) and argv[1] in the same call — the checker " +
+			"models one inbound channel per call, never a mix", args[2], resolvedPath
 	}
 	return &ForeignEdge{
 		Call:       call,
-		TargetPath: targetPath,
+		TargetPath: resolvedPath,
 		Payload:    payload,
+		ArgvValue:  dataElement,
 		StdoutName: name,
-	}, true, "", nil
+	}, true, "", nil, resolvedPath
 }
 
-// execFileSyncBindingOf reads `const <name> = <call>(...)` — one
-// declarator binding one call. A const binding is what lets the return
-// leg follow the name to its parse: a `let` the following statements
-// could rewrite carries no such guarantee, and declines here.
-func execFileSyncBindingOf(statement *ast.Node) (string, *ast.Node, bool) {
+// spawnSyncEdgeOf reads the same argv/options shape as execFileSync
+// through spawnSync — the difference is entirely in the RESULT: spawnSync
+// answers an object (`{stdout, stderr, status, ...}`), never a bare
+// string, so the bound name's stdout rides at `<name>.stdout` rather
+// than at `<name>` itself. StdoutName carries the same binding name;
+// soleParseConsumerOf's shared reading (foreign_edge.go's return leg)
+// accepts either the bare name or `<name>.stdout` as the read of it.
+func spawnSyncEdgeOf(ctx *FlowContext, call *ast.Node, name string) (*ForeignEdge, bool, string, *ast.Node, string) {
+	return execFileSyncEdgeOf(ctx, call, name)
+}
+
+// spawnAsyncEdgeOf is `spawn(<runner>, <argv>)` — async, no captured
+// return value at the call site itself. The reference (the argv naming
+// the script) is exactly as followable as execFileSync's; the call
+// itself is recognized on that basis alone.
+//
+// What the call ALONE cannot yet determine is the return leg, and this
+// answers "does not determine (yet)", never "cannot": an accumulate-
+// then-parse spawn body —
+//
+//	const child = spawn(<runner>, <argv>);
+//	let out = "";
+//	child.stdout.on("data", (d) => { out += d; });
+//	child.on("close", () => { const result = JSON.parse(out); ... });
+//
+// — DOES deterministically name both the file that runs next (the
+// argv, exactly as execFileSync's does) and the expression the target's
+// fact would attach to (the JSON.parse inside the close handler): nothing
+// about the shape is dynamic or unbounded. spawnReturnLegOf (below) now
+// reads exactly that pair out of the statements following this call —
+// the accumulator name and the parse node are RECOGNIZED. What still
+// blocks serving is not the recognition: it is a way for listWalk's
+// override (analyze_statement.go's `foreignOverrideAt`) to reach a node
+// INSIDE a callback body rather than only a top-level statement, since
+// the override today pins the whole statement CONTAINING the parse, and
+// here that statement is the `.on("close", cb)` call, not the parse
+// expression itself — walking that statement has to actually enter the
+// callback body for the pinned node to ever be visited, and no
+// callback-body-walking route exists for an arbitrary `.on()` handler
+// today (only Promise .then/.catch handlers inline, via
+// promiseRunHandler/InlineCallback in promise_instance_models.go). That
+// route is analyze_statement.go's to build, outside this file's
+// ownership; a body this reader cannot recognize at all (no pair, a
+// mismatched parameter, an intervening write) still owes its own,
+// narrower sentence naming exactly what breaks the recognition itself.
+func spawnAsyncEdgeOf(
+	ctx *FlowContext, call *ast.Node, name string, statements []*ast.Node, index int,
+) (*ForeignEdge, bool, string, *ast.Node, string) {
+	args, _ := callArguments(call)
+	if len(args) < 2 {
+		return nil, false, "", nil, ""
+	}
+	runnerWord, script, _, scriptOk, sentence, sentenceNode := runnerAndScriptArgvOf(ctx, args[0], args[1])
+	if sentence != "" {
+		return nil, false, sentence, sentenceNode, ""
+	}
+	if !scriptOk {
+		return nil, false, "", nil, ""
+	}
+	resolvedPath, pathSentence := resolveForeignScriptPath(call, runnerWord, script)
+	if pathSentence != "" {
+		return nil, false, pathSentence, call, resolvedPath
+	}
+	if resolvedPath == "" {
+		return nil, false, "", nil, ""
+	}
+	leg, legSentence := spawnReturnLegOf(statements, index, name)
+	if legSentence == "" {
+		// the pair IS recognized (the accumulator and the parse node are
+		// both named) — what remains is the callback-body walk route, not
+		// this reader's own gap
+		return nil, false, "this call runs " + runnerWord + " on " + script + " with spawn — the argv names " +
+			"the script exactly as execFileSync's does, and the accumulate-then-parse pair after it is " +
+			"recognized (the accumulator " + leg.AccumulatorName + " and its JSON.parse are both named), " +
+			"but this checker has no route that walks a callback body to attach a fact to a node inside " +
+			"it — the edge is recognized and not yet served",
+			call, resolvedPath
+	}
+	return nil, false, "this call runs " + runnerWord + " on " + script + " with spawn — the argv names " +
+		"the script exactly as execFileSync's does, but its result does not determine (yet): " + legSentence,
+		call, resolvedPath
+}
+
+/* ── the spawn (async) return leg: the accumulate-then-parse `.on()` pair ── */
+
+// spawnReturnLegOf scans the statements AFTER a `spawn(...)` call bound
+// to childName for the accumulate-then-parse pair —
+//
+//	<childName>.stdout.on("data", (d) => { out += d; });
+//	<childName>.on("close", () => { ... JSON.parse(out) ... });
+//
+// — the same "scan the statements after this one" discipline
+// soleParseConsumerOf already applies, one level deeper: past finding
+// the two `.on()` calls, it steps INTO each handler's body to read the
+// accumulator name (spawnAccumulatorNameOf) and the parse node
+// (spawnParseNodeOf) the same way soleParseConsumerOf reads a top-level
+// JSON.parse.
+//
+// Answers (leg, "") when the whole pair recognizes; ("", said)
+// otherwise, naming the first construct that blocks it. A missing
+// 'close' handler, a 'data' handler whose accumulator write does not
+// read the handler's OWN parameter, or a write to the accumulator by a
+// THIRD statement outside the two handlers all decline by name here —
+// none of them are silent.
+func spawnReturnLegOf(statements []*ast.Node, index int, childName string) (SpawnReturnLeg, string) {
+	dataHandler, dataOk := spawnOnHandlerOf(statements, index, childName, true, "data")
+	if !dataOk {
+		return SpawnReturnLeg{}, "no " + childName + ".stdout.on(\"data\", ...) handler follows the call, " +
+			"so there is no accumulator for a return fact to attach through"
+	}
+	accumulatorName, accumulatorOk := spawnAccumulatorNameOf(dataHandler)
+	if !accumulatorOk {
+		return SpawnReturnLeg{}, "the 'data' handler's body is not a single `<name> += <chunk>` statement " +
+			"adding its own parameter into an outer name, so no accumulator is named"
+	}
+	closeHandler, closeOk := spawnOnHandlerOf(statements, index, childName, false, "close")
+	if !closeOk {
+		return SpawnReturnLeg{}, "no " + childName + ".on(\"close\", ...) handler follows the call, so " +
+			"nothing reads " + accumulatorName + " back as the target's result"
+	}
+	parseNode, parseOk := spawnParseNodeOf(closeHandler, accumulatorName)
+	if !parseOk {
+		return SpawnReturnLeg{}, "the 'close' handler's body does not read " + accumulatorName +
+			" through JSON.parse, so the target's stated result has no expression to land on"
+	}
+	// the intervening-write hazard: the 'data' handler's OWN `+=` is part
+	// of the recognized shape, not a disqualifying write — every OTHER
+	// statement between the call and the 'close' handler, and every
+	// statement inside the 'close' handler's own body, must leave the
+	// accumulator untouched
+	if spawnAccumulatorWriteOutsideHandlers(statements, index, accumulatorName, dataHandler) {
+		return SpawnReturnLeg{}, "a statement other than the 'data' handler writes " + accumulatorName +
+			" after the call, so the value the 'close' handler parses is not the value the two " +
+			"handlers alone accumulated"
+	}
+	return SpawnReturnLeg{
+		AccumulatorName: accumulatorName,
+		DataHandler:     dataHandler,
+		CloseHandler:    closeHandler,
+		ParseNode:       parseNode,
+	}, ""
+}
+
+// spawnOnHandlerOf finds `<childName>.on(event, cb)` — or, when
+// throughStdout is true, `<childName>.stdout.on(event, cb)` — among the
+// expression-statement calls following index, and answers cb. These
+// calls are bare expression statements (EventEmitter#on returns the
+// emitter for chaining, but nothing here reads that return value), so
+// they never enter constBoundCallOf's const-bound switch; this reads
+// the shape directly.
+func spawnOnHandlerOf(
+	statements []*ast.Node, index int, childName string, throughStdout bool, event string,
+) (*ast.Node, bool) {
+	for _, statement := range statements[index+1:] {
+		if !ast.IsExpressionStatement(statement) {
+			continue
+		}
+		call := Unwrapped(statement.AsExpressionStatement().Expression)
+		if call == nil || !ast.IsCallExpression(call) {
+			continue
+		}
+		expr := call.AsCallExpression()
+		callee := Unwrapped(expr.Expression)
+		if callee == nil || !ast.IsPropertyAccessExpression(callee) {
+			continue
+		}
+		access := callee.AsPropertyAccessExpression()
+		if access.QuestionDotToken != nil || !ast.IsIdentifier(access.Name()) || access.Name().Text() != "on" {
+			continue
+		}
+		receiver := Unwrapped(access.Expression)
+		if receiver == nil {
+			continue
+		}
+		if throughStdout {
+			if !ast.IsPropertyAccessExpression(receiver) {
+				continue
+			}
+			stdoutAccess := receiver.AsPropertyAccessExpression()
+			if stdoutAccess.QuestionDotToken != nil || !ast.IsIdentifier(stdoutAccess.Name()) ||
+				stdoutAccess.Name().Text() != "stdout" {
+				continue
+			}
+			receiver = Unwrapped(stdoutAccess.Expression)
+			if receiver == nil {
+				continue
+			}
+		}
+		if !ast.IsIdentifier(receiver) || receiver.Text() != childName {
+			continue
+		}
+		if expr.Arguments == nil || len(expr.Arguments.Nodes) != 2 {
+			continue
+		}
+		eventWord, eventOk := stringLiteralText(expr.Arguments.Nodes[0])
+		if !eventOk || eventWord != event {
+			continue
+		}
+		handler := Unwrapped(expr.Arguments.Nodes[1])
+		if handler == nil || (!ast.IsArrowFunction(handler) && !ast.IsFunctionExpression(handler)) {
+			continue
+		}
+		return handler, true
+	}
+	return nil, false
+}
+
+// spawnAccumulatorNameOf reads the 'data' handler's body as exactly one
+// statement, `<name> += <param>;`, where the right side is a bare read
+// of the handler's OWN FIRST PARAMETER — the specific parameter, never
+// a same-spelled identifier from an outer scope: a handler whose body
+// happens to add some other in-reach `d` is not this shape, so the
+// check is the parameter DECLARATION node's own identity (by position),
+// not a name-equality test against the parameter's spelled text.
+func spawnAccumulatorNameOf(handler *ast.Node) (string, bool) {
+	parameters := handler.Parameters()
+	if len(parameters) != 1 {
+		return "", false
+	}
+	parameterName := parameters[0].AsParameterDeclaration().Name()
+	if parameterName == nil || !ast.IsIdentifier(parameterName) {
+		return "", false
+	}
+	body := StatementsOf(handler.Body())
+	if len(body) != 1 || !ast.IsExpressionStatement(body[0]) {
+		return "", false
+	}
+	add := Unwrapped(body[0].AsExpressionStatement().Expression)
+	if add == nil || !ast.IsBinaryExpression(add) {
+		return "", false
+	}
+	bin := add.AsBinaryExpression()
+	if bin.OperatorToken.Kind != ast.KindPlusEqualsToken {
+		return "", false
+	}
+	target := Unwrapped(bin.Left)
+	if target == nil || !ast.IsIdentifier(target) {
+		return "", false
+	}
+	// the accumulator must be a DIFFERENT binding than the parameter —
+	// summing the chunk into itself writes back nothing an outer scope
+	// can read
+	if target.Text() == parameterName.Text() {
+		return "", false
+	}
+	right := Unwrapped(bin.Right)
+	if right == nil || !ast.IsIdentifier(right) || right.Text() != parameterName.Text() {
+		return "", false
+	}
+	return target.Text(), true
+}
+
+// spawnParseNodeOf finds the sole `JSON.parse(<accumulatorName>)` node
+// inside the 'close' handler's body — the same read isForeignParseOf
+// already performs for a bare stdout binding, applied to the accumulator
+// name instead. Unlike soleParseConsumerOf's top-level scan, this reads
+// exactly ONE handler body rather than a run of statements, so there is
+// no "two or more consumers" question here: the handler either contains
+// one parse of the name or it does not.
+func spawnParseNodeOf(closeHandler *ast.Node, accumulatorName string) (*ast.Node, bool) {
+	body := closeHandler.Body()
+	if body == nil {
+		return nil, false
+	}
+	var found *ast.Node
+	count := 0
+	foreignParseCallsIn(body, accumulatorName, &found, &count)
+	if count != 1 {
+		return nil, false
+	}
+	return found, true
+}
+
+// spawnAccumulatorWriteOutsideHandlers is the intervening-write hazard
+// check: whether any statement OTHER than the 'data' handler's own
+// recognized `+=` writes the accumulator between the spawn call and the
+// end of the scan — a statement in between the two handlers, a
+// statement after the 'close' handler in the same list, or a write
+// inside the 'close' handler's own body (AssignedNamesDirect walks INTO
+// a callback literal same as any other subtree, so a write inside
+// CloseHandler's body is already covered by the same scan). The 'data'
+// handler's own statement is the one excluded: its `+=` is the
+// recognized shape, not a disqualifying write.
+func spawnAccumulatorWriteOutsideHandlers(
+	statements []*ast.Node, index int, accumulatorName string, dataHandler *ast.Node,
+) bool {
+	written := map[string]struct{}{}
+	for _, statement := range statements[index+1:] {
+		if spawnStatementIsHandlerFor(statement, dataHandler) {
+			continue
+		}
+		AssignedNamesDirect(statement, written)
+	}
+	_, moves := written[accumulatorName]
+	return moves
+}
+
+// spawnStatementIsHandlerFor is whether statement is the bare
+// expression-statement call that hands handler as one of its arguments
+// — the recognized `.on(...)` statement itself, excluded from the
+// write scan because its own `+=` is the shape being recognized, not a
+// write to disqualify it.
+func spawnStatementIsHandlerFor(statement *ast.Node, handler *ast.Node) bool {
+	if !ast.IsExpressionStatement(statement) {
+		return false
+	}
+	call := Unwrapped(statement.AsExpressionStatement().Expression)
+	if call == nil || !ast.IsCallExpression(call) {
+		return false
+	}
+	expr := call.AsCallExpression()
+	if expr.Arguments == nil {
+		return false
+	}
+	for _, argument := range expr.Arguments.Nodes {
+		if Unwrapped(argument) == handler {
+			return true
+		}
+	}
+	return false
+}
+
+// constBoundCallOf reads `const <name> = <call>(...)` — one declarator
+// binding one call, whatever the callee's name. A const binding is what
+// lets the return leg follow the name to its parse: a `let` the
+// following statements could rewrite carries no such guarantee, and
+// declines here. Shared by every invocation function this file reads
+// (execFileSync, spawnSync, execSync) — the binding shape is the same
+// regardless of which one was called.
+func constBoundCallOf(statement *ast.Node) (string, *ast.Node, bool) {
 	if statement == nil || !ast.IsVariableStatement(statement) {
 		return "", nil, false
 	}
@@ -306,20 +703,23 @@ func execFileSyncBindingOf(statement *ast.Node) (string, *ast.Node, bool) {
 	return name.Text(), call, true
 }
 
-// resolvesToChildProcessExecFileSync is the callee test: the name is
-// execFileSync, and its symbol declares in a DECLARATION FILE whose
-// path names child_process. That is the same shape resolvesToDefaultLib
-// tests for the built-ins (a symbol's declaring file), widened to the
-// one ambient module this edge consumes — `child_process` is not in the
-// default lib, it arrives with @types/node, so the default-lib test
-// answers false for it and cannot be reused unchanged.
+// resolvesToChildProcessMember is the callee test, widened past
+// execFileSync alone: the name is memberName, and its symbol declares
+// in a DECLARATION FILE whose path names child_process. That is the
+// same shape resolvesToDefaultLib tests for the built-ins (a symbol's
+// declaring file), widened to the one ambient module this edge
+// consumes — `child_process` is not in the default lib, it arrives
+// with @types/node, so the default-lib test answers false for it and
+// cannot be reused unchanged.
 //
-// Both spellings resolve: the named import `import { execFileSync } from
+// Both spellings resolve: the named import `import { <memberName> } from
 // "node:child_process"` (an identifier callee, followed through the
 // import alias by symbolAt) and the namespace form
-// `childProcess.execFileSync(...)` (a property access, whose NAME node
-// carries the same symbol).
-func resolvesToChildProcessExecFileSync(ctx *FlowContext, callee *ast.Node) bool {
+// `childProcess.<memberName>(...)` (a property access, whose NAME node
+// carries the same symbol). spawnSync and execSync are the same
+// child_process export shape as execFileSync, so one test serves all
+// three names.
+func resolvesToChildProcessMember(ctx *FlowContext, callee *ast.Node, memberName string) bool {
 	if ctx == nil || ctx.P == nil || callee == nil {
 		return false
 	}
@@ -331,7 +731,7 @@ func resolvesToChildProcessExecFileSync(ctx *FlowContext, callee *ast.Node) bool
 	} else {
 		return false
 	}
-	if name.Text() != "execFileSync" {
+	if name.Text() != memberName {
 		return false
 	}
 	symbol := symbolAt(ctx.P.Checker, name)
@@ -360,26 +760,297 @@ func isChildProcessDeclarationPath(fileName string) bool {
 		base == "child_process.d.cts"
 }
 
-// singleScriptArgvOf reads `["./audio_level.py"]` — an argv array
-// written in place holding exactly one string literal. More elements
-// mean the target takes arguments this edge does not model; a spread or
-// a variable means the argv is not a written literal, and the checker
-// cannot name the code that runs next from it.
-func singleScriptArgvOf(argument *ast.Node) (string, bool) {
-	array := Unwrapped(argument)
+// scriptPathLawTwoSentence is the one sentence a script-path element
+// that is not a written string literal, and does not resolve to one
+// through a const binding, owes — law 2: name exactly what would make
+// it resolvable.
+const scriptPathLawTwoSentence = "the script path is computed; spell it as a written string literal"
+
+// runnerAndScriptArgvOf reads argv[0] (the runner word) and argv[1]
+// (the argv array naming the script) together, since the shape of the
+// second depends on the first: a plain interpreter (`python3`,
+// `python`) takes either a single-element argv holding the script
+// alone, or a TWO-element argv holding the script AND one crossing
+// value (dataElement — the argv-scalar leg, CROSS-LANGUAGE-EDGE.md's
+// data-leg list); `uv` takes `["run", <script>]` or `["run",
+// <interpreter>, <script>]`, the runner word plus its own arguments in
+// ONE array rather than two separate positions, and models no data
+// element (a third argv slot beyond `uv`'s own runner-word/interpreter
+// pair is a different, unmodeled shape).
+//
+// Answers (runnerWord, script, dataElement, true, "", nil) when a
+// script name was read — whether written in place or resolved through
+// a const — dataElement nil unless the python arm's argv carried
+// exactly two elements. Answers (_, _, nil, false, "", nil) where
+// argv[0] does not even read as a recognized runner word (nothing
+// owed: the call may not be a Python edge at all), or where the argv
+// array's own length is neither the plain nor the two-element python
+// shape (three-or-more elements still models nothing: a target taking
+// arguments this edge does not model is a different shape from a
+// computed single element, so it stays a plain non-match). A script
+// ELEMENT that is present but not a plain written literal, and does
+// not resolve to one, owes the law-2 sentence rather than silence —
+// the runner word itself is already known by that point, so the call
+// IS this edge, only unfollowable.
+func runnerAndScriptArgvOf(ctx *FlowContext, runnerArgument *ast.Node, argvArgument *ast.Node) (runnerWord string, script string, dataElement *ast.Node, ok bool, sentence string, sentenceNode *ast.Node) {
+	interpreter, interpreterOk := stringLiteralText(runnerArgument)
+	if !interpreterOk {
+		// the runner word itself is not a written literal (a variable, a
+		// computed expression) — the reader cannot yet see this is python
+		// at all, so nothing is owed
+		return "", "", nil, false, "", nil
+	}
+	array := Unwrapped(argvArgument)
 	if array == nil || !ast.IsArrayLiteralExpression(array) {
-		return "", false
+		return "", "", nil, false, "", nil
 	}
 	elements := array.AsArrayLiteralExpression().Elements.Nodes
-	if len(elements) != 1 {
-		return "", false
+	switch {
+	case pythonSpellings[interpreter]:
+		if len(elements) < 1 || len(elements) > 2 {
+			// more elements mean the target takes arguments this edge does
+			// not model; that is a DIFFERENT shape from a computed single
+			// element, so it stays a plain non-match (no sentence)
+			return "", "", nil, false, "", nil
+		}
+		script, scriptOk, scriptSentence, scriptNode := scriptElementOf(ctx, elements[0])
+		if scriptSentence != "" {
+			return "", "", nil, false, scriptSentence, scriptNode
+		}
+		if !scriptOk {
+			return "", "", nil, false, "", nil
+		}
+		var data *ast.Node
+		if len(elements) == 2 {
+			data = Unwrapped(elements[1])
+		}
+		return interpreter, script, data, true, "", nil
+	case interpreter == "uv":
+		// `uv run <script>` or `uv run <interpreter> <script>`: the runner
+		// word's own argument list rides inside argv[1], not split across
+		// two call arguments the way a plain interpreter spells it. No
+		// data element is modeled for uv here — a fourth slot beyond the
+		// runner-word/interpreter pair is a different, unmodeled shape.
+		if len(elements) < 2 || len(elements) > 3 {
+			return "", "", nil, false, "", nil
+		}
+		runWord, runOk := stringLiteralText(elements[0])
+		if !runOk || runWord != "run" {
+			return "", "", nil, false, "", nil
+		}
+		scriptElement := elements[len(elements)-1]
+		if len(elements) == 3 {
+			// the middle element names which interpreter uv runs the
+			// script with; anything other than a recognized python
+			// spelling there is a different program, not this edge
+			middle, middleOk := stringLiteralText(elements[1])
+			if !middleOk || !pythonSpellings[middle] {
+				return "", "", nil, false, "", nil
+			}
+		}
+		script, scriptOk, scriptSentence, scriptNode := scriptElementOf(ctx, scriptElement)
+		if scriptSentence != "" {
+			return "", "", nil, false, scriptSentence, scriptNode
+		}
+		if !scriptOk {
+			return "", "", nil, false, "", nil
+		}
+		return "uv run", script, nil, true, "", nil
 	}
-	return stringLiteralText(elements[0])
+	return "", "", nil, false, "", nil
 }
 
-// execFileSyncOptionsOf reads the options object: the `input` property
+// scriptElementOf reads one argv element as the script's own path: a
+// written string literal (or no-substitution template) directly, or —
+// past this pass — an IDENTIFIER resolved through resolvedConstStringLiteral
+// to its const initializer's own literal. Anything else that is not a
+// plain written literal (a parameter reference, a computed expression
+// such as string concatenation) is a script path the checker can SEE
+// but cannot yet name: recognized, not silent, carrying the law-2
+// sentence naming exactly what would make it resolvable.
+func scriptElementOf(ctx *FlowContext, element *ast.Node) (script string, ok bool, sentence string, sentenceNode *ast.Node) {
+	node := Unwrapped(element)
+	if node == nil {
+		return "", false, "", nil
+	}
+	if text, literalOk := stringLiteralText(node); literalOk {
+		return text, true, "", nil
+	}
+	if ast.IsIdentifier(node) {
+		if text, resolvedOk := resolvedConstStringLiteral(ctx, node); resolvedOk {
+			return text, true, "", nil
+		}
+	}
+	// past this point the reader knows there IS a script argv element —
+	// it is simply not one the checker can read a name from
+	return "", false, scriptPathLawTwoSentence, node
+}
+
+// resolvedConstStringLiteral follows an identifier BACK to a `const`
+// binding's own initializer and reads that initializer as a written
+// string literal — the same "identifier → symbol → ValueDeclaration →
+// const VariableDeclaration → initializer" resolution
+// accumulationLengthNodeOf (relational_accumulation.go) already performs
+// for a `.length` denominator, applied here to a literal string instead.
+// A `let` binding, a parameter, or an initializer that is itself not a
+// written literal all answer false — only a value FIXED by the
+// declaration survives the follow.
+func resolvedConstStringLiteral(ctx *FlowContext, identifier *ast.Node) (string, bool) {
+	c := checkerOf(ctx)
+	if c == nil {
+		return "", false
+	}
+	symbol := symbolAt(c, identifier)
+	if symbol == nil || symbol.ValueDeclaration == nil || !ast.IsVariableDeclaration(symbol.ValueDeclaration) {
+		return "", false
+	}
+	declaration := symbol.ValueDeclaration
+	if declaration.Parent == nil || !ast.IsVariableDeclarationList(declaration.Parent) ||
+		(declaration.Parent.Flags&ast.NodeFlagsConst) == 0 {
+		return "", false
+	}
+	initializer := Unwrapped(declaration.AsVariableDeclaration().Initializer)
+	if initializer == nil {
+		return "", false
+	}
+	return stringLiteralText(initializer)
+}
+
+// resolveForeignScriptPath discharges the two premises common to every
+// invocation shape once a script NAME is in hand: the name must end in
+// `.py` (the checker only reads a fact for Python source), and a
+// relative name resolves against the SOURCE FILE's own directory (the
+// cwd of the eventual run is deployment, and resolving against it would
+// make the checker's answer depend on where it was invoked). Answers
+// ("", "") for a call whose source file cannot be found — the same
+// silent decline the original inline reading gave.
+func resolveForeignScriptPath(call *ast.Node, runnerWord string, script string) (resolvedPath string, sentence string) {
+	if filepath.Ext(script) != ".py" {
+		return "", "this call runs " + runnerWord + " on " + script +
+			", which is not a .py file — the checker models the edge only where the argv " +
+			"names Python source it can read a fact for"
+	}
+	sourceFile := ast.GetSourceFileOfNode(call)
+	if sourceFile == nil {
+		return "", ""
+	}
+	resolvedPath = script
+	if !filepath.IsAbs(resolvedPath) {
+		resolvedPath = filepath.Join(filepath.Dir(sourceFile.FileName()), script)
+	}
+	return resolvedPath, ""
+}
+
+// execSyncShellStringSentence is the law-2 decline for the whole
+// family of execSync/exec shapes this file cannot read a runner and
+// script out of: a command that is not a written string literal at
+// all (a template with a substitution, a variable, a concatenation),
+// or one whose tokens carry shell syntax this reader does not model
+// (quoting, `$`, pipes, `&&`, `;`, output redirection, backticks).
+const execSyncShellStringSentence = "the command is a shell string the checker cannot read; " +
+	"spell it as an argv list"
+
+// execSyncUnsupportedShellTokenChars is the set of characters whose
+// presence in ANY token marks the command string as shell syntax this
+// reader does not model, rather than a plain word or a `./path`: a
+// quote, `$`, `|`, `&`, `;`, `>`, `<`, or a backtick. `<` doubles as the
+// `< file` stdin-from-file shape's own opening character, but this
+// reader has no fixture row exercising that shape, so `<` stays in the
+// unsupported set rather than getting a special reading no row proves.
+const execSyncUnsupportedShellTokenChars = "'\"$|&;><`"
+
+// execSyncEdgeOf reads `execSync(<command>, {encoding: <string
+// encoding>})` (or the bare one-argument form) — a single shell
+// COMMAND STRING rather than an argv array. Recognized only when the
+// command is a WRITTEN string literal (or no-substitution template)
+// tokenizable on single spaces into plain words and `./path` tokens
+// with none of the unsupported shell characters: that is the one shape
+// where the string names a runner and a script as deterministically as
+// an argv array does. Anything else — a template with a substitution,
+// a variable, a concatenation, or a literal string carrying shell
+// syntax this reader does not model — owes the one law-2 sentence:
+// the command is unreadable as spelled, and an argv list is what would
+// resolve it.
+func execSyncEdgeOf(call *ast.Node, name string) (*ForeignEdge, bool, string, *ast.Node, string) {
+	args, _ := callArguments(call)
+	if len(args) < 1 {
+		return nil, false, "", nil, ""
+	}
+	command, literalOk := stringLiteralText(args[0])
+	if !literalOk {
+		return nil, false, execSyncShellStringSentence, args[0], ""
+	}
+	runnerWord, script, tokensOk := execSyncSimpleCommandTokens(command)
+	if !tokensOk {
+		return nil, false, execSyncShellStringSentence, args[0], ""
+	}
+	resolvedPath, pathSentence := resolveForeignScriptPath(call, runnerWord, script)
+	if pathSentence != "" {
+		return nil, false, pathSentence, call, resolvedPath
+	}
+	if resolvedPath == "" {
+		return nil, false, "", nil, ""
+	}
+	// execSync's own bound name (constBoundCallOf already required a
+	// const binding) IS the stdout string, exactly like execFileSync's —
+	// there is no options-object input/encoding pair to read here, since
+	// the whole command is the one string argument; a second argument,
+	// where present, only ever carries `encoding`.
+	if len(args) >= 2 {
+		if _, encodingOk, optionsSentence := execFileSyncOptionsOf(args[1]); optionsSentence != "" {
+			return nil, false, optionsSentence, args[1], resolvedPath
+		} else if !encodingOk {
+			return nil, false, "this call runs " + runnerWord + " on " + script + " without a string " +
+				"encoding, so its result is a Buffer rather than the target's JSON text — " +
+				"the return leg has no text to parse", args[1], resolvedPath
+		}
+	}
+	return &ForeignEdge{
+		Call:       call,
+		TargetPath: resolvedPath,
+		Payload:    nil,
+		StdoutName: name,
+	}, true, "", nil, resolvedPath
+}
+
+// execSyncSimpleCommandTokens splits a command string on single spaces
+// and reads it as `<runner> <script>` — exactly two tokens, neither
+// carrying any unsupported shell character, the second ending `.py`.
+// More or fewer tokens, or any unsupported character in either one,
+// answers false: this reader models only the plain two-word command,
+// not a program's own arguments or any shell construct.
+func execSyncSimpleCommandTokens(command string) (runnerWord string, script string, ok bool) {
+	tokens := splitOnSingleSpaces(command)
+	if len(tokens) != 2 {
+		return "", "", false
+	}
+	for _, token := range tokens {
+		if token == "" || strings.ContainsAny(token, execSyncUnsupportedShellTokenChars) {
+			return "", "", false
+		}
+	}
+	if !pythonSpellings[tokens[0]] {
+		return "", "", false
+	}
+	return tokens[0], tokens[1], true
+}
+
+// splitOnSingleSpaces is strings.Split(s, " ") under its own name — the
+// tokenizer's own stated rule ("tokenize it on single spaces") rather
+// than a general whitespace split, so a tab or a run of spaces inside
+// the string is left for the caller's per-token check to catch instead
+// of silently collapsing.
+func splitOnSingleSpaces(s string) []string {
+	return strings.Split(s, " ")
+}
+
+// execFileSyncOptionsOf reads the options object shared by execFileSync,
+// spawnSync, and execSync's own second argument: the `input` property
 // whose value is `JSON.stringify(<payload>)`, and the `encoding`
-// property whose word makes the result a string.
+// property whose word makes the result a string. execSync's own
+// command string carries no `input` — it reads only for the encoding
+// half there, and its payload comes from `child.stdin.write` instead
+// where a caller writes one.
 //
 // Answers the payload expression (nil where input is absent or is not a
 // stringify), whether the encoding admits a string result, and a
@@ -388,7 +1059,7 @@ func singleScriptArgvOf(argument *ast.Node) (string, bool) {
 func execFileSyncOptionsOf(argument *ast.Node) (*ast.Node, bool, string) {
 	options := Unwrapped(argument)
 	if options == nil || !ast.IsObjectLiteralExpression(options) {
-		return nil, false, "this call's execFileSync options are not written out as an object " +
+		return nil, false, "this call's options are not written out as an object " +
 			"literal, so the checker cannot see what crosses on stdin or whether the result " +
 			"is text — no edge is modeled here"
 	}
@@ -463,7 +1134,16 @@ func stringLiteralText(expression *ast.Node) (string, bool) {
 // where the leg is clean; an outcome (a decline sentence, or nothing at
 // all after a 7001 fired) where it is not.
 //
-// The premises, each a REAL check:
+// A recognized edge crosses on exactly one of two channels — stdin
+// (edge.Payload) or argv (edge.ArgvValue) — and the FIRST premise,
+// before any of the ones below, is that the crossing channel MEETS the
+// target's own stated surface: a call on one channel at a target whose
+// surface serves the other is a channel mismatch, declined by name
+// (checkArgvCrossing carries this for the argv leg; the mirror lives
+// here for the stdin leg).
+//
+// The stdin leg's own premises past the channel match, each a REAL
+// check:
 //
 //   - the artifact states an entry position for the payload to fit
 //     (no position, no crossing to judge);
@@ -483,6 +1163,23 @@ func stringLiteralText(expression *ast.Node) (string, bool) {
 func checkOutboundLeg(
 	ctx *FlowContext, env Env, edge *ForeignEdge, artifact *ForeignArtifact,
 ) *ForeignEdgeOutcome {
+	if edge.ArgvValue != nil {
+		// the crossing rides on argv, not stdin — a DIFFERENT inbound
+		// channel with its own premises (channel match, then the
+		// written-literal/parse/fit chain), never the stdin NaN/subset
+		// path below
+		return checkArgvCrossing(ctx, edge, artifact)
+	}
+	// the MIRROR channel mismatch: a call sending its value through
+	// `input: JSON.stringify(...)` at a target whose surface reads argv
+	// alone — symmetric with checkArgvCrossing's own channel check
+	if artifact.Surface == ForeignSurfaceArgvScalar {
+		return &ForeignEdgeOutcome{
+			Decline: "the call passes the value as JSON on stdin, but the target's fact serves an argv[" +
+				strconv.Itoa(artifact.ArgvIndex) + "] scalar — the channels do not meet",
+			DeclineNode: edge.Payload,
+		}
+	}
 	if len(artifact.Called.Entry) == 0 {
 		return &ForeignEdgeOutcome{
 			Decline: "the target " + artifact.Called.Name + " states no entry position, so " +
@@ -505,16 +1202,144 @@ func checkOutboundLeg(
 	crossing := evaluateExpression(ctx, env, edge.Payload)
 	// NaN-FREEDOM (§4): the premise the fixture's own comment names
 	if sentence := nanFreedomObstacle(crossing); sentence != "" {
-		ctx.Report(assignability.At(edge.Payload, 7001, foreignMessage(
+		ctx.Report(foreignRefutation(edge.Payload,
 			sentence+" — JSON.stringify writes NaN as null, so "+artifact.Called.Name+
 				" would receive a value this program never computed",
-			artifact)))
+			artifact))
 		return &ForeignEdgeOutcome{}
 	}
 	if entry.IsSequence {
 		return checkSequenceCrossing(ctx, edge, artifact, entry, crossing)
 	}
 	return checkScalarCrossing(ctx, edge, artifact, entry, crossing)
+}
+
+// checkArgvCrossing discharges the argv-scalar leg's own premises, in
+// order:
+//
+//   - CHANNEL MATCH: the target's surface must itself be argv-scalar at
+//     the modeled index — a call passing argv data at a target whose
+//     surface serves JSON on stdin (or names a different argv index) is
+//     a channel mismatch, declined by name, symmetric with the stdin
+//     leg's own "no JSON.stringify input" decline;
+//   - the value must be a WRITTEN STRING LITERAL (directly, or resolved
+//     through a const binding — the same follow scriptElementOf already
+//     performs for a script path) — anything else is recognized but
+//     unpinnable, since only a literal's parsed value can be computed
+//     without running Python;
+//   - the literal must PARSE as a Python float() — a parse failure is a
+//     fire at the call, not a decline: the value cannot arrive at all;
+//   - NaN-FREEDOM: "nan" parses to a real NaN under float() exactly as
+//     it does in JS, and the entry set — like every derived set — admits
+//     no NaN member, so a NaN literal fires through the same obstacle
+//     the stdin leg routes through;
+//   - the FIT: the parsed value's exact singleton inside the entry's
+//     stated set, asked of the kernel exactly as checkScalarCrossing
+//     asks it.
+func checkArgvCrossing(ctx *FlowContext, edge *ForeignEdge, artifact *ForeignArtifact) *ForeignEdgeOutcome {
+	if artifact.Surface != ForeignSurfaceArgvScalar {
+		return &ForeignEdgeOutcome{
+			Decline: "the call passes the value as argv[1], but the target's fact serves JSON on stdin — " +
+				"the channels do not meet",
+			DeclineNode: edge.ArgvValue,
+		}
+	}
+	if artifact.ArgvIndex != foreignArgvIndexModeled {
+		return &ForeignEdgeOutcome{
+			Decline: "the target " + artifact.Called.Name + " states its argv-scalar surface at index " +
+				strconv.Itoa(artifact.ArgvIndex) + ", and this call's data element sits at argv[" +
+				strconv.Itoa(foreignArgvIndexModeled) + "] — the channels do not meet",
+			DeclineNode: edge.ArgvValue,
+		}
+	}
+	if len(artifact.Called.Entry) != 1 {
+		return &ForeignEdgeOutcome{
+			Decline: "the target " + artifact.Called.Name + " states " +
+				strconv.Itoa(len(artifact.Called.Entry)) + " entry positions, and the argv-scalar " +
+				"surface hands it one value — the checker models no splitting of that value across positions",
+			DeclineNode: edge.Call,
+		}
+	}
+	entry := artifact.Called.Entry[0]
+	if entry.IsSequence {
+		return &ForeignEdgeOutcome{
+			Decline: "the target " + artifact.Called.Name + " admits a sequence at " + entry.Name +
+				", and an argv string carries one scalar — nothing says whether it fits",
+			DeclineNode: edge.ArgvValue,
+		}
+	}
+	literalText, isLiteral := argvLiteralTextOf(ctx, edge.ArgvValue)
+	if !isLiteral {
+		return &ForeignEdgeOutcome{
+			Decline: "the argv value is not a written string literal; its parsed value cannot be pinned",
+			DeclineNode: edge.ArgvValue,
+		}
+	}
+	parsed, parseErr := strconv.ParseFloat(literalText, 64)
+	if parseErr != nil {
+		ctx.Report(assignability.At(edge.ArgvValue, 7001,
+			"the argv value "+strconv.Quote(literalText)+" crossing to "+artifact.Called.Name+
+				" does not parse as a Python float() — the value cannot arrive"))
+		return &ForeignEdgeOutcome{}
+	}
+	// NaN-FREEDOM: the same obstacle the stdin leg routes through — a
+	// pinned NaN value, the third of the three shapes nanFreedomObstacle
+	// recognizes.
+	if parsedIsNaN(parsed) {
+		sentence := nanFreedomObstacle(abstractdomain.AbstractValue{Kind: abstractdomain.KindNaN})
+		ctx.Report(foreignRefutation(edge.ArgvValue,
+			sentence+" — the argv value "+strconv.Quote(literalText)+" parses as NaN, so "+
+				artifact.Called.Name+" would receive a value this program never computed",
+			artifact))
+		return &ForeignEdgeOutcome{}
+	}
+	crossingSet := refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{parsed}))
+	fits, asked := foreignScalarSubset(ctx, crossingSet, entry.Set)
+	if !asked {
+		return &ForeignEdgeOutcome{
+			Decline: "the kernel refused the question of whether the argv value crossing out fits " +
+				artifact.Called.Name + "'s stated " + foreignSetWords(entry.Set) + ", so the crossing is not judged",
+			DeclineNode: edge.ArgvValue,
+		}
+	}
+	if !fits {
+		ctx.Report(foreignRefutation(edge.ArgvValue,
+			"the argv value crossing to "+artifact.Called.Name+" is "+foreignSetWords(crossingSet)+
+				", and the target admits "+foreignSetWords(entry.Set)+
+				" — the value can escape what the target states it accepts",
+			artifact))
+		return &ForeignEdgeOutcome{}
+	}
+	return nil
+}
+
+// argvLiteralTextOf reads an argv element as a written string literal's
+// own text — directly, or through a const binding's initializer
+// (resolvedConstStringLiteral, the same follow scriptElementOf already
+// performs for a script path).
+func argvLiteralTextOf(ctx *FlowContext, element *ast.Node) (string, bool) {
+	node := Unwrapped(element)
+	if node == nil {
+		return "", false
+	}
+	if text, ok := stringLiteralText(node); ok {
+		return text, true
+	}
+	if ast.IsIdentifier(node) {
+		if text, ok := resolvedConstStringLiteral(ctx, node); ok {
+			return text, true
+		}
+	}
+	return "", false
+}
+
+// parsedIsNaN is whether a Go strconv.ParseFloat result is NaN — Python's
+// float() accepts the "nan" spelling (case-insensitively, optionally
+// signed) exactly where Go's parser does, so a value that reaches here
+// through strconv.ParseFloat succeeding is NaN under both languages'
+// readings at once.
+func parsedIsNaN(v float64) bool {
+	return v != v
 }
 
 // nanFreedomObstacle answers the sentence naming why a value may carry
@@ -574,22 +1399,22 @@ func checkSequenceCrossing(
 		}
 	}
 	if !fits {
-		ctx.Report(assignability.At(edge.Payload, 7001, foreignMessage(
+		ctx.Report(foreignRefutation(edge.Payload,
 			"the elements crossing to "+artifact.Called.Name+" are "+
 				foreignSetWords(window.Element)+", and the target admits "+
 				foreignSetWords(entry.Element)+
 				" — the value can escape what the target states it accepts",
-			artifact)))
+			artifact))
 		return &ForeignEdgeOutcome{}
 	}
 	// the LENGTH floor: the target's body relies on it (a division by
 	// len, an indexed read), so a shorter sequence is a different program
 	if window.Lo < entry.LengthAtLeast {
-		ctx.Report(assignability.At(edge.Payload, 7001, foreignMessage(
+		ctx.Report(foreignRefutation(edge.Payload,
 			"the sequence crossing to "+artifact.Called.Name+" holds at least "+
 				strconv.Itoa(window.Lo)+" elements, and the target relies on at least "+
 				strconv.Itoa(entry.LengthAtLeast),
-			artifact)))
+			artifact))
 		return &ForeignEdgeOutcome{}
 	}
 	return nil
@@ -621,12 +1446,12 @@ func checkScalarCrossing(
 		}
 	}
 	if !fits {
-		ctx.Report(assignability.At(edge.Payload, 7001, foreignMessage(
+		ctx.Report(foreignRefutation(edge.Payload,
 			"the value crossing to "+artifact.Called.Name+" is "+
 				foreignSetWords(crossingSet)+", and the target admits "+
 				foreignSetWords(entry.Set)+
 				" — the value can escape what the target states it accepts",
-			artifact)))
+			artifact))
 		return &ForeignEdgeOutcome{}
 	}
 	return nil
@@ -650,16 +1475,30 @@ func foreignScalarSubset(
 	return ctx.Kernel.ScalarSubset(a, b), true
 }
 
-// foreignMessage appends the target's own provenance to a crossing
-// refutation — the second step of the two-language explanation, in the
-// message-text form. See ForeignProvenance.ProvenanceSentence for the
-// named relatedInformation work item this stands in for.
-func foreignMessage(said string, artifact *ForeignArtifact) string {
-	provenance := artifact.Called.Provenance.ProvenanceSentence()
-	if provenance == "" {
-		return said
+// foreignRefutation builds a 7001 at node, carrying the target's own
+// provenance as a related step in the Python file rather than
+// concatenated into the message text — the second step of the
+// two-language explanation, at the shape RefinementDiagnostic.Steps
+// renders (assignability/refinement_diagnostics.go, ls/refinedts_
+// diagnostics.go's AddRelatedInfo). said is the whole message on its
+// own; the provenance step is additive, never folded into it.
+//
+// The step's file/text/offset all come from ForeignProvenance, filled
+// once in foreign_edge_artifact.go from the SAME bytes checkTargetIntegrity
+// already read — nothing here reads the target file again. A
+// provenance with no line (Length == 0: absent, or the artifact's line
+// and the target's current text have drifted) still names the file:
+// StepInForeignFile's own empty-text degrade pins the step to the
+// file's head rather than dropping it.
+func foreignRefutation(node *ast.Node, said string, artifact *ForeignArtifact) assignability.RefinementDiagnostic {
+	finding := assignability.At(node, 7001, said)
+	provenance := artifact.Called.Provenance
+	if provenance.File == "" {
+		return finding
 	}
-	return said + ". " + provenance
+	return finding.WithSteps(assignability.StepInForeignFile(
+		provenance.File, provenance.Text, provenance.Start, provenance.Length, provenance.Said,
+	))
 }
 
 /* ── the return leg ──────────────────────────────────────────────── */
@@ -743,7 +1582,12 @@ func foreignParseCallsIn(node *ast.Node, name string, found **ast.Node, count *i
 	visit(node)
 }
 
-// isForeignParseOf is whether a node is exactly `JSON.parse(<name>)`.
+// isForeignParseOf is whether a node is exactly `JSON.parse(<name>)` or
+// `JSON.parse(<name>.stdout)` — execFileSync's bound name IS the stdout
+// string, so the bare identifier is the read; spawnSync's bound name is
+// the whole result object, so its stdout string sits at `.stdout`. Both
+// read the SAME binding for the write-check in soleParseConsumerOf
+// (AssignedNamesDirect keys on the plain name either way).
 func isForeignParseOf(node *ast.Node, name string) bool {
 	if node == nil || !ast.IsCallExpression(node) {
 		return false
@@ -761,6 +1605,25 @@ func isForeignParseOf(node *ast.Node, name string) bool {
 	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
 		return false
 	}
-	argument := Unwrapped(call.Arguments.Nodes[0])
-	return argument != nil && ast.IsIdentifier(argument) && argument.Text() == name
+	return isForeignParseArgumentOf(call.Arguments.Nodes[0], name)
+}
+
+// isForeignParseArgumentOf is whether a parse's one argument reads the
+// bound name's stdout: the bare identifier (execFileSync/execSync), or
+// `<name>.stdout` (spawnSync's result object).
+func isForeignParseArgumentOf(argument *ast.Node, name string) bool {
+	node := Unwrapped(argument)
+	if node == nil {
+		return false
+	}
+	if ast.IsIdentifier(node) {
+		return node.Text() == name
+	}
+	if ast.IsPropertyAccessExpression(node) {
+		access := node.AsPropertyAccessExpression()
+		receiver := Unwrapped(access.Expression)
+		return access.QuestionDotToken == nil && receiver != nil && ast.IsIdentifier(receiver) &&
+			receiver.Text() == name && ast.IsIdentifier(access.Name()) && access.Name().Text() == "stdout"
+	}
+	return false
 }

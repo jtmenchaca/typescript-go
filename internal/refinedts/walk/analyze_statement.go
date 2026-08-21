@@ -136,6 +136,13 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 			if outcome.Override != nil {
 				foreignOverride, foreignOverrideAt = outcome.Override, outcome.OverrideStatement
 			}
+			// consumer-index prerequisite (docs/one-checker/lsp-coordinator.md
+			// build plan item 3): every edge this walk recognized — fired,
+			// declined, or served — names a foreign target this check
+			// consumed, read back through service.CheckResult.ConsumedForeignTargets.
+			if running.ConsumedForeignSink != nil && outcome.TargetPath != "" {
+				*running.ConsumedForeignSink = append(*running.ConsumedForeignSink, outcome.TargetPath)
+			}
 		}
 		if index == foreignOverrideAt && foreignOverride != nil {
 			pinning := *running
