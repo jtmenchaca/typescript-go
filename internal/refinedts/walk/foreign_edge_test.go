@@ -398,6 +398,71 @@ func foreignOutboundFixture(t *testing.T, lo float64, hi float64, atLeast int) f
 	}
 }
 
+// foreignLiteralArrayOutboundFixture is the array-LITERAL counterpart of
+// foreignOutboundFixture: the payload identifier reads `samples`'s bare
+// array literal — declared either at MODULE scope (declareSamplesInModule
+// true, d-data-legs.ts's own shape), where the identifier resolves through
+// evaluateExpression's env.Get miss into UntrackedIdentifier's module-const
+// follow, or inside the function body one statement above the call, where
+// the const's own preceding statement is walked first (AnalyzeVariableStatement)
+// so env carries exactly the binding an ordinary function-local const
+// leaves behind — the ordinary env.Get hit, never the module-const follow.
+// audio_level.py's own entry (−2 … 2, lengthAtLeast 1) is the target
+// throughout — the payload literal's own values decide whether the
+// crossing fits, not the fixture itself.
+func foreignLiteralArrayOutboundFixture(
+	t *testing.T, samplesLiteral string, declareSamplesInModule bool,
+) foreignEdgeFixture {
+	t.Helper()
+	targetPath, contentHash := writeForeignTarget(t)
+	writeForeignArtifact(t, targetPath, foreignArtifactJSON(contentHash, targetPath, true))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	var source string
+	var callStatementIndex int
+	if declareSamplesInModule {
+		source = "const samples = " + samplesLiteral + ";\n" +
+			"function f() {\n" +
+			"	samples;\n" +
+			"}\n"
+		callStatementIndex = 0
+	} else {
+		source = "function f() {\n" +
+			"	const samples = " + samplesLiteral + ";\n" +
+			"	samples;\n" +
+			"}\n"
+		callStatementIndex = 1
+	}
+	p := entryEnvTestProgram(t, source)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	payload := statements[callStatementIndex].AsExpressionStatement().Expression
+	var reported []assignability.RefinementDiagnostic
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report:    func(d assignability.RefinementDiagnostic) { reported = append(reported, d) },
+	}
+	env := NewEnv()
+	if !declareSamplesInModule {
+		// the ordinary local-binding path: `samples`'s own preceding const
+		// statement is walked for real, so env holds exactly what an
+		// ordinary function-local const leaves behind — no synthetic seed
+		AnalyzeVariableStatement(ctx, env, statements[0])
+	}
+	return foreignEdgeFixture{
+		artifact: artifact,
+		ctx:      ctx,
+		env:      env,
+		edge:     &ForeignEdge{Call: payload, TargetPath: targetPath, Payload: payload, StdoutName: "stdout"},
+		reported: &reported,
+	}
+}
+
 func TestCheckOutboundLeg_AValueInsideTheStatedEntryPassesEveryPremise(t *testing.T) {
 	// -2 … 2, at least one element: exactly what the artifact admits
 	fixture := foreignOutboundFixture(t, -2, 2, 1)
@@ -492,6 +557,166 @@ func TestCheckOutboundLeg_APossiblyNaNCrossingFiresNamingTheStringifyBehaviour(t
 	}
 	if !strings.Contains((*fixture.reported)[0].MessageText, "null") {
 		t.Errorf("the message %q does not say what stringify does to NaN", (*fixture.reported)[0].MessageText)
+	}
+}
+
+/* ── a module-level (and function-local) const array LITERAL payload ── */
+
+// TestCheckOutboundLeg_AModuleLevelConstArrayLiteralPayloadPassesEveryPremise
+// pins d-data-legs.ts's own jsonStdinCapturedStdoutRecognized shape: `const
+// samples = [0.5, -0.3, 0.2];` at MODULE scope, read as the payload inside
+// a function that never itself declares `samples` — the identifier
+// resolves through UntrackedIdentifier's module-const follow to
+// EvaluateArrayLiteral's flat KindValues{PrimitiveArray} reading, and
+// checkSequenceCrossing's own sequenceCrossingOfExactTuple converts that
+// tuple to the same Repetition-shaped window a declared `number[]`
+// parameter wears. Every element (0.5, −0.3, 0.2) sits inside audio_level's
+// stated −2 … 2, and the length (3) clears its lengthAtLeast (1): the
+// crossing passes with no diagnostic.
+func TestCheckOutboundLeg_AModuleLevelConstArrayLiteralPayloadPassesEveryPremise(t *testing.T) {
+	fixture := foreignLiteralArrayOutboundFixture(t, "[0.5, -0.3, 0.2]", true)
+	if outcome := checkOutboundLeg(fixture.ctx, fixture.env, fixture.edge, fixture.artifact); outcome != nil {
+		t.Fatalf("a module-level const array literal inside the stated entry did not pass: %+v", outcome)
+	}
+	if len(*fixture.reported) != 0 {
+		t.Errorf("a fitting module-level literal crossing reported %d diagnostics: %+v", len(*fixture.reported), *fixture.reported)
+	}
+}
+
+// TestCheckOutboundLeg_AFunctionLocalConstArrayLiteralPayloadPassesEveryPremise
+// is the function-local mirror: the SAME literal, one statement above the
+// call inside the function body rather than at module scope. The payload
+// identifier now resolves through env.Get directly (the ordinary tracked
+// local-binding path, never UntrackedIdentifier's module-const follow) —
+// evaluateExpression still reads it through EvaluateArrayLiteral's flat
+// reading either way, so both routes converge on the same
+// KindValues{PrimitiveArray} tuple and the same converted crossing.
+func TestCheckOutboundLeg_AFunctionLocalConstArrayLiteralPayloadPassesEveryPremise(t *testing.T) {
+	fixture := foreignLiteralArrayOutboundFixture(t, "[0.5, -0.3, 0.2]", false)
+	if outcome := checkOutboundLeg(fixture.ctx, fixture.env, fixture.edge, fixture.artifact); outcome != nil {
+		t.Fatalf("a function-local const array literal inside the stated entry did not pass: %+v", outcome)
+	}
+	if len(*fixture.reported) != 0 {
+		t.Errorf("a fitting function-local literal crossing reported %d diagnostics: %+v", len(*fixture.reported), *fixture.reported)
+	}
+}
+
+// TestCheckOutboundLeg_AModuleLevelConstArrayLiteralOutsideTheEntryFires
+// pins the fit-failure side of the same conversion: a module-level const
+// array literal whose own elements sit outside audio_level's stated
+// −2 … 2 still fires 7001 at the call — the conversion feeds the same
+// element-fit and length-floor premises checkSequenceCrossing always
+// asked, it does not skip them.
+func TestCheckOutboundLeg_AModuleLevelConstArrayLiteralOutsideTheEntryFires(t *testing.T) {
+	fixture := foreignLiteralArrayOutboundFixture(t, "[4, -0.3, 0.2]", true)
+	outcome := checkOutboundLeg(fixture.ctx, fixture.env, fixture.edge, fixture.artifact)
+	if outcome == nil {
+		t.Fatalf("a module-level literal crossing outside the stated entry passed")
+	}
+	if outcome.Decline != "" {
+		t.Fatalf("a crossing outside the stated entry DECLINED (%q); a fit failure is a refutation", outcome.Decline)
+	}
+	if len(*fixture.reported) != 1 || (*fixture.reported)[0].Code != 7001 {
+		t.Fatalf("want exactly one 7001 for the element fit: %+v", *fixture.reported)
+	}
+}
+
+// TestCheckOutboundLeg_ALetBoundModuleArrayLiteralPayloadStaysUndetermined
+// pins the const-only gate UntrackedIdentifier's own module-const follow
+// already carries (untracked_identifier.go: `(d.Parent.Flags&ast.NodeFlagsConst)
+// != 0`): a MODULE-LEVEL `let samples = [...]` the rest of the module could
+// rewrite never reaches the follow, so the identifier reads through its
+// DECLARED type instead — a sequence whose elements are unbounded numbers,
+// which admit NaN. That reading derives a real stringify hazard, so the
+// NaN-freedom premise fires the refutation and the outcome carries no
+// override and no decline sentence of its own.
+func TestCheckOutboundLeg_ALetBoundModuleArrayReadsByTypeAndFiresNaNFreedom(t *testing.T) {
+	targetPath, contentHash := writeForeignTarget(t)
+	writeForeignArtifact(t, targetPath, foreignArtifactJSON(contentHash, targetPath, true))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	p := entryEnvTestProgram(t, "let samples = [0.5, -0.3, 0.2];\n"+
+		"function f() {\n"+
+		"	samples;\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	payload := statements[0].AsExpressionStatement().Expression
+	var reported []assignability.RefinementDiagnostic
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report: func(d assignability.RefinementDiagnostic) {
+			reported = append(reported, d)
+		},
+	}
+	edge := &ForeignEdge{Call: payload, TargetPath: targetPath, Payload: payload, StdoutName: "stdout"}
+	outcome := checkOutboundLeg(ctx, NewEnv(), edge, artifact)
+	if outcome == nil {
+		t.Fatalf("a let-bound module array literal passed with no outcome at all")
+	}
+	if outcome.Decline != "" || outcome.Override != nil {
+		t.Fatalf("expected the NaN-freedom fire's empty outcome, got %+v", outcome)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("expected exactly one NaN-freedom refutation, got %d", len(reported))
+	}
+	if !strings.Contains(reported[0].MessageText, "JSON.stringify writes NaN as null") {
+		t.Errorf("the refutation does not name the stringify behaviour: %q", reported[0].MessageText)
+	}
+}
+
+// TestCheckOutboundLeg_AModuleConstArrayWithANonLiteralElementFiresNaNFreedom
+// pins the other edge of the exact shape: a module-level const array
+// literal with ONE non-literal element (`gain`, a declared number) never
+// reaches EvaluateArrayLiteral's flat path — flat requires every item to
+// be a single-number KindValues (array_literal.go) — so
+// sequenceCrossingOfExactTuple's gate never fires and the reading falls
+// to a sequence whose elements admit NaN (the declared `number` carries
+// the possibly-NaN wrapper). That derives the same stringify hazard, so
+// the NaN-freedom premise fires rather than serving or declining.
+func TestCheckOutboundLeg_AModuleConstArrayWithANonLiteralElementFiresNaNFreedom(t *testing.T) {
+	targetPath, contentHash := writeForeignTarget(t)
+	writeForeignArtifact(t, targetPath, foreignArtifactJSON(contentHash, targetPath, true))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	p := entryEnvTestProgram(t, "declare const gain: number;\n"+
+		"const samples = [gain, -0.3, 0.2];\n"+
+		"function f() {\n"+
+		"	samples;\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	payload := statements[0].AsExpressionStatement().Expression
+	var reported []assignability.RefinementDiagnostic
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report: func(d assignability.RefinementDiagnostic) {
+			reported = append(reported, d)
+		},
+	}
+	edge := &ForeignEdge{Call: payload, TargetPath: targetPath, Payload: payload, StdoutName: "stdout"}
+	outcome := checkOutboundLeg(ctx, NewEnv(), edge, artifact)
+	if outcome == nil {
+		t.Fatalf("a module const array with a non-literal element passed with no outcome at all")
+	}
+	if outcome.Decline != "" || outcome.Override != nil {
+		t.Fatalf("expected the NaN-freedom fire's empty outcome, got %+v", outcome)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("expected exactly one NaN-freedom refutation, got %d", len(reported))
+	}
+	if !strings.Contains(reported[0].MessageText, "JSON.stringify writes NaN as null") {
+		t.Errorf("the refutation does not name the stringify behaviour: %q", reported[0].MessageText)
 	}
 }
 

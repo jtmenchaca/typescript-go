@@ -1,5 +1,10 @@
 // The @refinedts-expect-error reader — ONE recognizer for every
-// consumer. A marker declares that a line is EXPECTED to fire: a
+// consumer. A marker is recognized only when @refinedts-expect-error
+// is the first word of a comment's content, immediately after `//` or
+// `/*` (whitespace only in between) — the same discipline markers.rs
+// applies to `# refinedpy: expect-error`. The token appearing
+// mid-sentence in prose, even inside a real comment, is never a
+// marker. A marker declares that a line is EXPECTED to fire: a
 // standalone comment line covers the next line that is not itself a
 // comment-only line — comment lines between the marker and the code
 // are skipped, matching markers.rs — a trailing comment covers its
@@ -18,8 +23,9 @@
 //	surfaces each stale marker as its own 7005 diagnostic — tsc's
 //	expect-error semantics, in the refinement layer.
 //
-// Ported 1:1 from service/expect_error.ts, with the comment-skip and
-// reason capture adopted from markers.rs for marker-grammar parity.
+// Ported from service/expect_error.ts, with the comment-skip, reason
+// capture, and marker-comment-only recognition adopted from
+// markers.rs for marker-grammar parity.
 package service
 
 import (
@@ -34,7 +40,17 @@ import (
 
 const expectErrorMarker = "@refinedts-expect-error"
 
-var expectErrorLinePattern = regexp.MustCompile(`(^|\s)(//|/\*|\*)?[^\n]*@refinedts-expect-error(?:\s+(\d+))?(.*)$`)
+// expectErrorLinePattern recognizes a marker ONLY when
+// @refinedts-expect-error is the first word of a comment's content —
+// immediately after `//` or `/*`, optionally with spaces/tabs between
+// (never other characters, so prose before the token never matches
+// even inside a real comment). This mirrors markers.rs's own
+// discipline: the token must open the comment, not merely appear
+// somewhere inside one. A `*`-continuation line of a block comment
+// (no `//` or `/*` of its own) is never a comment opener, so a
+// multi-line doc header that mentions the token mid-prose on such a
+// line is never read as a marker.
+var expectErrorLinePattern = regexp.MustCompile(`(^|\s)(//|/\*)[ \t]*@refinedts-expect-error(?:\s+(\d+))?(.*)$`)
 var commentStartPattern = regexp.MustCompile(`//|/\*`)
 var commentOnlyLinePattern = regexp.MustCompile(`^\s*//`)
 var reasonSeparatorPattern = regexp.MustCompile(`^[\s—-]+`)

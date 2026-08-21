@@ -203,6 +203,47 @@ func TestStandaloneMarkerSkipsCommentLines(t *testing.T) {
 	}
 }
 
+// TestProseMentionOfTheTokenIsNotAMarker: the measured defect. A
+// marker is recognized only when @refinedts-expect-error is the first
+// word of a comment's content, immediately after `//` or `/*` — never
+// merely present somewhere inside a comment. Both measured
+// false-positive shapes (docs/one-checker/marker-parity.md's first
+// divergence row) are pinned here: a JSDoc header whose `*`-
+// continuation line mentions the token mid-prose (the exact shape in
+// language/edge-coverage/b-runners.ts and its three siblings), and a
+// `//` line comment with prose before the token.
+func TestProseMentionOfTheTokenIsNotAMarker(t *testing.T) {
+	testCases := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "JSDoc block header mentioning the token mid-prose on a continuation line",
+			text: "/**\n" +
+				" * ONE-CHECKER.md the runner-word leg.\n" +
+				" *\n" +
+				" * An undetermined row also carries no marker —\n" +
+				" * @refinedts-expect-error never matches RTS7002 — so the row is a\n" +
+				" * bare unmarked call whose comment names the first blocking construct.\n" +
+				" */\n" +
+				"bad();\n",
+		},
+		{
+			name: "a line comment with prose before the token",
+			text: "// see @refinedts-expect-error for details\n" +
+				"bad();\n",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			read := ExpectationsOf(testCase.text)
+			if len(read) != 0 {
+				t.Fatalf("expected no expectations from prose mentioning the token, got %+v", read)
+			}
+		})
+	}
+}
+
 // TestReasonTextCapturedAndPrintedWhenStale: text after the marker
 // (and its optional code) is the reason, ported from markers.rs's own
 // reason capture — read here, and surfaced in the 7005 sentence when

@@ -127,9 +127,25 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 		if index < walked {
 			continue
 		}
-		// a recognized cross-language call: its premises are discharged
-		// here, where the environment still holds what crosses out
-		if outcome, isEdge := ForeignEdgeAt(running, env, statements, index); isEdge {
+		// the spawn (async) return leg: recognized separately from every
+		// OTHER cross-language shape, because serving it means WALKING two
+		// callback bodies (spawn_callback_serve.go) rather than pinning one
+		// override on a statement the ordinary walk already reaches. Tried
+		// BEFORE ForeignEdgeAt at the same statement so a served pair
+		// reports once, through this route's own sentence, rather than
+		// twice (ForeignEdgeAt's own spawn recognizer still declines
+		// internally — see foreign_edge.go's spawnAsyncEdgeOf — so running
+		// both would double-report the same construct).
+		if spawnOutcome, isSpawn := ServeSpawnReturnLeg(running, env, statements, index); isSpawn {
+			if spawnOutcome.Decline != "" && spawnOutcome.DeclineNode != nil {
+				running.Report(assignability.At(spawnOutcome.DeclineNode, 7002, spawnOutcome.Decline))
+			}
+			if running.ConsumedForeignSink != nil && spawnOutcome.TargetPath != "" {
+				*running.ConsumedForeignSink = append(*running.ConsumedForeignSink, spawnOutcome.TargetPath)
+			}
+		} else if outcome, isEdge := ForeignEdgeAt(running, env, statements, index); isEdge {
+			// a recognized cross-language call: its premises are discharged
+			// here, where the environment still holds what crosses out
 			if outcome.Decline != "" && outcome.DeclineNode != nil {
 				running.Report(assignability.At(outcome.DeclineNode, 7002, outcome.Decline))
 			}

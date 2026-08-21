@@ -1200,7 +1200,12 @@ func checkOutboundLeg(
 	}
 	entry := artifact.Called.Entry[0]
 	crossing := evaluateExpression(ctx, env, edge.Payload)
-	// NaN-FREEDOM (§4): the premise the fixture's own comment names
+	// NaN-FREEDOM (§4): the premise the fixture's own comment names.
+	// This runs BEFORE the shape gates because the obstacle only speaks
+	// for readings that DERIVE a NaN path — a pinned NaN, the
+	// possibly-NaN wrapper, or a sequence reading whose elements admit
+	// NaN — and each of those is a real stringify hazard regardless of
+	// which entry shape receives it.
 	if sentence := nanFreedomObstacle(crossing); sentence != "" {
 		ctx.Report(foreignRefutation(edge.Payload,
 			sentence+" — JSON.stringify writes NaN as null, so "+artifact.Called.Name+
@@ -1370,6 +1375,26 @@ func checkSequenceCrossing(
 	ctx *FlowContext, edge *ForeignEdge, artifact *ForeignArtifact,
 	entry ForeignEntry, crossing abstractdomain.AbstractValue,
 ) *ForeignEdgeOutcome {
+	// a MODULE-LEVEL const array literal (`const samples = [0.5, -0.3,
+	// 0.2]`) evaluates through EvaluateArrayLiteral's own flat path to a
+	// bare KindValues{PrimitiveArray} tuple — never a KindSet, since
+	// KindSet is what a DECLARED `number[]` parameter wears
+	// (typereading's StarOfElement/Repetition seeding), not what a
+	// literal's own values evaluate to. The fixture's own row
+	// (d-data-legs.ts's jsonStdinCapturedStdoutRecognized) reads exactly
+	// this shape, whether `samples` is declared at module scope or
+	// inside the function — the value crossing out is the same tuple
+	// either way. sequenceCrossingOfExactTuple rebuilds the same
+	// Repetition-shaped window a declared array wears, so this gate and
+	// everything past it read an exact literal identically to a
+	// declared one; a shape it cannot convert (a non-literal element, a
+	// literal join with a mutated value) falls through to the existing
+	// decline unchanged.
+	if crossing.Kind == abstractdomain.KindValues && crossing.KindTag == abstractdomain.PrimitiveArray {
+		if converted, ok := sequenceCrossingOfExactTuple(crossing); ok {
+			crossing = converted
+		}
+	}
 	if crossing.Kind != abstractdomain.KindSet || crossing.SetKindTag != abstractdomain.SetKindTagNone {
 		return &ForeignEdgeOutcome{
 			Decline: "the target " + artifact.Called.Name + " admits a sequence at " +
@@ -1418,6 +1443,39 @@ func checkSequenceCrossing(
 		return &ForeignEdgeOutcome{}
 	}
 	return nil
+}
+
+// sequenceCrossingOfExactTuple rebuilds an exact KindValues{PrimitiveArray}
+// tuple as the Repetition-shaped KindSet a declared `number[]` parameter
+// already wears: the union of the tuple's own values as the element,
+// repeated exactly len(values) times. This is the array-literal twin of
+// SetOfKnown's tuple-concatenation reading (lattice_operations.go) — that
+// reading builds an exact CONCATENATION of singletons for the scalar-fit
+// question checkScalarCrossing asks; this one builds the COUNTED-REPEAT
+// window checkSequenceCrossing asks instead, since a sequence entry's own
+// premises (the element fit, the length floor) are stated over a
+// Repetition, not a concatenation.
+//
+// Answers ok=false for the one shape Repetition itself cannot spell back
+// through AsRepetition: an exactly-one-element tuple, where Repetition's
+// own lo=1/hi=1 special case collapses to the bare scalar element with no
+// repeat wrapper (repetition_window_forms.go's own doc names this
+// collapse) — that tuple stays undetermined with the ordinary "not read
+// as one here" sentence, the same as any other shape this reader cannot
+// convert, rather than silently misreading a 1-element array as a scalar.
+func sequenceCrossingOfExactTuple(crossing abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
+	if len(crossing.Values) == 0 {
+		return abstractdomain.AbstractValue{}, false
+	}
+	element := refinementsets.MakeRefinedSet(refinementsets.OneOf(crossing.Values))
+	n := len(crossing.Values)
+	window := refinementsets.Repetition(element, n, &n)
+	if _, ok := refinementsets.AsRepetition(window); !ok {
+		return abstractdomain.AbstractValue{}, false
+	}
+	return abstractdomain.KnownSet(
+		window, nil, abstractdomain.TrustLevelOf(crossing), abstractdomain.SetKindTagNone,
+	), true
 }
 
 // checkScalarCrossing judges a scalar payload against a scalar entry —
