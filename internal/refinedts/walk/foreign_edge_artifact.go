@@ -40,6 +40,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,8 +51,16 @@ import (
 )
 
 // ForeignArtifactSuffix is what the producer appends to the target's
-// own path: `audio_level.py` exports `audio_level.py.refined.json`.
+// path under the project cache: `audio_level.py` caches as
+// `.refined/cache/<relpath>/audio_level.py.refined.json`.
 const ForeignArtifactSuffix = ".refined.json"
+
+// ForeignCacheDir is the project-rooted cache both checkers share —
+// gitignored, one entry per target, overwritten in place. The content
+// hash INSIDE the artifact is the identity; the path only says where
+// to look. A sidecar written with `--export-fact -o` is internal
+// tooling, never consulted here.
+var ForeignCacheDir = filepath.Join(".refined", "cache")
 
 // ForeignArtifactKind and ForeignArtifactVersion are the envelope this
 // consumer admits. A different kind or version is a decline, never a
@@ -145,13 +155,16 @@ var (
 	foreignArtifacts   = map[string]foreignArtifactRow{}
 )
 
-// ReadForeignArtifact resolves and reads `<targetPath>.refined.json`,
-// checks every premise this file owns, and answers the harness-called
-// function's fact — or ("", one sentence) saying which premise broke.
+// ReadForeignArtifact resolves the target's project-cache entry,
+// filling it through the resolved producer when it is missing or
+// stale, checks every premise this file owns, and answers the
+// harness-called function's fact — or ("", one sentence) saying which
+// premise broke.
 //
 // The premises discharged HERE, each a real check and none assumed:
 //
-//   - the artifact EXISTS beside the target (missing names the file and
+//   - the artifact EXISTS in the cache (a miss auto-exports when a
+//     producer resolves; otherwise the sentence names the file and
 //     the command that writes it);
 //   - the envelope is this kind and this version;
 //   - TARGET INTEGRITY (§5): sha256 of the .py file's ACTUAL BYTES
@@ -179,10 +192,83 @@ func ReadForeignArtifact(targetPath string) (*ForeignArtifact, string) {
 	return artifact, sentence
 }
 
-// readForeignArtifactUncached is the read itself — every premise
-// checked, no memo consulted.
+// readForeignArtifactUncached fills the cache when it can and reads
+// it — every premise checked, no memo consulted. A missing or failed
+// artifact triggers ONE export attempt through the resolved producer
+// (REFINEDPY_CHECK, then PATH); when no producer resolves, the
+// sentence names the file and the command, exactly as before.
 func readForeignArtifactUncached(targetPath string) (*ForeignArtifact, string) {
-	artifactPath := targetPath + ForeignArtifactSuffix
+	artifactPath := foreignCacheArtifactPath(targetPath)
+	artifact, sentence := readAndVerifyForeignArtifact(targetPath, artifactPath)
+	if sentence == "" {
+		return artifact, ""
+	}
+	if exportSentence := exportForeignArtifact(targetPath, artifactPath); exportSentence != "" {
+		return nil, sentence + " (auto-export declined: " + exportSentence + ")"
+	}
+	return readAndVerifyForeignArtifact(targetPath, artifactPath)
+}
+
+// foreignCacheArtifactPath resolves the target's cache entry: the
+// nearest ancestor holding `.git` is the project root (the target's
+// own directory when none is found), and the entry mirrors the
+// target's path relative to that root.
+func foreignCacheArtifactPath(targetPath string) string {
+	abs, err := filepath.Abs(targetPath)
+	if err != nil {
+		return targetPath + ForeignArtifactSuffix
+	}
+	root := filepath.Dir(abs)
+	for dir := filepath.Dir(abs); ; {
+		if _, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil {
+			root = dir
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		rel = filepath.Base(abs)
+	}
+	return filepath.Join(root, ForeignCacheDir, rel+ForeignArtifactSuffix)
+}
+
+// exportForeignArtifact runs the resolved producer into the cache
+// entry, answering "" on success and one sentence naming what stopped
+// it. Resolution: the REFINEDPY_CHECK environment variable, then
+// `refinedpy-check` on PATH.
+func exportForeignArtifact(targetPath string, artifactPath string) string {
+	producer := os.Getenv("REFINEDPY_CHECK")
+	if producer == "" {
+		found, err := exec.LookPath("refinedpy-check")
+		if err != nil {
+			return "refinedpy-check is not on PATH and REFINEDPY_CHECK is unset"
+		}
+		producer = found
+	}
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		return "the cache directory could not be created: " + err.Error()
+	}
+	command := exec.Command(producer, "--export-fact", targetPath, "-o", artifactPath)
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return "the export run failed: " + message
+	}
+	return ""
+}
+
+// readAndVerifyForeignArtifact is the read itself — every premise
+// checked against the given cache entry.
+func readAndVerifyForeignArtifact(targetPath string, artifactPath string) (*ForeignArtifact, string) {
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
 		return nil, "the Python target " + targetPath + " states no fact for this edge — " +

@@ -83,12 +83,19 @@ func foreignArtifactJSON(contentHash string, targetFile string, stdoutPure bool)
 }`
 }
 
-// writeForeignArtifact drops an artifact text beside a target and clears
-// the read memo, so each case reads its own file rather than a previous
-// case's answer.
+// writeForeignArtifact drops an artifact text at the target's cache
+// entry and clears the read memo, so each case reads its own file
+// rather than a previous case's answer. Every test also pins the
+// producer resolution to a dead path, so a developer's PATH cannot
+// turn a missing-artifact case into a live export.
 func writeForeignArtifact(t *testing.T, targetPath string, text string) {
 	t.Helper()
-	if err := os.WriteFile(targetPath+ForeignArtifactSuffix, []byte(text), 0o644); err != nil {
+	t.Setenv("REFINEDPY_CHECK", "/nonexistent/refinedpy-check")
+	artifactPath := foreignCacheArtifactPath(targetPath)
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("creating the cache directory: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte(text), 0o644); err != nil {
 		t.Fatalf("writing the artifact: %v", err)
 	}
 	forgetForeignArtifact(targetPath)
@@ -139,14 +146,15 @@ func TestReadForeignArtifact_AWellFormedArtifactAnswersTheCalledFunctionsFact(t 
 
 func TestReadForeignArtifact_AMissingArtifactNamesTheFileAndTheCommandThatWritesIt(t *testing.T) {
 	targetPath, _ := writeForeignTarget(t)
+	t.Setenv("REFINEDPY_CHECK", "/nonexistent/refinedpy-check")
 	forgetForeignArtifact(targetPath)
 
 	artifact, sentence := ReadForeignArtifact(targetPath)
 	if artifact != nil {
 		t.Fatalf("a missing artifact answered a fact: %+v", artifact)
 	}
-	if !strings.Contains(sentence, targetPath+ForeignArtifactSuffix) {
-		t.Errorf("the sentence %q does not name the file that is missing", sentence)
+	if !strings.Contains(sentence, foreignCacheArtifactPath(targetPath)) {
+		t.Errorf("the sentence %q does not name the cache entry that is missing", sentence)
 	}
 	if !strings.Contains(sentence, ForeignExportCommand) {
 		t.Errorf("the sentence %q does not name the command that writes it — a missing fact is a work-queue item, not a silence", sentence)
