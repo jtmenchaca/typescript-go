@@ -109,6 +109,138 @@ func TestCheckWithProgramSuppressesCoveredFire(t *testing.T) {
 	}
 }
 
+// TestCheckWithProgramCodeLessMarkerNeverSwallowsRTS7002: the defect
+// fixture, end to end through the real kernel. `2 ** n` at a checked
+// position fires RTS7002 (the tsc-vscode/fixtures/alert.analysis.ts
+// shape, also used by server_refinedts_diagnostic_test.go's "alert
+// fires 7002" case) — the undetermined channel, never a fire a
+// code-less marker may swallow. A marker sitting over that line must
+// leave the 7002 visible AND report itself stale, since it covered
+// nothing: the honest outcome for a marker that names no code over an
+// undetermined position.
+func TestCheckWithProgramCodeLessMarkerNeverSwallowsRTS7002(t *testing.T) {
+	if !kernelbridge.KernelArtifactsPresent(kernelbridge.DylibPath) {
+		t.Skip("native kernel dylib not built")
+	}
+	source := "import * as z from \"/surface/z.ts\";\n" +
+		"const zPct = z.number().min(0).max(100);\n" +
+		"type Pct = z.infer<typeof zPct>;\n" +
+		"function fee(p: Pct): number {\n" +
+		"  return 0;\n" +
+		"}\n" +
+		"function f(n: number): number {\n" +
+		"  return fee(2 ** n); // @refinedts-expect-error\n" +
+		"}\n"
+	built, err := ProgramFromSource(source, testSurfaceDir)
+	if err != nil {
+		t.Fatalf("ProgramFromSource: %v", err)
+	}
+	defer built.Done()
+	result, err := CheckWithProgram(context.Background(), built.Program, "/main.ts", []string{SurfacePath})
+	if err != nil {
+		t.Fatalf("CheckWithProgram: %v", err)
+	}
+	sawUndetermined := false
+	sawStale := false
+	for _, d := range result.Refinements {
+		if d.Code == 7002 {
+			sawUndetermined = true
+		}
+		if d.Code == 7005 {
+			sawStale = true
+		}
+	}
+	if !sawUndetermined {
+		t.Fatalf("a code-less marker must never swallow RTS7002, got %+v", result.Refinements)
+	}
+	if !sawStale {
+		t.Fatalf("the marker covered nothing real, so it must report stale (its own 7005), got %+v", result.Refinements)
+	}
+}
+
+// TestCheckWithProgramExplicitCode7002MarkerAlsoNeverMatches: the
+// same fixture, marker narrowed to `7002` explicitly. No fixture in
+// this tree writes `@refinedts-expect-error 7002` (searched:
+// refined-ts-go, tsc-vscode, refined-ts-typescript), so the ban is
+// adopted without exception — an explicit 7002 code does not carve
+// out an exception either, matching Python's markers.rs (its matcher
+// has no numeric-code narrowing at all, so its ban already covers
+// every marker shape).
+func TestCheckWithProgramExplicitCode7002MarkerAlsoNeverMatches(t *testing.T) {
+	if !kernelbridge.KernelArtifactsPresent(kernelbridge.DylibPath) {
+		t.Skip("native kernel dylib not built")
+	}
+	source := "import * as z from \"/surface/z.ts\";\n" +
+		"const zPct = z.number().min(0).max(100);\n" +
+		"type Pct = z.infer<typeof zPct>;\n" +
+		"function fee(p: Pct): number {\n" +
+		"  return 0;\n" +
+		"}\n" +
+		"function f(n: number): number {\n" +
+		"  return fee(2 ** n); // @refinedts-expect-error 7002\n" +
+		"}\n"
+	built, err := ProgramFromSource(source, testSurfaceDir)
+	if err != nil {
+		t.Fatalf("ProgramFromSource: %v", err)
+	}
+	defer built.Done()
+	result, err := CheckWithProgram(context.Background(), built.Program, "/main.ts", []string{SurfacePath})
+	if err != nil {
+		t.Fatalf("CheckWithProgram: %v", err)
+	}
+	sawUndetermined := false
+	sawStale := false
+	for _, d := range result.Refinements {
+		if d.Code == 7002 {
+			sawUndetermined = true
+		}
+		if d.Code == 7005 {
+			sawStale = true
+		}
+	}
+	if !sawUndetermined {
+		t.Fatalf("an explicit 7002 code must not carve out an exception, got %+v", result.Refinements)
+	}
+	if !sawStale {
+		t.Fatalf("the explicit-code marker covered nothing real, so it must report stale, got %+v", result.Refinements)
+	}
+}
+
+// TestCheckWithProgramMarkerOverA7001LineStillSuppresses: the
+// contrast case — a marker over a line whose diagnostic IS 7001
+// (not the undetermined channel) suppresses exactly as before the
+// RTS7002 exclusion landed.
+func TestCheckWithProgramMarkerOverA7001LineStillSuppresses(t *testing.T) {
+	if !kernelbridge.KernelArtifactsPresent(kernelbridge.DylibPath) {
+		t.Skip("native kernel dylib not built")
+	}
+	source := "import * as z from \"/surface/z.ts\";\n" +
+		"const zPct = z.number().min(0).max(100);\n" +
+		"type Pct = z.infer<typeof zPct>;\n" +
+		"function fee(p: Pct): number {\n" +
+		"  return 0;\n" +
+		"}\n" +
+		"// @refinedts-expect-error\n" +
+		"fee(150);\n"
+	built, err := ProgramFromSource(source, testSurfaceDir)
+	if err != nil {
+		t.Fatalf("ProgramFromSource: %v", err)
+	}
+	defer built.Done()
+	result, err := CheckWithProgram(context.Background(), built.Program, "/main.ts", []string{SurfacePath})
+	if err != nil {
+		t.Fatalf("CheckWithProgram: %v", err)
+	}
+	for _, d := range result.Refinements {
+		if d.Code == 7001 {
+			t.Fatalf("the covered 7001 should still be suppressed, got %+v", result.Refinements)
+		}
+		if d.Code == 7005 {
+			t.Fatalf("the marker is used — no stale 7005 should ride, got %+v", result.Refinements)
+		}
+	}
+}
+
 // TestSurfacePathsOfDiscovery: discovery finds the virtual surface at
 // its exact FileName spelling. The entry must IMPORT the surface — a
 // file the program never reaches is not a program source file, and

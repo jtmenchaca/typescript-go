@@ -136,10 +136,13 @@ type ForeignArtifact struct {
 }
 
 // foreignArtifactRow is one read's whole outcome, memoized: the fact
-// or the sentence that stopped it.
+// or the sentence that stopped it, plus the artifact file's mtime AT
+// FILL TIME — the freshness stopgap below reads this to notice a
+// producer (or a live LSP) rewriting the cache mid-process.
 type foreignArtifactRow struct {
 	artifact *ForeignArtifact
 	sentence string
+	modTime  int64
 }
 
 // foreignArtifacts memoizes ReadForeignArtifact by target path. The
@@ -178,27 +181,58 @@ var (
 // CHANNEL PURITY (§5) is NOT checked here: it is a property of the
 // consumed function's return, so the edge checks it where it consumes
 // it (foreign_edge.go), which is where the sentence can name the call.
+//
+// FRESHNESS (the stopgap docs/one-checker/fact-freshness.md names,
+// pending the coordinator's push-based invalidation): the memo is held
+// for the process, which was correct while a producer only ran ahead
+// of the check — wrong once a live LSP writes the cache mid-session.
+// Every read stats the artifact path; a changed mtime drops the row
+// and re-reads rather than serving what a since-overwritten file said.
 func ReadForeignArtifact(targetPath string) (*ForeignArtifact, string) {
+	artifactPath := ForeignCacheArtifactPath(targetPath)
+	currentModTime := artifactModTime(artifactPath)
+
 	foreignArtifactsMu.Lock()
 	held, memoized := foreignArtifacts[targetPath]
 	foreignArtifactsMu.Unlock()
-	if memoized {
+	if memoized && held.modTime == currentModTime {
 		return held.artifact, held.sentence
 	}
+
 	artifact, sentence := readForeignArtifactUncached(targetPath)
+	// the read above may itself have exported a fresh artifact (the
+	// miss-triggers-export path), so the mtime recorded against the memo
+	// is read AFTER that read, not the one taken before it
 	foreignArtifactsMu.Lock()
-	foreignArtifacts[targetPath] = foreignArtifactRow{artifact: artifact, sentence: sentence}
+	foreignArtifacts[targetPath] = foreignArtifactRow{
+		artifact: artifact,
+		sentence: sentence,
+		modTime:  artifactModTime(artifactPath),
+	}
 	foreignArtifactsMu.Unlock()
 	return artifact, sentence
+}
+
+// artifactModTime answers the artifact file's modification time as a
+// unix-nanosecond stamp, or 0 when the file does not exist — a missing
+// file and "never read" both memo as 0, and the first successful write
+// (a nonzero mtime) is itself a freshness change worth reacting to.
+func artifactModTime(artifactPath string) int64 {
+	info, err := os.Stat(artifactPath)
+	if err != nil {
+		return 0
+	}
+	return info.ModTime().UnixNano()
 }
 
 // readForeignArtifactUncached fills the cache when it can and reads
 // it — every premise checked, no memo consulted. A missing or failed
 // artifact triggers ONE export attempt through the resolved producer
-// (REFINEDPY_CHECK, then PATH); when no producer resolves, the
-// sentence names the file and the command, exactly as before.
+// (explicitProducerPyPath, then the project-root build, then PATH);
+// when no producer resolves, the sentence names the file and the
+// command, exactly as before.
 func readForeignArtifactUncached(targetPath string) (*ForeignArtifact, string) {
-	artifactPath := foreignCacheArtifactPath(targetPath)
+	artifactPath := ForeignCacheArtifactPath(targetPath)
 	artifact, sentence := readAndVerifyForeignArtifact(targetPath, artifactPath)
 	if sentence == "" {
 		return artifact, ""
@@ -209,15 +243,31 @@ func readForeignArtifactUncached(targetPath string) (*ForeignArtifact, string) {
 	return readAndVerifyForeignArtifact(targetPath, artifactPath)
 }
 
-// foreignCacheArtifactPath resolves the target's cache entry: the
+// ForeignCacheArtifactPath resolves the target's cache entry: the
 // nearest ancestor holding `.git` is the project root (the target's
 // own directory when none is found), and the entry mirrors the
-// target's path relative to that root.
-func foreignCacheArtifactPath(targetPath string) string {
+// target's path relative to that root. Exported: service/export_fact.go
+// derives its own default `-o` from this same rule, so the two
+// checkers meet at one file without either being told where.
+func ForeignCacheArtifactPath(targetPath string) string {
 	abs, err := filepath.Abs(targetPath)
 	if err != nil {
 		return targetPath + ForeignArtifactSuffix
 	}
+	root := projectRootOf(abs)
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		rel = filepath.Base(abs)
+	}
+	return filepath.Join(root, ForeignCacheDir, rel+ForeignArtifactSuffix)
+}
+
+// projectRootOf is the nearest ancestor of an absolute path holding
+// `.git` — the target's own directory when none is found. Shared by
+// ForeignCacheArtifactPath (where the cache entry lives) and
+// exportForeignArtifact (where a project-local producer build lives),
+// so the two never derive the root two different ways.
+func projectRootOf(abs string) string {
 	root := filepath.Dir(abs)
 	for dir := filepath.Dir(abs); ; {
 		if _, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil {
@@ -230,25 +280,64 @@ func foreignCacheArtifactPath(targetPath string) string {
 		}
 		dir = parent
 	}
-	rel, err := filepath.Rel(root, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		rel = filepath.Base(abs)
+	return root
+}
+
+// explicitProducerPyPathMu guards explicitProducerPyPath, mirroring
+// kernelbridge.SetDylibPath's own discipline: a plain setter, never an
+// environment variable — behavior is configured by arguments (a
+// binary's `-producer-py` flag) or the binary's own layout, never by
+// ambient process state.
+var (
+	explicitProducerPyPathMu sync.Mutex
+	explicitProducerPyPath   string
+)
+
+// SetPythonProducerPath states where the refinedpy-check binary lives,
+// for a caller that already knows (typically cmd/refinedts-check's
+// `-producer-py` flag). Resolution otherwise falls through to a
+// project-root build, then PATH — see exportForeignArtifact.
+func SetPythonProducerPath(path string) {
+	explicitProducerPyPathMu.Lock()
+	defer explicitProducerPyPathMu.Unlock()
+	explicitProducerPyPath = path
+}
+
+// resolveProducerPyPath answers the refinedpy-check binary to run, in
+// order: the caller-stated path (SetPythonProducerPath), a release
+// build under the project root, a debug build under the project root,
+// then whatever `refinedpy-check` PATH resolves to. "" means none of
+// the four held — no environment variable is read at any step (the
+// standing rule: ambient process state never configures behavior).
+func resolveProducerPyPath(targetPath string) string {
+	explicitProducerPyPathMu.Lock()
+	explicit := explicitProducerPyPath
+	explicitProducerPyPathMu.Unlock()
+	if explicit != "" {
+		return explicit
 	}
-	return filepath.Join(root, ForeignCacheDir, rel+ForeignArtifactSuffix)
+	if abs, err := filepath.Abs(targetPath); err == nil {
+		root := projectRootOf(abs)
+		for _, profile := range []string{"release", "debug"} {
+			candidate := filepath.Join(root, "packages", "refinedpy", "pyrefly", "target", profile, "refinedpy-check")
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				return candidate
+			}
+		}
+	}
+	if found, err := exec.LookPath("refinedpy-check"); err == nil {
+		return found
+	}
+	return ""
 }
 
 // exportForeignArtifact runs the resolved producer into the cache
 // entry, answering "" on success and one sentence naming what stopped
-// it. Resolution: the REFINEDPY_CHECK environment variable, then
-// `refinedpy-check` on PATH.
+// it. Resolution: resolveProducerPyPath's three-step order, above.
 func exportForeignArtifact(targetPath string, artifactPath string) string {
-	producer := os.Getenv("REFINEDPY_CHECK")
+	producer := resolveProducerPyPath(targetPath)
 	if producer == "" {
-		found, err := exec.LookPath("refinedpy-check")
-		if err != nil {
-			return "refinedpy-check is not on PATH and REFINEDPY_CHECK is unset"
-		}
-		producer = found
+		return "no -producer-py flag, no built refinedpy-check under the project root, and none on PATH"
 	}
 	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
 		return "the cache directory could not be created: " + err.Error()

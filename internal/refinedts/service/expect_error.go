@@ -3,12 +3,14 @@
 // standalone comment line covers the NEXT line (tsc's own
 // expect-error convention), a trailing comment covers its own line,
 // and an optional code (`@refinedts-expect-error 7001`) narrows the
-// expectation to that code.
+// expectation to that code. RTS7002 (the undetermined channel) is
+// never matched by any marker, coded or not — see Covers.
 //
-// Two presentations share this reader:
+// Two presentations share this reader, and both go through Covers so
+// the exclusion holds in one place:
 //
-//	the CLI (check_cli.ts) prints covered fires with the `expected`
-//	prefix and fails the run on stale markers;
+//	the CLI (cmd/refinedts-check/main.go) prints covered fires with
+//	the `expected` prefix and fails the run on stale markers;
 //	the editor seam (checkWithProgram) SUPPRESSES covered fires and
 //	surfaces each stale marker as its own 7005 diagnostic — tsc's
 //	expect-error semantics, in the refinement layer.
@@ -43,6 +45,27 @@ type Expectation struct {
 	Code    int
 	HasCode bool
 	Used    bool
+}
+
+// undeterminedCode is RTS7002, the undetermined channel: nothing was
+// proven about a checked position. No marker — coded or code-less —
+// ever matches it. A marker swallowing "nothing was determined" would
+// fake progress; the Python reader enforces the same law absolutely
+// (markers.rs:11-12; its matcher has no numeric-code narrowing at
+// all, so its ban already covers every marker shape). No fixture in
+// this tree writes `@refinedts-expect-error 7002`, so the ban is
+// adopted without exception, for parity.
+const undeterminedCode = 7002
+
+// Covers reports whether expectation e matches diagnostic code.
+// RTS7002 is never matched, by any marker: a stale marker that only
+// covered a 7002 line is the honest outcome, not a bug in the
+// matcher.
+func (e *Expectation) Covers(code int) bool {
+	if code == undeterminedCode {
+		return false
+	}
+	return !e.HasCode || e.Code == code
 }
 
 // ExpectationsOf reports every `@refinedts-expect-error` marker in the
@@ -125,7 +148,7 @@ func EditorView(text string, refinements []assignability.RefinementDiagnostic) [
 		line := lineOf(d.Start)
 		var covering *Expectation
 		for _, e := range expectations {
-			if e.Line == line && (!e.HasCode || e.Code == d.Code) {
+			if e.Line == line && e.Covers(d.Code) {
 				covering = e
 				break
 			}

@@ -1,0 +1,136 @@
+// Ports the harness recognizer against real parsed sources — the same
+// discipline foreign_edge_test.go states for its own syntactic halves:
+// no checker, no program, a throwaway source file parsed straight from
+// text.
+package walk
+
+import (
+	"testing"
+
+	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/parser"
+)
+
+// harnessSourceFileOf parses a whole file's text (not one expression,
+// unlike switchExprOf) since HarnessCallOf reads top-level statements
+// including import declarations.
+func harnessSourceFileOf(t *testing.T, source string) *ast.SourceFile {
+	t.Helper()
+	opts := ast.SourceFileParseOptions{FileName: "/harness.ts", Path: "/harness.ts"}
+	return parser.ParseSourceFile(opts, source, core.ScriptKindTS)
+}
+
+func TestHarnessCallOf_TheExactShapeNamesTheFunction(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
+`)
+	name, ok := HarnessCallOf(file)
+	if !ok {
+		t.Fatalf("the exact shape did not recognize")
+	}
+	if name != "audioLevel" {
+		t.Errorf("got name %q, want %q", name, "audioLevel")
+	}
+}
+
+func TestHarnessCallOf_NamespaceImportOfFsRecognizes(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import * as fs from "node:fs";
+function audioLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(fs.readFileSync(0, "utf8")))));
+`)
+	name, ok := HarnessCallOf(file)
+	if !ok {
+		t.Fatalf("the fs.readFileSync namespace spelling did not recognize")
+	}
+	if name != "audioLevel" {
+		t.Errorf("got name %q, want %q", name, "audioLevel")
+	}
+}
+
+func TestHarnessCallOf_InsideAnIfGuardDeclines(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+if (require.main === module) {
+  console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
+}
+`)
+	if _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("a guarded statement recognized — v1 declines guards, the target file has no import surface a guard would protect")
+	}
+}
+
+func TestHarnessCallOf_JSONParseOfAnythingElseDeclines(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+const raw = readFileSync(0, "utf8");
+console.log(JSON.stringify(audioLevel(JSON.parse(raw))));
+`)
+	if _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("JSON.parse of a bare variable (not the stdin read directly) recognized")
+	}
+}
+
+func TestHarnessCallOf_TwoMatchingStatementsDecline(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+function otherLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
+console.log(JSON.stringify(otherLevel(JSON.parse(readFileSync(0, "utf8")))));
+`)
+	if _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("two matching top-level statements recognized — one harness fact cannot stand for two")
+	}
+}
+
+func TestHarnessCallOf_ProcessStdoutWriteSpellingDeclines(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+process.stdout.write(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))) + "\n");
+`)
+	if _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("process.stdout.write recognized — console.log is the one recognized sink")
+	}
+}
+
+func TestHarnessCallOf_ShadowedReadFileSyncDeclines(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+function run() {
+  const readFileSync = () => "{}";
+  console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
+}
+`)
+	if _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("a shadowed readFileSync recognized — the call is not a top-level statement and the name is not node:fs's own binding at that scope")
+	}
+}
+
+func TestHarnessCallOf_NoImportOfNodeFsDeclines(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+function readFileSync(fd, encoding) { return "{}"; }
+function audioLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
+`)
+	if _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("a locally declared readFileSync (never imported from node:fs) recognized")
+	}
+}
+
+func TestHarnessCallOf_NoMatchingStatementDeclines(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+`)
+	if _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("a file with no harness statement at all recognized")
+	}
+}

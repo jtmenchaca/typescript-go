@@ -86,12 +86,14 @@ func foreignArtifactJSON(contentHash string, targetFile string, stdoutPure bool)
 // writeForeignArtifact drops an artifact text at the target's cache
 // entry and clears the read memo, so each case reads its own file
 // rather than a previous case's answer. Every test also pins the
-// producer resolution to a dead path, so a developer's PATH cannot
-// turn a missing-artifact case into a live export.
+// producer resolution to a dead path, so a developer's PATH (or a
+// project-root build) cannot turn a missing-artifact case into a live
+// export.
 func writeForeignArtifact(t *testing.T, targetPath string, text string) {
 	t.Helper()
-	t.Setenv("REFINEDPY_CHECK", "/nonexistent/refinedpy-check")
-	artifactPath := foreignCacheArtifactPath(targetPath)
+	SetPythonProducerPath("/nonexistent/refinedpy-check")
+	t.Cleanup(func() { SetPythonProducerPath("") })
+	artifactPath := ForeignCacheArtifactPath(targetPath)
 	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
 		t.Fatalf("creating the cache directory: %v", err)
 	}
@@ -146,14 +148,15 @@ func TestReadForeignArtifact_AWellFormedArtifactAnswersTheCalledFunctionsFact(t 
 
 func TestReadForeignArtifact_AMissingArtifactNamesTheFileAndTheCommandThatWritesIt(t *testing.T) {
 	targetPath, _ := writeForeignTarget(t)
-	t.Setenv("REFINEDPY_CHECK", "/nonexistent/refinedpy-check")
+	SetPythonProducerPath("/nonexistent/refinedpy-check")
+	t.Cleanup(func() { SetPythonProducerPath("") })
 	forgetForeignArtifact(targetPath)
 
 	artifact, sentence := ReadForeignArtifact(targetPath)
 	if artifact != nil {
 		t.Fatalf("a missing artifact answered a fact: %+v", artifact)
 	}
-	if !strings.Contains(sentence, foreignCacheArtifactPath(targetPath)) {
+	if !strings.Contains(sentence, ForeignCacheArtifactPath(targetPath)) {
 		t.Errorf("the sentence %q does not name the cache entry that is missing", sentence)
 	}
 	if !strings.Contains(sentence, ForeignExportCommand) {

@@ -5,10 +5,12 @@
 // file:line:col. Exit 1 when anything fired; 0 on silence.
 //
 // @refinedts-expect-error markers are honored through
-// service.ExpectationsOf (service/expect_error.go, landed by a
-// concurrent porter per the task's instruction) — a matched fire is
-// SILENT and does not fail the run; an expectation nothing fired on
-// is itself an error, so stale declarations stay visible.
+// service.ExpectationsOf and matched with Expectation.Covers
+// (service/expect_error.go) — a matched fire is SILENT and does not
+// fail the run; an expectation nothing fired on is itself an error, so
+// stale declarations stay visible. Covers never matches RTS7002 (the
+// undetermined channel), so a marker over a 7002-only line reports
+// stale rather than swallowing it.
 
 package main
 
@@ -28,6 +30,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/service"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
+	"github.com/microsoft/typescript-go/internal/refinedts/walk"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
@@ -73,6 +76,12 @@ func main() {
 		"record per-entry mechanism timers only (honest wall, no trace inflation) and print the decomposition")
 	kernelTraceFlag := flag.Bool("kernel-trace", false,
 		"stream every kernel question and answer wire to stderr LIVE — the diagnosis line for a hang is the last Q with no A")
+	exportFactFlag := flag.String("export-fact", "",
+		"write this file's fact artifact instead of checking it (the cross-language edge's producer mode)")
+	outFlag := flag.String("o", "",
+		"artifact output path for -export-fact (default: the project-cache entry -export-fact's target reads by)")
+	producerPyFlag := flag.String("producer-py", "",
+		"path to the refinedpy-check binary, for the Python foreign-edge auto-export (default: a project-root build, then PATH)")
 	flag.Parse()
 	files := flag.Args()
 	if *listFlag != "" {
@@ -87,8 +96,17 @@ func main() {
 			}
 		}
 	}
-	if len(files) == 0 {
+	// -export-fact alongside positional files would silently ignore one
+	// side of the command line, which is worse than refusing the line —
+	// the same refusal refinedpy_check.rs's read_invocation states for
+	// its own --export-fact.
+	if *exportFactFlag != "" && len(files) > 0 {
+		fmt.Fprintln(os.Stderr, "usage: refinedts-check -export-fact <file.ts> [-o path] [-producer-py path]")
+		os.Exit(2)
+	}
+	if *exportFactFlag == "" && len(files) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] [-list files.txt] [-wall] [-trace] [-trace-out path] <file.ts> [...]")
+		fmt.Fprintln(os.Stderr, "       refinedts-check -export-fact <file.ts> [-o path] [-producer-py path]")
 		os.Exit(2)
 	}
 	startedAt := time.Now()
@@ -103,6 +121,24 @@ func main() {
 	} else if derived, ok := repoRelative(
 		"refined-lean/native/build/librefined_kernel.dylib"); ok {
 		kernelbridge.SetDylibPath(derived)
+	}
+	if *producerPyFlag != "" {
+		walk.SetPythonProducerPath(*producerPyFlag)
+	}
+
+	if *exportFactFlag != "" {
+		// omissions are never fatal — a work-queue item printed to
+		// stderr, never a failure of this run — so exit 0 follows both
+		// branches; only a read/parse/write failure exits 2.
+		_, omissions, exportErr := service.ExportFact(*exportFactFlag, surfacePath, *outFlag)
+		for _, omission := range omissions {
+			fmt.Fprintln(os.Stderr, omission)
+		}
+		if exportErr != nil {
+			fmt.Fprintln(os.Stderr, exportErr)
+			os.Exit(2)
+		}
+		os.Exit(0)
 	}
 
 	if *kernelTraceFlag {
@@ -171,7 +207,7 @@ func main() {
 			spelled := fmt.Sprintf("%s:%d:%d refinement RTS%d: %s", file, line, character+1, d.Code, d.MessageText)
 			var expected *service.Expectation
 			for _, e := range expectations {
-				if e.Line == line && (!e.HasCode || e.Code == d.Code) {
+				if e.Line == line && e.Covers(d.Code) {
 					expected = e
 					break
 				}
