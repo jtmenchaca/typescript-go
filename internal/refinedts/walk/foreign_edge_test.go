@@ -684,6 +684,59 @@ func TestCheckOutboundLeg_AModuleLevelConstArrayLiteralPayloadPassesEveryPremise
 	}
 }
 
+// TestCheckOutboundLeg_AModuleConstArrayMutatedByPushFiresNaNFreedomLikeLet
+// mirrors the pass test above with ONE addition: a `samples.push(...)`
+// statement anywhere in the module (here, inside a second, unrelated
+// function — the brief's "top level or inside another function" case).
+// RULING (JT 2026-08-21): a mutation site anywhere in the module blocks
+// the const-follow's array serve — UntrackedIdentifier falls to its
+// last-reader path instead of handing out the stale literal, exactly the
+// path TestCheckOutboundLeg_ALetBoundModuleArrayReadsByTypeAndFiresNaNFreedom
+// already pins for a `let`-bound array: the identifier reads through its
+// DECLARED type (a sequence of unbounded numbers, which admit NaN), and
+// the NaN-freedom premise fires rather than the crossing converting the
+// stale tuple.
+func TestCheckOutboundLeg_AModuleConstArrayMutatedByPushFiresNaNFreedomLikeLet(t *testing.T) {
+	targetPath, contentHash := writeForeignTarget(t)
+	writeForeignArtifact(t, targetPath, foreignArtifactJSON(contentHash, targetPath, true))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	p := entryEnvTestProgram(t, "const samples = [0.5, -0.3, 0.2];\n"+
+		"function f() {\n"+
+		"	samples;\n"+
+		"}\n"+
+		"function mutateElsewhere() {\n"+
+		"	samples.push(0.1);\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	payload := statements[0].AsExpressionStatement().Expression
+	var reported []assignability.RefinementDiagnostic
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report:    func(d assignability.RefinementDiagnostic) { reported = append(reported, d) },
+	}
+	edge := &ForeignEdge{Call: payload, TargetPath: targetPath, Payload: payload, StdoutName: "stdout"}
+	outcome := checkOutboundLeg(ctx, NewEnv(), edge, artifact)
+	if outcome == nil {
+		t.Fatalf("a mutated module const array passed with no outcome at all — the literal was served despite the push")
+	}
+	if outcome.Decline != "" || outcome.Override != nil {
+		t.Fatalf("expected the NaN-freedom fire's empty outcome, got %+v", outcome)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("expected exactly one NaN-freedom refutation (the literal must not have been served), got %d: %+v", len(reported), reported)
+	}
+	if !strings.Contains(reported[0].MessageText, "JSON.stringify writes NaN as null") {
+		t.Errorf("the refutation does not name the stringify behaviour: %q", reported[0].MessageText)
+	}
+}
+
 // TestCheckOutboundLeg_AFunctionLocalConstArrayLiteralPayloadPassesEveryPremise
 // is the function-local mirror: the SAME literal, one statement above the
 // call inside the function body rather than at module scope. The payload

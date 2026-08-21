@@ -6,9 +6,12 @@
 //
 // The envelope is schema v2 (docs/one-checker/schema-v2.md,
 // walk/foreign_edge_artifact.go's doc comment): kind "fact-artifact",
-// version 2, language "typescript", and "node-23+" as the runtime
-// band — PROVISIONAL: bare `node x.ts` runs natively from Node 23, and
-// the final band string awaits the js.* naming ruling (§17 K2).
+// version 2, language "typescript", and "es2023+" as the runtime
+// band (RULING 2026-08-21: one JS-family band claiming ECMA-level
+// behavior, replacing the provisional node-specific string — every
+// premise the edge discharges, JSON round-trip and Number semantics,
+// is an ECMA-262 claim, not a node-specific one, so any recognized JS
+// runner — node, deno, bun, npx tsx — satisfies it).
 //
 // Every field is computed. A file with no recognized harness, a
 // harness calling an unexported or unexportable function, or a
@@ -46,8 +49,9 @@ const (
 // it selects which pins the runtime band is checked against.
 const ExportFactLanguage = "typescript"
 
-// ExportFactRuntimeBand is PROVISIONAL — see the file banner.
-const ExportFactRuntimeBand = "node-23+"
+// ExportFactRuntimeBand is the one JS-family band claiming ECMA-level
+// behavior — see the file banner.
+const ExportFactRuntimeBand = "es2023+"
 
 // ExportFact writes entryFilePath's fact artifact to outPath (the
 // caller's `-o`, or walk.ForeignCacheArtifactPath's default when

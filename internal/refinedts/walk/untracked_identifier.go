@@ -141,11 +141,28 @@ func UntrackedIdentifier(ctx *FlowContext, e *ast.Node) abstractdomain.AbstractV
 				// number wherever a guard tests against it. A held
 				// OBJECT stays unclaimed: its content may move between
 				// calls.
-				switch followed.Kind {
-				case abstractdomain.KindValues, abstractdomain.KindSet,
-					abstractdomain.KindNaN, abstractdomain.KindPossiblyNaN,
-					abstractdomain.KindBigints:
-					return followed
+				//
+				// An ARRAY literal is the one KindValues shape the
+				// alias-freedom argument above does NOT cover on its
+				// own — samples.push(...), samples[i] = …, and
+				// Object.assign(samples, …) all mutate the array in
+				// place with no rebinding at all (RULING, JT
+				// 2026-08-21). Serve the array only when a file-level
+				// scan finds no such mutation site for this name;
+				// finding one falls through to the last-reader path
+				// below, naming nothing new itself — the consumer's
+				// existing decline sentence owns the wording.
+				if followed.Kind == abstractdomain.KindValues && followed.KindTag == abstractdomain.PrimitiveArray {
+					if !ConstArrayMutated(d, symbol.Name) {
+						return followed
+					}
+				} else {
+					switch followed.Kind {
+					case abstractdomain.KindValues, abstractdomain.KindSet,
+						abstractdomain.KindNaN, abstractdomain.KindPossiblyNaN,
+						abstractdomain.KindBigints:
+						return followed
+					}
 				}
 			}
 		}

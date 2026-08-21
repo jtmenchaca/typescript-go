@@ -16,7 +16,7 @@
 //	{"refined": {"kind": "fact-artifact", "version": 2},
 //	 "target": {"file", "contentHash": "sha256:<hex>"},
 //	 "language": "python" | "typescript",
-//	 "runtime": {"band": "cpython-3.11+" | "node-23+"},
+//	 "runtime": {"band": "cpython-3.11+" | "es2023+"},
 //	 "surface": {"kind": "stdin-json", "stdin": "json", "stdout": "json", "calls": "<fn>"}
 //	          | {"kind": "argv-scalar", "argIndex": n, "parse": "float", "stdout": "json", "calls": "<fn>"}
 //	          | {"kind": "stdin-json-argv-scalar", "stdin": "json", "argIndex": n, "parse": "float",
