@@ -1,11 +1,12 @@
 // The harness a target FILE runs as, when exported for the cross-
 // language edge (docs/one-checker/reverse-pair.md, Half A step 4).
 //
-// TWO RECOGNIZED SHAPES (a pinned product decision for v1 — every
-// deviation declines, never guesses):
+// THREE RECOGNIZED SHAPES (a pinned product decision — every deviation
+// declines, never guesses):
 //
 //	console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(0, "utf8")))));
 //	console.log(JSON.stringify(<fn>(JSON.parse(process.argv[<literal int>]))));
+//	console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(process.argv[<literal int>], "utf8")))));
 //
 // as a BARE TOP-LEVEL statement in the source file. There is no main
 // guard here the way the Python reader's harness_call requires one:
@@ -27,7 +28,11 @@
 // (there is no import to check — `process` is a Node global) indexed
 // by a literal integer; a non-literal index (`process.argv[i]`, a
 // computed expression) answers no argIndex the exporter could pin, so
-// HarnessCallOf declines the whole file rather than guess one.
+// HarnessCallOf declines the whole file rather than guess one. The
+// file-json shape's `readFileSync(process.argv[<literal int>], "utf8")`
+// reuses this same literal-index reading for its first argument —
+// only the fd argument's shape (a literal 0 vs. an argv element
+// access) tells the stdin-json and file-json readings apart.
 //
 // <fn> must be a bare identifier naming a function declared in the
 // same file — HarnessCallOf hands that name back for its caller to
@@ -45,7 +50,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 )
 
-// HarnessShape names which of the two recognized harness carriers a
+// HarnessShape names which of the three recognized harness carriers a
 // file's own top-level statement matched.
 type HarnessShape int
 
@@ -58,15 +63,20 @@ const (
 	// HarnessShapeArgvJSON is `process.argv[<literal int>]` read into
 	// JSON.parse — the argv-json surface.
 	HarnessShapeArgvJSON
+	// HarnessShapeFileJSON is
+	// `readFileSync(process.argv[<literal int>], "utf8")` read into
+	// JSON.parse — the file-json surface: the JSON payload lives in the
+	// FILE named at that argv position, not on the argv value itself.
+	HarnessShapeFileJSON
 )
 
 // HarnessCallOf scans sourceFile's own top-level statements for one of
-// the two recognized harness shapes and answers the named function's
-// identifier text, which shape matched, and — for the argv shape only
-// — the literal argv index. Answers ("", HarnessShapeNone, 0, false)
-// where zero or more than one top-level statement matches — a file
-// that runs a shape twice states no single harness fact any more than
-// a file that never runs one does.
+// the three recognized harness shapes and answers the named function's
+// identifier text, which shape matched, and — for the argv and
+// file-json shapes only — the literal argv index. Answers ("",
+// HarnessShapeNone, 0, false) where zero or more than one top-level
+// statement matches — a file that runs a shape twice states no single
+// harness fact any more than a file that never runs one does.
 func HarnessCallOf(sourceFile *ast.SourceFile) (calls string, shape HarnessShape, argIndex float64, ok bool) {
 	if sourceFile == nil {
 		return "", HarnessShapeNone, 0, false
@@ -85,6 +95,13 @@ func HarnessCallOf(sourceFile *ast.SourceFile) (calls string, shape HarnessShape
 			if name, matched := harnessShapeCallOf(expr, readFileSyncNames); matched {
 				foundName = name
 				foundShape = HarnessShapeStdinJSON
+				matches++
+				continue
+			}
+			if name, index, matched := fileHarnessShapeCallOf(expr, readFileSyncNames); matched {
+				foundName = name
+				foundShape = HarnessShapeFileJSON
+				foundArgIndex = index
 				matches++
 				continue
 			}
@@ -241,6 +258,99 @@ func isReadFileSyncStdinRead(expr *ast.Node, readFileSyncNames map[string]bool) 
 	}
 	encoding, encodingOk := stringLiteralText(arguments[1])
 	return encodingOk && encoding == "utf8"
+}
+
+// fileHarnessShapeCallOf reads one expression as
+// `console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(process.argv[<literal
+// int>], "utf8")))))`, answering <fn>'s name and the literal argv
+// index. Every layer must match exactly, mirroring harnessShapeCallOf's
+// stdin twin down to the outer console.log/JSON.stringify/<fn>/
+// JSON.parse peel — only the innermost read differs
+// (isReadFileSyncFileRead in place of isReadFileSyncStdinRead). Any
+// deviation answers ("", 0, false).
+func fileHarnessShapeCallOf(expr *ast.Node, readFileSyncNames map[string]bool) (string, float64, bool) {
+	logged, ok := singleArgumentOfNamedCall(expr, "console", "log")
+	if !ok {
+		return "", 0, false
+	}
+	stringified, ok := singleArgumentOfNamedCall(logged, "JSON", "stringify")
+	if !ok {
+		return "", 0, false
+	}
+	called := Unwrapped(stringified)
+	if called == nil || !ast.IsCallExpression(called) {
+		return "", 0, false
+	}
+	callExpression := called.AsCallExpression()
+	callee := Unwrapped(callExpression.Expression)
+	if callee == nil || !ast.IsIdentifier(callee) {
+		return "", 0, false
+	}
+	arguments, ok := callArguments(called)
+	if !ok || len(arguments) != 1 {
+		return "", 0, false
+	}
+	parsed, ok := singleArgumentOfNamedCall(arguments[0], "JSON", "parse")
+	if !ok {
+		return "", 0, false
+	}
+	argIndex, matched := isReadFileSyncFileRead(parsed, readFileSyncNames)
+	if !matched {
+		return "", 0, false
+	}
+	return callee.Text(), argIndex, true
+}
+
+// isReadFileSyncFileRead is whether expr is
+// `readFileSync(process.argv[<literal int>], "utf8")` (or
+// `<ns>.readFileSync(process.argv[<literal int>], "utf8")`) under one
+// of the bindings readFileSyncBindingsOf found — the same readFileSync
+// callee recognition isReadFileSyncStdinRead uses, but the fd argument
+// is `process.argv[<literal int>]` (read via
+// processArgvLiteralIndexOf) rather than the literal 0, and the
+// encoding is still the literal "utf8". Answers the literal argv index
+// and whether the whole shape matched; a non-literal argv index
+// answers (0, false), the same refusal processArgvLiteralIndexOf gives
+// its own argv-json caller.
+func isReadFileSyncFileRead(expr *ast.Node, readFileSyncNames map[string]bool) (float64, bool) {
+	call := Unwrapped(expr)
+	if call == nil || !ast.IsCallExpression(call) {
+		return 0, false
+	}
+	callExpression := call.AsCallExpression()
+	callee := Unwrapped(callExpression.Expression)
+	if callee == nil {
+		return 0, false
+	}
+	switch {
+	case ast.IsIdentifier(callee):
+		if !readFileSyncNames[callee.Text()] {
+			return 0, false
+		}
+	case ast.IsPropertyAccessExpression(callee):
+		access := callee.AsPropertyAccessExpression()
+		if !ast.IsIdentifier(access.Expression) || access.Name().Text() != "readFileSync" {
+			return 0, false
+		}
+		if !readFileSyncNames[access.Expression.Text()+"."] {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	arguments, ok := callArguments(call)
+	if !ok || len(arguments) != 2 {
+		return 0, false
+	}
+	argIndex, indexOk := processArgvLiteralIndexOf(Unwrapped(arguments[0]))
+	if !indexOk {
+		return 0, false
+	}
+	encoding, encodingOk := stringLiteralText(arguments[1])
+	if !encodingOk || encoding != "utf8" {
+		return 0, false
+	}
+	return argIndex, true
 }
 
 // argvHarnessShapeCallOf reads one expression as

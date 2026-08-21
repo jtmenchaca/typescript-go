@@ -127,6 +127,107 @@ func foreignArgvScalarArtifactJSON(contentHash string, targetFile string) string
 }`
 }
 
+// foreignMixedTargetSource is the Python body the mixed-surface
+// artifacts below describe — level_gain_argv.py's own real anatomy
+// (samples on stdin, gain on argv[1]), kept exactly as the real target
+// reads for it.
+const foreignMixedTargetSource = "import math\n\n\n" +
+	"def level_gain_argv(samples, gain):\n" +
+	"    clamped = [max(-1.0, min(1.0, s * gain)) for s in samples]\n" +
+	"    total = sum(s * s for s in clamped)\n" +
+	"    return math.sqrt(total / len(samples))\n"
+
+// writeForeignMixedTarget writes the mixed-surface target into a fresh
+// temp directory and answers its path and the sha256 the artifact must
+// state to match it.
+func writeForeignMixedTarget(t *testing.T) (string, string) {
+	t.Helper()
+	targetPath := filepath.Join(t.TempDir(), "level_gain_argv.py")
+	if err := os.WriteFile(targetPath, []byte(foreignMixedTargetSource), 0o644); err != nil {
+		t.Fatalf("writing the target: %v", err)
+	}
+	sum := sha256.Sum256([]byte(foreignMixedTargetSource))
+	return targetPath, "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// foreignMixedArtifactJSON builds an artifact stating the mixed
+// stdin-json-argv-scalar surface: entry[0] a sequence -2 … 2 at least
+// one element (the stdin leg, "samples"), entry[1] a scalar 0 … 4 (the
+// argv leg, "gain"), argIndex 1, calling level_gain_argv.
+func foreignMixedArtifactJSON(contentHash string, targetFile string) string {
+	return `{
+  "refined": {"kind": "fact-artifact", "version": 2},
+  "target": {"file": "` + targetFile + `", "contentHash": "` + contentHash + `"},
+  "language": "python",
+  "runtime": {"band": "cpython-3.11+"},
+  "surface": {"kind": "stdin-json-argv-scalar", "stdin": "json", "argIndex": 1, "parse": "float",
+              "stdout": "json", "calls": "level_gain_argv"},
+  "functions": {
+    "level_gain_argv": {
+      "entry": [{"name": "samples", "sequence": {
+                  "element": {"forms": [{"form": "atLeast", "a": {"num": -2, "exp": 0}},
+                                        {"form": "atMost", "a": {"num": 2, "exp": 0}}]},
+                  "lengthAtLeast": 1}},
+                {"name": "gain", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                                                    {"form": "atMost", "a": {"num": 4, "exp": 0}}]}}],
+      "return": {"set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+                 "stdoutPure": true},
+      "provenance": {"line": 4, "said": "clamped levels stay 0 … 1 for samples -2 … 2 and gain 0 … 4"}
+    }
+  }
+}`
+}
+
+// foreignFileTargetSource is the Python body the file-json artifacts
+// below describe — level_from_file.py's own real anatomy (samples read
+// as JSON from the file named at argv[1]), kept exactly as the real
+// target reads for it.
+const foreignFileTargetSource = "import json\nimport math\nimport sys\n\n\n" +
+	"def level_from_file(samples):\n" +
+	"    clamped = [max(-1.0, min(1.0, s)) for s in samples]\n" +
+	"    total = sum(s * s for s in clamped)\n" +
+	"    return math.sqrt(total / len(samples))\n"
+
+// writeForeignFileTarget writes the file-json target into a fresh temp
+// directory and answers its path and the sha256 the artifact must
+// state to match it.
+func writeForeignFileTarget(t *testing.T) (string, string) {
+	t.Helper()
+	targetPath := filepath.Join(t.TempDir(), "level_from_file.py")
+	if err := os.WriteFile(targetPath, []byte(foreignFileTargetSource), 0o644); err != nil {
+		t.Fatalf("writing the target: %v", err)
+	}
+	sum := sha256.Sum256([]byte(foreignFileTargetSource))
+	return targetPath, "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// foreignFileJSONArtifactJSON builds an artifact stating the file-json
+// surface: one sequence entry -2 … 2 at least one element ("samples",
+// the file's own JSON content), argIndex 1 (the argv position naming
+// the file), calling level_from_file.
+func foreignFileJSONArtifactJSON(contentHash string, targetFile string) string {
+	return `{
+  "refined": {"kind": "fact-artifact", "version": 2},
+  "target": {"file": "` + targetFile + `", "contentHash": "` + contentHash + `"},
+  "language": "python",
+  "runtime": {"band": "cpython-3.11+"},
+  "surface": {"kind": "file-json", "argIndex": 1, "stdout": "json", "calls": "level_from_file"},
+  "functions": {
+    "level_from_file": {
+      "entry": [{"name": "samples", "sequence": {
+                  "element": {"forms": [{"form": "atLeast", "a": {"num": -2, "exp": 0}},
+                                        {"form": "atMost", "a": {"num": 2, "exp": 0}}]},
+                  "lengthAtLeast": 1}}],
+      "return": {"set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+                 "stdoutPure": true},
+      "provenance": {"line": 6, "said": "clamped levels stay 0 … 1 for samples -2 … 2"}
+    }
+  }
+}`
+}
+
 // writeForeignArtifact drops an artifact text at the target's cache
 // entry and clears the read memo, so each case reads its own file
 // rather than a previous case's answer. Every test also pins the
@@ -919,6 +1020,338 @@ func TestCheckOutboundLeg_AStdinCallAtAnArgvScalarTargetDeclinesWithTheMirroredC
 	}
 }
 
+/* ── the mixed shape (stdin + argv, both legs), against a real kernel ── */
+
+// foreignMixedFixture builds a mixed-surface artifact (level_gain_argv.py's
+// own real anatomy: samples on stdin, gain from argv[1]) and an edge whose
+// Payload is a declared `samples: number[]` parameter (the stdin leg) and
+// whose ArgvValue is a `const gain = <gainLiteral>;` initializer node (the
+// argv leg) in the SAME function — the exact dual-channel shape the brief
+// names: both an options-object `input: JSON.stringify(...)` and a
+// two-element argv, recognized together rather than declined as a mix.
+func foreignMixedFixture(t *testing.T, gainLiteral string) foreignEdgeFixture {
+	t.Helper()
+	targetPath, contentHash := writeForeignMixedTarget(t)
+	writeForeignArtifact(t, targetPath, foreignMixedArtifactJSON(contentHash, targetPath))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	p := entryEnvTestProgram(t, "function f(samples: number[]) { samples; const gain = "+
+		strconv.Quote(gainLiteral)+"; gain; }\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	payload := statements[0].AsExpressionStatement().Expression
+	gainDeclaration := statements[1].AsVariableStatement().DeclarationList.
+		AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration()
+	argvValue := gainDeclaration.Initializer
+	var reported []assignability.RefinementDiagnostic
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report:    func(d assignability.RefinementDiagnostic) { reported = append(reported, d) },
+	}
+	env := NewEnv()
+	env.Set("samples", abstractdomain.KnownSet(
+		refinementsets.Repetition(
+			refinementsets.MakeRefinedSet(refinementsets.AtLeast(-2), refinementsets.AtMost(2)), 1, nil),
+		nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+	return foreignEdgeFixture{
+		artifact: artifact,
+		ctx:      ctx,
+		env:      env,
+		edge:     &ForeignEdge{Call: payload, TargetPath: targetPath, Payload: payload, ArgvValue: argvValue, StdoutName: "stdout"},
+		reported: &reported,
+	}
+}
+
+// TestCheckMixedCrossing_BothLegsInsideTheStatedEntryAreSilent pins the
+// green path: samples (-2 … 2, at least 1 element) fits entry[0], and
+// gain 0.5 fits entry[1]'s 0 … 4 — both legs fit, so checkOutboundLeg
+// answers clean with nothing reported.
+func TestCheckMixedCrossing_BothLegsInsideTheStatedEntryAreSilent(t *testing.T) {
+	fixture := foreignMixedFixture(t, "0.5")
+	if outcome := checkOutboundLeg(fixture.ctx, fixture.env, fixture.edge, fixture.artifact); outcome != nil {
+		t.Fatalf("a fitting mixed crossing did not pass: %+v", outcome)
+	}
+	if len(*fixture.reported) != 0 {
+		t.Errorf("a fitting mixed crossing reported %d diagnostics: %+v", len(*fixture.reported), *fixture.reported)
+	}
+}
+
+// TestCheckMixedCrossing_AnOutOfSetArgvLiteralFiresOnThatLegOnly pins that
+// each leg's refutation is independent: gain "9" sits outside the
+// target's 0 … 4 window, and fires 7001 on the ARGV leg specifically,
+// while the stdin leg (samples, in-range) is judged and passes cleanly —
+// exactly one diagnostic, naming the argv leg's own values.
+func TestCheckMixedCrossing_AnOutOfSetArgvLiteralFiresOnThatLegOnly(t *testing.T) {
+	fixture := foreignMixedFixture(t, "9")
+	outcome := checkOutboundLeg(fixture.ctx, fixture.env, fixture.edge, fixture.artifact)
+	if outcome == nil {
+		t.Fatalf("an out-of-set argv leg passed")
+	}
+	if outcome.Decline != "" {
+		t.Fatalf("an out-of-set argv leg DECLINED (%q); a fit failure is a refutation", outcome.Decline)
+	}
+	if len(*fixture.reported) != 1 {
+		t.Fatalf("reported %d diagnostics, want exactly 1 (the argv leg's own): %+v", len(*fixture.reported), *fixture.reported)
+	}
+	fired := (*fixture.reported)[0]
+	if fired.Code != 7001 {
+		t.Errorf("Code = %d, want 7001", fired.Code)
+	}
+	if !strings.Contains(fired.MessageText, "the argv value crossing to level_gain_argv is 9") {
+		t.Errorf("the message %q does not name the argv leg's own out-of-set value", fired.MessageText)
+	}
+}
+
+// TestCheckMixedCrossing_AMixedCallAtAStdinJsonTargetDeclines pins the
+// channel-match premise: a mixed call (both legs recognized) at a target
+// whose fact serves plain stdin-json (never both channels) declines
+// naming the surface it actually found, never silently picking one leg.
+func TestCheckMixedCrossing_AMixedCallAtAStdinJsonTargetDeclines(t *testing.T) {
+	targetPath, contentHash := writeForeignTarget(t)
+	writeForeignArtifact(t, targetPath, foreignArtifactJSON(contentHash, targetPath, true))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	p := entryEnvTestProgram(t, `function f(samples: number[]) { samples; const gain = "0.5"; gain; }`+"\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	payload := statements[0].AsExpressionStatement().Expression
+	gainDeclaration := statements[1].AsVariableStatement().DeclarationList.
+		AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration()
+	argvValue := gainDeclaration.Initializer
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report:    func(assignability.RefinementDiagnostic) {},
+	}
+	edge := &ForeignEdge{Call: payload, TargetPath: targetPath, Payload: payload, ArgvValue: argvValue, StdoutName: "stdout"}
+	outcome := checkOutboundLeg(ctx, NewEnv(), edge, artifact)
+	if outcome == nil {
+		t.Fatalf("a mixed call at a stdin-json target passed with no outcome at all")
+	}
+	if !strings.Contains(outcome.Decline, "the channels do not meet") {
+		t.Errorf("Decline = %q, want the channel-mismatch sentence", outcome.Decline)
+	}
+	if !strings.Contains(outcome.Decline, "stdin-json") {
+		t.Errorf("Decline = %q, want it to name the surface actually found (stdin-json)", outcome.Decline)
+	}
+}
+
+// TestCheckOutboundLeg_AStdinOnlyCallAtAMixedSurfaceTargetDeclinesNamingTheAbsentArgvLeg
+// pins the single-channel-at-mixed-surface premise: a call that sends only
+// the stdin leg (no ArgvValue at all) at a target whose fact serves the
+// mixed surface declines naming the ABSENT leg, never silently judging
+// the one leg it has against the mixed surface's own entry[0].
+func TestCheckOutboundLeg_AStdinOnlyCallAtAMixedSurfaceTargetDeclinesNamingTheAbsentArgvLeg(t *testing.T) {
+	targetPath, contentHash := writeForeignMixedTarget(t)
+	writeForeignArtifact(t, targetPath, foreignMixedArtifactJSON(contentHash, targetPath))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	p := entryEnvTestProgram(t, "function f(samples: number[]) { samples; }\n")
+	fn := entryEnvFunctionNamed(t, p, "f")
+	payload := fn.AsFunctionDeclaration().Body.AsBlock().Statements.Nodes[0].
+		AsExpressionStatement().Expression
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report:    func(assignability.RefinementDiagnostic) {},
+	}
+	env := NewEnv()
+	env.Set("samples", abstractdomain.KnownSet(
+		refinementsets.Repetition(
+			refinementsets.MakeRefinedSet(refinementsets.AtLeast(-2), refinementsets.AtMost(2)), 1, nil),
+		nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+	// Payload set, ArgvValue nil: only the stdin leg, at a mixed-surface target
+	edge := &ForeignEdge{Call: payload, TargetPath: targetPath, Payload: payload, StdoutName: "stdout"}
+	outcome := checkOutboundLeg(ctx, env, edge, artifact)
+	if outcome == nil {
+		t.Fatalf("a stdin-only call at a mixed-surface target passed with no outcome at all")
+	}
+	if !strings.Contains(outcome.Decline, "the channels do not meet") {
+		t.Errorf("Decline = %q, want the channel-mismatch sentence", outcome.Decline)
+	}
+	if !strings.Contains(outcome.Decline, "argv leg is absent") {
+		t.Errorf("Decline = %q, want it to name the absent argv leg specifically", outcome.Decline)
+	}
+}
+
+/* ── the file-carried shape, against a real kernel and real syntax ──── */
+
+// foreignFileFixture builds a file-json artifact (level_from_file.py's own
+// real anatomy) and an edge whose Payload/FilePath are set directly — the
+// grain checkOutboundLeg itself judges at, mirroring foreignOutboundFixture's
+// own direct-edge-construction style rather than round-tripping through
+// fileCrossingOf's own syntax recognition (pinned separately, below).
+func foreignFileFixture(t *testing.T, samplesLiteral string) foreignEdgeFixture {
+	t.Helper()
+	targetPath, contentHash := writeForeignFileTarget(t)
+	writeForeignArtifact(t, targetPath, foreignFileJSONArtifactJSON(contentHash, targetPath))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	p := entryEnvTestProgram(t, "function f() {\n"+
+		"	const samples = "+samplesLiteral+";\n"+
+		"	samples;\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	payload := statements[1].AsExpressionStatement().Expression
+	var reported []assignability.RefinementDiagnostic
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report:    func(d assignability.RefinementDiagnostic) { reported = append(reported, d) },
+	}
+	env := NewEnv()
+	AnalyzeVariableStatement(ctx, env, statements[0])
+	// FilePath only needs to be non-nil here to route checkOutboundLeg's
+	// dispatch to checkFileCrossing — its own value never enters the fit
+	// judged below (only a channel-mismatch DeclineNode, not exercised by
+	// this fixture's green/fit-only cases). statements[1] (a real, distinct
+	// node) stands in rather than aliasing Payload to two different roles.
+	return foreignEdgeFixture{
+		artifact: artifact,
+		ctx:      ctx,
+		env:      env,
+		edge:     &ForeignEdge{Call: payload, TargetPath: targetPath, Payload: payload, FilePath: statements[1], StdoutName: "stdout"},
+		reported: &reported,
+	}
+}
+
+// TestCheckFileCrossing_AFittingPayloadIsSilent pins the green path: the
+// SAME stdin fit chain the pure-stdin shape uses, applied to a file-json
+// target — samples (0.5, -0.3, 0.2) fit -2 … 2 at length 3 >= 1, so the
+// crossing passes with nothing reported.
+func TestCheckFileCrossing_AFittingPayloadIsSilent(t *testing.T) {
+	fixture := foreignFileFixture(t, "[0.5, -0.3, 0.2]")
+	if outcome := checkOutboundLeg(fixture.ctx, fixture.env, fixture.edge, fixture.artifact); outcome != nil {
+		t.Fatalf("a fitting file-carried crossing did not pass: %+v", outcome)
+	}
+	if len(*fixture.reported) != 0 {
+		t.Errorf("a fitting file-carried crossing reported %d diagnostics: %+v", len(*fixture.reported), *fixture.reported)
+	}
+}
+
+/* ── fileCrossingOf: the writeFileSync-then-execFileSync syntax reader ── */
+
+// TestFileCrossingOf_AMatchingWriteImmediatelyBeforeTheCallIsRecognized
+// pins d-data-legs.ts's tempFileNamedInArgvUndetermined shape: the
+// statement immediately before the call writes the SAME path the call's
+// own argv names, so fileCrossingOf answers the written payload and the
+// argv element, with no sentence at all.
+func TestFileCrossingOf_AMatchingWriteImmediatelyBeforeTheCallIsRecognized(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execFileSync(file: string, args: string[], options: unknown): string;
+declare function writeFileSync(path: string, data: string): void;
+function f(samples: number[]) {
+	writeFileSync("./targets/level_payload.json", JSON.stringify(samples));
+	const stdout = execFileSync("python3", ["./targets/level_from_file.py", "./targets/level_payload.json"], { encoding: "utf8" });
+	return stdout;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	ctx := relationalAccumulationContext(p)
+	_, call, _ := constBoundCallOf(statements[1])
+	args, _ := callArguments(call)
+	payload, filePathElement, sentence, ok := fileCrossingOf(ctx, statements, 1, args)
+	if sentence != "" {
+		t.Fatalf("a matching immediately-preceding write declined: %s", sentence)
+	}
+	if !ok {
+		t.Fatalf("a matching immediately-preceding write was not recognized")
+	}
+	if payload == nil || !ast.IsIdentifier(payload) || payload.Text() != "samples" {
+		t.Errorf("payload = %v, want the identifier samples (JSON.stringify's own argument)", payload)
+	}
+	if filePathElement == nil {
+		t.Errorf("filePathElement is nil, want the argv element naming the file")
+	}
+}
+
+// TestFileCrossingOf_AnInterveningStatementBetweenTheWriteAndTheCallDeclines
+// pins the carrier premise's own boundary: the SAME write and the SAME
+// matching argv path, but with one statement between them — the write is
+// recognized (the path IS named by this call's argv), and the carrier
+// premise (no statement between the write and the call) is what refuses
+// it, named rather than silently falling through to an unrelated reading.
+func TestFileCrossingOf_AnInterveningStatementBetweenTheWriteAndTheCallDeclines(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execFileSync(file: string, args: string[], options: unknown): string;
+declare function writeFileSync(path: string, data: string): void;
+function f(samples: number[]) {
+	writeFileSync("./targets/level_payload.json", JSON.stringify(samples));
+	const unrelated = 1;
+	const stdout = execFileSync("python3", ["./targets/level_from_file.py", "./targets/level_payload.json"], { encoding: "utf8" });
+	return stdout + unrelated;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	ctx := relationalAccumulationContext(p)
+	_, call, _ := constBoundCallOf(statements[2])
+	args, _ := callArguments(call)
+	_, _, sentence, ok := fileCrossingOf(ctx, statements, 2, args)
+	if ok {
+		t.Fatalf("a write separated from the call by an intervening statement was recognized")
+	}
+	if sentence == "" {
+		t.Fatalf("an intervening statement between the write and the call was silently not-this-shape")
+	}
+	if !strings.Contains(sentence, "intervening statement") {
+		t.Errorf("sentence %q does not name the intervening statement", sentence)
+	}
+}
+
+// TestFileCrossingOf_AMismatchedWritePathStaysUndeterminedNamingIt pins
+// the path-mismatch case: the immediately preceding statement DOES write
+// a file, but a DIFFERENT path than either argv element names — recognized
+// (the write and the call both exist) and undetermined (the carrier
+// premise does not hold), named rather than silently read as no write at
+// all or as an ordinary argv-scalar call.
+func TestFileCrossingOf_AMismatchedWritePathStaysUndeterminedNamingIt(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execFileSync(file: string, args: string[], options: unknown): string;
+declare function writeFileSync(path: string, data: string): void;
+function f(samples: number[]) {
+	writeFileSync("./targets/wrong_path.json", JSON.stringify(samples));
+	const stdout = execFileSync("python3", ["./targets/level_from_file.py", "./targets/level_payload.json"], { encoding: "utf8" });
+	return stdout;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	ctx := relationalAccumulationContext(p)
+	_, call, _ := constBoundCallOf(statements[1])
+	args, _ := callArguments(call)
+	_, _, sentence, ok := fileCrossingOf(ctx, statements, 1, args)
+	if ok {
+		t.Fatalf("a mismatched write path was recognized as a fit")
+	}
+	if sentence == "" {
+		t.Fatalf("a mismatched write path was silently not-this-shape")
+	}
+	if !strings.Contains(sentence, "wrong_path.json") {
+		t.Errorf("sentence %q does not name the mismatched written path", sentence)
+	}
+	if !strings.Contains(sentence, "carrier premise") {
+		t.Errorf("sentence %q does not name the carrier premise", sentence)
+	}
+}
+
 /* ── recognition, syntax halves ──────────────────────────────────── */
 
 func TestForeignEdgeRecognition_ReadsTheArgvAndOptionsTheFixtureSpells(t *testing.T) {
@@ -1271,7 +1704,7 @@ function f(boosted: number[]) {
 	if !ok {
 		t.Fatalf("the const-bound spawnSync call was not read")
 	}
-	edge, recognized, sentence, _, path := spawnSyncEdgeOf(nil, call, name)
+	edge, recognized, sentence, _, path := spawnSyncEdgeOf(nil, call, name, statements, 0)
 	if sentence != "" {
 		t.Fatalf("spawnSync declined: %s", sentence)
 	}

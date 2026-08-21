@@ -18,19 +18,29 @@
 //	 "language": "python" | "typescript",
 //	 "runtime": {"band": "cpython-3.11+" | "node-23+"},
 //	 "surface": {"kind": "stdin-json", "stdin": "json", "stdout": "json", "calls": "<fn>"}
-//	          | {"kind": "argv-scalar", "argIndex": n, "parse": "float", "stdout": "json", "calls": "<fn>"},
+//	          | {"kind": "argv-scalar", "argIndex": n, "parse": "float", "stdout": "json", "calls": "<fn>"}
+//	          | {"kind": "stdin-json-argv-scalar", "stdin": "json", "argIndex": n, "parse": "float",
+//	             "stdout": "json", "calls": "<fn>"}
+//	          | {"kind": "file-json", "argIndex": n, "stdout": "json", "calls": "<fn>"},
 //	 "functions": {"<name>": {
 //	   "entry": [{"name", "sequence": {"element": <set>, "lengthAtLeast": n}}
 //	            |{"name", "set": <set>}],
 //	   "return": {"set": <set>, "stdoutPure": bool},
 //	   "provenance": {"line": n, "said": "..."}}}}
 //
-// The two surface kinds are different INBOUND channels: stdin-json's
+// The four surface kinds are different INBOUND channels: stdin-json's
 // one crossing value arrives as JSON on stdin; argv-scalar's arrives as
 // one string at sys.argv[argIndex], parsed with Python's float() — it
 // carries no stdin field, since nothing crosses on stdin for that
-// surface. A call crossing on the wrong channel for the target's own
-// surface is a channel mismatch (foreign_edge.go), not a fit question.
+// surface. stdin-json-argv-scalar is the two together: the target's
+// entry has exactly TWO rows, entry[0] receiving the stdin JSON value
+// and entry[1] the argv float. file-json's one crossing value arrives
+// as JSON read from the FILE NAMED at sys.argv[argIndex] — the file is
+// the carrier, and the transport model is the same JSON reading
+// stdin-json applies, only relocated: entry has one row, for the
+// file's own JSON content, not for the argv string that names it. A
+// call crossing on the wrong channel for the target's own surface is a
+// channel mismatch (foreign_edge.go), not a fit question.
 //
 // `language` selects which runtime pins the band is checked against
 // ("adding a language does not add an artifact kind").
@@ -153,17 +163,23 @@ type ForeignFunctionFact struct {
 	Provenance ForeignProvenance
 }
 
-// ForeignSurfaceChannel is which inbound channel the target's __main__
-// block reads its one crossing value from — "stdin-json" (the value
-// arrives as JSON on stdin) or "argv-scalar" (the value arrives as one
-// argv string, parsed with float()). The two channels are mutually
-// exclusive: a target states exactly one, and a caller crossing on the
-// other channel is a channel mismatch, not a fit question.
+// ForeignSurfaceChannel is which inbound channel(s) the target's
+// __main__ block reads its crossing value(s) from — "stdin-json" (the
+// value arrives as JSON on stdin), "argv-scalar" (the value arrives as
+// one argv string, parsed with float()), "stdin-json-argv-scalar" (TWO
+// values cross at once: a JSON value on stdin AND a float at one argv
+// position), or "file-json" (the value arrives as JSON read from a file
+// NAMED at one argv position — the file is the carrier, never the argv
+// string itself). A target states exactly one channel shape, and a
+// caller crossing on a different shape is a channel mismatch, not a fit
+// question.
 type ForeignSurfaceChannel string
 
 const (
-	ForeignSurfaceStdinJSON  ForeignSurfaceChannel = "stdin-json"
-	ForeignSurfaceArgvScalar ForeignSurfaceChannel = "argv-scalar"
+	ForeignSurfaceStdinJSON      ForeignSurfaceChannel = "stdin-json"
+	ForeignSurfaceArgvScalar     ForeignSurfaceChannel = "argv-scalar"
+	ForeignSurfaceMixedStdinArgv ForeignSurfaceChannel = "stdin-json-argv-scalar"
+	ForeignSurfaceFileJSON       ForeignSurfaceChannel = "file-json"
 )
 
 // ForeignArtifact is the artifact as consumed: the runtime band it
@@ -176,13 +192,15 @@ type ForeignArtifact struct {
 	// (not as the artifact spells it — the hash is what ties them).
 	TargetFile  string
 	RuntimeBand string
-	// Surface: which inbound channel the target reads (stdin-json or
-	// argv-scalar) — the consumer checks the caller's own crossing
-	// channel against this before judging fit at all.
+	// Surface: which inbound channel(s) the target reads (stdin-json,
+	// argv-scalar, the mixed stdin+argv shape, or file-json) — the
+	// consumer checks the caller's own crossing channel(s) against this
+	// before judging fit at all.
 	Surface ForeignSurfaceChannel
-	// ArgvIndex: the argv position the target reads its scalar from,
-	// meaningful only when Surface is ForeignSurfaceArgvScalar (schema
-	// v2's "argIndex" field).
+	// ArgvIndex: the argv position the target reads its scalar from —
+	// meaningful for ForeignSurfaceArgvScalar (schema v2's "argIndex"),
+	// ForeignSurfaceMixedStdinArgv (the argv leg's own position, entry[1]),
+	// and ForeignSurfaceFileJSON (the position naming the file path).
 	ArgvIndex int
 	// Called: the fact of surface.calls — the function the stdin/stdout
 	// surface actually invokes, which is the only one this edge consumes.
@@ -527,9 +545,9 @@ func readPythonArtifact(parsed map[string]any, targetPath string, artifactPath s
 	}, ""
 }
 
-// foreignSurface is surfaceOf's whole reading: which channel the target
-// serves, the argv position for an argv-scalar surface, and the one
-// function the __main__ block calls.
+// foreignSurface is surfaceOf's whole reading: which channel(s) the
+// target serves, the argv position an argv-scalar/mixed/file-json
+// surface names, and the one function the __main__ block calls.
 type foreignSurface struct {
 	channel  ForeignSurfaceChannel
 	argIndex int
@@ -537,24 +555,23 @@ type foreignSurface struct {
 }
 
 // surfaceOf reads the target's inbound/outbound channel: the wire is
-// JSON in both directions for "stdin-json", or one argv string parsed
-// as a float for "argv-scalar" — the outbound leg (stdout) is JSON
-// either way, since both transports still print `json.dumps(...)`. The
+// JSON in both directions for "stdin-json", one argv string parsed as a
+// float for "argv-scalar", both of those together for
+// "stdin-json-argv-scalar", or a file's JSON content named at one argv
+// position for "file-json" — the outbound leg (stdout) is JSON in every
+// case, since every transport still prints `json.dumps(...)`. The
 // edge's whole claim is about the ONE named function — a target whose
-// surface names a kind other than these two, or calls nothing this
+// surface names a kind other than these four, or calls nothing this
 // artifact names, transports something the JSON model does not
 // describe.
 func surfaceOf(parsed map[string]any, artifactPath string) (foreignSurface, string) {
 	surface, ok := parsed["surface"].(map[string]any)
 	if !ok {
 		// the producer emits no surface key at all for a harness shape it
-		// does not recognize — a mixed stdin+argv __main__ block (values
-		// crossing on BOTH channels at once) is exactly this case today:
-		// neither stdin-json nor argv-scalar names one inbound channel for
-		// the whole call, so the target states no callable surface
+		// does not recognize
 		return foreignSurface{}, artifactPath + " states no callable surface for its __main__ block " +
-			"— a harness shape (such as one mixing stdin and argv data in the same call) that this " +
-			"producer does not export a surface for — so nothing says what the target does with its input and output"
+			"— a harness shape this producer does not export a surface for — so nothing says what " +
+			"the target does with its input and output"
 	}
 	kind, _ := surface["kind"].(string)
 	switch kind {
@@ -562,9 +579,14 @@ func surfaceOf(parsed map[string]any, artifactPath string) (foreignSurface, stri
 		return surfaceOfStdinJSON(surface, artifactPath)
 	case string(ForeignSurfaceArgvScalar):
 		return surfaceOfArgvScalar(surface, artifactPath)
+	case string(ForeignSurfaceMixedStdinArgv):
+		return surfaceOfMixedStdinArgv(surface, artifactPath)
+	case string(ForeignSurfaceFileJSON):
+		return surfaceOfFileJSON(surface, artifactPath)
 	default:
 		return foreignSurface{}, artifactPath + ` states a surface of kind ` + quotedOrNone(kind) +
-			`, and this edge applies the JSON transport model only to "stdin-json" or "argv-scalar"`
+			`, and this edge applies the JSON transport model only to "stdin-json", "argv-scalar", ` +
+			`"stdin-json-argv-scalar", or "file-json"`
 	}
 }
 
@@ -616,6 +638,78 @@ func surfaceOfArgvScalar(surface map[string]any, artifactPath string) (foreignSu
 	}
 	return foreignSurface{
 		channel:  ForeignSurfaceArgvScalar,
+		argIndex: int(argIndexFloat),
+		calls:    called,
+	}, ""
+}
+
+// surfaceOfMixedStdinArgv reads the mixed surface: one value crosses on
+// stdin as JSON, and a SECOND value crosses at argv[argIndex], parsed
+// with Python's float() — schema-v2.md's exact spec: {"kind":
+// "stdin-json-argv-scalar", "stdin": "json", "argIndex": 1, "parse":
+// "float", "stdout": "json", "calls": "<fn>"}. The target's own entry
+// therefore has exactly TWO rows in this one function's fact: entry[0]
+// is the stdin leg's own set, entry[1] the argv leg's — the caller
+// (checkOutboundLeg's mixed branch) fits each leg through its own
+// existing crossing function rather than through one combined question.
+func surfaceOfMixedStdinArgv(surface map[string]any, artifactPath string) (foreignSurface, string) {
+	stdin, _ := surface["stdin"].(string)
+	stdout, _ := surface["stdout"].(string)
+	if stdin != "json" || stdout != "json" {
+		return foreignSurface{}, artifactPath + " states a mixed surface reading " + quotedOrNone(stdin) +
+			" on stdin and writing " + quotedOrNone(stdout) +
+			" on stdout, and this edge applies the JSON transport model to both legs"
+	}
+	parse, _ := surface["parse"].(string)
+	if parse != "float" {
+		return foreignSurface{}, artifactPath + " states a mixed surface parsing " +
+			quotedOrNone(parse) + " on its argv leg, and this edge reads only the \"float\" parse — " +
+			"Python's float(sys.argv[n])"
+	}
+	argIndexFloat, hasIndex := surface["argIndex"].(float64)
+	if !hasIndex {
+		return foreignSurface{}, artifactPath + " states a mixed surface with no argIndex, " +
+			"so nothing says which argv position the target reads its second value from"
+	}
+	called, calledOk := surface["calls"].(string)
+	if !calledOk || called == "" {
+		return foreignSurface{}, artifactPath + " states no surface.calls function, so nothing names the code " +
+			"that runs when this call executes"
+	}
+	return foreignSurface{
+		channel:  ForeignSurfaceMixedStdinArgv,
+		argIndex: int(argIndexFloat),
+		calls:    called,
+	}, ""
+}
+
+// surfaceOfFileJSON reads the file-carried surface: the crossing value
+// arrives as JSON, but read from a FILE whose path is named at
+// argv[argIndex] — the argv string itself carries no data, only the
+// path — schema-v2.md's exact spec: {"kind": "file-json", "argIndex": 1,
+// "stdout": "json", "calls": "<fn>"}. The target's entry has one row —
+// the file's own JSON content — exactly as stdin-json's does; only the
+// carrier differs (a file instead of the stdin stream), so the JSON
+// transport model itself is shared, never re-derived.
+func surfaceOfFileJSON(surface map[string]any, artifactPath string) (foreignSurface, string) {
+	stdout, _ := surface["stdout"].(string)
+	if stdout != "json" {
+		return foreignSurface{}, artifactPath + " states a file-json surface writing " +
+			quotedOrNone(stdout) + " on stdout, and this edge applies the JSON transport model " +
+			"to the return leg"
+	}
+	argIndexFloat, hasIndex := surface["argIndex"].(float64)
+	if !hasIndex {
+		return foreignSurface{}, artifactPath + " states a file-json surface with no argIndex, " +
+			"so nothing says which argv position names the file the target reads"
+	}
+	called, calledOk := surface["calls"].(string)
+	if !calledOk || called == "" {
+		return foreignSurface{}, artifactPath + " states no surface.calls function, so nothing names the code " +
+			"that runs when this call executes"
+	}
+	return foreignSurface{
+		channel:  ForeignSurfaceFileJSON,
 		argIndex: int(argIndexFloat),
 		calls:    called,
 	}, ""

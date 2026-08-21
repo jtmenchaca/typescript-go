@@ -10,7 +10,11 @@
 // and not a manifest: the argv deterministically NAMES the code that
 // runs next, so the checker treats the invocation the way it treats an
 // import. §11 is this exact spelling; §4 is the JSON transport model
-// both legs apply; §5 is the list of premises the crossing rests on.
+// every crossing shape applies (pure stdin above, pure argv-scalar, the
+// MIXED shape carrying one value on each channel at once, and the
+// FILE-CARRIED shape whose value is written to a file and read back
+// through the same JSON model, only relocated); §5 is the list of
+// premises the crossing rests on.
 //
 // WHAT THE ROUTE DOES, in order:
 //
@@ -70,11 +74,12 @@ import (
 )
 
 // foreignArgvIndexModeled is the one argv position this edge reads a
-// scalar from — schema-v2.md's argv-scalar surface states its own
-// argIndex, and this is the only value this reader was built against:
-// argv[1], the position a plain interpreter's two-element argv (`[<script>,
-// <data>]`) puts the data element at. A surface naming any other index
-// is recognized-and-declined by name, not silently accepted.
+// scalar (argv-scalar, the mixed shape's argv leg) or a path (file-json)
+// from — schema-v2.md's own argIndex field, and this is the only value
+// this reader was built against: argv[1], the position a plain
+// interpreter's two-element argv (`[<script>, <data>]`) puts the second
+// element at. A surface naming any other index is recognized-and-
+// declined by name, not silently accepted.
 const foreignArgvIndexModeled = 1
 
 // pythonSpellings are the argv[0] words this recognizer reads as "the
@@ -91,7 +96,7 @@ var pythonSpellings = map[string]bool{"python3": true, "python": true}
 var stringEncodings = map[string]bool{"utf8": true, "utf-8": true}
 
 // ForeignEdge is one recognized cross-language call: which node the
-// call is, which .py file it names, which expression crosses out, and
+// call is, which .py file it names, which expression(s) cross out, and
 // which name catches the target's stdout.
 type ForeignEdge struct {
 	// Call: the execFileSync call expression — where a fit refutation
@@ -102,15 +107,25 @@ type ForeignEdge struct {
 	// wrote it, which is the only reading that survives a moved cwd).
 	TargetPath string
 	// Payload: the expression handed to JSON.stringify — the value that
-	// actually crosses out on stdin. Nil when the crossing rides on argv
-	// instead (ArgvValue set).
+	// crosses out on stdin (the ordinary and mixed shapes), or the value
+	// written to the file FilePath names (the file-carried shape). Nil
+	// where nothing stringifies at all (the pure argv-scalar shape).
 	Payload *ast.Node
-	// ArgvValue: the argv element carrying the crossing value — set only
-	// for the two-element python argv shape (`[<script>, <data>]`), nil
-	// for the ordinary one-element/stdin shape. Exactly one of Payload
-	// and ArgvValue is ever set for a recognized edge: the two are
-	// different inbound channels, never both at once.
+	// ArgvValue: the argv element carrying the crossing value ITSELF —
+	// set for the two-element python argv shape (`[<script>, <data>]`,
+	// pure argv-scalar) and for the mixed shape's own argv leg (both
+	// Payload and ArgvValue set together). Nil for the ordinary
+	// stdin-only and file-carried shapes, where the crossing value is
+	// not the argv element's own text.
 	ArgvValue *ast.Node
+	// FilePath: the argv element NAMING a file — set only for the
+	// file-carried shape, where the data itself is written to that path
+	// by a preceding writeFileSync(FilePath, JSON.stringify(Payload))
+	// statement and the target reads it back off disk, never off argv's
+	// own text. Nil for every other shape. Exactly one of {ArgvValue,
+	// FilePath} is ever set alongside a non-nil Payload for a recognized
+	// mixed or file-carried edge; the pure shapes set neither.
+	FilePath *ast.Node
 	// StdoutName: the name the call's result binds, whose sole
 	// JSON.parse consumer receives the return fact.
 	StdoutName string
@@ -255,22 +270,9 @@ func foreignReturnValue(artifact *ForeignArtifact) abstractdomain.AbstractValue 
 // argv-naming basis; its return leg reads the following statements for
 // the accumulate-then-parse `.on()` pair (spawnAsyncEdgeOf), and answers
 // its own sentence naming whatever construct still blocks it rather than
-// falling through to "not this shape". statements/index are threaded
-// through for that look-ahead alone — every other invocation function
-// reads its own statement only.
-//
-// The shapes it can answer (targetPath, the fifth value, rides
-// alongside every one of them — "" wherever the reader has not yet
-// resolved a script path to name):
-//
-//	(edge, true,  "", nil)     — recognized whole
-//	(nil,  false, "", nil)     — not this shape at all; no sentence owed
-//	(nil,  false, said, node)  — a recognized cross-language call whose
-//	                             spelling stopped the resolution
-//
-// The declines that DO owe a sentence are exactly those where the
-// reader can see a cross-language call and cannot serve it. A call to
-// some other program is not this edge and says nothing.
+// falling through to "not this shape". execFileSync/spawnSync also take
+// statements/index — the file-carried shape's own look-BACK (a preceding
+// writeFileSync statement) needs them exactly as spawn's look-ahead does.
 func foreignEdgeOf(ctx *FlowContext, statements []*ast.Node, index int) (edge *ForeignEdge, recognized bool, declineSentence string, declineNode *ast.Node, targetPath string) {
 	statement := statements[index]
 	name, call, ok := constBoundCallOf(statement)
@@ -280,9 +282,9 @@ func foreignEdgeOf(ctx *FlowContext, statements []*ast.Node, index int) (edge *F
 	callee := calleeOf(call)
 	switch {
 	case resolvesToChildProcessMember(ctx, callee, "execFileSync"):
-		return execFileSyncEdgeOf(ctx, call, name)
+		return execFileSyncEdgeOf(ctx, call, name, statements, index)
 	case resolvesToChildProcessMember(ctx, callee, "spawnSync"):
-		return spawnSyncEdgeOf(ctx, call, name)
+		return spawnSyncEdgeOf(ctx, call, name, statements, index)
 	case resolvesToChildProcessMember(ctx, callee, "execSync"):
 		return execSyncEdgeOf(call, name)
 	case resolvesToChildProcessMember(ctx, callee, "spawn"):
@@ -297,10 +299,19 @@ func foreignEdgeOf(ctx *FlowContext, statements []*ast.Node, index int) (edge *F
 // JSON.stringify(<payload>), encoding: <string encoding>})` — the
 // sync exec whose bound name is itself the stdout string. The argv
 // itself may ALSO carry a two-element [script, dataElement] shape (the
-// argv-value leg); a call sending a value on both stdin and argv[1] at
-// once is a mixed channel this reader does not model and declines by
-// name, rather than silently picking one of the two.
-func execFileSyncEdgeOf(ctx *FlowContext, call *ast.Node, name string) (*ForeignEdge, bool, string, *ast.Node, string) {
+// argv-value leg); a call sending a value on BOTH stdin and argv[1] at
+// once is now a RECOGNIZED mixed edge (Payload and ArgvValue both set) —
+// checkOutboundLeg's mixed branch is the one place that judges whether
+// the target's own surface actually reads both legs, per-leg fit
+// discharged only once the channel match itself holds.
+//
+// A call with NO options-object input at all still recognizes the
+// file-carried shape: fileCrossingOf looks at the PRECEDING statement
+// for a `writeFileSync(<path>, JSON.stringify(<payload>))` write whose
+// path matches one of this call's own argv elements.
+func execFileSyncEdgeOf(
+	ctx *FlowContext, call *ast.Node, name string, statements []*ast.Node, index int,
+) (*ForeignEdge, bool, string, *ast.Node, string) {
 	args, _ := callArguments(call)
 	if len(args) < 3 {
 		return nil, false, "", nil, ""
@@ -328,18 +339,40 @@ func execFileSyncEdgeOf(ctx *FlowContext, call *ast.Node, name string) (*Foreign
 			"so its result is a Buffer rather than the target's JSON text — " +
 			"the return leg has no text to parse", args[2], resolvedPath
 	}
-	if payload == nil && dataElement == nil {
+	if payload == nil && dataElement != nil {
+		// no stdin `input`, but a second argv element exists — that
+		// element is either the FILE-CARRIED shape's own path (a
+		// preceding writeFileSync wrote it) or the pure argv-scalar
+		// shape's data itself; the write-back check decides which,
+		// since the two read as the identical AST shape otherwise
+		filePayload, filePath, fileSentence, fileOk := fileCrossingOf(ctx, statements, index, args)
+		if fileSentence != "" {
+			return nil, false, fileSentence, dataElement, resolvedPath
+		}
+		if fileOk {
+			return &ForeignEdge{
+				Call:       call,
+				TargetPath: resolvedPath,
+				Payload:    filePayload,
+				FilePath:   filePath,
+				StdoutName: name,
+			}, true, "", nil, resolvedPath
+		}
+		return &ForeignEdge{
+			Call:       call,
+			TargetPath: resolvedPath,
+			ArgvValue:  dataElement,
+			StdoutName: name,
+		}, true, "", nil, resolvedPath
+	}
+	if payload == nil {
+		// no stdin `input` and no second argv element at all — the
+		// file-carried shape still needs SOME argv element to name the
+		// path, so a preceding writeFileSync here has nothing to match
+		// against; nothing crosses out at all
 		return nil, false, "this call runs " + runnerWord + " on " + script + " and sends it no " +
 			"JSON.stringify(...) input, so nothing crosses out on stdin and the transport " +
 			"model has no outbound leg to apply", args[2], resolvedPath
-	}
-	if payload != nil && dataElement != nil {
-		// BOTH channels carry a value in this one call: the target's own
-		// __main__ block may read one, the other, or both, and this reader
-		// models one inbound channel per call, never a mix
-		return nil, false, "this call runs " + runnerWord + " on " + script + " and sends a value " +
-			"on BOTH stdin (JSON.stringify(...) input) and argv[1] in the same call — the checker " +
-			"models one inbound channel per call, never a mix", args[2], resolvedPath
 	}
 	return &ForeignEdge{
 		Call:       call,
@@ -350,6 +383,133 @@ func execFileSyncEdgeOf(ctx *FlowContext, call *ast.Node, name string) (*Foreign
 	}, true, "", nil, resolvedPath
 }
 
+// fileCrossingOf recognizes the FILE-CARRIED data leg: a preceding
+// `writeFileSync(<written path>, JSON.stringify(<payload>))` statement
+// whose path (const-resolved paths allowed, via resolvedConstStringLiteral
+// — the same follow scriptElementOf already performs) is named by one
+// of callArgs[1]'s own argv elements. The CARRIER PREMISE — the bytes
+// written are the bytes read — holds only when that write is the
+// IMMEDIATELY PRECEDING statement, no exceptions: any statement between
+// the write and the call could have touched the file first, so this
+// reader requires index-1 specifically, never merely "somewhere
+// earlier".
+//
+// Answers (payload, filePathElement, "", true) on a full match; (nil,
+// nil, "", false) where NO statement in this body — preceding or not —
+// is a writeFileSync at all — silent, since a call with no writeFileSync
+// anywhere and no stdin input is simply not this shape (a caller with
+// nothing to model owes no sentence any more than the ordinary "not
+// this call" cases above it do); (nil, nil, said, false) in the two
+// RECOGNIZED-and-blocked cases, each named: the immediately preceding
+// statement IS a writeFileSync but its own written path names NO argv
+// element of this call (a path mismatch — the write and the call both
+// exist, but do not name the same file), or an EARLIER statement (not
+// the immediately preceding one) writes a path this call's argv DOES
+// name (an intervening statement — the write exists and the path
+// matches, but the carrier premise still refuses it).
+func fileCrossingOf(
+	ctx *FlowContext, statements []*ast.Node, index int, callArgs []*ast.Node,
+) (payload *ast.Node, filePathElement *ast.Node, sentence string, ok bool) {
+	if index == 0 || len(callArgs) < 2 {
+		return nil, nil, "", false
+	}
+	argv := Unwrapped(callArgs[1])
+	if argv == nil || !ast.IsArrayLiteralExpression(argv) {
+		return nil, nil, "", false
+	}
+	argvElements := argv.AsArrayLiteralExpression().Elements.Nodes
+	// the immediately preceding statement, the ONLY position the carrier
+	// premise can hold at
+	precedingPath, precedingPayload, precedingWriteOk := writeFileSyncOf(ctx, statements[index-1])
+	if precedingWriteOk {
+		for _, element := range argvElements {
+			if text, elementOk := argvLiteralTextOf(ctx, element); elementOk && text == precedingPath {
+				return precedingPayload, Unwrapped(element), "", true
+			}
+		}
+	}
+	// scan the statements STRICTLY BEFORE that one: a writeFileSync
+	// naming a path this call's argv also names, but separated from the
+	// call by at least one intervening statement, is a RECOGNIZED write
+	// the carrier premise still refuses — name the gap, don't stay silent
+	for earlier := index - 2; earlier >= 0; earlier-- {
+		writtenPath, _, writeOk := writeFileSyncOf(ctx, statements[earlier])
+		if !writeOk {
+			continue
+		}
+		for _, element := range argvElements {
+			if text, elementOk := argvLiteralTextOf(ctx, element); elementOk && text == writtenPath {
+				return nil, nil, "a statement writes " + strconv.Quote(writtenPath) +
+					" earlier in this body, but it is not the statement immediately before this call — " +
+					"an intervening statement could have touched the file first, so the carrier premise " +
+					"(the bytes written are the bytes read) does not hold", false
+			}
+		}
+	}
+	// the immediately preceding statement IS a writeFileSync, but names a
+	// path none of this call's argv elements name — a genuine path
+	// mismatch, recognized and named rather than silently read as "no
+	// writeFileSync at all"
+	if precedingWriteOk {
+		return nil, nil, "the immediately preceding statement writes " + strconv.Quote(precedingPath) +
+			", and this call's own argv names no element with that same path — the carrier premise " +
+			"(the bytes written are the bytes read) does not hold, so the written file is not this call's data leg", false
+	}
+	return nil, nil, "", false
+}
+
+// writeFileSyncOf reads `writeFileSync(<path>, JSON.stringify(<payload>))`
+// as a bare expression statement — fs's own two-argument sync write, the
+// same shape execFileSyncOptionsOf already reads for the `input` property,
+// applied to a direct call rather than an object property. The callee
+// test is BY NAME ONLY, the same discipline jsonStringifyArgumentOf
+// already states for `JSON.stringify` ("the resolvesToDefaultLib check
+// that would ground it belongs to the evaluation of that call") —
+// writeFileSync never gates WHICH invocation reader runs the way
+// execFileSync/spawnSync/execSync/spawn's own callee does
+// (resolvesToChildProcessMember, at foreignEdgeOf's dispatch), so there is
+// no dispatch moment this name needs to be exclusive at; a same-named
+// local helper reads identically here, exactly as a local `JSON` shadow
+// would for the stringify read. The path element follows the same
+// written-literal-or-const-resolved rule scriptElementOf and
+// argvLiteralTextOf already apply, so a computed path is not recognized
+// here any more than a computed script path is recognized there.
+func writeFileSyncOf(ctx *FlowContext, statement *ast.Node) (path string, payload *ast.Node, ok bool) {
+	if statement == nil || !ast.IsExpressionStatement(statement) {
+		return "", nil, false
+	}
+	call := Unwrapped(statement.AsExpressionStatement().Expression)
+	if call == nil || !ast.IsCallExpression(call) {
+		return "", nil, false
+	}
+	callee := calleeOf(call)
+	if callee == nil {
+		return "", nil, false
+	}
+	var name *ast.Node
+	if ast.IsIdentifier(callee) {
+		name = callee
+	} else if ast.IsPropertyAccessExpression(callee) {
+		name = callee.AsPropertyAccessExpression().Name()
+	}
+	if name == nil || name.Text() != "writeFileSync" {
+		return "", nil, false
+	}
+	args, hasArgs := callArguments(call)
+	if !hasArgs || len(args) < 2 {
+		return "", nil, false
+	}
+	pathText, pathOk := argvLiteralTextOf(ctx, args[0])
+	if !pathOk {
+		return "", nil, false
+	}
+	inner, innerOk := jsonStringifyArgumentOf(args[1])
+	if !innerOk {
+		return "", nil, false
+	}
+	return pathText, inner, true
+}
+
 // spawnSyncEdgeOf reads the same argv/options shape as execFileSync
 // through spawnSync — the difference is entirely in the RESULT: spawnSync
 // answers an object (`{stdout, stderr, status, ...}`), never a bare
@@ -357,8 +517,10 @@ func execFileSyncEdgeOf(ctx *FlowContext, call *ast.Node, name string) (*Foreign
 // than at `<name>` itself. StdoutName carries the same binding name;
 // soleParseConsumerOf's shared reading (foreign_edge.go's return leg)
 // accepts either the bare name or `<name>.stdout` as the read of it.
-func spawnSyncEdgeOf(ctx *FlowContext, call *ast.Node, name string) (*ForeignEdge, bool, string, *ast.Node, string) {
-	return execFileSyncEdgeOf(ctx, call, name)
+func spawnSyncEdgeOf(
+	ctx *FlowContext, call *ast.Node, name string, statements []*ast.Node, index int,
+) (*ForeignEdge, bool, string, *ast.Node, string) {
+	return execFileSyncEdgeOf(ctx, call, name, statements, index)
 }
 
 // spawnAsyncEdgeOf is `spawn(<runner>, <argv>)` — async, no captured
@@ -1134,16 +1296,20 @@ func stringLiteralText(expression *ast.Node) (string, bool) {
 // where the leg is clean; an outcome (a decline sentence, or nothing at
 // all after a 7001 fired) where it is not.
 //
-// A recognized edge crosses on exactly one of two channels — stdin
-// (edge.Payload) or argv (edge.ArgvValue) — and the FIRST premise,
-// before any of the ones below, is that the crossing channel MEETS the
-// target's own stated surface: a call on one channel at a target whose
-// surface serves the other is a channel mismatch, declined by name
-// (checkArgvCrossing carries this for the argv leg; the mirror lives
-// here for the stdin leg).
+// A recognized edge crosses on one of FOUR channel shapes — pure stdin
+// (edge.Payload alone), pure argv-scalar (edge.ArgvValue alone), the
+// mixed shape (edge.Payload AND edge.ArgvValue both set), or the
+// file-carried shape (edge.Payload with edge.FilePath set) — and the
+// FIRST premise, before any of the ones below, is that the crossing
+// channel MEETS the target's own stated surface: a call on one shape at
+// a target whose surface serves another is a channel mismatch, declined
+// by name (checkArgvCrossing, checkMixedCrossing, and checkFileCrossing
+// each carry their own channel match; the mirror for the pure-stdin
+// path lives here).
 //
 // The stdin leg's own premises past the channel match, each a REAL
-// check:
+// check — shared verbatim by the pure-stdin, mixed, and file-carried
+// shapes through stdinFitAgainst:
 //
 //   - the artifact states an entry position for the payload to fit
 //     (no position, no crossing to judge);
@@ -1163,12 +1329,23 @@ func stringLiteralText(expression *ast.Node) (string, bool) {
 func checkOutboundLeg(
 	ctx *FlowContext, env Env, edge *ForeignEdge, artifact *ForeignArtifact,
 ) *ForeignEdgeOutcome {
-	if edge.ArgvValue != nil {
-		// the crossing rides on argv, not stdin — a DIFFERENT inbound
-		// channel with its own premises (channel match, then the
+	switch {
+	case edge.ArgvValue != nil && edge.Payload != nil:
+		// the MIXED shape: both legs carry a value — channel match first
+		// (a mixed call only fits a mixed surface), then each leg's own
+		// existing fit chain, independently
+		return checkMixedCrossing(ctx, env, edge, artifact)
+	case edge.ArgvValue != nil:
+		// the crossing rides on argv alone, not stdin — a DIFFERENT
+		// inbound channel with its own premises (channel match, then the
 		// written-literal/parse/fit chain), never the stdin NaN/subset
 		// path below
 		return checkArgvCrossing(ctx, edge, artifact)
+	case edge.FilePath != nil:
+		// the crossing rides on a FILE named in argv — the carrier
+		// differs, but the payload crosses through the same stdin fit
+		// chain once the channel match holds
+		return checkFileCrossing(ctx, env, edge, artifact)
 	}
 	// the MIRROR channel mismatch: a call sending its value through
 	// `input: JSON.stringify(...)` at a target whose surface reads argv
@@ -1177,6 +1354,22 @@ func checkOutboundLeg(
 		return &ForeignEdgeOutcome{
 			Decline: "the call passes the value as JSON on stdin, but the target's fact serves an argv[" +
 				strconv.Itoa(artifact.ArgvIndex) + "] scalar — the channels do not meet",
+			DeclineNode: edge.Payload,
+		}
+	}
+	if artifact.Surface == ForeignSurfaceMixedStdinArgv {
+		return &ForeignEdgeOutcome{
+			Decline: "the call passes only the value as JSON on stdin, but the target's fact serves a mixed " +
+				"surface reading a SECOND value from argv[" + strconv.Itoa(artifact.ArgvIndex) +
+				"] as well — the channels do not meet: the argv leg is absent",
+			DeclineNode: edge.Payload,
+		}
+	}
+	if artifact.Surface == ForeignSurfaceFileJSON {
+		return &ForeignEdgeOutcome{
+			Decline: "the call passes the value as JSON on stdin, but the target's fact serves a file-json " +
+				"surface reading the value from a file named at argv[" + strconv.Itoa(artifact.ArgvIndex) +
+				"] — the channels do not meet",
 			DeclineNode: edge.Payload,
 		}
 	}
@@ -1198,8 +1391,18 @@ func checkOutboundLeg(
 			DeclineNode: edge.Call,
 		}
 	}
-	entry := artifact.Called.Entry[0]
-	crossing := evaluateExpression(ctx, env, edge.Payload)
+	return stdinFitAgainst(ctx, env, edge.Payload, artifact, artifact.Called.Entry[0])
+}
+
+// stdinFitAgainst is the stdin leg's own fit chain, past the channel
+// match and the entry-position count: NaN-freedom (§4), then the
+// sequence or scalar crossing fit. checkOutboundLeg's pure-stdin path
+// and checkMixedCrossing's stdin leg (entry[0]) both fit through this
+// SAME function.
+func stdinFitAgainst(
+	ctx *FlowContext, env Env, payload *ast.Node, artifact *ForeignArtifact, entry ForeignEntry,
+) *ForeignEdgeOutcome {
+	crossing := evaluateExpression(ctx, env, payload)
 	// NaN-FREEDOM (§4): the premise the fixture's own comment names.
 	// This runs BEFORE the shape gates because the obstacle only speaks
 	// for readings that DERIVE a NaN path — a pinned NaN, the
@@ -1207,16 +1410,129 @@ func checkOutboundLeg(
 	// NaN — and each of those is a real stringify hazard regardless of
 	// which entry shape receives it.
 	if sentence := nanFreedomObstacle(crossing); sentence != "" {
-		ctx.Report(foreignRefutation(edge.Payload,
+		ctx.Report(foreignRefutation(payload,
 			sentence+" — JSON.stringify writes NaN as null, so "+artifact.Called.Name+
 				" would receive a value this program never computed",
 			artifact))
 		return &ForeignEdgeOutcome{}
 	}
 	if entry.IsSequence {
-		return checkSequenceCrossing(ctx, edge, artifact, entry, crossing)
+		return checkSequenceCrossing(ctx, payload, artifact, entry, crossing)
 	}
-	return checkScalarCrossing(ctx, edge, artifact, entry, crossing)
+	return checkScalarCrossing(ctx, payload, artifact, entry, crossing)
+}
+
+// checkMixedCrossing discharges the mixed shape's own premises, in
+// order:
+//
+//   - CHANNEL MATCH: the target's surface must itself be the mixed
+//     stdin-json-argv-scalar shape, at the modeled argv index — a mixed
+//     CALL at any other surface declines with today's "checker models
+//     one inbound channel per call" reading extended to name the surface
+//     it actually found (a single-channel surface, or the wrong argv
+//     index), never silently picking one leg;
+//   - the target's entry must state EXACTLY TWO positions — entry[0] for
+//     the stdin leg, entry[1] for the argv leg — since the harness hands
+//     the mixed call's two values to exactly those two positions;
+//   - EACH LEG's OWN fit, independently: the stdin leg through
+//     stdinFitAgainst (against entry[0], the SAME function the pure
+//     stdin shape uses), the argv leg through argvScalarFitAgainst
+//     (against entry[1], the SAME function the pure argv-scalar shape
+//     uses). A refutation on one leg fires its own 7001 with its own
+//     sentence; the other leg is still judged, since the two crossings
+//     are independent values with independent fates.
+func checkMixedCrossing(
+	ctx *FlowContext, env Env, edge *ForeignEdge, artifact *ForeignArtifact,
+) *ForeignEdgeOutcome {
+	if artifact.Surface != ForeignSurfaceMixedStdinArgv {
+		return &ForeignEdgeOutcome{
+			Decline: "this call sends a value on BOTH stdin (JSON.stringify(...) input) and argv[" +
+				strconv.Itoa(foreignArgvIndexModeled) + "], but the target's fact serves " +
+				string(artifact.Surface) + ", not the mixed stdin-json-argv-scalar surface — " +
+				"the channels do not meet",
+			DeclineNode: edge.Call,
+		}
+	}
+	if artifact.ArgvIndex != foreignArgvIndexModeled {
+		return &ForeignEdgeOutcome{
+			Decline: "the target " + artifact.Called.Name + " states its mixed surface's argv leg at index " +
+				strconv.Itoa(artifact.ArgvIndex) + ", and this call's data element sits at argv[" +
+				strconv.Itoa(foreignArgvIndexModeled) + "] — the channels do not meet",
+			DeclineNode: edge.ArgvValue,
+		}
+	}
+	if len(artifact.Called.Entry) != 2 {
+		return &ForeignEdgeOutcome{
+			Decline: "the target " + artifact.Called.Name + " states " +
+				strconv.Itoa(len(artifact.Called.Entry)) + " entry positions, and the mixed surface " +
+				"hands it exactly two values (stdin, then argv) — the checker models no other split",
+			DeclineNode: edge.Call,
+		}
+	}
+	stdinOutcome := stdinFitAgainst(ctx, env, edge.Payload, artifact, artifact.Called.Entry[0])
+	argvOutcome := argvScalarFitAgainst(ctx, edge.ArgvValue, artifact, artifact.Called.Entry[1])
+	// each leg's own refutation already reported through ctx.Report as it
+	// ran; a non-nil DECLINE outcome from either leg still needs to reach
+	// the caller (a decline is not reported, only returned) — the stdin
+	// leg's decline takes precedence only because there is exactly one
+	// Decline slot to carry back, never because the argv leg went unjudged
+	if stdinOutcome != nil && stdinOutcome.Decline != "" {
+		return stdinOutcome
+	}
+	if argvOutcome != nil && argvOutcome.Decline != "" {
+		return argvOutcome
+	}
+	if stdinOutcome != nil || argvOutcome != nil {
+		// at least one leg fired its own 7001 (or both did) — nothing left
+		// to publish, exactly as the pure-channel paths answer after a fire
+		return &ForeignEdgeOutcome{}
+	}
+	return nil
+}
+
+// checkFileCrossing discharges the file-carried shape's own premises,
+// in order:
+//
+//   - CHANNEL MATCH: the target's surface must itself be file-json, at
+//     the modeled argv index — a call whose data crosses through a
+//     written file at any other surface declines by name;
+//   - the target's entry must state EXACTLY ONE position — the file's
+//     own JSON content, read as one value exactly as stdin-json's single
+//     entry is;
+//   - the PAYLOAD FIT: the SAME stdinFitAgainst function the pure stdin
+//     shape uses, against entry[0] — the carrier (a file instead of
+//     stdin) is the only difference; the JSON transport model itself,
+//     and every premise it carries (NaN-freedom, the element/length
+//     fit), is shared unchanged.
+func checkFileCrossing(
+	ctx *FlowContext, env Env, edge *ForeignEdge, artifact *ForeignArtifact,
+) *ForeignEdgeOutcome {
+	if artifact.Surface != ForeignSurfaceFileJSON {
+		return &ForeignEdgeOutcome{
+			Decline: "this call writes its value to a file and names that file at argv[" +
+				strconv.Itoa(foreignArgvIndexModeled) + "], but the target's fact serves " +
+				string(artifact.Surface) + ", not the file-json surface — the channels do not meet",
+			DeclineNode: edge.Call,
+		}
+	}
+	if artifact.ArgvIndex != foreignArgvIndexModeled {
+		return &ForeignEdgeOutcome{
+			Decline: "the target " + artifact.Called.Name + " states its file-json surface at argv index " +
+				strconv.Itoa(artifact.ArgvIndex) + ", and this call names the file at argv[" +
+				strconv.Itoa(foreignArgvIndexModeled) + "] — the channels do not meet",
+			DeclineNode: edge.FilePath,
+		}
+	}
+	if len(artifact.Called.Entry) != 1 {
+		return &ForeignEdgeOutcome{
+			Decline: "the target " + artifact.Called.Name + " states " +
+				strconv.Itoa(len(artifact.Called.Entry)) + " entry positions, and the file-json " +
+				"surface hands it one JSON value read from the file — the checker models no " +
+				"splitting of that value across positions",
+			DeclineNode: edge.Call,
+		}
+	}
+	return stdinFitAgainst(ctx, env, edge.Payload, artifact, artifact.Called.Entry[0])
 }
 
 // checkArgvCrossing discharges the argv-scalar leg's own premises, in
@@ -1242,10 +1558,26 @@ func checkOutboundLeg(
 //     stated set, asked of the kernel exactly as checkScalarCrossing
 //     asks it.
 func checkArgvCrossing(ctx *FlowContext, edge *ForeignEdge, artifact *ForeignArtifact) *ForeignEdgeOutcome {
-	if artifact.Surface != ForeignSurfaceArgvScalar {
+	switch artifact.Surface {
+	case ForeignSurfaceArgvScalar:
+		// the one surface this leg's fit chain judges — fall through
+	case ForeignSurfaceStdinJSON:
 		return &ForeignEdgeOutcome{
 			Decline: "the call passes the value as argv[1], but the target's fact serves JSON on stdin — " +
 				"the channels do not meet",
+			DeclineNode: edge.ArgvValue,
+		}
+	case ForeignSurfaceMixedStdinArgv:
+		return &ForeignEdgeOutcome{
+			Decline: "the call passes only the value as argv[1], but the target's fact serves a mixed " +
+				"surface reading a SECOND value from stdin as well — the channels do not meet: " +
+				"the stdin leg is absent",
+			DeclineNode: edge.ArgvValue,
+		}
+	default:
+		return &ForeignEdgeOutcome{
+			Decline: "the call passes the value as argv[1], but the target's fact serves " +
+				string(artifact.Surface) + ", not an argv-scalar surface — the channels do not meet",
 			DeclineNode: edge.ArgvValue,
 		}
 	}
@@ -1265,24 +1597,36 @@ func checkArgvCrossing(ctx *FlowContext, edge *ForeignEdge, artifact *ForeignArt
 			DeclineNode: edge.Call,
 		}
 	}
-	entry := artifact.Called.Entry[0]
+	return argvScalarFitAgainst(ctx, edge.ArgvValue, artifact, artifact.Called.Entry[0])
+}
+
+// argvScalarFitAgainst is the argv-scalar leg's own fit chain, past the
+// channel match and the entry-position count: a written literal → a
+// Python float() parse → NaN-freedom → the singleton-subset ask.
+// checkArgvCrossing (the pure argv-scalar surface, entry[0]) and the
+// mixed surface's argv leg (entry[1]) both fit through this SAME
+// function — the chain does not change shape depending on which entry
+// position it is judging.
+func argvScalarFitAgainst(
+	ctx *FlowContext, argvValue *ast.Node, artifact *ForeignArtifact, entry ForeignEntry,
+) *ForeignEdgeOutcome {
 	if entry.IsSequence {
 		return &ForeignEdgeOutcome{
 			Decline: "the target " + artifact.Called.Name + " admits a sequence at " + entry.Name +
 				", and an argv string carries one scalar — nothing says whether it fits",
-			DeclineNode: edge.ArgvValue,
+			DeclineNode: argvValue,
 		}
 	}
-	literalText, isLiteral := argvLiteralTextOf(ctx, edge.ArgvValue)
+	literalText, isLiteral := argvLiteralTextOf(ctx, argvValue)
 	if !isLiteral {
 		return &ForeignEdgeOutcome{
 			Decline: "the argv value is not a written string literal; its parsed value cannot be pinned",
-			DeclineNode: edge.ArgvValue,
+			DeclineNode: argvValue,
 		}
 	}
 	parsed, parseErr := strconv.ParseFloat(literalText, 64)
 	if parseErr != nil {
-		ctx.Report(assignability.At(edge.ArgvValue, 7001,
+		ctx.Report(assignability.At(argvValue, 7001,
 			"the argv value "+strconv.Quote(literalText)+" crossing to "+artifact.Called.Name+
 				" does not parse as a Python float() — the value cannot arrive"))
 		return &ForeignEdgeOutcome{}
@@ -1292,7 +1636,7 @@ func checkArgvCrossing(ctx *FlowContext, edge *ForeignEdge, artifact *ForeignArt
 	// recognizes.
 	if parsedIsNaN(parsed) {
 		sentence := nanFreedomObstacle(abstractdomain.AbstractValue{Kind: abstractdomain.KindNaN})
-		ctx.Report(foreignRefutation(edge.ArgvValue,
+		ctx.Report(foreignRefutation(argvValue,
 			sentence+" — the argv value "+strconv.Quote(literalText)+" parses as NaN, so "+
 				artifact.Called.Name+" would receive a value this program never computed",
 			artifact))
@@ -1304,11 +1648,11 @@ func checkArgvCrossing(ctx *FlowContext, edge *ForeignEdge, artifact *ForeignArt
 		return &ForeignEdgeOutcome{
 			Decline: "the kernel refused the question of whether the argv value crossing out fits " +
 				artifact.Called.Name + "'s stated " + foreignSetWords(entry.Set) + ", so the crossing is not judged",
-			DeclineNode: edge.ArgvValue,
+			DeclineNode: argvValue,
 		}
 	}
 	if !fits {
-		ctx.Report(foreignRefutation(edge.ArgvValue,
+		ctx.Report(foreignRefutation(argvValue,
 			"the argv value crossing to "+artifact.Called.Name+" is "+foreignSetWords(crossingSet)+
 				", and the target admits "+foreignSetWords(entry.Set)+
 				" — the value can escape what the target states it accepts",
@@ -1372,7 +1716,7 @@ func nanFreedomObstacle(crossing abstractdomain.AbstractValue) string {
 // entry: the elements inside the stated element set, and the length
 // floor at or above the stated one.
 func checkSequenceCrossing(
-	ctx *FlowContext, edge *ForeignEdge, artifact *ForeignArtifact,
+	ctx *FlowContext, payload *ast.Node, artifact *ForeignArtifact,
 	entry ForeignEntry, crossing abstractdomain.AbstractValue,
 ) *ForeignEdgeOutcome {
 	// a MODULE-LEVEL const array literal (`const samples = [0.5, -0.3,
@@ -1400,7 +1744,7 @@ func checkSequenceCrossing(
 			Decline: "the target " + artifact.Called.Name + " admits a sequence at " +
 				entry.Name + ", and the value crossing out is not read as one here — " +
 				"nothing says whether it fits",
-			DeclineNode: edge.Payload,
+			DeclineNode: payload,
 		}
 	}
 	window, windowOk := refinementsets.AsRepetition(crossing.Set)
@@ -1410,7 +1754,7 @@ func checkSequenceCrossing(
 				entry.Name + " of at least " + strconv.Itoa(entry.LengthAtLeast) +
 				" elements, and the value crossing out states no element set or length " +
 				"window — nothing says whether it fits",
-			DeclineNode: edge.Payload,
+			DeclineNode: payload,
 		}
 	}
 	// the ELEMENT fit — a real kernel ask
@@ -1420,11 +1764,11 @@ func checkSequenceCrossing(
 			Decline: "the kernel refused the question of whether the elements crossing out fit " +
 				artifact.Called.Name + "'s stated " + foreignSetWords(entry.Element) +
 				", so the crossing is not judged",
-			DeclineNode: edge.Payload,
+			DeclineNode: payload,
 		}
 	}
 	if !fits {
-		ctx.Report(foreignRefutation(edge.Payload,
+		ctx.Report(foreignRefutation(payload,
 			"the elements crossing to "+artifact.Called.Name+" are "+
 				foreignSetWords(window.Element)+", and the target admits "+
 				foreignSetWords(entry.Element)+
@@ -1435,7 +1779,7 @@ func checkSequenceCrossing(
 	// the LENGTH floor: the target's body relies on it (a division by
 	// len, an indexed read), so a shorter sequence is a different program
 	if window.Lo < entry.LengthAtLeast {
-		ctx.Report(foreignRefutation(edge.Payload,
+		ctx.Report(foreignRefutation(payload,
 			"the sequence crossing to "+artifact.Called.Name+" holds at least "+
 				strconv.Itoa(window.Lo)+" elements, and the target relies on at least "+
 				strconv.Itoa(entry.LengthAtLeast),
@@ -1481,7 +1825,7 @@ func sequenceCrossingOfExactTuple(crossing abstractdomain.AbstractValue) (abstra
 // checkScalarCrossing judges a scalar payload against a scalar entry —
 // the same ScalarSubset ask, without a length to carry.
 func checkScalarCrossing(
-	ctx *FlowContext, edge *ForeignEdge, artifact *ForeignArtifact,
+	ctx *FlowContext, payload *ast.Node, artifact *ForeignArtifact,
 	entry ForeignEntry, crossing abstractdomain.AbstractValue,
 ) *ForeignEdgeOutcome {
 	crossingSet, ok := abstractdomain.SetOfKnown(crossing)
@@ -1491,7 +1835,7 @@ func checkScalarCrossing(
 				foreignSetWords(entry.Set) + " at " + entry.Name +
 				", and the value crossing out is not read as a set here — " +
 				"nothing says whether it fits",
-			DeclineNode: edge.Payload,
+			DeclineNode: payload,
 		}
 	}
 	fits, asked := foreignScalarSubset(ctx, crossingSet, entry.Set)
@@ -1500,11 +1844,11 @@ func checkScalarCrossing(
 			Decline: "the kernel refused the question of whether the value crossing out fits " +
 				artifact.Called.Name + "'s stated " + foreignSetWords(entry.Set) +
 				", so the crossing is not judged",
-			DeclineNode: edge.Payload,
+			DeclineNode: payload,
 		}
 	}
 	if !fits {
-		ctx.Report(foreignRefutation(edge.Payload,
+		ctx.Report(foreignRefutation(payload,
 			"the value crossing to "+artifact.Called.Name+" is "+
 				foreignSetWords(crossingSet)+", and the target admits "+
 				foreignSetWords(entry.Set)+

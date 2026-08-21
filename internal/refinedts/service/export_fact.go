@@ -85,8 +85,9 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 	calledName, harnessShape, argIndex, harnessOk := walk.HarnessCallOf(p.Entry)
 	if !harnessOk {
 		return "", []string{entryFilePath + ": no recognized stdio harness — " +
-			`a bare top-level console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(0, "utf8"))))) ` +
-			`or console.log(JSON.stringify(<fn>(JSON.parse(process.argv[<literal int>])))) is the only shape read`}, nil
+			`a bare top-level console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(0, "utf8"))))), ` +
+			`console.log(JSON.stringify(<fn>(JSON.parse(process.argv[<literal int>])))), ` +
+			`or console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(process.argv[<literal int>], "utf8"))))) is the only shape read`}, nil
 	}
 
 	var calledContract *walk.FunctionContract
@@ -147,14 +148,18 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 
 // exportFactEnvelope builds the artifact as raw JSON-serializable maps
 // — schema v2's shape (walk/foreign_edge_artifact.go's doc comment),
-// with `language` "typescript" and `surface.kind` either "stdin-json"
-// (unchanged) or "argv-json" (harnessShape ==
-// walk.HarnessShapeArgvJSON): {"kind": "argv-json", "argIndex": <int>,
-// "stdout": "json", "calls": <fn>} — the same JSON.parse transport as
-// stdin-json, carried through process.argv[argIndex] instead of stdin,
-// so there is no "stdin" field on this surface. Every <set> is
-// kernelbridge.EncodeSet's own wire text, embedded as json.RawMessage
-// so it is never re-encoded through a second string builder.
+// with `language` "typescript" and `surface.kind` one of "stdin-json"
+// (unchanged), "argv-json" (harnessShape == walk.HarnessShapeArgvJSON:
+// {"kind": "argv-json", "argIndex": <int>, "stdout": "json", "calls":
+// <fn>} — the same JSON.parse transport as stdin-json, carried through
+// process.argv[argIndex] instead of stdin, so there is no "stdin"
+// field on this surface), or "file-json" (harnessShape ==
+// walk.HarnessShapeFileJSON: {"kind": "file-json", "argIndex": <int>,
+// "stdout": "json", "calls": <fn>} — the target reads its JSON payload
+// from the FILE named at process.argv[argIndex], also with no "stdin"
+// field). Every <set> is kernelbridge.EncodeSet's own wire text,
+// embedded as json.RawMessage so it is never re-encoded through a
+// second string builder.
 func exportFactEnvelope(
 	targetFile string, contentHash string, harnessCalls string,
 	harnessShape walk.HarnessShape, argIndex float64,
@@ -209,24 +214,35 @@ func exportFactEnvelope(
 }
 
 // exportFactSurface builds the `surface` field per the recognized
-// harness shape: stdin-json (unchanged v2 shape) or argv-json
-// ({"kind": "argv-json", "argIndex": <int>, "stdout": "json", "calls":
-// <fn>} — no "stdin" field; the payload rides process.argv[argIndex]
-// instead).
+// harness shape: stdin-json (unchanged v2 shape), argv-json ({"kind":
+// "argv-json", "argIndex": <int>, "stdout": "json", "calls": <fn>} —
+// no "stdin" field; the payload rides process.argv[argIndex] instead),
+// or file-json ({"kind": "file-json", "argIndex": <int>, "stdout":
+// "json", "calls": <fn>} — no "stdin" field; the target reads JSON
+// from the FILE named at process.argv[argIndex]).
 func exportFactSurface(harnessShape walk.HarnessShape, argIndex float64, harnessCalls string) map[string]any {
-	if harnessShape == walk.HarnessShapeArgvJSON {
+	switch harnessShape {
+	case walk.HarnessShapeArgvJSON:
 		return map[string]any{
 			"kind":     "argv-json",
 			"argIndex": int(argIndex),
 			"stdout":   "json",
 			"calls":    harnessCalls,
 		}
-	}
-	return map[string]any{
-		"kind":   "stdin-json",
-		"stdin":  "json",
-		"stdout": "json",
-		"calls":  harnessCalls,
+	case walk.HarnessShapeFileJSON:
+		return map[string]any{
+			"kind":     "file-json",
+			"argIndex": int(argIndex),
+			"stdout":   "json",
+			"calls":    harnessCalls,
+		}
+	default:
+		return map[string]any{
+			"kind":   "stdin-json",
+			"stdin":  "json",
+			"stdout": "json",
+			"calls":  harnessCalls,
+		}
 	}
 }
 

@@ -184,3 +184,83 @@ console.log(JSON.stringify(otherLevel(JSON.parse(process.argv[2]))));
 		t.Fatalf("a stdin-json statement and an argv-json statement together recognized — one harness fact cannot stand for two, whatever their shapes")
 	}
 }
+
+func TestHarnessCallOf_FileJSONShapeNamesTheFunctionAndIndex(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(process.argv[2], "utf8")))));
+`)
+	name, shape, argIndex, ok := HarnessCallOf(file)
+	if !ok {
+		t.Fatalf("the file-json shape did not recognize")
+	}
+	if name != "audioLevel" {
+		t.Errorf("got name %q, want %q", name, "audioLevel")
+	}
+	if shape != HarnessShapeFileJSON {
+		t.Errorf("got shape %v, want HarnessShapeFileJSON", shape)
+	}
+	if argIndex != 2 {
+		t.Errorf("got argIndex %v, want 2", argIndex)
+	}
+}
+
+func TestHarnessCallOf_FileJSONNamespaceImportOfFsRecognizes(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import * as fs from "node:fs";
+function audioLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(fs.readFileSync(process.argv[2], "utf8")))));
+`)
+	name, shape, argIndex, ok := HarnessCallOf(file)
+	if !ok {
+		t.Fatalf("the fs.readFileSync namespace spelling did not recognize for the file-json shape")
+	}
+	if name != "audioLevel" {
+		t.Errorf("got name %q, want %q", name, "audioLevel")
+	}
+	if shape != HarnessShapeFileJSON {
+		t.Errorf("got shape %v, want HarnessShapeFileJSON", shape)
+	}
+	if argIndex != 2 {
+		t.Errorf("got argIndex %v, want 2", argIndex)
+	}
+}
+
+func TestHarnessCallOf_FileJSONNonLiteralIndexDeclines(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+const i = 2;
+console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(process.argv[i], "utf8")))));
+`)
+	if _, _, _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("a non-literal argv index (a variable) recognized inside readFileSync — the exporter can only pin an argIndex read directly off the source")
+	}
+}
+
+func TestHarnessCallOf_FileJSONWrongEncodingDeclines(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(process.argv[2], "ascii")))));
+`)
+	if _, _, _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("an encoding other than \"utf8\" recognized")
+	}
+}
+
+func TestHarnessCallOf_AllThreeShapesTogetherDecline(t *testing.T) {
+	file := harnessSourceFileOf(t, `
+import { readFileSync } from "node:fs";
+function audioLevel(samples) { return samples.length; }
+function otherLevel(samples) { return samples.length; }
+function thirdLevel(samples) { return samples.length; }
+console.log(JSON.stringify(audioLevel(JSON.parse(readFileSync(0, "utf8")))));
+console.log(JSON.stringify(otherLevel(JSON.parse(process.argv[2]))));
+console.log(JSON.stringify(thirdLevel(JSON.parse(readFileSync(process.argv[3], "utf8")))));
+`)
+	if _, _, _, ok := HarnessCallOf(file); ok {
+		t.Fatalf("three matching statements across all shapes recognized — one harness fact cannot stand for three")
+	}
+}

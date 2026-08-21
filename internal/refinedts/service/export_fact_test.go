@@ -102,6 +102,31 @@ console.log(JSON.stringify(meterLevel(JSON.parse(process.argv[2]))));
 	return path
 }
 
+// writeFileHarnessFixture writes a temp-dir .ts fixture in the
+// file-json harness shape fact_export_harness.go recognizes — the same
+// anatomy writeHarnessFixture builds, but the harness line reads
+// readFileSync(process.argv[2], "utf8") instead of readFileSync(0,
+// "utf8") — the payload lives in the FILE named at that argv position,
+// not on stdin.
+func writeFileHarnessFixture(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	source := `import { readFileSync } from "node:fs";
+import * as z from "` + exportFactSurfacePath + `";
+
+const zSamples = z.array(z.number().min(-2).max(2)).min(1);
+
+` + body + `
+
+console.log(JSON.stringify(meterLevel(JSON.parse(readFileSync(process.argv[2], "utf8")))));
+`
+	path := filepath.Join(dir, "meter_level.ts")
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+	return path
+}
+
 func requireExportFactKernel(t *testing.T) {
 	t.Helper()
 	if !kernelbridge.KernelArtifactsPresent(kernelbridge.DylibPath) {
@@ -280,14 +305,138 @@ func TestExportFact_ArgvJSONHarnessExportsTheArgvJSONSurface(t *testing.T) {
 	}
 }
 
+// TestExportFact_FileJSONHarnessExportsTheFileJSONSurface pins the
+// file-json surface verbatim ({"kind": "file-json", "argIndex": 2,
+// "stdout": "json", "calls": "meterLevel"} — no "stdin" field) for a
+// fixture whose harness reads readFileSync(process.argv[2], "utf8")
+// rather than stdin or the argv value itself, and confirms the rest of
+// the envelope (entry rows, return set, stdoutPure) exports exactly as
+// the stdin fixture's own test pins.
+func TestExportFact_FileJSONHarnessExportsTheFileJSONSurface(t *testing.T) {
+	requireExportFactKernel(t)
+	path := writeFileHarnessFixture(t, meterLevelBody)
+	outPath := filepath.Join(filepath.Dir(path), "meter_level.ts.refined.json")
+
+	written, omissions, err := ExportFact(path, exportFactSurfacePath, outPath)
+	if err != nil {
+		t.Fatalf("ExportFact: %v", err)
+	}
+	if len(omissions) != 0 {
+		t.Fatalf("ExportFact reported omissions for an exportable file-json function: %v", omissions)
+	}
+	if written != outPath {
+		t.Fatalf("written = %q, want %q", written, outPath)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading the written artifact: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("the written artifact is not valid JSON: %v", err)
+	}
+
+	surface, ok := parsed["surface"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact carries no surface: %v", parsed)
+	}
+	wantSurface := map[string]any{
+		"kind":     "file-json",
+		"argIndex": float64(2),
+		"stdout":   "json",
+		"calls":    "meterLevel",
+	}
+	if len(surface) != len(wantSurface) {
+		t.Fatalf("surface = %v, want exactly %v (no extra fields, no \"stdin\")", surface, wantSurface)
+	}
+	for key, want := range wantSurface {
+		if got := surface[key]; got != want {
+			t.Errorf("surface[%q] = %v, want %v", key, got, want)
+		}
+	}
+	if _, hasStdin := surface["stdin"]; hasStdin {
+		t.Errorf(`surface carries a "stdin" field — file-json has no stdin carrier`)
+	}
+
+	functions, ok := parsed["functions"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact carries no functions: %v", parsed)
+	}
+	row, ok := functions["meterLevel"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact states no fact for meterLevel: %v", functions)
+	}
+	entries, ok := row["entry"].([]any)
+	if !ok || len(entries) == 0 {
+		t.Fatalf("entry = %v, want a non-empty entry row list", row["entry"])
+	}
+	returned, ok := row["return"].(map[string]any)
+	if !ok {
+		t.Fatalf("the row states no return: %v", row)
+	}
+	if pure, _ := returned["stdoutPure"].(bool); !pure {
+		t.Errorf("stdoutPure = %v, want true — the fixture writes nothing else to stdout", returned["stdoutPure"])
+	}
+}
+
+// TestExportFact_NonLiteralArgvIndexInsideReadFileSyncOmitsNamingTheHarnessGap:
+// a harness reading readFileSync(process.argv[i], "utf8") for a
+// variable i (not a literal) matches none of the three recognized
+// harness shapes, so ExportFact declines the whole file with the same
+// "no recognized stdio harness" sentence — naming the construct
+// HarnessCallOf requires (a literal argv index inside readFileSync)
+// rather than silently guessing one.
+func TestExportFact_NonLiteralArgvIndexInsideReadFileSyncOmitsNamingTheHarnessGap(t *testing.T) {
+	dir := t.TempDir()
+	source := `import { readFileSync } from "node:fs";
+import * as z from "` + exportFactSurfacePath + `";
+
+const zSamples = z.array(z.number().min(-2).max(2)).min(1);
+
+function meterLevel(samples: z.infer<typeof zSamples>): number {
+  return samples.length;
+}
+
+const i = 2;
+console.log(JSON.stringify(meterLevel(JSON.parse(readFileSync(process.argv[i], "utf8")))));
+`
+	path := filepath.Join(dir, "meter_level.ts")
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+	outPath := filepath.Join(dir, "meter_level.ts.refined.json")
+
+	written, omissions, err := ExportFact(path, exportFactSurfacePath, outPath)
+	if err != nil {
+		t.Fatalf("ExportFact: %v", err)
+	}
+	if written != "" {
+		t.Fatalf("written = %q, want \"\" alongside an omission", written)
+	}
+	if len(omissions) != 1 {
+		t.Fatalf("omissions = %v, want exactly one", omissions)
+	}
+	want := path + ": no recognized stdio harness — " +
+		`a bare top-level console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(0, "utf8"))))), ` +
+		`console.log(JSON.stringify(<fn>(JSON.parse(process.argv[<literal int>])))), ` +
+		`or console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(process.argv[<literal int>], "utf8"))))) is the only shape read`
+	if omissions[0] != want {
+		t.Errorf("omissions[0] = %q, want %q", omissions[0], want)
+	}
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Errorf("an omitted function must not write an artifact file")
+	}
+}
+
 // TestExportFact_NonLiteralArgvIndexOmitsNamingTheHarnessGap: a harness
 // reading process.argv[i] for a variable i (not a literal) matches
-// neither recognized harness shape, so ExportFact declines the whole
-// file with the same "no recognized stdio harness" sentence a file
-// with no harness at all gets — naming the construct HarnessCallOf
-// requires (a literal argv index) rather than silently guessing one.
-// No kernel needed: HarnessCallOf's own decline is a pure AST scan,
-// reached before ExportFact ever sets one up.
+// none of the three recognized harness shapes, so ExportFact declines
+// the whole file with the same "no recognized stdio harness" sentence
+// a file with no harness at all gets — naming the construct
+// HarnessCallOf requires (a literal argv index) rather than silently
+// guessing one. No kernel needed: HarnessCallOf's own decline is a
+// pure AST scan, reached before ExportFact ever sets one up.
 func TestExportFact_NonLiteralArgvIndexOmitsNamingTheHarnessGap(t *testing.T) {
 	dir := t.TempDir()
 	source := `import * as z from "` + exportFactSurfacePath + `";
@@ -318,8 +467,9 @@ console.log(JSON.stringify(meterLevel(JSON.parse(process.argv[i]))));
 		t.Fatalf("omissions = %v, want exactly one", omissions)
 	}
 	want := path + ": no recognized stdio harness — " +
-		`a bare top-level console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(0, "utf8"))))) ` +
-		`or console.log(JSON.stringify(<fn>(JSON.parse(process.argv[<literal int>])))) is the only shape read`
+		`a bare top-level console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(0, "utf8"))))), ` +
+		`console.log(JSON.stringify(<fn>(JSON.parse(process.argv[<literal int>])))), ` +
+		`or console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(process.argv[<literal int>], "utf8"))))) is the only shape read`
 	if omissions[0] != want {
 		t.Errorf("omissions[0] = %q, want %q", omissions[0], want)
 	}
