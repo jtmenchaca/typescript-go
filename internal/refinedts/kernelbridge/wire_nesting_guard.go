@@ -29,27 +29,51 @@ package kernelbridge
 
 import "strings"
 
-// wireNestingFormTags are the JSON form-tag spellings wireFormJSON
-// gives the forms that nest an operand as a further wire object.
-// Scalar/leaf forms (atLeast, oneOf, integer, …) are excluded: they
-// carry no nested RefinedSet operand of their own, so they cannot
-// deepen a chain.
-var wireNestingFormTags = []string{
+// wireSequenceFormTags are the JSON form-tag spellings of the
+// sequence-family forms — the shapes the kernel's DERIVATIVE-based
+// deciders walk, where the measured non-termination lived (the
+// automata Concatenation case grows the term on every nullable-left
+// step). Scalar/leaf forms (atLeast, oneOf, integer, …) are excluded:
+// they carry no nested RefinedSet operand of their own.
+var wireSequenceFormTags = []string{
 	`"form":"concatenation"`,
 	`"form":"star"`,
 	`"form":"repeat"`,
 	`"form":"repeatWord"`,
+}
+
+// wireBranchingFormTags nest operands too, but a wire built ONLY of
+// these over scalar leaves never reaches the derivative deciders at
+// all — the scalar DNF machinery decides it, and its disjunctions
+// deduplicate at every union and negation step
+// (set_functions/emptiness.lean dedupD), so a self-similar scalar
+// tower collapses instead of squaring per layer. The kernel answers
+// every readable question (JT's ruling, 2026-08-09); these tags gate
+// only in the company of a sequence-family tag, where a branching
+// node genuinely deepens the derivative walk.
+var wireBranchingFormTags = []string{
 	`"form":"union"`,
 	`"form":"difference"`,
 }
 
-// wireNestingCount is the number of sequence-shaped form tags a wire's
-// JSON text mentions — the seam guard's cheap depth proxy. See the
-// file comment for why a plain occurrence count is a sound lower
-// bound on nesting depth for the chains this guards against.
+// wireNestingCount is the seam guard's cheap depth proxy over the
+// shapes the derivative deciders walk. A wire with NO sequence-family
+// tag counts zero — it is a scalar question the DNF deciders collapse,
+// not a shape this guard exists for. A wire with any sequence-family
+// tag counts every nesting tag, branching included — conservative for
+// exactly the chains the measured hang was made of. See the file
+// comment for why an occurrence count is a sound lower bound on depth
+// for those chains.
 func wireNestingCount(wire string) int {
-	total := 0
-	for _, tag := range wireNestingFormTags {
+	sequence := 0
+	for _, tag := range wireSequenceFormTags {
+		sequence += strings.Count(wire, tag)
+	}
+	if sequence == 0 {
+		return 0
+	}
+	total := sequence
+	for _, tag := range wireBranchingFormTags {
 		total += strings.Count(wire, tag)
 	}
 	return total

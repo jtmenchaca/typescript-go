@@ -26,22 +26,31 @@
 // the time any code could ask "did the kernel just die," the process
 // that would have asked is already gone. There is no "answer the
 // question that killed it as a decline, then keep serving on a fresh
-// kernel" path available to an in-process abort — that recovery shape
-// (which Invalidate below still documents, ported from the TS
-// wasm-module-replacement design) needs the kernel to run somewhere an
-// abort does not take the caller down with it: a separate process or
-// subprocess speaking the same wire over IPC. That is a genuine
-// architecture change (a new out-of-process seam), not a fix to this
-// file, and is not implemented here.
+// kernel IN THE SAME PROCESS" path available to an in-process abort —
+// that would need the kernel to run somewhere an abort does not take
+// the caller down with it: a separate process or subprocess speaking
+// the same wire over IPC, a genuine architecture change this file does
+// not make.
 //
-// What IS implemented, given that constraint: ProbeKernelAlive
-// (kernel_bridge.go) asks one trivial known-answer question on a
-// freshly loaded dylib before LoadKernel ever shares it — catching a
-// dylib that loaded (dlopen + every symbol resolved) but answers
-// wrong, PRE-death, when the failure is still just a Go `error`
-// instead of a process abort. That is the entire quarantine this
-// architecture allows without the out-of-process seam: pre-death
-// verification at load, not mid-session detection-and-replace.
+// What IS implemented, given that constraint, is detection and
+// quarantine ONE LEVEL UP, in whatever parent respawns this process.
+// ask1/ask2 below write the LAST QUESTION RECORD (last_question_record.go)
+// immediately before every question crosses to the dylib and clear it
+// immediately after a successful answer, so a process that aborts
+// mid-question leaves the record naming exactly that question. The
+// parent (cmd/refined-lsp's coordinator, for the LSP path) detects the
+// child's death, reads that record, restarts the child, and passes the
+// killing question's cache key back in (cmd/tsgo's -quarantine-file
+// flag, SetQuarantinedQuestions). ask1/ask2 check that quarantine list before
+// the cache lookup and the FFI call, exactly like the nesting guard
+// (wire_nesting_guard.go): the restarted process declines that ONE
+// question by name instead of asking it again and dying the same way.
+//
+// ProbeKernelAlive (kernel_bridge.go) is the complementary PRE-death
+// check: one trivial known-answer question on a freshly loaded dylib,
+// before LoadKernel ever shares it — catching a dylib that loaded
+// (dlopen + every symbol resolved) but answers wrong, while the failure
+// is still just a Go `error` instead of a process abort.
 package kernelbridge
 
 import (
@@ -241,10 +250,30 @@ func KernelFromCalls(input KernelFromCallsInput) *RefinedTSKernel {
 		if len(key) > 0 {
 			k = key[0]
 		}
-		return AskCached(fmt.Sprintf("%s\x00%s", op, k), func() (string, error) {
-			return timed(op, len(wireInput), wireInput, func() (string, error) {
+		cacheKey := fmt.Sprintf("%s\x00%s", op, k)
+		// THE QUARANTINE GATE (quarantine.go): a question named by a
+		// PRIOR run's last-question record — the one that killed that
+		// run's kernel — declines here by name, ahead of the cache
+		// lookup and the FFI call, exactly like the nesting guard above.
+		// This is what keeps a restarted process from crash-looping on
+		// the same file: the parent (cmd/refined-lsp) reads the dead
+		// child's record and passes this same key back in as -quarantine.
+		if isQuarantined(cacheKey) {
+			return "", fmt.Errorf("%s", quarantineDeclineMessage)
+		}
+		return AskCached(cacheKey, func() (string, error) {
+			// THE LAST-QUESTION RECORD (last_question_record.go): written
+			// immediately before the question that could kill this
+			// process, cleared immediately after it answers. A no-op
+			// when no record path is configured (the batch-CLI default).
+			WriteLastQuestion(op, cacheKey)
+			raw, err := timed(op, len(wireInput), wireInput, func() (string, error) {
 				return call1(symbol, wireInput)
 			})
+			if err == nil {
+				ClearLastQuestion()
+			}
+			return raw, err
 		})
 	}
 	ask2 := func(op string, symbol string, first string, second string, key ...string) (string, error) {
@@ -257,10 +286,21 @@ func KernelFromCalls(input KernelFromCallsInput) *RefinedTSKernel {
 		if len(key) > 0 {
 			k = key[0]
 		}
-		return AskCached(fmt.Sprintf("%s\x00%s", op, k), func() (string, error) {
-			return timed(op, len(first)+len(second), fmt.Sprintf("%s %s", first, second), func() (string, error) {
+		cacheKey := fmt.Sprintf("%s\x00%s", op, k)
+		// THE QUARANTINE GATE — see ask1's comment above.
+		if isQuarantined(cacheKey) {
+			return "", fmt.Errorf("%s", quarantineDeclineMessage)
+		}
+		return AskCached(cacheKey, func() (string, error) {
+			// THE LAST-QUESTION RECORD — see ask1's comment above.
+			WriteLastQuestion(op, cacheKey)
+			raw, err := timed(op, len(first)+len(second), fmt.Sprintf("%s %s", first, second), func() (string, error) {
 				return call2(symbol, first, second)
 			})
+			if err == nil {
+				ClearLastQuestion()
+			}
+			return raw, err
 		})
 	}
 

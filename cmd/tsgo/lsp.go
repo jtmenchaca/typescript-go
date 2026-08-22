@@ -25,6 +25,10 @@ func runLSP(args []string) int {
 	_ = pipe
 	socket := flag.String("socket", "", "use socket for communication")
 	_ = socket
+	lastQuestionRecord := flag.String("last-question-record", "",
+		"path to persist the in-flight kernel question, so a parent process can name what killed this one on a mid-session Lean abort (unset by default: no record is written unless a parent states where to put it)")
+	quarantineFile := flag.String("quarantine-file", "",
+		"path to a file of newline-separated question cache keys (op\\x00rest, as named by a prior run's -last-question-record) to decline outright this run, instead of asking them again — a FILE rather than a flag value because a question's own wire (JSON) can contain arbitrary characters a shell-quoted argv would mangle")
 	if err := flag.Parse(args); err != nil {
 		return 2
 	}
@@ -44,6 +48,7 @@ func runLSP(args []string) int {
 	// request — the first diagnostic pull loads it on demand
 	// (refinedts_kernel.go; GO-LSP-EDITOR-PATH.md §11.5, §15.4)
 	configureRefinedTSKernel()
+	configureKernelDeathQuarantine(*lastQuestionRecord, *quarantineFile)
 
 	fs := bundled.WrapFS(osvfs.FS())
 	defaultLibraryPath := bundled.LibPath()

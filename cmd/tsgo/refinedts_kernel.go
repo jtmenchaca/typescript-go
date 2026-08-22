@@ -15,8 +15,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
@@ -29,6 +31,61 @@ func configureRefinedTSKernel() {
 	if derived, ok := refinedtsRepoRelative(
 		"refined-lean/native/build/librefined_kernel.dylib"); ok {
 		kernelbridge.SetDylibPath(derived)
+	}
+}
+
+// configureKernelDeathQuarantine wires this LSP session into the
+// host-level replace-and-quarantine design (ISSUES.md "The native
+// kernel seam has no death signal"): a mid-session Lean panic
+// abort()s THIS WHOLE PROCESS (kernelbridge/ask_kernel.go's file
+// comment), so the only place that can ever detect the death and act
+// on it is whatever PARENT respawns this process — cmd/refined-lsp's
+// coordinator, for the LSP path.
+//
+// lastQuestionRecordFlag ("" unless the coordinator passes
+// -last-question-record) states where kernelbridge persists the ONE
+// question currently in flight, so a parent that detects this process
+// died can read that file and learn what killed it. Defaulting to ""
+// here rather than always deriving a path keeps a bare `tsgo --lsp`
+// (no coordinator watching) from paying a write per question for
+// nothing: the record is only useful to a parent that knows where to
+// look, and only the coordinator knows that (it is the one choosing
+// the path and passing it in) — see cmd/refined-lsp's own comment at
+// the call site that builds this flag.
+//
+// quarantineFileFlag ("" unless the coordinator passes
+// -quarantine-file) names a file of newline-separated question cache
+// keys (op\x00rest, the exact spelling last_question_record.go writes
+// and ask_kernel.go's ask1/ask2 compute) this run declines outright —
+// the killing question from a PRIOR run's record, so a restarted
+// process never re-asks the same question and crash-loops. A file
+// rather than a flag value: a question's own wire is arbitrary encoded
+// JSON and could in principle hold any byte a shell-quoted argv could
+// mangle, where a file read with no shell interpretation cannot.
+func configureKernelDeathQuarantine(lastQuestionRecordFlag string, quarantineFileFlag string) {
+	if lastQuestionRecordFlag != "" {
+		kernelbridge.SetLastQuestionRecordPath(lastQuestionRecordFlag)
+	}
+	if quarantineFileFlag == "" {
+		return
+	}
+	raw, err := os.ReadFile(quarantineFileFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "refinedts: -quarantine-file %s: %v\n", quarantineFileFlag, err)
+		return
+	}
+	var keys []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if trimmed := strings.TrimRight(line, "\r"); trimmed != "" {
+			keys = append(keys, trimmed)
+		}
+	}
+	if len(keys) == 0 {
+		return
+	}
+	kernelbridge.SetQuarantinedQuestions(keys)
+	for _, key := range keys {
+		fmt.Fprintf(os.Stderr, "refinedts: quarantining a question from the prior session: %s\n", key)
 	}
 }
 
