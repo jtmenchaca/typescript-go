@@ -187,10 +187,30 @@ func metRepetition(a, b refinementsets.RefinedSet) (refinementsets.RefinedSet, b
 	if hi != nil && *hi < lo {
 		return refinementsets.RefinedSet{}, false
 	}
-	element := refinementsets.MakeRefinedSet(
+	// CANONICALIZE the merged element before it becomes the repetition's
+	// own element — the same hygiene the sibling combined-forms path
+	// below already runs (its own comment on line ~128), and for the
+	// identical reason: repA.Element and repB.Element are very often
+	// the SAME set arriving from two separate walk passes (a codepoint
+	// alphabet met with itself, say), and appending their forms
+	// unconditionally wears a duplicate conjunct every time this meet
+	// runs. A loop whose body re-derives the same star-of-codepoints
+	// claim on every iteration (ReduceCSSCalc.ts's evaluateExpression:
+	// calculateParentheses's own while-loop output fed through a SECOND
+	// calculateArithmetic call) then meets that claim against itself
+	// repeatedly, and without this fold the element list grows by one
+	// duplicate conjunct pair PER MEET with nothing folding it back down
+	// — measured directly: the minimized reproducer's kernel seqSubset
+	// ask carries a Star whose element repeats the same (integer, union)
+	// pair two, then four, then six times across three successive asks,
+	// and the kernel's own derivative engine, which walks every node in
+	// that list once per step (refined_sets/automata.lean), never
+	// returns on the third. CanonicalScalarForms drops the repeated
+	// conjunct without changing which values the merged element admits.
+	element := refinementsets.CanonicalScalarForms(refinementsets.MakeRefinedSet(
 		append(append([]refinementsets.Refinement{}, repA.Element.Forms...),
 			repB.Element.Forms...)...,
-	)
+	))
 	built, ok := repetitionOrNothing(element, lo, hi)
 	if !ok {
 		return refinementsets.RefinedSet{}, false
@@ -1168,6 +1188,33 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 			return KnownWithVariants(joint, arms)
 		}
 		return joint
+	}
+	// A JOIN THAT WOULD STACK PAST THE WIDENING BOUND answers the
+	// string ground directly instead of building the deeper
+	// Concatenation/Union/Star the arms below would produce. A loop
+	// body that reassigns a string across repeated derivations (a
+	// `.replace()`/`+` chain re-joined every iteration, with nothing to
+	// fold the accumulated structure back down) stacks one more
+	// Concatenation/Star layer onto the candidate each round; past
+	// sequenceConcatenationWidenBound layers deep, the JOIN ITSELF
+	// widens to Strings (C*, the sound "any string" claim every string
+	// value already sits inside) rather than handing the kernel's
+	// seqSubset decider an ever-deeper term to walk — the
+	// ReduceCSSCalc.ts hang (sequence_concatenation_widen.go's file
+	// comment measures it: the kernel's own derivative-based deciders
+	// grow the term on every nullable-left step with nothing
+	// collapsing the repeated substructure, so a moderately-nested
+	// tree turns into an unbounded question). Checked ahead of the
+	// union-building and absorption arms below, on either operand
+	// independently, so this widening triggers before either arm's own
+	// Concatenation/Union construction would compound it further.
+	if aSet, aIsSet := SetOfKnown(a); aIsSet && refinementsets.StatesSequence(aSet) &&
+		refinementsets.SequenceNestingDepth(aSet) > sequenceConcatenationWidenBound {
+		return KnownSet(refinementsets.Strings, nil, grade, SetKindTagNone)
+	}
+	if bSet, bIsSet := SetOfKnown(b); bIsSet && refinementsets.StatesSequence(bSet) &&
+		refinementsets.SequenceNestingDepth(bSet) > sequenceConcatenationWidenBound {
+		return KnownSet(refinementsets.Strings, nil, grade, SetKindTagNone)
 	}
 	// two STRING-SORTED sides join into the union of their tuples —
 	// but only when every member is at least two characters long, so

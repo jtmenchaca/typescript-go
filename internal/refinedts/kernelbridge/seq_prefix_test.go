@@ -1,10 +1,11 @@
 // kernel.SeqPrefix — the ask kernel_asks.go wires to kernel_seq_prefix
-// (mirrors kernel_seq_subset's two-string shape). seqOf
-// (subset_seq_shape.lean) recognizes a concatenation only when its
-// LEFT operand is a single scalar set — the fixed-head, open-tail
-// shape z.tuple([...], rest)/z.array() emits — so both tests below
-// pin that boundary: a fixed-head concatenation answers the proved
-// prefix window; an open-head one (either operand order) declines.
+// (mirrors kernel_seq_subset's two-string shape). seqWindowOf
+// (prefix_read.lean) reads scalars, the empty tuple, Star, Repeat
+// with any bound, and a Concatenation whose BOTH operands are
+// themselves recognized — in either orientation — answering the
+// proved window Repeat(foldedAlphabet, min(lo, n), n). The tests pin
+// both the concatenation-of-windows answer and the fixed-scalar-head
+// answer.
 package kernelbridge
 
 import (
@@ -13,7 +14,12 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
-func TestSeqPrefix_AnOpenLeftOperandDeclinesInBothOrientations(t *testing.T) {
+// The old premise, retired with seqWindowOf (prefix_read.lean): seqOf
+// recognized a concatenation only when its LEFT operand was a single
+// scalar set, so an open-left operand declined in both orientations.
+// seqWindowOf reads a Concatenation of recognized operands in either
+// order, so both orientations now ANSWER the proved prefix window.
+func TestSeqPrefix_AConcatenationOfWindowsAnswersInBothOrientations(t *testing.T) {
 	if !KernelArtifactsPresent(DylibPath) {
 		t.Skip("native kernel dylib absent")
 	}
@@ -21,17 +27,28 @@ func TestSeqPrefix_AnOpenLeftOperandDeclinesInBothOrientations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadKernel: %v", err)
 	}
-	// Strings (a Star) as the LEFT operand: not scalar, so seqOf's
-	// .Concatenation arm never matches
 	openLeft := refinementsets.MakeRefinedSet(refinementsets.Concatenation(refinementsets.Strings, refinementsets.StringTuple("xxxxxxxx")))
-	if _, ok := kernel.SeqPrefix(openLeft, 3); ok {
-		t.Errorf("SeqPrefix(Strings . StringTuple(xxxxxxxx), 3) ok = true, want false — the left operand is not scalar")
-	}
-	// a MULTI-character word as the left operand is itself a
-	// Concatenation, not one scalar set — same decline
 	multiCharHead := refinementsets.MakeRefinedSet(refinementsets.Concatenation(refinementsets.StringTuple("xxxxxxxx"), refinementsets.Strings))
-	if _, ok := kernel.SeqPrefix(multiCharHead, 3); ok {
-		t.Errorf("SeqPrefix(StringTuple(xxxxxxxx) . Strings, 3) ok = true, want false — a multi-char literal is a Concatenation, not one scalar set")
+	for name, set := range map[string]refinementsets.RefinedSet{
+		"Strings . StringTuple(xxxxxxxx)": openLeft,
+		"StringTuple(xxxxxxxx) . Strings": multiCharHead,
+	} {
+		got, ok := kernel.SeqPrefix(set, 3)
+		if !ok {
+			t.Errorf("SeqPrefix(%s, 3) ok = false, want true — seqWindowOf reads a concatenation of recognized operands in either orientation", name)
+			continue
+		}
+		// total length floor is 8 (the literal), so take(3) is exactly
+		// 3 characters over the folded alphabet
+		if !kernel.Member(got, refinementsets.CodepointsOf("xxx")) {
+			t.Errorf("%s: the answered set excludes \"xxx\" — a 3-character take must be a member", name)
+		}
+		if kernel.Member(got, refinementsets.CodepointsOf("xxxx")) {
+			t.Errorf("%s: the answered set admits \"xxxx\" — take(3) never exceeds n", name)
+		}
+		if kernel.Member(got, refinementsets.CodepointsOf("")) {
+			t.Errorf("%s: the answered set admits the empty word — the length floor is min(8, 3) = 3", name)
+		}
 	}
 }
 

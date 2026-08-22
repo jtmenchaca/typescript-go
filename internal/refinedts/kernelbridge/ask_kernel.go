@@ -205,6 +205,17 @@ func KernelFromCalls(input KernelFromCallsInput) *RefinedTSKernel {
 	}
 
 	ask1 := func(op string, symbol string, wireInput string, key ...string) (string, error) {
+		// THE SEAM GUARD (wire_nesting_guard.go): a wire whose sequence-
+		// shaped nesting exceeds what the kernel's deciders are measured
+		// to walk declines here, before the cache lookup and before the
+		// FFI call — never a crash, never an unbounded ask. Checked
+		// ahead of AskCached so a too-deep wire is never remembered as a
+		// permanent cache entry either (a later, differently-shaped
+		// question with the same op never collides with this one's key).
+		if wireExceedsNestingCap(wireInput) {
+			return "", fmt.Errorf(
+				"kernel: declined — the set's nesting exceeds what the kernel's deciders read")
+		}
 		k := wireInput
 		if len(key) > 0 {
 			k = key[0]
@@ -216,6 +227,11 @@ func KernelFromCalls(input KernelFromCallsInput) *RefinedTSKernel {
 		})
 	}
 	ask2 := func(op string, symbol string, first string, second string, key ...string) (string, error) {
+		// THE SEAM GUARD, both operands — see ask1's comment above.
+		if wireExceedsNestingCap(first) || wireExceedsNestingCap(second) {
+			return "", fmt.Errorf(
+				"kernel: declined — the set's nesting exceeds what the kernel's deciders read")
+		}
 		k := fmt.Sprintf("%s\x01%s", first, second)
 		if len(key) > 0 {
 			k = key[0]
