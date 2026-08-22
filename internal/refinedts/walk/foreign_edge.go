@@ -2066,10 +2066,17 @@ func scalarCaseSetOf(cases []Case, forName string) (set refinementsets.RefinedSe
 // A refused question answers (false, false) — the same try/catch shape
 // nan_wrapper.go's own ScalarSubset call wears, so a kernel that cannot
 // decide leaves the crossing unjudged rather than refuting it.
+//
+// The question is picked by the operands' sort: a sequence-shaped
+// operand (a string window, a concatenation, a union of words) asks
+// SeqSubset — the decider whose grammar reads those shapes — and
+// scalars ask ScalarSubset. Sending a string set through the scalar
+// decider is a question the kernel rightly panics on, which used to
+// read here as a refusal.
 func foreignScalarSubset(
 	ctx *FlowContext, a refinementsets.RefinedSet, b refinementsets.RefinedSet,
 ) (fits bool, asked bool) {
-	if ctx == nil || ctx.Kernel == nil || ctx.Kernel.ScalarSubset == nil {
+	if ctx == nil || ctx.Kernel == nil {
 		return false, false
 	}
 	defer func() {
@@ -2077,6 +2084,17 @@ func foreignScalarSubset(
 			fits, asked = false, false
 		}
 	}()
+	sequenceShaped := refinementsets.StatesSequence(a) || refinementsets.SequenceShaped(a) ||
+		refinementsets.StatesSequence(b) || refinementsets.SequenceShaped(b)
+	if sequenceShaped {
+		if ctx.Kernel.SeqSubset == nil {
+			return false, false
+		}
+		return ctx.Kernel.SeqSubset(a, b), true
+	}
+	if ctx.Kernel.ScalarSubset == nil {
+		return false, false
+	}
 	return ctx.Kernel.ScalarSubset(a, b), true
 }
 
