@@ -35,9 +35,29 @@ func PremiseWire(p InvariantPremise) string {
 }
 
 // PremiseKey is premiseKey in the TS source.
+//
+// The "values" branch used to hand-format the raw tuple with
+// marshalWireValue (a literal json.Marshal), the same collapsed
+// spelling CanonicalPairOfSetAndTuple's member-question key carried
+// before its own fix: Go's encoding/json refuses to marshal a
+// non-finite float64 at all, so a tuple holding +Inf, -Inf, or NaN
+// panicked here. A loop-entry premise genuinely carries such a value —
+// abstractdomain.KindValues tracks an exact NaN or Infinity read
+// (`memo_spell_test.go` pins both spelling distinctly) and
+// walk/loop_candidate.go and walk/certified_invariant.go pass that
+// tracked value straight into InvariantPremiseValues — so the honest
+// fix is the same one CanonicalPairOfSetAndTuple took: key every
+// member with cacheNumberString, which keeps each finite numeral as
+// before and gives +Inf/-Inf/NaN their own distinct sentinel instead
+// of erroring, so two premises differing only in which non-finite
+// value they hold key apart rather than crashing.
 func PremiseKey(p InvariantPremise) (string, bool) {
 	if p.Kind == InvariantPremiseValues {
-		return marshalWireValue(p.Values), true
+		parts := make([]string, len(p.Values))
+		for i, x := range p.Values {
+			parts[i] = cacheNumberString(x)
+		}
+		return "[" + strings.Join(parts, ",") + "]", true
 	}
 	key := CanonicalKeyOf(wireSet(p.Set))
 	if key == nil {

@@ -134,7 +134,22 @@ function wrapperNewTargetOver(): number {
 // negative control: a constructor writing an IN-SET literal into an
 // Age-declared field reports nothing — the new judge fires only where
 // the written value actually falls outside the field's own statement.
+//
+// OLD PREMISE: this test passed a NIL kernel to parseVocabRun — safe
+// only while `wrapperConstructorFieldOk(): number`'s own plain-number
+// RETURN position stated nothing (AnnotationOfType answered nil), so
+// `return 0;` never asked the kernel a membership question at all.
+// Now that a bare `number` keyword grounds (JT's ruling,
+// annotations/type_node_sets.go), the return statement's own
+// CheckAssignability DOES ask ctx.Kernel.Member(Numbers, [0]) — with a
+// nil kernel that call panics on a nil pointer dereference and
+// recovers into a 7002 "the kernel declined the question"
+// (parseVocabAssignabilityKernel's own doc names this exact failure
+// mode). A real kernel answers the trivially-true question instead,
+// which is what a genuinely grounded, in-range return position should
+// do — so this fix is passing a real kernel, not weakening the check.
 func TestConstructorFieldWrites_PlainNumberFieldStaysSilent(t *testing.T) {
+	kernel := parseVocabKernel(t)
 	source := constructorFieldWritesHeader + `
 function wrapperConstructorFieldOk(): number {
   class AgedBox {
@@ -147,20 +162,36 @@ function wrapperConstructorFieldOk(): number {
   return 0;
 }
 `
-	diagnostics := parseVocabRun(t, nil, source, "wrapperConstructorFieldOk")
+	diagnostics := parseVocabRun(t, kernel, source, "wrapperConstructorFieldOk")
 	if len(diagnostics) != 0 {
-		t.Errorf("wrapperConstructorFieldOk reported %d diagnostic(s), want none (40 is in Age's set): %+v", len(diagnostics), diagnostics)
+		t.Errorf("wrapperConstructorFieldOk reported %d diagnostic(s), want none (40 is in Age's set, and 0 is in the now-grounded plain number return position): %+v", len(diagnostics), diagnostics)
 	}
 }
 
 // TestConstructorFieldWrites_UnrefinedFieldTypeStaysSilent pins the
 // negative control the brief calls out by name: a field typed plain
 // `number` (no compilable refinement annotation — Sealed's own #age in
-// the e-class-and-function.ts fixture) must never fire through this
-// judge, whatever the constructor writes — AnnotationOfType answers
-// Stated: nil for a bare `number` node, and checkConstructorFieldWrites
-// skips every field its read does not resolve.
+// the e-class-and-function.ts fixture).
+//
+// OLD PREMISE: "AnnotationOfType answers Stated: nil for a bare
+// `number` node, and checkConstructorFieldWrites skips every field its
+// read does not resolve" (asserted zero diagnostics) — now false (JT's
+// ruling, annotations/type_node_sets.go's primitive-keyword arm): the
+// field's own plain `number` type grounds, so the write DOES check.
+//
+// The check now genuinely fires ONE 7002 — not a widening bug, but
+// nan_wrapper.go's own documented rule (CheckPossiblyNaN's
+// AddsNothingSet gate): `age`'s own read is InitialStateOfPlainParameter's
+// PossiblyNaN(Numbers) (typereading's ReadDeclaredType already grounded
+// a bare `number` PARAMETER this way, independent of this fix), and a
+// possibly-NaN value whose real half ADDS NOTHING beyond the plain
+// number ground carries no more information than KindUnknown — the
+// SAME 7002 KindUnknown itself would take (nan_wrapper.go's own
+// comment: "Undetermined stays undetermined: skip straight to the 7002
+// alert below"). The write is genuinely unproven NaN-safe: nothing
+// here excludes NaN on either the parameter's or the field's side.
 func TestConstructorFieldWrites_UnrefinedFieldTypeStaysSilent(t *testing.T) {
+	kernel := parseVocabKernel(t)
 	source := constructorFieldWritesHeader + `
 function wrapperPlainNumberField(): number {
   class PrivateAgeHolder {
@@ -173,8 +204,11 @@ function wrapperPlainNumberField(): number {
   return 0;
 }
 `
-	diagnostics := parseVocabRun(t, nil, source, "wrapperPlainNumberField")
-	if len(diagnostics) != 0 {
-		t.Errorf("wrapperPlainNumberField reported %d diagnostic(s), want none (the field's own type is plain number, not Age): %+v", len(diagnostics), diagnostics)
+	diagnostics := parseVocabRun(t, kernel, source, "wrapperPlainNumberField")
+	if len(diagnostics) != 1 {
+		t.Fatalf("wrapperPlainNumberField reported %d diagnostic(s), want exactly 1 (the unproven-NaN-safety verdict on `this.#age = age`): %+v", len(diagnostics), diagnostics)
+	}
+	if diagnostics[0].Code != 7002 {
+		t.Errorf("the one diagnostic is code %d, want 7002 (undetermined — a plain number parameter is not proven NaN-free): %+v", diagnostics[0].Code, diagnostics[0])
 	}
 }

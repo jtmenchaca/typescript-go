@@ -942,24 +942,26 @@ func walkContractBodies(
 	ordered = sorted
 
 	for _, contract := range ordered {
-		// an unstated parameter of a non-exported function wears the
-		// join of what its call sites pass — every caller is in view,
-		// so the join is exactly what the parameter can hold
+		// a non-exported function's parameters wear the join of what
+		// its call sites pass — every caller is in view, so the join is
+		// exactly what each parameter can hold. This is asked for EVERY
+		// parameter, stated or not: a STATED parameter still wants the
+		// join, because entry_env.go's BindEntryEnv takes the MEET of a
+		// call-site-derived exact value against the declared ceiling
+		// (entryStateMeet), which only ever narrows, never widens.
+		// Gating on "some parameter is unstated" (as this used to)
+		// was sound only while a bare keyword (`number`, `string`,
+		// `boolean`) compiled to no DeclaredRefinement at all; now that
+		// annotations/type_node_sets.go grounds those keywords, a
+		// function whose every parameter carries a written bare-keyword
+		// type had EVERY stated slot non-nil, so the old inner loop
+		// never found a nil entry and the join never ran — silently
+		// dropping every call-site-derived exact value for exactly the
+		// functions the grounding change touches (walk/
+		// call_site_snapshot_fill.go's demand-fill path carried the
+		// identical bug, fixed the same way).
 		declaration := contract.Declaration
 		needsCallSiteJoin := ast.IsFunctionDeclaration(declaration)
-		if needsCallSiteJoin {
-			needsCallSiteJoin = false
-			for i := range declaration.Parameters() {
-				var stated *annotations.DeclaredRefinement
-				if i < len(contract.Params) {
-					stated = contract.Params[i]
-				}
-				if stated == nil {
-					needsCallSiteJoin = true
-					break
-				}
-			}
-		}
 		var initialStates map[string]abstractdomain.AbstractValue
 		if needsCallSiteJoin {
 			tJoin := time.Now()

@@ -270,10 +270,16 @@ func TestFieldInvariants_ASealedPublicFieldKeepsItsInitializer(t *testing.T) {
 	classFieldValuesExactNumber(t, held, 40)
 }
 
-func TestFieldInvariants_AClassReferencedAsAValueLosesThePublicInvariant(t *testing.T) {
-	// `void OverPerson` reads the class VALUE — a holder the seal
-	// cannot follow, so the public field keeps no invariant and its
-	// reads stay opaque
+func TestFieldInvariants_AVoidDiscardedClassKeepsThePublicInvariant(t *testing.T) {
+	// `void OverPerson;` applies the void operator to the bare class
+	// value and discards the result as a statement — a PROVABLY
+	// non-escaping reference, so the seal now admits it (the void-arm
+	// fix in classReferenceSealed). This test used to assert the
+	// opposite (unsealed) under the name
+	// TestFieldInvariants_AClassReferencedAsAValueLosesThePublicInvariant
+	// — that was the ledgered gap itself: no construction anywhere in
+	// the file, and the only reference a provable discard, yet the
+	// field answered opaque in every position.
 	p := classFieldValuesProgram(t,
 		"class OverPerson {\n"+
 			"  age = 200;\n"+
@@ -285,9 +291,11 @@ func TestFieldInvariants_AClassReferencedAsAValueLosesThePublicInvariant(t *test
 	declaration := classFieldValuesClassNamed(t, p, "OverPerson")
 	ctx := classFieldValuesContext(p)
 	invariants := FieldInvariantsOf(ctx, declaration)
-	if _, has := invariants["age"]; has {
-		t.Errorf("a class handed out as a value kept a public-field invariant")
+	held, has := invariants["age"]
+	if !has {
+		t.Fatalf("a class referenced only by a void discard lost its public-field invariant")
 	}
+	classFieldValuesExactNumber(t, held, 200)
 }
 
 func TestFieldInvariants_ANonThisWriteVetoesThePublicField(t *testing.T) {
@@ -332,6 +340,74 @@ func TestFieldInvariants_AnInstancePassedAsAnArgumentLosesTheSeal(t *testing.T) 
 	invariants := FieldInvariantsOf(ctx, declaration)
 	if _, has := invariants["age"]; has {
 		t.Errorf("an instance handed to a callee kept a public-field invariant")
+	}
+}
+
+// TestFieldInvariants_ANeverConstructedClassWithAVoidDiscardSeals pins
+// the ledgered gap: a class NEVER constructed anywhere in its file,
+// referenced only by `void NeverBuilt;` — a provably non-escaping
+// discard — still seals. No instance exists for outside text to have
+// written to, so the field keeps its initializer's invariant.
+func TestFieldInvariants_ANeverConstructedClassWithAVoidDiscardSeals(t *testing.T) {
+	p := classFieldValuesProgram(t,
+		"class NeverBuilt {\n"+
+			"  age = 40;\n"+
+			"}\n"+
+			"void NeverBuilt;\n")
+	declaration := classFieldValuesClassNamed(t, p, "NeverBuilt")
+	ctx := classFieldValuesContext(p)
+	invariants := FieldInvariantsOf(ctx, declaration)
+	held, has := invariants["age"]
+	if !has {
+		t.Fatalf("a never-constructed class referenced only by a void discard lost its public-field invariant")
+	}
+	classFieldValuesExactNumber(t, held, 40)
+}
+
+// TestReadThisFieldInvariant_ANeverConstructedClassWithAVoidDiscardReads
+// carries the same shape through to a `this.field` read: the sealed
+// invariant answers the initializer's value even though the class is
+// never constructed in the file.
+func TestReadThisFieldInvariant_ANeverConstructedClassWithAVoidDiscardReads(t *testing.T) {
+	p := classFieldValuesProgram(t,
+		"class NeverBuilt {\n"+
+			"  age = 40;\n"+
+			"  years(): number {\n"+
+			"    return this.age;\n"+
+			"  }\n"+
+			"}\n"+
+			"void NeverBuilt;\n")
+	thisRead := classFieldValuesFirstNode(t, p, "this.age read", func(node *ast.Node) bool {
+		if !ast.IsPropertyAccessExpression(node) {
+			return false
+		}
+		access := node.AsPropertyAccessExpression()
+		return access.Expression.Kind == ast.KindThisKeyword && access.Name().Text() == "age"
+	})
+	ctx := classFieldValuesContext(p)
+	held := readThisFieldInvariant(ctx, NewEnv(), thisRead, "age")
+	if held == nil {
+		t.Fatalf("this.age read answered nil for a never-constructed, void-discarded class")
+	}
+	classFieldValuesExactNumber(t, *held, 40)
+}
+
+// TestFieldInvariants_ABareArgumentReferenceStaysUnsealed is the
+// regression for the escape rule beside the void-discard admission
+// above: a bare `register(C)` hands the constructor to unknown code
+// that may construct and mutate it, so the class must NOT seal.
+func TestFieldInvariants_ABareArgumentReferenceStaysUnsealed(t *testing.T) {
+	p := classFieldValuesProgram(t,
+		"class Registered {\n"+
+			"  age = 40;\n"+
+			"}\n"+
+			"declare function register(c: typeof Registered): void;\n"+
+			"register(Registered);\n")
+	declaration := classFieldValuesClassNamed(t, p, "Registered")
+	ctx := classFieldValuesContext(p)
+	invariants := FieldInvariantsOf(ctx, declaration)
+	if _, has := invariants["age"]; has {
+		t.Errorf("a class handed to a call as a bare argument kept a public-field invariant")
 	}
 }
 

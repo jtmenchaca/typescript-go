@@ -58,8 +58,8 @@ func spawnServeArtifact() *ForeignArtifact {
 		Called: ForeignFunctionFact{
 			Name: "level_ok",
 			Return: ForeignReturn{
-				Set: refinementsets.MakeRefinedSet(
-					refinementsets.AtLeast(0), refinementsets.AtMost(1)),
+				Cases: []Case{{Sort: CaseSortNumber, Set: refinementsets.MakeRefinedSet(
+					refinementsets.AtLeast(0), refinementsets.AtMost(1))}},
 				StdoutPure: true,
 			},
 		},

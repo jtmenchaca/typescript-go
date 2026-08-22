@@ -121,7 +121,7 @@ func ExportFactOnSave(ctx context.Context, prog *compiler.Program, entryPath str
 		Aliases:   dataflowfacts.NewAliasClasses(),
 		Declared:  map[string]*annotations.DeclaredRefinement{},
 	}
-	entryRows, returnSet, omission := walk.ExportFunctionFact(walkCtx, calledContract)
+	entryRows, returnCases, omission := walk.ExportFunctionFact(walkCtx, calledContract)
 	if omission != "" {
 		return "", false, nil
 	}
@@ -130,11 +130,11 @@ func ExportFactOnSave(ctx context.Context, prog *compiler.Program, entryPath str
 	}
 
 	provenanceLine := walk.ProvenanceLineOf(p.Entry, calledContract.Declaration)
-	provenanceSaid := walk.ProvenanceSaidOf(entryRows, returnSet)
+	provenanceSaid := walk.ProvenanceSaidOf(entryRows, returnCases)
 
 	rendered, marshalErr := json.MarshalIndent(
 		exportFactEnvelope(filepath.Base(entryPath), contentHash, calledName, harnessShape, argIndex,
-			true, entryRows, returnSet, true, provenanceLine, provenanceSaid),
+			true, entryRows, returnCases, true, provenanceLine, provenanceSaid),
 		"", "  ")
 	if marshalErr != nil {
 		return "", false, fmt.Errorf("rendering the artifact for %s: %w", entryPath, marshalErr)

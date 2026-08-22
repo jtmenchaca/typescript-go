@@ -499,6 +499,25 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 			out := receiver
 			return &out
 		}
+		// `.slice(0, n)` over a sequence-SHAPED set (a concatenation or
+		// repetition form, not an exact value): the kernel's prefix read
+		// answers take-n of every member — a repetition window over the
+		// folded alphabet, length [min lo n, n]. JS `.slice(0, n)` on a
+		// shorter string returns the whole string, the same clamping the
+		// kernel's window already states, so this is faithful for THIS
+		// shape only — a non-zero start or an unrecognized n keeps
+		// falling through to the sort-level answer below.
+		if method == "slice" && len(arguments) == 2 && receiver.Kind == abstractdomain.KindSet &&
+			receiver.SetKindTag == abstractdomain.SetKindTagNone {
+			start, startOk := exactIntOf(argKnowns[0])
+			n, nOk := exactIntOf(argKnowns[1])
+			if startOk && start == 0 && nOk && n >= 0 {
+				if prefixSet, ok := ctx.Kernel.SeqPrefix(receiver.Set, n); ok {
+					out := abstractdomain.KnownSet(prefixSet, nil, oracleGrade, abstractdomain.SetKindTagNone)
+					return &out
+				}
+			}
+		}
 		if _, ok := stringOutMethods[method]; ok {
 			out := abstractdomain.KnownSet(refinementsets.Strings, nil, oracleGrade, abstractdomain.SetKindTagNone)
 			return &out

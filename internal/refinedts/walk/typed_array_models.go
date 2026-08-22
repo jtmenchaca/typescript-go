@@ -39,6 +39,21 @@
 //     arrived as a Number (TypedArraySetElement's `? ToNumber(value)`,
 //     #sec-typedarraysetelement), so the element holds that Number
 //     unchanged: the identity conversion.
+//   - Float32Array's element conversion — NumericToRawBytes's ~float32~
+//     branch (#sec-numerictorawbytes, same clause as above) is "Let
+//     rawBytes be a List whose elements are the 4 bytes that are the
+//     result of converting value to IEEE 754-2019 binary32 format
+//     using roundTiesToEven mode" — the identical rounding step
+//     Math.fround runs (#sec-math.fround: "Let n32 be the result of
+//     converting n to IEEE 754-2019 binary32 format using
+//     roundTiesToEven mode. Let n64 be the result of converting n32 to
+//     IEEE 754-2019 binary64 format."). A read decodes those same
+//     stored bytes back to a Number the same way the ~float64~ branch's
+//     bytes decode (TypedArrayGetElement -> GetValueFromBuffer, the
+//     read-side mirror of SetValueInBuffer), so the round-tripped value
+//     a Float32Array element holds is exactly Math.fround(value): round
+//     value to binary32 (roundTiesToEven), then read it back as
+//     binary64.
 //
 // Hand-verified against the fixture's own claimed values:
 //   ToUint8(121)      = 121   (121 mod 256, no wrap)
@@ -50,22 +65,31 @@
 //   ToUint8Clamp(-50) = 0     (-50 < 0, clamps to the floor)
 //   ToUint16(70000)   = 4464  (70000 mod 65536 = 4464)
 //
-// Float32Array and BigInt64Array/BigUint64Array are NOT in this table.
-// Float32Array's own element conversion (NumericToRawBytes's ~float32~
-// branch, same clause as above) is "the result of converting value to
-// IEEE 754-2019 binary32 format using roundTiesToEven mode" — exactly
-// Math.fround (#sec-math.fround: ToNumber, then binary32-round-then-
-// back-to-binary64) — but this table's conversion shape is
-// func(float64) float64 computed in Go's own float64 domain with no
-// binary32-rounding primitive; stating Float32Array here would either
-// approximate (wrong) or require a new rounding primitive this file
-// does not have, so the row is left out rather than stating a lossy
-// value as exact. BigInt64Array/BigUint64Array's own conversions
-// (ToBigInt64/#sec-tobigint64, ToBigUint64/#sec-tobiguint64) take and
-// return BigInt, not Number — this table's whole shape
+// BigInt64Array/BigUint64Array are NOT in this table. Their own
+// conversions (ToBigInt64/#sec-tobigint64, ToBigUint64/#sec-tobiguint64)
+// take and return BigInt, not Number — this table's whole shape
 // (func(float64) float64) has no BigInt vocabulary to route them
-// through either. Both declines are named at construction time
+// through. The decline is named at construction time
 // (noteUnmodeledTypedArrayFamily below) rather than left silent.
+//
+// Float32Array WAS named absent on the premise that this table's
+// func(float64) float64 shape had no binary32-rounding primitive to
+// state Math.fround exactly. That premise does not hold: Go's own
+// non-constant numeric conversion rule (the Go language specification,
+// "Conversions between numeric types") states "the result value is
+// rounded to the precision specified by the destination type" for a
+// float64-to-float32 conversion — `float32(v)` for a float64 v is
+// exactly this rounding step, and `float64(float32(v))` composes it
+// with the widen-back-to-64-bit step, giving Go's own two-line
+// equivalent of the spec's round-then-widen algorithm. (The spec text
+// itself does not name a rounding MODE for this non-constant case —
+// "IEEE 754 round-to-even" appears only in the "Representability"
+// section, which is scoped to constant expressions. The mode Go's
+// compilers actually generate for this conversion — e.g. the amd64
+// CVTSD2SS instruction — is round-to-nearest-even, matching
+// roundTiesToEven, but that is implementation behavior the Go spec
+// does not itself pin; toFloat32RoundTrip below states only what the
+// spec text supports plus the value this repo's Go toolchain measures.)
 
 package walk
 
@@ -92,16 +116,16 @@ var TypedArrayConversions = map[string]func(float64) float64{
 	"Int32Array":        toInt32,
 	"Uint32Array":       toUint32TypedArrayElement,
 	"Float64Array":      identityConversion,
+	"Float32Array":      toFloat32RoundTrip,
 }
 
 // unmodeledTypedArrayFamilies names every default-lib typed-array
-// constructor this table recognizes but does NOT land — Float32Array
-// and the two BigInt-element families — so a construction on one of
-// them names the family in the decline instead of falling to the
-// generic, constructor-name-blind "new builds a value the walk does
-// not model" sentence (syntax_models.go's ast.KindNewExpression row).
+// constructor this table recognizes but does NOT land — the two
+// BigInt-element families — so a construction on one of them names
+// the family in the decline instead of falling to the generic,
+// constructor-name-blind "new builds a value the walk does not model"
+// sentence (syntax_models.go's ast.KindNewExpression row).
 var unmodeledTypedArrayFamilies = map[string]string{
-	"Float32Array":   "Float32Array's element conversion rounds through IEEE 754 binary32 (Math.fround) — this table's func(float64) float64 conversions have no binary32-rounding primitive to state it exactly",
 	"BigInt64Array":  "BigInt64Array's element conversion (ToBigInt64) takes and returns BigInt — this table's conversions are all func(float64) float64 and have no BigInt vocabulary",
 	"BigUint64Array": "BigUint64Array's element conversion (ToBigUint64) takes and returns BigInt — this table's conversions are all func(float64) float64 and have no BigInt vocabulary",
 }
@@ -112,13 +136,13 @@ func typedArrayConversion(name string) (func(float64) float64, bool) {
 }
 
 // noteUnmodeledTypedArrayFamilyIfNamed records, by name, a `new` whose
-// callee is one of unmodeledTypedArrayFamilies (Float32Array,
-// BigInt64Array, BigUint64Array) resolving to the default lib — the
-// named-absence counterpart of builtin_models.go's NoteUnmodeledCall,
-// for constructors rather than calls. A no-op for every other callee
-// (an ordinary unrecognized identifier, a shadowed local, a
-// non-identifier callee), which falls to the generic syntax-kind
-// decline exactly as before.
+// callee is one of unmodeledTypedArrayFamilies (BigInt64Array,
+// BigUint64Array) resolving to the default lib — the named-absence
+// counterpart of builtin_models.go's NoteUnmodeledCall, for
+// constructors rather than calls. A no-op for every other callee (an
+// ordinary unrecognized identifier, a shadowed local, a non-identifier
+// callee), which falls to the generic syntax-kind decline exactly as
+// before.
 func noteUnmodeledTypedArrayFamilyIfNamed(ctx *FlowContext, e *ast.Node) {
 	callee := calleeOf(e)
 	if callee == nil || !ast.IsIdentifier(callee) {
@@ -237,6 +261,21 @@ func toUint32TypedArrayElement(v float64) float64 {
 // unchanged.
 func identityConversion(v float64) float64 {
 	return v
+}
+
+// toFloat32RoundTrip is Float32Array's own element conversion:
+// NumericToRawBytes's ~float32~ branch (#sec-numerictorawbytes) rounds
+// value to IEEE 754-2019 binary32 using roundTiesToEven, storing those
+// 4 bytes; a later read decodes them back to a Number, the same
+// round-trip Math.fround performs and returns directly
+// (#sec-math.fround). Go's own non-constant conversion rule (the Go
+// language specification, "Conversions between numeric types": "the
+// result value is rounded to the precision specified by the
+// destination type") makes `float32(v)` exactly the round-to-binary32
+// step, and converting the result back to float64 is the widen-back
+// step — `float64(float32(v))` is this row's whole conversion.
+func toFloat32RoundTrip(v float64) float64 {
+	return float64(float32(v))
 }
 
 // typedArrayConstructorName reads the identifier a `new NAME(...)`

@@ -161,9 +161,10 @@ func requireExportFactKernel(t *testing.T) {
 }
 
 // TestExportFact_AWellFormedHarnessWritesTheFrozenEnvelope pins the
-// whole shape foreign_edge_artifact.go's doc comment freezes: kind,
-// version, contentHash prefix, harness.calls, a non-empty entry row,
-// a non-empty return set, stdoutPure, and a provenance line ≥ 1.
+// whole shape foreign_edge_artifact.go's doc comment freezes: kind, NO
+// version field, contentHash prefix, harness.calls, a non-empty entry
+// row, a non-empty return cases list, stdoutPure, and a provenance
+// line ≥ 1.
 func TestExportFact_AWellFormedHarnessWritesTheFrozenEnvelope(t *testing.T) {
 	requireExportFactKernel(t)
 	path := writeHarnessFixture(t, meterLevelBody)
@@ -196,8 +197,8 @@ func TestExportFact_AWellFormedHarnessWritesTheFrozenEnvelope(t *testing.T) {
 	if kind, _ := envelope["kind"].(string); kind != ExportFactArtifactKind {
 		t.Errorf("kind = %q, want %q", kind, ExportFactArtifactKind)
 	}
-	if version, _ := envelope["version"].(float64); int(version) != ExportFactArtifactVersion {
-		t.Errorf("version = %v, want %d", envelope["version"], ExportFactArtifactVersion)
+	if _, hasVersion := envelope["version"]; hasVersion {
+		t.Errorf(`envelope carries a "version" field (%v), want none — the RULED schema states no version, ever`, envelope["version"])
 	}
 	if language, _ := parsed["language"].(string); language != ExportFactLanguage {
 		t.Errorf("language = %q, want %q", language, ExportFactLanguage)
@@ -239,8 +240,9 @@ func TestExportFact_AWellFormedHarnessWritesTheFrozenEnvelope(t *testing.T) {
 	if !ok {
 		t.Fatalf("the row states no return: %v", row)
 	}
-	if _, hasSet := returned["set"]; !hasSet {
-		t.Errorf("return carries no set: %v", returned)
+	cases, hasCases := returned["cases"].([]any)
+	if !hasCases || len(cases) == 0 {
+		t.Errorf("return carries no non-empty cases list: %v", returned)
 	}
 	if pure, _ := returned["stdoutPure"].(bool); !pure {
 		t.Errorf("stdoutPure = %v, want true — the fixture writes nothing else to stdout", returned["stdoutPure"])
@@ -662,6 +664,195 @@ func TestExportFact_AnUnexportableFunctionPinsTheOmissionSentence(t *testing.T) 
 	}
 }
 
+// nullableMeterLevelBody is meterLevelBody's nullable-return twin:
+// samples.length is always present, so a null branch is added purely
+// to exercise the RULED schema's null-case export — the body still
+// calls the ONE harness-recognized name (meterLevel) with the ONE
+// z-bounded array parameter writeHarnessFixture's harness line names.
+const nullableMeterLevelBody = `function meterLevel(samples: z.infer<typeof zSamples>): number | null {
+  return samples.length > 5 ? null : samples.length;
+}
+`
+
+// TestExportFact_ANullableReturnEmitsTheInnerCasePlusNull pins the
+// RULED schema's own rule for a DeclaredPossiblyUndefined-shaped
+// derived return: the emitted "cases" array carries the inner number
+// case PLUS {"sort":"null"} appended, and the envelope carries no
+// "version" field anywhere.
+func TestExportFact_ANullableReturnEmitsTheInnerCasePlusNull(t *testing.T) {
+	requireExportFactKernel(t)
+	path := writeHarnessFixture(t, nullableMeterLevelBody)
+	outPath := filepath.Join(filepath.Dir(path), "meter_level.ts.refined.json")
+
+	written, omissions, err := ExportFact(path, exportFactSurfacePath, outPath)
+	if err != nil {
+		t.Fatalf("ExportFact: %v", err)
+	}
+	if len(omissions) != 0 {
+		t.Fatalf("ExportFact reported omissions for an exportable nullable-return function: %v", omissions)
+	}
+	if written != outPath {
+		t.Fatalf("written = %q, want %q", written, outPath)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading the written artifact: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("the written artifact is not valid JSON: %v", err)
+	}
+
+	envelope, ok := parsed["refined"].(map[string]any)
+	if !ok {
+		t.Fatalf(`the artifact carries no "refined" envelope: %v`, parsed)
+	}
+	if _, hasVersion := envelope["version"]; hasVersion {
+		t.Errorf(`envelope carries a "version" field (%v), want none`, envelope["version"])
+	}
+
+	functions, ok := parsed["functions"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact carries no functions: %v", parsed)
+	}
+	row, ok := functions["meterLevel"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact states no fact for meterLevel: %v", functions)
+	}
+	returned, ok := row["return"].(map[string]any)
+	if !ok {
+		t.Fatalf("the row states no return: %v", row)
+	}
+	cases, ok := returned["cases"].([]any)
+	if !ok {
+		t.Fatalf("return carries no cases list: %v", returned)
+	}
+	if len(cases) != 2 {
+		t.Fatalf("len(cases) = %d, want 2 (the inner number case plus null): %v", len(cases), cases)
+	}
+	first, ok := cases[0].(map[string]any)
+	if !ok {
+		t.Fatalf("cases[0] is not an object: %v", cases[0])
+	}
+	if sort, _ := first["sort"].(string); sort != "number" {
+		t.Errorf(`cases[0].sort = %q, want "number"`, sort)
+	}
+	if _, hasSet := first["set"]; !hasSet {
+		t.Errorf("cases[0] carries no set: %v", first)
+	}
+	last, ok := cases[1].(map[string]any)
+	if !ok {
+		t.Fatalf("cases[1] is not an object: %v", cases[1])
+	}
+	if sort, _ := last["sort"].(string); sort != "null" {
+		t.Errorf(`cases[1].sort = %q, want "null"`, sort)
+	}
+	if _, hasSet := last["set"]; hasSet {
+		t.Errorf("cases[1] (the null case) carries a set, want none: %v", last)
+	}
+}
+
+// objectReturnMeterLevelBody is meterLevelBody's object-return twin:
+// the same z-bounded array parameter, but the body wraps samples.length
+// in a plain object literal — Item 1's own exporter reading
+// (FaithfulReturnCases' object arm, fact_export.go) applied end to end
+// through the real ExportFact CLI path rather than a unit call.
+const objectReturnMeterLevelBody = `function meterLevel(samples: z.infer<typeof zSamples>) {
+  return { ok: true, level: samples.length };
+}
+`
+
+// TestExportFact_AnObjectReturnEmitsTheObjectCaseWithMembers pins Item
+// 1's whole producer path: a body returning a plain object literal
+// exports {"sort":"object","members":{...},"closed":true} rather than
+// the old omission ("an object" — returnKindWords' refusal before this
+// fix), verified against the actual bytes ExportFact writes to disk —
+// the same JSON a Python consumer would read across the FFI edge.
+func TestExportFact_AnObjectReturnEmitsTheObjectCaseWithMembers(t *testing.T) {
+	requireExportFactKernel(t)
+	path := writeHarnessFixture(t, objectReturnMeterLevelBody)
+	outPath := filepath.Join(filepath.Dir(path), "meter_level.ts.refined.json")
+
+	written, omissions, err := ExportFact(path, exportFactSurfacePath, outPath)
+	if err != nil {
+		t.Fatalf("ExportFact: %v", err)
+	}
+	if len(omissions) != 0 {
+		t.Fatalf("ExportFact reported omissions for an exportable object-return function: %v", omissions)
+	}
+	if written != outPath {
+		t.Fatalf("written = %q, want %q", written, outPath)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading the written artifact: %v", err)
+	}
+	t.Logf("written artifact:\n%s", raw)
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("the written artifact is not valid JSON: %v", err)
+	}
+
+	functions, ok := parsed["functions"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact carries no functions: %v", parsed)
+	}
+	row, ok := functions["meterLevel"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact states no fact for meterLevel: %v", functions)
+	}
+	returned, ok := row["return"].(map[string]any)
+	if !ok {
+		t.Fatalf("the row states no return: %v", row)
+	}
+	cases, ok := returned["cases"].([]any)
+	if !ok {
+		t.Fatalf("return carries no cases list: %v", returned)
+	}
+	if len(cases) != 1 {
+		t.Fatalf("len(cases) = %d, want 1: %v", len(cases), cases)
+	}
+	c, ok := cases[0].(map[string]any)
+	if !ok {
+		t.Fatalf("cases[0] is not an object: %v", cases[0])
+	}
+	if sort, _ := c["sort"].(string); sort != "object" {
+		t.Fatalf(`cases[0].sort = %q, want "object"`, sort)
+	}
+	closed, _ := c["closed"].(bool)
+	if !closed {
+		t.Errorf("cases[0].closed = %v, want true — a plain object literal with no spread states its exact key set", c["closed"])
+	}
+	members, ok := c["members"].(map[string]any)
+	if !ok {
+		t.Fatalf("cases[0] carries no members object: %v", c)
+	}
+	if len(members) != 2 {
+		t.Fatalf("len(members) = %d, want 2: %v", len(members), members)
+	}
+	okMemberCases, ok := members["ok"].([]any)
+	if !ok || len(okMemberCases) != 1 {
+		t.Fatalf(`members["ok"] = %v, want a one-element cases list`, members["ok"])
+	}
+	okCase, ok := okMemberCases[0].(map[string]any)
+	if !ok || okCase["sort"] != "boolean" {
+		t.Errorf(`members["ok"][0] = %v, want {"sort":"boolean"}`, okMemberCases[0])
+	}
+	levelMemberCases, ok := members["level"].([]any)
+	if !ok || len(levelMemberCases) != 1 {
+		t.Fatalf(`members["level"] = %v, want a one-element cases list`, members["level"])
+	}
+	levelCase, ok := levelMemberCases[0].(map[string]any)
+	if !ok || levelCase["sort"] != "number" {
+		t.Errorf(`members["level"][0] = %v, want {"sort":"number",...}`, levelMemberCases[0])
+	}
+	if _, hasSet := levelCase["set"]; !hasSet {
+		t.Errorf(`members["level"][0] carries no set: %v`, levelCase)
+	}
+}
+
 // TestReadForeignArtifact_MemoFreshness_ARewrittenArtifactIsReadAfresh
 // pins the fact-freshness stopgap docs/one-checker/fact-freshness.md
 // names: ReadForeignArtifact memoizes for the process, and a later
@@ -685,18 +876,18 @@ func TestReadForeignArtifact_MemoFreshness_ARewrittenArtifactIsReadAfresh(t *tes
 	writeArtifactSayingLine := func(source string, line int) {
 		sum := sha256.Sum256([]byte(source))
 		hash := "sha256:" + hex.EncodeToString(sum[:])
-		text := `{"refined": {"kind": "fact-artifact", "version": 2},
+		text := `{"refined": {"kind": "fact-artifact"},
 "target": {"file": "` + targetPath + `", "contentHash": "` + hash + `"},
 "language": "python",
 "runtime": {"band": "cpython-3.11+"},
 "surface": {"kind": "stdin-json", "stdin": "json", "stdout": "json", "calls": "audio_level"},
 "functions": {"audio_level": {
   "entry": [{"name": "samples", "sequence": {
-    "element": {"forms": [{"form": "atLeast", "a": {"num": -1, "exp": 0}},
-                          {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+    "element": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": -1, "exp": 0}},
+                          {"form": "atMost", "a": {"num": 1, "exp": 0}}]}}]},
     "lengthAtLeast": 1}}],
-  "return": {"set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
-                               {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+  "return": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                               {"form": "atMost", "a": {"num": 1, "exp": 0}}]}}],
              "stdoutPure": true},
   "provenance": {"line": ` + strconv.Itoa(line) + `, "said": "first"}
 }}}`
@@ -733,27 +924,27 @@ func TestReadForeignArtifact_MemoFreshness_ARewrittenArtifactIsReadAfresh(t *tes
 	}
 }
 
-// audioLevelV2Artifact is one hand-authored fact-artifact row — entry,
-// return, provenance — spelled under schema v2's
-// "fact-artifact"/2/language/surface shape (docs/one-checker/schema-v2.md).
+// audioLevelCasesArtifact is one hand-authored fact-artifact row —
+// entry, return, provenance — spelled under the RULED cases schema's
+// "fact-artifact"/language/surface shape (no version field, ever).
 // Hand-authored against the schema doc, not generated, so
-// TestReadForeignArtifact_V2FixtureReads proves the reader agrees with
-// the shared spec, not merely with its own producer.
-func audioLevelV2Artifact(targetPath string, hash string) string {
-	return `{"refined": {"kind": "fact-artifact", "version": 2},
+// TestReadForeignArtifact_CasesFixtureReads proves the reader agrees
+// with the shared spec, not merely with its own producer.
+func audioLevelCasesArtifact(targetPath string, hash string) string {
+	return `{"refined": {"kind": "fact-artifact"},
 "target": {"file": "` + targetPath + `", "contentHash": "` + hash + `"},
 "language": "python",
 "runtime": {"band": "cpython-3.11+"},
 "surface": {"kind": "stdin-json", "stdin": "json", "stdout": "json", "calls": "audio_level"},
 "functions": {"audio_level": {
   "entry": [{"name": "samples", "sequence": {
-    "element": {"forms": [{"form": "atLeast", "a": {"num": -1, "exp": 0}},
-                          {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+    "element": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": -1, "exp": 0}},
+                          {"form": "atMost", "a": {"num": 1, "exp": 0}}]}}]},
     "lengthAtLeast": 1}}],
-  "return": {"set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
-                               {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+  "return": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                               {"form": "atMost", "a": {"num": 1, "exp": 0}}]}}],
              "stdoutPure": true},
-  "provenance": {"line": 4, "said": "the v2 shape"}
+  "provenance": {"line": 4, "said": "the cases shape"}
 }}}`
 }
 
@@ -780,17 +971,17 @@ func writeTargetAndArtifact(t *testing.T, dir string, source string, text func(t
 	return targetPath, artifactPath
 }
 
-// TestReadForeignArtifact_V2FixtureReads pins that a hand-authored v2
-// artifact — written directly from the schema doc, never copied from
-// this reader's own code — reads cleanly: the reader agrees with the
-// shared spec, not merely with its own producer.
-func TestReadForeignArtifact_V2FixtureReads(t *testing.T) {
+// TestReadForeignArtifact_CasesFixtureReads pins that a hand-authored
+// cases-shape artifact — written directly from the schema doc, never
+// copied from this reader's own code — reads cleanly: the reader
+// agrees with the shared spec, not merely with its own producer.
+func TestReadForeignArtifact_CasesFixtureReads(t *testing.T) {
 	source := "def audio_level(samples):\n    return 0.5\n"
-	targetPath, _ := writeTargetAndArtifact(t, t.TempDir(), source, audioLevelV2Artifact)
+	targetPath, _ := writeTargetAndArtifact(t, t.TempDir(), source, audioLevelCasesArtifact)
 
 	artifact, sentence := walk.ReadForeignArtifact(targetPath)
 	if sentence != "" {
-		t.Fatalf("the v2 fixture declined: %s", sentence)
+		t.Fatalf("the cases fixture declined: %s", sentence)
 	}
 	if artifact.RuntimeBand != walk.ForeignRuntimeBand {
 		t.Errorf("RuntimeBand = %q, want %q", artifact.RuntimeBand, walk.ForeignRuntimeBand)
@@ -807,38 +998,74 @@ func TestReadForeignArtifact_V2FixtureReads(t *testing.T) {
 	if !artifact.Called.Entry[0].IsSequence || artifact.Called.Entry[0].LengthAtLeast != 1 {
 		t.Errorf("Called.Entry[0] = %+v, want a sequence with lengthAtLeast 1", artifact.Called.Entry[0])
 	}
-	if artifact.Called.Provenance.Said != "the v2 shape" {
-		t.Errorf("Called.Provenance.Said = %q, want %q", artifact.Called.Provenance.Said, "the v2 shape")
+	if len(artifact.Called.Entry[0].ElementCases) != 1 || artifact.Called.Entry[0].ElementCases[0].Sort != walk.CaseSortNumber {
+		t.Errorf("Called.Entry[0].ElementCases = %+v, want one number case", artifact.Called.Entry[0].ElementCases)
+	}
+	if len(artifact.Called.Return.Cases) != 1 || artifact.Called.Return.Cases[0].Sort != walk.CaseSortNumber {
+		t.Errorf("Called.Return.Cases = %+v, want one number case", artifact.Called.Return.Cases)
+	}
+	if artifact.Called.Provenance.Said != "the cases shape" {
+		t.Errorf("Called.Provenance.Said = %q, want %q", artifact.Called.Provenance.Said, "the cases shape")
 	}
 }
 
-// TestReadForeignArtifact_WrongTripleDeclinesByName: a triple that is
-// not the one accepted form — here, "fact-artifact"/2 with NO language
-// field (schema v2 requires "python" or "typescript") — must decline
-// with a sentence naming the stated triple and the one accepted form,
-// never fall back to reading it anyway.
-func TestReadForeignArtifact_WrongTripleDeclinesByName(t *testing.T) {
+// TestReadForeignArtifact_AVersionFieldDeclinesAsSuperseded: an
+// envelope carrying a "version" field at all — the pre-ruling shape —
+// is NO-FACT under the RULED schema, declined by name before the
+// kind/language pair is even asked.
+func TestReadForeignArtifact_AVersionFieldDeclinesAsSuperseded(t *testing.T) {
 	source := "def audio_level(samples):\n    return 0.5\n"
 	targetPath, _ := writeTargetAndArtifact(t, t.TempDir(), source,
 		func(targetPath string, hash string) string {
 			return `{"refined": {"kind": "fact-artifact", "version": 2},
 "target": {"file": "` + targetPath + `", "contentHash": "` + hash + `"},
+"language": "python",
 "runtime": {"band": "cpython-3.11+"},
 "surface": {"kind": "stdin-json", "stdin": "json", "stdout": "json", "calls": "audio_level"},
 "functions": {"audio_level": {
-  "entry": [{"name": "samples", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}}]}}],
-  "return": {"set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}}]}, "stdoutPure": true},
+  "entry": [{"name": "samples", "cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}}]}}]}],
+  "return": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}}]}}], "stdoutPure": true},
+  "provenance": {"line": 1, "said": "a superseded shape"}
+}}}`
+		})
+
+	_, sentence := walk.ReadForeignArtifact(targetPath)
+	if sentence == "" {
+		t.Fatalf("an envelope carrying a version field must decline, and it did not")
+	}
+	if !strings.Contains(sentence, "superseded shape") {
+		t.Errorf("decline sentence = %q, want it to name the superseded shape", sentence)
+	}
+}
+
+// TestReadForeignArtifact_WrongTripleDeclinesByName: a (kind,
+// language) pair that is not the one accepted form — here,
+// "fact-artifact" with NO language field (the RULED schema requires
+// "python" or "typescript") — must decline with a sentence naming the
+// stated pair and the one accepted form, never fall back to reading
+// it anyway.
+func TestReadForeignArtifact_WrongTripleDeclinesByName(t *testing.T) {
+	source := "def audio_level(samples):\n    return 0.5\n"
+	targetPath, _ := writeTargetAndArtifact(t, t.TempDir(), source,
+		func(targetPath string, hash string) string {
+			return `{"refined": {"kind": "fact-artifact"},
+"target": {"file": "` + targetPath + `", "contentHash": "` + hash + `"},
+"runtime": {"band": "cpython-3.11+"},
+"surface": {"kind": "stdin-json", "stdin": "json", "stdout": "json", "calls": "audio_level"},
+"functions": {"audio_level": {
+  "entry": [{"name": "samples", "cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}}]}}]}],
+  "return": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}}]}}], "stdoutPure": true},
   "provenance": {"line": 1, "said": "no language"}
 }}}`
 		})
 
 	_, sentence := walk.ReadForeignArtifact(targetPath)
 	if sentence == "" {
-		t.Fatalf("a triple with no language field must decline, and it did not")
+		t.Fatalf("a pair with no language field must decline, and it did not")
 	}
 	for _, want := range []string{
-		`kind "fact-artifact"`, "version 2", `language ""`,
-		`"fact-artifact", 2, "python"`,
+		`kind "fact-artifact"`, `language ""`,
+		`"fact-artifact", "python"`,
 	} {
 		if !strings.Contains(sentence, want) {
 			t.Errorf("decline sentence = %q, want it to contain %q", sentence, want)

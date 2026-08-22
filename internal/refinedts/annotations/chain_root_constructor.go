@@ -178,7 +178,12 @@ func RootConstructor(params RootConstructorParams) *Compiled {
 		// input back unchanged
 		return &Compiled{Annotation: &Annotation{Set: setPtr(refinementsets.MakeRefinedSet()), Passthrough: true}}
 	case "boolean":
-		return &Compiled{Annotation: &Annotation{Set: setPtr(refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1})))}}
+		// the {0,1} whole-sort floor, tagged -- the same "state the sort
+		// before the double collapses it" discipline bigint/symbol already
+		// wear (KindTag), so a reader past this point (fact_export.go's
+		// entry rows) can still tell "z.boolean()" from "z.literal(0, 1)"
+		// once both compile to the identical two-member set
+		return &Compiled{Annotation: &Annotation{Set: setPtr(refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1}))), KindTag: "boolean"}}
 	case "guid", "uuid", "cuid", "cuid2", "ulid", "xid", "ksuid", "nanoid", "ipv4", "email":
 		// v4 root formats: exactly the vendored library's own regex
 		// (tmp/zod-src core/regexes.ts), compiled through the format

@@ -8,12 +8,12 @@
 // CROSS-LANGUAGE-EDGE.md §5's target-integrity premise and not a
 // convenience.
 //
-// The only accepted envelope is schema v2
-// (docs/one-checker/schema-v2.md) — one kind shared by every language,
-// distinguished by the `language` field rather than by a per-language
-// kind string:
+// The only accepted envelope is the RULED cases schema — NO version
+// field, ever ("refined":{"kind":"fact-artifact"} is an identity
+// marker only): one kind shared by every language, distinguished by
+// the `language` field rather than by a per-language kind string:
 //
-//	{"refined": {"kind": "fact-artifact", "version": 2},
+//	{"refined": {"kind": "fact-artifact"},
 //	 "target": {"file", "contentHash": "sha256:<hex>"},
 //	 "language": "python" | "typescript",
 //	 "runtime": {"band": "cpython-3.11+" | "es2023+"},
@@ -23,10 +23,19 @@
 //	             "stdout": "json", "calls": "<fn>"}
 //	          | {"kind": "file-json", "argIndex": n, "stdout": "json", "calls": "<fn>"},
 //	 "functions": {"<name>": {
-//	   "entry": [{"name", "sequence": {"element": <set>, "lengthAtLeast": n}}
-//	            |{"name", "set": <set>}],
-//	   "return": {"set": <set>, "stdoutPure": bool},
+//	   "entry": [{"name", "sequence": {"element": {"cases": [Case]}, "lengthAtLeast": n}}
+//	            |{"name", "cases": [Case]}],
+//	   "return": {"cases": [Case], "stdoutPure": bool},
 //	   "provenance": {"line": n, "said": "..."}}}}
+//
+// Case := {"sort": "number", "set": <WireSet>} | {"sort": "string", "set": <WireSet>}
+//       | {"sort": "boolean"} | {"sort": "null"} — the full kernel wire
+// set grammar inside a number/string case, reused verbatim from the
+// existing kernelbridge codec; boolean and null carry no set at all
+// (the whole-sort floor, and the absent value — both match what
+// actually crosses the wire, since JSON.stringify's own bare tokens
+// are what actually crosses). A single case still spells as a
+// one-element cases list — there is no bare, non-list shorthand.
 //
 // The four surface kinds are different INBOUND channels: stdin-json's
 // one crossing value arrives as JSON on stdin; argv-scalar's arrives as
@@ -44,11 +53,14 @@
 //
 // `language` selects which runtime pins the band is checked against
 // ("adding a language does not add an artifact kind").
-// `dispatchArtifactEnvelope` routes the (kind, version, language)
-// triple to the reader whose field meanings it pins; any other triple
-// declines by name.
+// `dispatchArtifactEnvelope` routes the (kind, language) pair to the
+// reader whose field meanings it pins; any other pair, OR any other
+// envelope shape at all — a "version" field, a bare "set"/old
+// "sequence" spelling — declines by name: the reader parses the
+// CURRENT shape strictly, and a superseded shape is NO-FACT with the
+// named sentence, same as an unrecognized kind.
 //
-// Every <set> is the kernel's own forms JSON, decoded by
+// Every Case's own <set> is the kernel's own forms JSON, decoded by
 // kernelbridge.DecodeWireSet — the SAME decoder every kernel answer
 // goes through, so a set that crossed the edge and a set the kernel
 // answered are the same object. DecodeWireSet PANICS on an unknown
@@ -89,16 +101,17 @@ const ForeignArtifactSuffix = ".refined.json"
 // tooling, never consulted here.
 var ForeignCacheDir = filepath.Join(".refined", "cache")
 
-// FactArtifactKindV2 and FactArtifactVersionV2 are the one envelope
-// this consumer admits (docs/one-checker/schema-v2.md) — one kind
-// shared by every language, distinguished by the `language` field
-// rather than by a per-language kind string. A different kind or
-// version is a decline, never a best-effort read: the fields'
-// meanings are what the version pins.
-const (
-	FactArtifactKindV2    = "fact-artifact"
-	FactArtifactVersionV2 = 2
-)
+// FactArtifactKindV2 is the one envelope kind this consumer admits —
+// one kind shared by every language, distinguished by the `language`
+// field rather than by a per-language kind string. NO version field
+// rides beside it, ever (the RULED schema's own rule: "refined" is an
+// identity marker, not a ceremony) — a different kind, OR any envelope
+// carrying a "version" field at all, is a decline, never a best-effort
+// read: the reader parses the CURRENT shape strictly. The name keeps
+// its "V2" suffix for the CONSTANT only (every existing caller —
+// service/export_fact.go's own re-export — already spells it), not
+// because a second version exists to distinguish it from.
+const FactArtifactKindV2 = "fact-artifact"
 
 // ForeignRuntimeBand is the interpreter band the Python pins commit to
 // (CROSS-LANGUAGE-EDGE.md §5, runtime identity). An artifact naming a
@@ -111,24 +124,27 @@ const ForeignRuntimeBand = "cpython-3.11+"
 const ForeignExportCommand = "refinedpy-check --export-fact"
 
 // ForeignEntry is one parameter position the target states: either a
-// SEQUENCE (an element set plus the length floor the body relies on)
-// or a plain scalar set.
+// SEQUENCE (an element cases list plus the length floor the body
+// relies on) or a plain scalar cases list — the RULED schema's own
+// "cases" vocabulary, reusing the Case type fact_export.go's exporter
+// already defines (walk has no per-direction split: the same Case
+// shape crosses the wire from a writer and back into a reader).
 type ForeignEntry struct {
 	Name string
-	// Element and LengthAtLeast describe a sequence position; IsSequence
-	// says which of the two shapes this row is.
+	// ElementCases and LengthAtLeast describe a sequence position;
+	// IsSequence says which of the two shapes this row is.
 	IsSequence    bool
-	Element       refinementsets.RefinedSet
+	ElementCases  []Case
 	LengthAtLeast int
-	// Set is the scalar position's own set.
-	Set refinementsets.RefinedSet
+	// Cases is the scalar position's own cases list.
+	Cases []Case
 }
 
 // ForeignReturn is what the target's result holds, plus the channel
 // fact the edge consumes: stdoutPure is §5's channel-purity premise —
 // the target writes NOTHING to stdout but the serialized result.
 type ForeignReturn struct {
-	Set        refinementsets.RefinedSet
+	Cases      []Case
 	StdoutPure bool
 }
 
@@ -318,16 +334,61 @@ func artifactModTime(artifactPath string) int64 {
 // (explicitProducerPyPath, then the project-root build, then PATH);
 // when no producer resolves, the sentence names the file and the
 // command, exactly as before.
+//
+// STALENESS (beside the content hash): a cached artifact that reads
+// cleanly is still stale when the RESOLVED PRODUCER BINARY's own mtime
+// is newer than the cache entry's — a rebuilt producer may derive a
+// different fact for the SAME target source (a sharper kernel, a
+// fixed bug in the exporter itself), and the content hash alone cannot
+// notice that, since the target's bytes never changed. No stamps, no
+// counters: the producer binary this same read already resolves for
+// auto-export is stat'd once more here, and a newer mtime triggers the
+// identical one re-export attempt the missing/failed path already
+// takes, before the read that follows.
 func readForeignArtifactUncached(targetPath string) (*ForeignArtifact, string) {
 	artifactPath := ForeignCacheArtifactPath(targetPath)
+	// REFINED_EXPORT_CHAIN is read ONCE here, at the point the spawn
+	// decision is made — never inside exportForeignArtifact itself,
+	// which takes the chain as a plain parameter so it is testable
+	// without mutating process environment.
+	exportChain := os.Getenv(ExportChainEnvVar)
+	if producerBinaryNewerThanArtifact(targetPath, artifactPath) {
+		// best-effort: a re-export failure here falls through to the
+		// ordinary read below, which still answers whatever the existing
+		// cache entry states — a producer that cannot be re-run is not
+		// grounds to lose an already-valid fact
+		exportForeignArtifact(targetPath, artifactPath, exportChain)
+	}
 	artifact, sentence := readAndVerifyForeignArtifact(targetPath, artifactPath)
 	if sentence == "" {
 		return artifact, ""
 	}
-	if exportSentence := exportForeignArtifact(targetPath, artifactPath); exportSentence != "" {
+	if exportSentence := exportForeignArtifact(targetPath, artifactPath, exportChain); exportSentence != "" {
 		return nil, sentence + " (auto-export declined: " + exportSentence + ")"
 	}
 	return readAndVerifyForeignArtifact(targetPath, artifactPath)
+}
+
+// producerBinaryNewerThanArtifact answers whether the resolved
+// producer binary's mtime is strictly newer than the cached artifact's
+// own mtime — false whenever either file cannot be stat'd (no producer
+// resolves, or no cache entry exists yet; the ordinary missing-artifact
+// path already handles the latter) or the artifact is at least as new,
+// which is the ordinary case once a rebuilt producer has re-exported.
+func producerBinaryNewerThanArtifact(targetPath string, artifactPath string) bool {
+	producer := resolveProducerPyPath(targetPath)
+	if producer == "" {
+		return false
+	}
+	producerInfo, producerErr := os.Stat(producer)
+	if producerErr != nil {
+		return false
+	}
+	artifactInfo, artifactErr := os.Stat(artifactPath)
+	if artifactErr != nil {
+		return false
+	}
+	return producerInfo.ModTime().After(artifactInfo.ModTime())
 }
 
 // ForeignCacheArtifactPath resolves the target's cache entry: the
@@ -444,10 +505,76 @@ func resolveProducerPyPath(targetPath string) string {
 	return ""
 }
 
+// ExportChainEnvVar is the environment variable carrying the
+// cross-process auto-export chain: a colon-separated list of absolute
+// target paths, one per export hop already in flight. This is internal
+// state no invocation reads on purpose — it governs WHETHER an
+// auto-export spawns, never WHICH binary runs, and is therefore a
+// wholly separate concern from resolveProducerPyPath's own
+// no-environment-variable rule for the PRODUCER'S identity (ambient
+// process state never configures WHICH binary runs). A TypeScript
+// checker auto-exporting a Python target whose own auto-export
+// recurses back to a TypeScript target already on this chain would
+// otherwise spawn forever, each hop a fresh process neither side's own
+// in-memory recursion guard can see across.
+const ExportChainEnvVar = "REFINED_EXPORT_CHAIN"
+
+// exportChainContains answers whether targetPath's absolute form
+// already appears as a hop in chain (the colon-separated
+// REFINED_EXPORT_CHAIN value read at this process's own entry point) —
+// true means spawning the producer for this target would recurse back
+// through a hop already in flight, and the caller must decline rather
+// than spawn.
+func exportChainContains(chain string, targetPath string) bool {
+	absoluteTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		absoluteTarget = targetPath
+	}
+	for _, hop := range strings.Split(chain, ":") {
+		if hop == "" {
+			continue
+		}
+		if hop == absoluteTarget {
+			return true
+		}
+	}
+	return false
+}
+
+// exportChainCycleSentence is the sentence a chain-marked decline
+// states: names the recursing target and the whole chain that led back
+// to it, so a reader sees the cycle rather than a generic refusal.
+func exportChainCycleSentence(chain string, targetPath string) string {
+	absoluteTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		absoluteTarget = targetPath
+	}
+	hops := make([]string, 0, 4)
+	for _, hop := range strings.Split(chain, ":") {
+		if hop != "" {
+			hops = append(hops, hop)
+		}
+	}
+	hops = append(hops, absoluteTarget)
+	return "the export of " + absoluteTarget + " recurses back through a target already in flight " +
+		"— the auto-export chain is " + strings.Join(hops, " → ")
+}
+
 // exportForeignArtifact runs the resolved producer into the cache
 // entry, answering "" on success and one sentence naming what stopped
 // it. Resolution: resolveProducerPyPath's three-step order, above.
-func exportForeignArtifact(targetPath string, artifactPath string) string {
+// exportChain is this process's own REFINED_EXPORT_CHAIN value (read
+// once, at the point the spawn decision is made, and threaded down here
+// as a plain parameter — never re-read from the environment inside
+// this function, which is what keeps it directly testable) — when
+// targetPath already appears on it, this declines with the cycle
+// sentence rather than spawning; otherwise the CHILD's own environment
+// carries the chain plus targetPath appended, so a nested auto-export
+// the child triggers sees the extended chain in turn.
+func exportForeignArtifact(targetPath string, artifactPath string, exportChain string) string {
+	if exportChainContains(exportChain, targetPath) {
+		return exportChainCycleSentence(exportChain, targetPath)
+	}
 	producer := resolveProducerPyPath(targetPath)
 	if producer == "" {
 		return "no -producer-py flag, no built refinedpy-check under the project root, and none on PATH"
@@ -455,7 +582,16 @@ func exportForeignArtifact(targetPath string, artifactPath string) string {
 	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
 		return "the cache directory could not be created: " + err.Error()
 	}
+	absoluteTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		absoluteTarget = targetPath
+	}
+	childChain := absoluteTarget
+	if exportChain != "" {
+		childChain = exportChain + ":" + absoluteTarget
+	}
 	command := exec.Command(producer, "--export-fact", targetPath, "-o", artifactPath)
+	command.Env = append(os.Environ(), ExportChainEnvVar+"="+childChain)
 	var stderr strings.Builder
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
@@ -484,27 +620,35 @@ func readAndVerifyForeignArtifact(targetPath string, artifactPath string) (*Fore
 	return dispatchArtifactEnvelope(parsed, targetPath, artifactPath)
 }
 
-// dispatchArtifactEnvelope reads the `refined` envelope and the v2
+// dispatchArtifactEnvelope reads the `refined` envelope and the
 // `language` field, then routes to the reader whose field meanings the
-// (kind, version, language) triple pins: only ("fact-artifact", 2,
-// "python") is read. Any other triple declines by name, naming the one
-// accepted form.
+// (kind, language) pair pins: only ("fact-artifact", "python") is
+// read. A "version" field anywhere in the envelope is itself a
+// superseded shape (the RULED schema states no version, ever) and
+// declines by name before the kind/language pair is even asked — the
+// reader parses the CURRENT shape strictly, and the old versioned
+// envelope is NO-FACT like any other unrecognized shape, never a
+// silently-tolerated extra field. Any other (kind, language) pair
+// declines by name, naming the one accepted form.
 func dispatchArtifactEnvelope(parsed map[string]any, targetPath string, artifactPath string) (*ForeignArtifact, string) {
 	envelope, ok := parsed["refined"].(map[string]any)
 	if !ok {
 		return nil, artifactPath + ` carries no "refined" envelope, so nothing identifies it as a fact artifact`
 	}
 	kind, _ := envelope["kind"].(string)
-	version, versionOk := envelope["version"].(float64)
 	language, _ := parsed["language"].(string)
 
+	if _, hasVersion := envelope["version"]; hasVersion {
+		return nil, artifactPath + ` states a "version" field on its "refined" envelope, and the current ` +
+			`schema states no version, ever — the envelope is a superseded shape, and states no fact this edge reads`
+	}
+
 	switch {
-	case kind == FactArtifactKindV2 && versionOk && int(version) == FactArtifactVersionV2 && language == "python":
+	case kind == FactArtifactKindV2 && language == "python":
 		return readPythonArtifact(parsed, targetPath, artifactPath)
 	default:
-		return nil, artifactPath + ` states (kind "` + kind + `", version ` + jsonNumberString(version) +
-			`, language "` + language + `"), and this edge reads only ("` +
-			FactArtifactKindV2 + `", ` + strconv.Itoa(FactArtifactVersionV2) + `, "python")`
+		return nil, artifactPath + ` states (kind "` + kind + `", language "` + language +
+			`"), and this edge reads only ("` + FactArtifactKindV2 + `", "python")`
 	}
 }
 
@@ -781,17 +925,21 @@ func functionFactOf(
 		return nil, artifactPath + " states no return fact for " + name +
 			", so nothing crosses back from this call"
 	}
-	rawSet, hasSet := returned["set"]
-	if !hasSet {
-		return nil, artifactPath + " states a return for " + name + " with no set, " +
+	rawCases, hasCases := returned["cases"]
+	if !hasCases {
+		return nil, artifactPath + " states a return for " + name + " with no cases, " +
 			"so the value crossing back is unbounded"
+	}
+	cases, casesSentence := casesOf(rawCases, name, artifactPath)
+	if casesSentence != "" {
+		return nil, casesSentence
 	}
 	stdoutPure, _ := returned["stdoutPure"].(bool)
 	return &ForeignFunctionFact{
 		Name:  name,
 		Entry: entries,
 		Return: ForeignReturn{
-			Set:        kernelbridge.DecodeWireSet(rawSet),
+			Cases:      cases,
 			StdoutPure: stdoutPure,
 		},
 		Provenance: artifactProvenanceOf(row, targetPath, targetBytes),
@@ -818,31 +966,111 @@ func artifactEntriesOf(
 		}
 		entryName, _ := entryRow["name"].(string)
 		if sequence, isSequence := entryRow["sequence"].(map[string]any); isSequence {
-			rawElement, hasElement := sequence["element"]
+			element, hasElement := sequence["element"].(map[string]any)
 			if !hasElement {
 				return nil, artifactPath + " states a sequence entry " + entryName +
-					" for " + name + " with no element set"
+					" for " + name + " with no element"
+			}
+			rawElementCases, hasCases := element["cases"]
+			if !hasCases {
+				return nil, artifactPath + " states a sequence entry " + entryName +
+					" for " + name + " whose element states no cases"
+			}
+			elementCases, casesSentence := casesOf(rawElementCases, entryName, artifactPath)
+			if casesSentence != "" {
+				return nil, casesSentence
 			}
 			lengthAtLeast, _ := sequence["lengthAtLeast"].(float64)
 			entries = append(entries, ForeignEntry{
 				Name:          entryName,
 				IsSequence:    true,
-				Element:       kernelbridge.DecodeWireSet(rawElement),
+				ElementCases:  elementCases,
 				LengthAtLeast: int(lengthAtLeast),
 			})
 			continue
 		}
-		rawSet, hasSet := entryRow["set"]
-		if !hasSet {
+		rawCases, hasCases := entryRow["cases"]
+		if !hasCases {
 			return nil, artifactPath + " states an entry position " + entryName +
-				" for " + name + " that is neither a sequence nor a set"
+				" for " + name + " that is neither a sequence nor a cases list"
+		}
+		cases, casesSentence := casesOf(rawCases, entryName, artifactPath)
+		if casesSentence != "" {
+			return nil, casesSentence
 		}
 		entries = append(entries, ForeignEntry{
-			Name: entryName,
-			Set:  kernelbridge.DecodeWireSet(rawSet),
+			Name:  entryName,
+			Cases: cases,
 		})
 	}
 	return entries, ""
+}
+
+// casesOf reads a "cases" JSON array into []Case — the RULED schema's
+// own union arm list. A number/string case requires its own "set",
+// decoded through the SAME kernelbridge.DecodeWireSet every other set
+// on this edge goes through; a boolean/null case carries no set at
+// all; an object case requires its own "members" object (a key ->
+// cases-list map, read recursively through this same function — a
+// member's cases may themselves carry object cases) and "closed"
+// (defaulting to false when absent, the honest reading for a producer
+// that states no completeness claim at all — "closed" unstated is
+// never assumed true). Every element is read STRICTLY: an unreadable
+// element, a missing/unrecognized "sort", a number/string case missing
+// its "set", or an object case missing its "members" all decline by
+// name — a cases list is a claim another program's checker made, and
+// a malformed member is a defect in that claim, never a value to
+// guess past.
+func casesOf(raw any, forName string, artifactPath string) ([]Case, string) {
+	rawList, ok := raw.([]any)
+	if !ok {
+		return nil, artifactPath + " states a \"cases\" field for " + forName +
+			" that is not a JSON array, so nothing says which sorts it admits"
+	}
+	if len(rawList) == 0 {
+		return nil, artifactPath + " states an empty \"cases\" list for " + forName +
+			", so nothing crosses at that position"
+	}
+	cases := make([]Case, 0, len(rawList))
+	for index, rawCase := range rawList {
+		caseRow, ok := rawCase.(map[string]any)
+		if !ok {
+			return nil, artifactPath + " states an unreadable case " + strconv.Itoa(index) +
+				" for " + forName
+		}
+		sort, _ := caseRow["sort"].(string)
+		switch CaseSort(sort) {
+		case CaseSortNumber, CaseSortString:
+			rawSet, hasSet := caseRow["set"]
+			if !hasSet {
+				return nil, artifactPath + " states a " + sort + " case for " + forName +
+					" with no set, so nothing bounds that case's members"
+			}
+			cases = append(cases, Case{Sort: CaseSort(sort), Set: kernelbridge.DecodeWireSet(rawSet)})
+		case CaseSortBoolean, CaseSortNull:
+			cases = append(cases, Case{Sort: CaseSort(sort)})
+		case CaseSortObject:
+			rawMembers, hasMembers := caseRow["members"].(map[string]any)
+			if !hasMembers {
+				return nil, artifactPath + " states an object case for " + forName +
+					" with no \"members\" object, so nothing says which keys it holds"
+			}
+			members := make(map[string][]Case, len(rawMembers))
+			for key, rawMemberCases := range rawMembers {
+				memberCases, memberSentence := casesOf(rawMemberCases, forName+"'s key '"+key+"'", artifactPath)
+				if memberSentence != "" {
+					return nil, memberSentence
+				}
+				members[key] = memberCases
+			}
+			closed, _ := caseRow["closed"].(bool)
+			cases = append(cases, Case{Sort: CaseSortObject, Members: members, Closed: closed})
+		default:
+			return nil, artifactPath + " states a case for " + forName + ` of sort ` + quotedOrNone(sort) +
+				`, and this edge reads only "number", "string", "boolean", "null", or "object"`
+		}
+	}
+	return cases, ""
 }
 
 // artifactProvenanceOf reads where the target's claim was made. Absent

@@ -256,4 +256,19 @@ type FlowContext struct {
 	// evaluateExpression's read nil-checks before it looks anything up,
 	// so the ordinary path pays a predictable branch and no hash.
 	NodeOverrides map[*ast.Node]abstractdomain.AbstractValue
+	// StatementObserver: when non-nil, listWalk calls this after EVERY
+	// statement it walks — both the plain path and the second half of a
+	// relational-accumulation pair — with the env as it stands right
+	// after that statement and whether the statement itself exited. A
+	// try body's own walk is the one caller today (try_statement.go):
+	// an exception can be observed after any prefix of the try text, so
+	// the catch/finally join needs a snapshot per statement, the same
+	// per-statement grain listWalk already visits to serve edges and
+	// answer questions — this hook rides that visit instead of a second,
+	// parallel walk. Set around one AnalyzeStatements call and restored
+	// after, exactly as NodeOverrides is: a *FlowContext value-copies
+	// into sub-walks, and an observer built for one caller's snapshots
+	// has no business firing inside an inlined callee or a speculative
+	// probe.
+	StatementObserver func(env Env, exits bool)
 }

@@ -64,7 +64,7 @@ type ObjectKeyValue struct {
 	// wear them.
 	Measures *Measures
 	// KindTag is the non-double sort the key's values wear:
-	// "bigint" | "symbol" | "".
+	// "bigint" | "symbol" | "boolean" | "".
 	KindTag string
 	// Depends are DEPENDENT bounds against sibling keys, read from a
 	// `.refine((r) => r.hi >= r.lo)` body — parse-checked by the
@@ -154,7 +154,7 @@ type DeclaredRefinement struct {
 	// semantics carries the library boundary in the ledger.
 	LibraryAdapter string
 	// KindTag is the non-double sort the statement's values wear:
-	// "bigint" | "symbol" | "".
+	// "bigint" | "symbol" | "boolean" | "".
 	KindTag string
 	// Depends are the DEPENDENT bounds (z.Gte<"name"> and family):
 	// the position's values relate to the named sibling parameters'

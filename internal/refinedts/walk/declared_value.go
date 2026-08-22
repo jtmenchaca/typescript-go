@@ -12,6 +12,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -29,7 +30,21 @@ func AbstractValueOfDeclared(stated annotations.DeclaredRefinement) abstractdoma
 			abstractdomain.TrustProved,
 			setKindTagOf(stated.KindTag),
 		)
-		return abstractdomain.KnownWithMeasures(bare, measuresOf(stated.Measures))
+		worn := abstractdomain.KnownWithMeasures(bare, measuresOf(stated.Measures))
+		// a bare `number` keyword grounds to the whole number ground
+		// (R-bar, annotations/type_node_sets.go's KindNumberKeyword
+		// arm) -- but a bare TypeScript `number` is not a refinement
+		// that excludes NaN, since NaN IS a number at runtime. The
+		// ground set itself carries no NaN member (refinementsets'
+		// ray forms never mention it), so this arm must wear the same
+		// PossiblyNaN wrapper typereading's NumberWithNaN already
+		// wears around the identical set for the ungrounded read path
+		// -- otherwise the grounding silently drops the NaN
+		// possibility a plain `number` position has always carried.
+		if refinementsets.IsNumberGround(*stated.Set) {
+			return abstractdomain.PossiblyNaN(worn)
+		}
+		return worn
 	case annotations.DeclaredVariable:
 		return abstractdomain.KnownVariable(stated.Symbol, *stated.Bound, stated.StarDepth, objectAnnotationRefOf(stated.BoundObject))
 	case annotations.DeclaredPossiblyUndefined:

@@ -90,6 +90,36 @@ func literalTypeSet(node *ast.Node) literalTypeSetResult {
 // means "not a set-shaped node, keep reading other arms"; matched=true
 // with a zero-value result.Stated/Unsupported means plain TypeScript.
 func annotationOfTypeSets(p *program.CheckerProgram, typeNode *ast.Node, registry AnnotationRegistry, objects ObjectRegistry, bindings map[*ast.Symbol]*DeclaredRefinement) (AnnotationOfTypeResult, bool) {
+	// a bare primitive keyword -- `string`, `number`, `boolean` with no
+	// zod wrapper at all -- states its OWN ground set: every string is
+	// exactly C* (refinementsets.Strings), every number is exactly R-bar
+	// (refinementsets.Numbers, the same set z.number()'s own root
+	// compiles to, chain_root_constructor.go's "number" case), every
+	// boolean is exactly {0,1} tagged "boolean" (mirroring z.boolean()'s
+	// own root, chain_root_constructor.go's "boolean" case, so a reader
+	// past this point still tells a boolean from a two-member numeric
+	// literal set). This is not a new claim about what TypeScript's own
+	// primitive types mean -- transcribing them is the same "state the
+	// spec-fixed ground fact" move typereading/recipes.go already makes
+	// for evaluation (StringGround/NumberWithNaN/BooleanCodes); until
+	// this arm existed, a plain `string`/`number`/`boolean` parameter or
+	// return type read as nil-nil ("plain TypeScript"), so every
+	// downstream consumer of a DeclaredRefinement -- assignability,
+	// Grounded, the fact exporter's entry rows -- silently skipped a
+	// position TypeScript itself already fully specifies.
+	if typeNode.Kind == ast.KindStringKeyword {
+		return AnnotationOfTypeResult{Stated: &DeclaredRefinement{Kind: DeclaredSet, Set: setPtr(refinementsets.Strings)}}, true
+	}
+	if typeNode.Kind == ast.KindNumberKeyword {
+		return AnnotationOfTypeResult{Stated: &DeclaredRefinement{Kind: DeclaredSet, Set: setPtr(refinementsets.Numbers)}}, true
+	}
+	if typeNode.Kind == ast.KindBooleanKeyword {
+		return AnnotationOfTypeResult{Stated: &DeclaredRefinement{
+			Kind:    DeclaredSet,
+			Set:     setPtr(refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1}))),
+			KindTag: "boolean",
+		}}, true
+	}
 	// (X) -- parentheses state nothing
 	if ast.IsParenthesizedTypeNode(typeNode) {
 		return annotationOfType(p, typeNode.AsParenthesizedTypeNode().Type, registry, objects, bindings), true

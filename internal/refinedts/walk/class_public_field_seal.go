@@ -178,10 +178,17 @@ func wrapperChainTop(node *ast.Node) *ast.Node {
 
 // classReferencesSealed: every reference to the class name in the file
 // is one the seal can account for — a `new C(...)` whose instance
-// stays behind member reads, an `x instanceof C` test, or a spelling
-// inside a type node (types read, never write). Anything else — an
-// alias, an argument, a heritage clause, a bare mention — hands the
-// class value to text this seal does not read.
+// stays behind member reads, an `x instanceof C` test, a `void C;`
+// discard that provably reaches no other text, or a spelling inside a
+// type node (types read, never write). Anything else — an alias, an
+// argument, a heritage clause, a bare mention — hands the class value
+// to text this seal does not read.
+//
+// A class with NO reference at all — the vacuous case — seals the
+// same way: the loop below finds nothing to refuse, so `sealed` stays
+// true. No construction anywhere in the file means no instance exists
+// for any outside text to have written to, which is a confinement at
+// least as strong as a construction consumed on the spot.
 func classReferencesSealed(
 	c *checker.Checker,
 	declaration *ast.Node,
@@ -227,6 +234,15 @@ func classReferenceSealed(c *checker.Checker, declaration *ast.Node, reference *
 		if be.OperatorToken.Kind == ast.KindInstanceOfKeyword && be.Right == use {
 			return true
 		}
+	}
+	// `void ClassName;` applies the void operator to the bare class
+	// value and discards the result as a statement — the operand never
+	// reaches a variable, a call argument, a return, or any other spot
+	// that could carry the constructor onward. A PROVABLY
+	// non-escaping discard, so it seals the same as a consumed
+	// construction or an instanceof test.
+	if ast.IsVoidExpression(parent) && parent.AsVoidExpression().Expression == use {
+		return true
 	}
 	return false
 }

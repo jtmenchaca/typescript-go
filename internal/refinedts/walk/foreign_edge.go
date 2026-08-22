@@ -65,6 +65,7 @@ package walk
 import (
 	"math"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -238,18 +239,30 @@ func ForeignEdgeAt(
 	// ±Infinity as the bare token `null` on the OUTBOUND leg (checked
 	// above, nanFreedomObstacle's own premise); on this INBOUND leg the
 	// hazard is the mirror and worse — the TARGET is Python, and
-	// `json.dumps(float("inf"))` emits the bare token `Infinity`, which
-	// is not legal JSON at all. `JSON.parse` of that text THROWS at
-	// runtime. A return set admitting either corner is a claim this
-	// transport cannot carry, so the fact never binds: it degrades to
-	// the same named-undetermined channel every other undischarged
-	// premise in this file uses.
-	if sentence := foreignReturnCornerObstacle(ctx, artifact.Called.Return.Set); sentence != "" {
-		return &ForeignEdgeOutcome{
-			Decline:     "the target " + artifact.Called.Name + "'s stated return " + sentence,
-			DeclineNode: parse,
-			TargetPath:  edge.TargetPath,
-		}, true
+	// `json.dumps(float("inf"))` emits the bare token `Infinity` rather
+	// than a JSON number literal (JSON itself carries no fault here:
+	// `1e999` is a legal JSON number and parses to Infinity in both
+	// runtimes; the bare `Infinity` TOKEN is what Python's default
+	// serializer chooses to write instead, and that token is not a
+	// legal JSON value). `JSON.parse` of that text THROWS at runtime. A
+	// return set admitting either corner is a claim this transport
+	// cannot carry, so the fact never binds: it degrades to the same
+	// named-undetermined channel every other undischarged premise in
+	// this file uses. The corner rule runs PER NUMBER CASE — a cases
+	// list may carry more than one (a possibly-null return, a union of
+	// sorts), and any one of them admitting either corner still stops
+	// the whole return from binding.
+	for _, c := range artifact.Called.Return.Cases {
+		if c.Sort != CaseSortNumber {
+			continue
+		}
+		if sentence := foreignReturnCornerObstacle(ctx, c.Set); sentence != "" {
+			return &ForeignEdgeOutcome{
+				Decline:     "the target " + artifact.Called.Name + "'s stated return " + sentence,
+				DeclineNode: parse,
+				TargetPath:  edge.TargetPath,
+			}, true
+		}
 	}
 	return &ForeignEdgeOutcome{
 		Override: map[*ast.Node]abstractdomain.AbstractValue{
@@ -281,21 +294,22 @@ func foreignReturnCornerObstacle(ctx *FlowContext, returnSet refinementsets.Refi
 		}
 	}()
 	if ctx.Kernel.Member(returnSet, []float64{math.Inf(1)}) {
-		return "admits Infinity, which the JSON stdout leg cannot carry — " +
-			"json.dumps(float(\"inf\")) writes the bare token Infinity, which is not legal JSON, " +
-			"and JSON.parse throws on it — the crossing cannot be trusted at that corner"
+		return "admits Infinity, which json.dumps spells as a token JSON.parse rejects on this leg — " +
+			"json.dumps(float(\"inf\")) writes the bare token Infinity rather than a JSON number literal " +
+			"(1e999 would parse fine; the bare token does not), and JSON.parse throws on it — " +
+			"the crossing cannot be trusted at that corner"
 	}
 	if ctx.Kernel.Member(returnSet, []float64{math.Inf(-1)}) {
-		return "admits -Infinity, which the JSON stdout leg cannot carry — " +
-			"json.dumps(float(\"-inf\")) writes the bare token -Infinity, which is not legal JSON, " +
+		return "admits -Infinity, which json.dumps spells as a token JSON.parse rejects on this leg — " +
+			"json.dumps(float(\"-inf\")) writes the bare token -Infinity rather than a JSON number literal, " +
 			"and JSON.parse throws on it — the crossing cannot be trusted at that corner"
 	}
 	return ""
 }
 
 // foreignReturnValue is the fact the parse result wears: the target's
-// stated return set, at the grade the crossing's weakest cited boundary
-// admits.
+// stated return cases, lowered to one AbstractValue at the grade the
+// crossing's weakest cited boundary admits.
 //
 // TrustSpec, and the reason is the file banner's: the value is not the
 // kernel's own decision about this expression, it is another language's
@@ -305,13 +319,110 @@ func foreignReturnCornerObstacle(ctx *FlowContext, returnSet refinementsets.Refi
 // existing grade for exactly that boundary — a spec clause read
 // correctly, not a theorem discharged.
 //
-// Called only once foreignReturnCornerObstacle has cleared the set of
-// both infinite corners — a set that reaches here binds exactly as it
-// always did.
+// Called only once the corner loop above has cleared every number case
+// of both infinite corners — a cases list that reaches here binds
+// exactly as it always did.
 func foreignReturnValue(artifact *ForeignArtifact) abstractdomain.AbstractValue {
-	return abstractdomain.KnownSet(
-		artifact.Called.Return.Set, nil,
-		abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+	return foreignAbstractValueOfCases(artifact.Called.Return.Cases)
+}
+
+// foreignAbstractValueOfCases lowers a RULED cases list into one
+// AbstractValue at TrustSpec — the walk's OWN vocabulary for "a value
+// that may be one of several sorts": a single present case (number,
+// string, boolean, or object) reads directly; a present case ALONGSIDE
+// a null case wraps through abstractdomain.PossiblyUndefined (the
+// wrapper every possibly-absent value in this checker already wears);
+// more than one PRESENT case — a genuine union of sorts, no null case
+// involved, INCLUDING a Result-style return whose two present cases
+// are both object-sorted (two distinct member structures joined) —
+// folds through abstractdomain.KindUnionOf, the same sort-
+// distinguished-arms union DerivedReturnOf's own join uses and the
+// same channel multiple SCALAR cases already fold through, reused
+// here rather than a new union kind for objects specifically. An
+// empty cases list (declined upstream by casesOf, so unreached in
+// practice) answers Unknown, keeping this function total.
+func foreignAbstractValueOfCases(cases []Case) abstractdomain.AbstractValue {
+	if len(cases) == 0 {
+		return abstractdomain.Unknown
+	}
+	hasNull := false
+	present := make([]Case, 0, len(cases))
+	for _, c := range cases {
+		if c.Sort == CaseSortNull {
+			hasNull = true
+			continue
+		}
+		present = append(present, c)
+	}
+	var value abstractdomain.AbstractValue
+	switch {
+	case len(present) == 0:
+		// null alone: the absent value, with no inner claim to wrap
+		return abstractdomain.Undef
+	case len(present) == 1:
+		value = foreignAbstractValueOfCase(present[0])
+	default:
+		arms := make([]abstractdomain.AbstractValue, 0, len(present))
+		for _, c := range present {
+			arms = append(arms, foreignAbstractValueOfCase(c))
+		}
+		value = abstractdomain.KindUnionOf(arms)
+	}
+	if hasNull && len(present) > 0 {
+		return abstractdomain.PossiblyUndefined(value, abstractdomain.TrustSpec, true, false)
+	}
+	return value
+}
+
+// foreignAbstractValueOfCase lowers one present (non-null) Case to its
+// own AbstractValue at TrustSpec: number/string cases wear their set
+// through KnownSet exactly as the pre-cases reading did; boolean wears
+// the whole {0,1} boolean-tagged domain KnownValues already carries
+// for a declared boolean elsewhere in this checker; object lowers
+// through foreignObjectValueOf into the walk's own object vocabulary
+// (abstractdomain.KnownObject) — reused, never invented, so the
+// consumer-side judge (CheckObjectTarget/CheckObjectKnown,
+// object_assignability.go) works through the existing object-
+// assignability laws unchanged.
+func foreignAbstractValueOfCase(c Case) abstractdomain.AbstractValue {
+	if c.Sort == CaseSortBoolean {
+		return abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec)
+	}
+	if c.Sort == CaseSortObject {
+		return foreignObjectValueOf(c)
+	}
+	return abstractdomain.KnownSet(c.Set, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+}
+
+// foreignObjectValueOf lowers one object Case into
+// abstractdomain.KnownObject: each member's own cases list lowers
+// through foreignAbstractValueOfCases (the SAME cases-list lowering a
+// top-level entry/return takes, recursed — a member's cases may
+// themselves carry object cases, exactly as casesOf reads them),
+// ordered by the member map's own sorted keys so the built AbstractValue
+// is deterministic across runs (a Go map has no stable iteration order;
+// ObjectKey.Name preserves the sort here rather than the producer's own
+// insertion order, which the wire's JSON object already lost). Complete
+// carries Closed unchanged — the producer's own completeness claim,
+// never re-derived. Stated is nil (no annotations.ObjectAnnotation backs
+// a foreign-crossed value) and bareProto is false (a JSON-parsed object
+// wears the ordinary Object.prototype, the same assumption
+// KnownObject's every other caller in this checker makes for a plain
+// object literal).
+func foreignObjectValueOf(c Case) abstractdomain.AbstractValue {
+	names := make([]string, 0, len(c.Members))
+	for name := range c.Members {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	keys := make([]abstractdomain.ObjectKey, 0, len(names))
+	for _, name := range names {
+		keys = append(keys, abstractdomain.ObjectKey{
+			Name:  name,
+			Value: foreignAbstractValueOfCases(c.Members[name]),
+		})
+	}
+	return abstractdomain.KnownObject(keys, nil, c.Closed, abstractdomain.TrustSpec, false)
 }
 
 /* ── recognition (Q1 side) ───────────────────────────────────────── */
@@ -1697,20 +1808,23 @@ func argvScalarFitAgainst(
 			artifact))
 		return &ForeignEdgeOutcome{}
 	}
+	entrySet, entrySentence := scalarCaseSetOf(entry.Cases, artifact.Called.Name)
+	if entrySentence != "" {
+		return &ForeignEdgeOutcome{Decline: entrySentence, DeclineNode: argvValue}
+	}
 	crossingSet := refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{parsed}))
-	fits, asked := foreignScalarSubset(ctx, crossingSet, entry.Set)
+	fits, asked := foreignScalarSubset(ctx, crossingSet, entrySet)
 	if !asked {
 		return &ForeignEdgeOutcome{
 			Decline: "the kernel refused the question of whether the argv value crossing out fits " +
-				artifact.Called.Name + "'s stated " + foreignSetWords(entry.Set) + ", so the crossing is not judged",
+				artifact.Called.Name + "'s stated " + foreignSetWords(entrySet) + ", so the crossing is not judged",
 			DeclineNode: argvValue,
 		}
 	}
 	if !fits {
 		ctx.Report(foreignRefutation(argvValue,
-			"the argv value crossing to "+artifact.Called.Name+" is "+foreignSetWords(crossingSet)+
-				", and the target admits "+foreignSetWords(entry.Set)+
-				" — the value can escape what the target states it accepts",
+			"the argv value sent to "+artifact.Called.Name+" is of type '"+foreignSetWords(crossingSet)+
+				"', which is not assignable to the target's stated entry '"+foreignSetWords(entrySet)+"'",
 			artifact))
 		return &ForeignEdgeOutcome{}
 	}
@@ -1813,21 +1927,23 @@ func checkSequenceCrossing(
 		}
 	}
 	// the ELEMENT fit — a real kernel ask
-	fits, asked := foreignScalarSubset(ctx, window.Element, entry.Element)
+	elementSet, elementSentence := scalarCaseSetOf(entry.ElementCases, artifact.Called.Name)
+	if elementSentence != "" {
+		return &ForeignEdgeOutcome{Decline: elementSentence, DeclineNode: payload}
+	}
+	fits, asked := foreignScalarSubset(ctx, window.Element, elementSet)
 	if !asked {
 		return &ForeignEdgeOutcome{
 			Decline: "the kernel refused the question of whether the elements crossing out fit " +
-				artifact.Called.Name + "'s stated " + foreignSetWords(entry.Element) +
+				artifact.Called.Name + "'s stated " + foreignSetWords(elementSet) +
 				", so the crossing is not judged",
 			DeclineNode: payload,
 		}
 	}
 	if !fits {
 		ctx.Report(foreignRefutation(payload,
-			"the elements crossing to "+artifact.Called.Name+" are "+
-				foreignSetWords(window.Element)+", and the target admits "+
-				foreignSetWords(entry.Element)+
-				" — the value can escape what the target states it accepts",
+			"the elements sent to "+artifact.Called.Name+" are of type '"+foreignSetWords(window.Element)+
+				"', which is not assignable to the target's stated entry '"+foreignSetWords(elementSet)+"'",
 			artifact))
 		return &ForeignEdgeOutcome{}
 	}
@@ -1883,35 +1999,67 @@ func checkScalarCrossing(
 	ctx *FlowContext, payload *ast.Node, artifact *ForeignArtifact,
 	entry ForeignEntry, crossing abstractdomain.AbstractValue,
 ) *ForeignEdgeOutcome {
+	entrySet, entrySentence := scalarCaseSetOf(entry.Cases, artifact.Called.Name)
+	if entrySentence != "" {
+		return &ForeignEdgeOutcome{Decline: entrySentence, DeclineNode: payload}
+	}
 	crossingSet, ok := abstractdomain.SetOfKnown(crossing)
 	if !ok {
 		return &ForeignEdgeOutcome{
 			Decline: "the target " + artifact.Called.Name + " admits " +
-				foreignSetWords(entry.Set) + " at " + entry.Name +
+				foreignSetWords(entrySet) + " at " + entry.Name +
 				", and the value crossing out is not read as a set here — " +
 				"nothing says whether it fits",
 			DeclineNode: payload,
 		}
 	}
-	fits, asked := foreignScalarSubset(ctx, crossingSet, entry.Set)
+	fits, asked := foreignScalarSubset(ctx, crossingSet, entrySet)
 	if !asked {
 		return &ForeignEdgeOutcome{
 			Decline: "the kernel refused the question of whether the value crossing out fits " +
-				artifact.Called.Name + "'s stated " + foreignSetWords(entry.Set) +
+				artifact.Called.Name + "'s stated " + foreignSetWords(entrySet) +
 				", so the crossing is not judged",
 			DeclineNode: payload,
 		}
 	}
 	if !fits {
 		ctx.Report(foreignRefutation(payload,
-			"the value crossing to "+artifact.Called.Name+" is "+
-				foreignSetWords(crossingSet)+", and the target admits "+
-				foreignSetWords(entry.Set)+
-				" — the value can escape what the target states it accepts",
+			"the value sent to "+artifact.Called.Name+" is of type '"+foreignSetWords(crossingSet)+
+				"', which is not assignable to the target's stated entry '"+foreignSetWords(entrySet)+"'",
 			artifact))
 		return &ForeignEdgeOutcome{}
 	}
 	return nil
+}
+
+// scalarCaseSetOf answers the ONE number/string set a cases list
+// states, for the crossing-fit code below that asks a single ScalarSubset
+// question against a single RefinedSet: the RULED schema's "cases" list
+// can name more than one sort at once (a possibly-null return, a
+// kindUnion of sorts), and judging a crossing against such a list is a
+// DIFFERENT question this fit chain does not yet ask — so this answers
+// ok=false, naming which shape stopped it, for anything other than
+// exactly one number-or-string case. The one-case common path (today's
+// only shape a producer states) reads through unchanged.
+func scalarCaseSetOf(cases []Case, forName string) (set refinementsets.RefinedSet, sentence string) {
+	if len(cases) == 0 {
+		return refinementsets.RefinedSet{}, "the target " + forName + " states no cases at all, so nothing bounds the crossing"
+	}
+	if len(cases) > 1 {
+		return refinementsets.RefinedSet{}, "the target " + forName + " states more than one case, and the crossing-fit " +
+			"chain judges a value against one number or string set at a time — a multi-case fit is recognized " +
+			"and not yet served"
+	}
+	switch cases[0].Sort {
+	case CaseSortNumber, CaseSortString:
+		return cases[0].Set, ""
+	case CaseSortBoolean:
+		return refinementsets.RefinedSet{}, "the target " + forName + " states a boolean case, and the crossing-fit " +
+			"chain judges a value against a number or string set — a boolean crossing is recognized and not yet served"
+	default:
+		return refinementsets.RefinedSet{}, "the target " + forName + " states a null case alone, so nothing " +
+			"but the absent value crosses at that position — the crossing-fit chain judges a present value's set"
+	}
 }
 
 // foreignScalarSubset asks the kernel A ⊆ B, answering (fits, asked).

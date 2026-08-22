@@ -80,8 +80,10 @@ func TestBindEntryEnv_APlainBooleanArrayParameterWearsTheStar(t *testing.T) {
 	})
 	held, _ := env.Get("xs")
 	formatted, ok := abstractdomain.FormatAbstractValue(held)
-	if !ok || formatted != "{each 0 | 1}" {
-		t.Errorf("env[xs] = %q, %v, want %q, true", formatted, ok, "{each 0 | 1}")
+	// the ruled container grammar (old wording, pre restructure:
+	// "{each 0 | 1}")
+	if !ok || formatted != "Array<number {0 | 1}>" {
+		t.Errorf("env[xs] = %q, %v, want %q, true", formatted, ok, "Array<number {0 | 1}>")
 	}
 }
 

@@ -3,8 +3,26 @@ package abstractdomain
 import (
 	"testing"
 
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
+
+// stringGroundAbsorptionKernel loads the native kernel the same way
+// every other kernel-gated test in this tree does (skip when the
+// dylib is absent, fatal on a load error) — JoinKnown's string-ground
+// absorption arm (lattice_operations.go) asks kernelSeqSubset, which
+// answers ok=false with no kernel seated at all.
+func stringGroundAbsorptionKernel(t *testing.T) *kernelbridge.RefinedTSKernel {
+	t.Helper()
+	if !kernelbridge.KernelArtifactsPresent(kernelbridge.DylibPath) {
+		t.Skip("native kernel dylib absent — build it first")
+	}
+	kernel, err := kernelbridge.LoadKernel(kernelbridge.DylibPath)
+	if err != nil {
+		t.Fatalf("LoadKernel: %v", err)
+	}
+	return kernel
+}
 
 // TestStringWordSetAdmitsTheEmptyWord is the direct check on
 // stringWordSet's gate (lattice_operations.go): the empty string is the
@@ -95,12 +113,54 @@ func TestJoinKnownOfTwoStringLiteralsStillJoinsAsBefore(t *testing.T) {
 // stringWordSet on both sides (unchanged by this fix), so the join
 // falls through to the numeric fallback, which then refuses on
 // IsNumericKind (a string-sorted side is never numeric) and answers
-// Unknown.
+// Unknown. Neither side contains the other (kernelSeqSubset answers
+// false both ways), so the string-ground ABSORPTION arm (below) does
+// not touch this boundary either — the deliberate refusal stays exactly
+// as strict with a kernel seated as it was declared to be unseated.
 func TestJoinKnownOfOneCodepointStringsStillFallsToTheNumericPath(t *testing.T) {
+	kernel := stringGroundAbsorptionKernel(t)
+	SetLatticeKernel(kernel)
+	t.Cleanup(func() { SetLatticeKernel(nil) })
 	a := KnownValues([]float64{97}, PrimitiveString, TrustProved) // "a"
 	b := KnownValues([]float64{98}, PrimitiveString, TrustProved) // "b"
 	joined := JoinKnown(a, b)
 	if joined.Kind != KindUnknown {
-		t.Errorf("JoinKnown(\"a\", \"b\").Kind = %v, want KindUnknown (unchanged boundary)", joined.Kind)
+		t.Errorf("JoinKnown(\"a\", \"b\").Kind = %v, want KindUnknown (unchanged boundary — neither word contains the other)", joined.Kind)
+	}
+}
+
+// TestJoinKnownStringGroundAbsorbsAContainedLiteral pins §G's
+// text_label.ts shape directly: `padded.length >= 3 ? padded : "xxx"`
+// joins a string-sorted, untagged set that is the WHOLE string ground
+// (Strings — Star(Codepoints), which genuinely admits 1-character
+// words and so can never pass stringWordSet's own reread-safety gate)
+// against the exact literal "xxx". Before this fix: stringWordSet
+// refused the ground side, the join fell to the numeric fallback,
+// IsNumericKind refused the string-sorted side, and JoinKnown answered
+// Unknown — even though "xxx" is trivially already a member of
+// Strings. After this fix: the kernel's own seqSubset ask certifies
+// "xxx" ⊆ Strings, and the join answers Strings itself — DETERMINED,
+// never a widened claim (Strings already admitted "xxx" before this
+// join ran).
+func TestJoinKnownStringGroundAbsorbsAContainedLiteral(t *testing.T) {
+	kernel := stringGroundAbsorptionKernel(t)
+	SetLatticeKernel(kernel)
+	t.Cleanup(func() { SetLatticeKernel(nil) })
+	stringGround := KnownSet(refinementsets.Strings, nil, TrustProved, SetKindTagNone)
+	literal := KnownValues(refinementsets.CodepointsOf("xxx"), PrimitiveString, TrustProved)
+	joined := JoinKnown(stringGround, literal)
+	if joined.Kind == KindUnknown {
+		t.Fatalf("JoinKnown(Strings, \"xxx\") = Unknown, want the absorbed string ground")
+	}
+	if joined.Kind != KindSet || !refinementsets.IsStringGround(joined.Set) {
+		spelled, _ := FormatAbstractValue(joined)
+		t.Errorf("JoinKnown(Strings, \"xxx\") = %+v (%q), want the whole string ground (Strings) absorbed unchanged", joined, spelled)
+	}
+	// the SAME join, arguments swapped — absorption must not depend on
+	// which side the ground rides on
+	joinedReversed := JoinKnown(literal, stringGround)
+	if joinedReversed.Kind != KindSet || !refinementsets.IsStringGround(joinedReversed.Set) {
+		spelled, _ := FormatAbstractValue(joinedReversed)
+		t.Errorf("JoinKnown(\"xxx\", Strings) = %+v (%q), want the whole string ground absorbed the same way, argument order reversed", joinedReversed, spelled)
 	}
 }

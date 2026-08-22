@@ -42,8 +42,11 @@ func TestTheHoverVocabularyTheSurfacesOwnWordsChainedBounds(t *testing.T) {
 	if got := hoverOf(t, MakeRefinedSet(OneOf([]float64{1}))); got != "1" {
 		t.Errorf("hover = %q", got)
 	}
-	// a sequence: what each element is
-	if got := hoverOf(t, MakeRefinedSet(Star(MakeRefinedSet(AtLeast(1), AtMost(5), Integer)))); got != "{each integer, 1 ≤ 𝑥 ≤ 5}" {
+	// a sequence: the ruled container grammar — the element's own type
+	// word carries its own braces inline, the generic replacing the
+	// host type wholesale (old wording, pre ruled-grammar restructure:
+	// "{each integer, 1 ≤ 𝑥 ≤ 5}")
+	if got := hoverOf(t, MakeRefinedSet(Star(MakeRefinedSet(AtLeast(1), AtMost(5), Integer)))); got != "Array<number {integer, 1 ≤ 𝑥 ≤ 5}>" {
 		t.Errorf("hover = %q", got)
 	}
 	// length is hoverLength, of a string and of an array alike

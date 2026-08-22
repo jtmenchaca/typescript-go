@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
@@ -67,7 +68,7 @@ func foreignArtifactJSON(contentHash string, targetFile string, stdoutPure bool)
 		pure = "true"
 	}
 	return `{
-  "refined": {"kind": "fact-artifact", "version": 2},
+  "refined": {"kind": "fact-artifact"},
   "target": {"file": "` + targetFile + `", "contentHash": "` + contentHash + `"},
   "language": "python",
   "runtime": {"band": "cpython-3.11+"},
@@ -75,11 +76,11 @@ func foreignArtifactJSON(contentHash string, targetFile string, stdoutPure bool)
   "functions": {
     "audio_level": {
       "entry": [{"name": "samples", "sequence": {
-        "element": {"forms": [{"form": "atLeast", "a": {"num": -2, "exp": 0}},
-                              {"form": "atMost", "a": {"num": 2, "exp": 0}}]},
+        "element": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": -2, "exp": 0}},
+                              {"form": "atMost", "a": {"num": 2, "exp": 0}}]}}]},
         "lengthAtLeast": 1}}],
-      "return": {"set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
-                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+      "return": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]}}],
                  "stdoutPure": ` + pure + `},
       "provenance": {"line": 5, "said": "math.sqrt of a mean of squares of -1 … 1 is 0 … 1"}
     }
@@ -111,17 +112,17 @@ func writeForeignScalarArgvTarget(t *testing.T) (string, string) {
 // own Gain window), argIndex 1, calling level_from_gain.
 func foreignArgvScalarArtifactJSON(contentHash string, targetFile string) string {
 	return `{
-  "refined": {"kind": "fact-artifact", "version": 2},
+  "refined": {"kind": "fact-artifact"},
   "target": {"file": "` + targetFile + `", "contentHash": "` + contentHash + `"},
   "language": "python",
   "runtime": {"band": "cpython-3.11+"},
   "surface": {"kind": "argv-scalar", "argIndex": 1, "parse": "float", "stdout": "json", "calls": "level_from_gain"},
   "functions": {
     "level_from_gain": {
-      "entry": [{"name": "gain", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
-                                                    {"form": "atMost", "a": {"num": 4, "exp": 0}}]}}],
-      "return": {"set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
-                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+      "entry": [{"name": "gain", "cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                                                    {"form": "atMost", "a": {"num": 4, "exp": 0}}]}}]}],
+      "return": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]}}],
                  "stdoutPure": true},
       "provenance": {"line": 2, "said": "min(1.0, gain / 4.0) is 0 … 1 for gain 0 … 4"}
     }
@@ -158,7 +159,7 @@ func writeForeignMixedTarget(t *testing.T) (string, string) {
 // argv leg, "gain"), argIndex 1, calling level_gain_argv.
 func foreignMixedArtifactJSON(contentHash string, targetFile string) string {
 	return `{
-  "refined": {"kind": "fact-artifact", "version": 2},
+  "refined": {"kind": "fact-artifact"},
   "target": {"file": "` + targetFile + `", "contentHash": "` + contentHash + `"},
   "language": "python",
   "runtime": {"band": "cpython-3.11+"},
@@ -167,13 +168,13 @@ func foreignMixedArtifactJSON(contentHash string, targetFile string) string {
   "functions": {
     "level_gain_argv": {
       "entry": [{"name": "samples", "sequence": {
-                  "element": {"forms": [{"form": "atLeast", "a": {"num": -2, "exp": 0}},
-                                        {"form": "atMost", "a": {"num": 2, "exp": 0}}]},
+                  "element": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": -2, "exp": 0}},
+                                        {"form": "atMost", "a": {"num": 2, "exp": 0}}]}}]},
                   "lengthAtLeast": 1}},
-                {"name": "gain", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
-                                                    {"form": "atMost", "a": {"num": 4, "exp": 0}}]}}],
-      "return": {"set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
-                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+                {"name": "gain", "cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                                                    {"form": "atMost", "a": {"num": 4, "exp": 0}}]}}]}],
+      "return": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]}}],
                  "stdoutPure": true},
       "provenance": {"line": 4, "said": "clamped levels stay 0 … 1 for samples -2 … 2 and gain 0 … 4"}
     }
@@ -210,7 +211,7 @@ func writeForeignFileTarget(t *testing.T) (string, string) {
 // the file), calling level_from_file.
 func foreignFileJSONArtifactJSON(contentHash string, targetFile string) string {
 	return `{
-  "refined": {"kind": "fact-artifact", "version": 2},
+  "refined": {"kind": "fact-artifact"},
   "target": {"file": "` + targetFile + `", "contentHash": "` + contentHash + `"},
   "language": "python",
   "runtime": {"band": "cpython-3.11+"},
@@ -218,11 +219,11 @@ func foreignFileJSONArtifactJSON(contentHash string, targetFile string) string {
   "functions": {
     "level_from_file": {
       "entry": [{"name": "samples", "sequence": {
-                  "element": {"forms": [{"form": "atLeast", "a": {"num": -2, "exp": 0}},
-                                        {"form": "atMost", "a": {"num": 2, "exp": 0}}]},
+                  "element": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": -2, "exp": 0}},
+                                        {"form": "atMost", "a": {"num": 2, "exp": 0}}]}}]},
                   "lengthAtLeast": 1}}],
-      "return": {"set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
-                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]},
+      "return": {"cases": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": 0, "exp": 0}},
+                                   {"form": "atMost", "a": {"num": 1, "exp": 0}}]}}],
                  "stdoutPure": true},
       "provenance": {"line": 6, "said": "clamped levels stay 0 … 1 for samples -2 … 2"}
     }
@@ -280,9 +281,12 @@ func TestReadForeignArtifact_AWellFormedArtifactAnswersTheCalledFunctionsFact(t 
 	if !entry.IsSequence || entry.LengthAtLeast != 1 {
 		t.Errorf("Entry[0] = %+v, want a sequence with lengthAtLeast 1", entry)
 	}
-	// the element set came through the kernel's own decoder, so it is the
-	// same object a kernel answer would have been
-	if words := foreignSetWords(entry.Element); !strings.Contains(words, "-2") || !strings.Contains(words, "2") {
+	// the element case's set came through the kernel's own decoder, so
+	// it is the same object a kernel answer would have been
+	if len(entry.ElementCases) != 1 || entry.ElementCases[0].Sort != CaseSortNumber {
+		t.Fatalf("entry.ElementCases = %+v, want exactly one number case", entry.ElementCases)
+	}
+	if words := foreignSetWords(entry.ElementCases[0].Set); !strings.Contains(words, "-2") || !strings.Contains(words, "2") {
 		t.Errorf("the entry element reads %q, want the -2 … 2 window the artifact states", words)
 	}
 	if !artifact.Called.Return.StdoutPure {
@@ -351,6 +355,96 @@ func TestReadForeignArtifact_AMissingArtifactNamesTheFileAndTheCommandThatWrites
 	}
 }
 
+// writeFakeProducerScript writes a tiny shell script standing in for
+// refinedpy-check: run as `<script> --export-fact <target> -o <out>`,
+// it writes artifactText to the `-o` path verbatim, ignoring every
+// other argument — enough to exercise exportForeignArtifact's own
+// exec.Command call without a real Rust binary in reach.
+func writeFakeProducerScript(t *testing.T, dir string, artifactText string) string {
+	t.Helper()
+	scriptPath := filepath.Join(dir, "fake-producer.sh")
+	script := "#!/bin/sh\n" +
+		"out=\"\"\n" +
+		"prev=\"\"\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$prev\" = \"-o\" ]; then out=\"$arg\"; fi\n" +
+		"  prev=\"$arg\"\n" +
+		"done\n" +
+		"cat > \"$out\" <<'ARTIFACT'\n" + artifactText + "\nARTIFACT\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing the fake producer script: %v", err)
+	}
+	return scriptPath
+}
+
+// TestReadForeignArtifact_AProducerBinaryNewerThanTheArtifactReExports
+// pins the RULED staleness rule: the content hash alone cannot notice
+// a REBUILT producer deriving a different fact for the SAME target
+// bytes, so the resolved producer binary's own mtime, compared against
+// the cache entry's, is the second freshness signal. A cached artifact
+// that reads cleanly is still re-exported when the producer is newer —
+// no stamps, no counters, just the two files' mtimes.
+func TestReadForeignArtifact_AProducerBinaryNewerThanTheArtifactReExports(t *testing.T) {
+	targetPath, contentHash := writeForeignTarget(t)
+	writeForeignArtifact(t, targetPath, foreignArtifactJSON(contentHash, targetPath, true))
+	artifactPath := ForeignCacheArtifactPath(targetPath)
+
+	// back-date the cache entry so the fake producer (written just now,
+	// by this test) reads unambiguously newer — mtime comparisons need a
+	// real gap, not a same-instant race
+	old := time.Now().Add(-1 * time.Hour)
+	if err := os.Chtimes(artifactPath, old, old); err != nil {
+		t.Fatalf("back-dating the cache entry: %v", err)
+	}
+
+	rebuiltArtifact := strings.Replace(
+		foreignArtifactJSON(contentHash, targetPath, true),
+		`"said": "math.sqrt of a mean of squares of -1 … 1 is 0 … 1"`,
+		`"said": "a rebuilt producer's own sentence"`, 1)
+	producer := writeFakeProducerScript(t, t.TempDir(), rebuiltArtifact)
+	SetPythonProducerPath(producer)
+	t.Cleanup(func() { SetPythonProducerPath("") })
+	forgetForeignArtifact(targetPath)
+
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the re-exported artifact declined: %s", sentence)
+	}
+	if artifact.Called.Provenance.Said != "a rebuilt producer's own sentence" {
+		t.Errorf("Called.Provenance.Said = %q, want the REBUILT producer's own sentence — "+
+			"a newer producer binary must trigger a re-export even though the cached artifact "+
+			"already read cleanly and the target's content hash never changed", artifact.Called.Provenance.Said)
+	}
+}
+
+// TestReadForeignArtifact_AnOlderProducerBinaryDoesNotReExport is the
+// mirror: a producer binary OLDER than the cache entry (the ordinary
+// case once a rebuilt producer has already re-exported once) must NOT
+// trigger a second re-export — the cached artifact's own provenance
+// reads through unchanged.
+func TestReadForeignArtifact_AnOlderProducerBinaryDoesNotReExport(t *testing.T) {
+	targetPath, contentHash := writeForeignTarget(t)
+	writeForeignArtifact(t, targetPath, foreignArtifactJSON(contentHash, targetPath, true))
+
+	producer := writeFakeProducerScript(t, t.TempDir(), "this text must never be read")
+	old := time.Now().Add(-1 * time.Hour)
+	if err := os.Chtimes(producer, old, old); err != nil {
+		t.Fatalf("back-dating the producer: %v", err)
+	}
+	SetPythonProducerPath(producer)
+	t.Cleanup(func() { SetPythonProducerPath("") })
+	forgetForeignArtifact(targetPath)
+
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the cached artifact declined: %s", sentence)
+	}
+	if artifact.Called.Provenance.Said != "math.sqrt of a mean of squares of -1 … 1 is 0 … 1" {
+		t.Errorf("Called.Provenance.Said = %q, want the ORIGINAL cached sentence — an older producer "+
+			"binary must not trigger a re-export", artifact.Called.Provenance.Said)
+	}
+}
+
 func TestReadForeignArtifact_AStaleContentHashDeclinesNamingTargetIntegrity(t *testing.T) {
 	targetPath, contentHash := writeForeignTarget(t)
 	writeForeignArtifact(t, targetPath, foreignArtifactJSON(contentHash, targetPath, true))
@@ -414,15 +508,19 @@ func TestReadForeignArtifact_ANonJsonHarnessDeclinesNamingTheChannel(t *testing.
 	}
 }
 
-func TestReadForeignArtifact_AnUnknownVersionDeclinesRatherThanReadingItAnyway(t *testing.T) {
+// TestReadForeignArtifact_AVersionFieldDeclinesAsSuperseded pins the
+// RULED schema's own rule: NO version field, ever — an envelope
+// carrying one at all (any value) is a superseded shape, declined by
+// name rather than read as this-version-or-that.
+func TestReadForeignArtifact_AVersionFieldDeclinesAsSuperseded(t *testing.T) {
 	targetPath, contentHash := writeForeignTarget(t)
 	text := strings.Replace(
 		foreignArtifactJSON(contentHash, targetPath, true),
-		`"version": 2`, `"version": 3`, 1)
+		`"refined": {"kind": "fact-artifact"}`, `"refined": {"kind": "fact-artifact", "version": 2}`, 1)
 	writeForeignArtifact(t, targetPath, text)
 
 	if _, sentence := ReadForeignArtifact(targetPath); !strings.Contains(sentence, "version") {
-		t.Errorf("the sentence %q does not name the version — the field meanings are what the version pins", sentence)
+		t.Errorf("the sentence %q does not name the version field — the current schema states no version, ever", sentence)
 	}
 }
 
@@ -942,9 +1040,12 @@ func TestCheckArgvCrossing_ALiteralOutsideTheStatedEntryFiresWithThePinnedSenten
 	if fired.Code != 7001 {
 		t.Errorf("Code = %d, want 7001", fired.Code)
 	}
-	wantSentence := "the argv value crossing to level_from_gain is 9, and the target admits " +
-		"0 … 4 — the value can escape what the target states it accepts"
-	if !strings.Contains(fired.MessageText, "the value can escape what the target states it accepts") {
+	// old wording (pre house-fire reword): "the argv value crossing to
+	// level_from_gain is 9, and the target admits 0 … 4 — the value can
+	// escape what the target states it accepts"
+	wantSentence := "the argv value sent to level_from_gain is of type '9', which is not " +
+		"assignable to the target's stated entry '0 … 4'"
+	if !strings.Contains(fired.MessageText, "which is not assignable to the target's stated entry") {
 		t.Errorf("the message %q does not carry the fit-failure sentence, want it to contain %q", fired.MessageText, wantSentence)
 	}
 	if !strings.Contains(fired.MessageText, "level_from_gain") {
@@ -1157,7 +1258,9 @@ func TestCheckMixedCrossing_AnOutOfSetArgvLiteralFiresOnThatLegOnly(t *testing.T
 	if fired.Code != 7001 {
 		t.Errorf("Code = %d, want 7001", fired.Code)
 	}
-	if !strings.Contains(fired.MessageText, "the argv value crossing to level_gain_argv is 9") {
+	// old wording (pre house-fire reword): "the argv value crossing to
+	// level_gain_argv is 9"
+	if !strings.Contains(fired.MessageText, "the argv value sent to level_gain_argv is of type '9'") {
 		t.Errorf("the message %q does not name the argv leg's own out-of-set value", fired.MessageText)
 	}
 }
@@ -2200,15 +2303,18 @@ func TestAnalyzeStatements_AnOrdinaryStatementPushesNothingToTheForeignSink(t *t
 	}
 }
 
-/* ── the return leg's ±Infinity corner (the JSON stdout leg cannot carry it) ── */
+/* ── the return leg's ±Infinity corner (json.dumps spells a token JSON.parse rejects) ── */
 //
-// json.dumps(float("inf")) writes the bare token `Infinity` — not legal
-// JSON — and JSON.parse throws on it at runtime. A return set admitting
-// either infinite corner must not bind as the parse's fact: it degrades
-// to a named undetermined instead. foreignReturnCornerObstacle is the
-// gate; these pin it directly against a real kernel's Member ask
-// (x ∈ A), the same idiom effect_math_test.go's own Math.min/max corner
-// checks and kernel_bridge_test.go's ℝ̄∖{0} row already use.
+// json.dumps(float("inf")) writes the bare token `Infinity` rather than
+// a JSON number literal (JSON itself is not at fault: `1e999` is a
+// legal JSON number and parses to Infinity in both runtimes — the bare
+// token is Python's default serializer's own choice), and JSON.parse
+// throws on that token at runtime. A return set admitting either
+// infinite corner must not bind as the parse's fact: it degrades to a
+// named undetermined instead. foreignReturnCornerObstacle is the gate;
+// these pin it directly against a real kernel's Member ask (x ∈ A), the
+// same idiom effect_math_test.go's own Math.min/max corner checks and
+// kernel_bridge_test.go's ℝ̄∖{0} row already use.
 
 // foreignReturnCornerKernel loads the same kernel every other
 // kernel-backed test in this file loads — skips (never a faked pass)
@@ -2235,7 +2341,7 @@ func TestForeignReturnCornerObstacle_APlusInfinityAdmittingSetDegrades(t *testin
 		t.Errorf("sentence %q does not name the Infinity corner", sentence)
 	}
 	if !strings.Contains(sentence, "JSON") {
-		t.Errorf("sentence %q does not name the JSON stdout leg that cannot carry it", sentence)
+		t.Errorf("sentence %q does not name json.dumps's bare Infinity token that JSON.parse rejects", sentence)
 	}
 }
 
@@ -2254,7 +2360,7 @@ func TestForeignReturnCornerObstacle_AMinusInfinityAdmittingSetDegradesIdentical
 		t.Errorf("sentence %q does not name the -Infinity corner", sentence)
 	}
 	if !strings.Contains(sentence, "JSON") {
-		t.Errorf("sentence %q does not name the JSON stdout leg that cannot carry it", sentence)
+		t.Errorf("sentence %q does not name json.dumps's bare Infinity token that JSON.parse rejects", sentence)
 	}
 }
 
@@ -2274,7 +2380,7 @@ func TestForeignReturnCornerObstacle_AFiniteWindowBindsExactlyAsBefore(t *testin
 	}
 	artifact := &ForeignArtifact{Called: ForeignFunctionFact{
 		Name:   "audio_level",
-		Return: ForeignReturn{Set: finiteWindow, StdoutPure: true},
+		Return: ForeignReturn{Cases: []Case{{Sort: CaseSortNumber, Set: finiteWindow}}, StdoutPure: true},
 	}}
 	got := foreignReturnValue(artifact)
 	want := abstractdomain.KnownSet(finiteWindow, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
@@ -2293,5 +2399,200 @@ func TestForeignReturnCornerObstacle_ARefusedQuestionAnswersNoObstacle(t *testin
 	admitsPosInf := refinementsets.MakeRefinedSet(refinementsets.AtLeast(0))
 	if sentence := foreignReturnCornerObstacle(ctx, admitsPosInf); sentence != "" {
 		t.Errorf("a nil kernel answered an obstacle sentence %q, want none (refused, not refuted)", sentence)
+	}
+}
+
+/* ── item 1: object-shaped values cross the wire (a Result-style return) ── */
+
+// foreignResultTargetSource is the Python body a Result-shaped
+// artifact describes: two object cases in one return cases list —
+// {"ok": true, "value": <number>} on success, {"ok": false, "error":
+// <string>} on failure — the RULED schema's own reading of a
+// Result-style union.
+const foreignResultTargetSource = "def parse_level(text):\n" +
+	"    try:\n" +
+	"        return {\"ok\": True, \"value\": float(text)}\n" +
+	"    except ValueError:\n" +
+	"        return {\"ok\": False, \"error\": \"not a number\"}\n"
+
+// writeForeignResultTarget writes the Result-shaped target into a
+// fresh temp directory and answers its path and the sha256 the
+// artifact must state to match it.
+func writeForeignResultTarget(t *testing.T) (string, string) {
+	t.Helper()
+	targetPath := filepath.Join(t.TempDir(), "parse_level.py")
+	if err := os.WriteFile(targetPath, []byte(foreignResultTargetSource), 0o644); err != nil {
+		t.Fatalf("writing the target: %v", err)
+	}
+	sum := sha256.Sum256([]byte(foreignResultTargetSource))
+	return targetPath, "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// stringsWireSet is refinementsets.Strings' own wire text
+// (kernelbridge.EncodeSet(refinementsets.Strings)), spelled once here
+// through the real encoder rather than hand-transcribed — a hand-
+// written "star of codepoints" guess drifted from the decoder's actual
+// form names (wire_decode.go's "star" case reads a capitalized "A"
+// wrapping a full nested set, never a bare {"form":"codepoints"}).
+var stringsWireSet = kernelbridge.EncodeSet(refinementsets.Strings)
+
+// foreignResultArtifactJSON builds an artifact whose return "cases" is
+// the RULED schema's object vocabulary: two object cases, each CLOSED
+// (the producer states the exact key set each branch holds) — the
+// success branch {"ok": boolean-true-only, "value": a finite number}
+// and the failure branch {"ok": boolean-false-only, "error": a
+// string}.
+func foreignResultArtifactJSON(contentHash string, targetFile string) string {
+	return `{
+  "refined": {"kind": "fact-artifact"},
+  "target": {"file": "` + targetFile + `", "contentHash": "` + contentHash + `"},
+  "language": "python",
+  "runtime": {"band": "cpython-3.11+"},
+  "surface": {"kind": "stdin-json", "stdin": "json", "stdout": "json", "calls": "parse_level"},
+  "functions": {
+    "parse_level": {
+      "entry": [{"name": "text", "cases": [{"sort": "string", "set": ` + stringsWireSet + `}]}],
+      "return": {"cases": [
+        {"sort": "object", "closed": true, "members": {
+          "ok": [{"sort": "boolean"}],
+          "value": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": -1000000, "exp": 0}},
+                                                            {"form": "atMost", "a": {"num": 1000000, "exp": 0}}]}}]
+        }},
+        {"sort": "object", "closed": true, "members": {
+          "ok": [{"sort": "boolean"}],
+          "error": [{"sort": "string", "set": ` + stringsWireSet + `}]
+        }}
+      ], "stdoutPure": true},
+      "provenance": {"line": 3, "said": "parse_level answers {ok, value} or {ok, error}"}
+    }
+  }
+}`
+}
+
+// TestForeignResultReturn_ATwoCaseObjectReturnBindsAndOkStyleAccessJudges
+// pins Item 1 end to end at the grain this package can reach without a
+// @types/node program host (this file's own header names that limit):
+// a fixture-registered Result-shaped artifact — two object cases in
+// one return cases list — reads through ReadForeignArtifact, lowers
+// through foreignReturnValue into abstractdomain.KnownObject-shaped
+// knowledge (a KindKindUnion of two KindObject arms, the union channel
+// scalar multi-cases already use), and a `.ok`-style member judged
+// through the EXISTING object-assignability law (CheckObjectTarget,
+// via CheckAssignabilityOfArm's own union-arm dispatch) proves the
+// member exists and fits on BOTH arms — never a re-derived reading
+// specific to this artifact.
+func TestForeignResultReturn_ATwoCaseObjectReturnBindsAndOkStyleAccessJudges(t *testing.T) {
+	kernel := foreignReturnCornerKernel(t)
+	targetPath, contentHash := writeForeignResultTarget(t)
+	writeForeignArtifact(t, targetPath, foreignResultArtifactJSON(contentHash, targetPath))
+
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the Result-shaped fixture artifact declined: %s", sentence)
+	}
+	returnCases := artifact.Called.Return.Cases
+	if len(returnCases) != 2 {
+		t.Fatalf("len(returnCases) = %d, want 2 (the two object cases)", len(returnCases))
+	}
+	for i, c := range returnCases {
+		if c.Sort != CaseSortObject {
+			t.Fatalf("returnCases[%d].Sort = %q, want %q", i, c.Sort, CaseSortObject)
+		}
+		if !c.Closed {
+			t.Errorf("returnCases[%d].Closed = false, want true — the artifact states \"closed\": true", i)
+		}
+	}
+
+	bound := foreignReturnValue(artifact)
+	if bound.Kind != abstractdomain.KindKindUnion {
+		t.Fatalf("foreignReturnValue(Result artifact).Kind = %v, want KindKindUnion (two object arms joined)", bound.Kind)
+	}
+	if len(bound.Arms) != 2 {
+		t.Fatalf("len(bound.Arms) = %d, want 2", len(bound.Arms))
+	}
+	for i, arm := range bound.Arms {
+		if arm.Kind != abstractdomain.KindObject {
+			t.Fatalf("bound.Arms[%d].Kind = %v, want KindObject", i, arm.Kind)
+		}
+		if !arm.Complete {
+			t.Errorf("bound.Arms[%d].Complete = false, want true — Closed carried through from the artifact", i)
+		}
+		var hasOk bool
+		for _, key := range arm.Keys {
+			if key.Name == "ok" {
+				hasOk = true
+				if key.Value.Kind != abstractdomain.KindValues || key.Value.KindTag != abstractdomain.PrimitiveBoolean {
+					t.Errorf("bound.Arms[%d]'s 'ok' key = %+v, want a KindValues{PrimitiveBoolean}", i, key.Value)
+				}
+			}
+		}
+		if !hasOk {
+			t.Errorf("bound.Arms[%d] carries no 'ok' key: %+v", i, arm.Keys)
+		}
+	}
+
+	// the ".ok"-style member access judges: a target object annotation
+	// stating only {ok: boolean} (every arm the union may take carries
+	// that key at that sort) must PROVE for this union, through the
+	// EXISTING object-assignability laws — CheckAssignabilityOfArm's own
+	// union dispatch (CheckKindUnion) walks each arm through
+	// CheckObjectTarget, and a captured 7001/7002 on any arm is what
+	// would fail this pin.
+	p := entryEnvTestProgram(t, "const anchor = 1;\n")
+	anchorStatement := p.Entry.Statements.Nodes[0]
+	anchorNode := anchorStatement.AsVariableStatement().DeclarationList.AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration().Initializer
+
+	okTarget := annotations.DeclaredRefinement{
+		Kind: annotations.DeclaredObject,
+		Object: &annotations.ObjectAnnotation{
+			Keys: []annotations.ObjectKeySpec{
+				{
+					Name:  "ok",
+					Count: setPtr(refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1}))),
+					At:    anchorNode,
+					Value: annotations.ObjectKeyValue{
+						Kind: annotations.KeyValueSet,
+						Set:  setPtr(refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1}))),
+					},
+				},
+			},
+		},
+	}
+
+	var captured []assignability.RefinementDiagnostic
+	ctx := &FlowContext{
+		Kernel: kernel,
+		Report: func(d assignability.RefinementDiagnostic) { captured = append(captured, d) },
+	}
+	CheckAssignability(ctx, bound, okTarget, anchorNode, "the returned value", nil)
+	for _, d := range captured {
+		t.Errorf("checking '.ok' against the Result union reported %d: %s — want no refutation, every arm carries 'ok: boolean'", d.Code, d.MessageText)
+	}
+}
+
+// TestReadForeignArtifact_AnObjectCaseWithNoMembersDeclinesNamingIt pins
+// casesOf's strict object arm: an object case stating no "members" at
+// all is a malformed claim (not a shape this edge can guess a key set
+// for), and the decline names it — the same "recognized and named,
+// never silently guessed past" discipline every other malformed-case
+// row in this file already gets.
+func TestReadForeignArtifact_AnObjectCaseWithNoMembersDeclinesNamingIt(t *testing.T) {
+	targetPath, contentHash := writeForeignResultTarget(t)
+	text := strings.Replace(
+		foreignResultArtifactJSON(contentHash, targetPath),
+		`{"sort": "object", "closed": true, "members": {
+          "ok": [{"sort": "boolean"}],
+          "value": [{"sort": "number", "set": {"forms": [{"form": "atLeast", "a": {"num": -1000000, "exp": 0}},
+                                                            {"form": "atMost", "a": {"num": 1000000, "exp": 0}}]}}]
+        }}`,
+		`{"sort": "object", "closed": true}`, 1)
+	writeForeignArtifact(t, targetPath, text)
+
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if artifact != nil {
+		t.Fatalf("an object case with no members answered a fact: %+v", artifact)
+	}
+	if !strings.Contains(sentence, "members") {
+		t.Errorf("the sentence %q does not name the missing \"members\" object", sentence)
 	}
 }

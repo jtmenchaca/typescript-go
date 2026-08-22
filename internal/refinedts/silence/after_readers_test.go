@@ -89,8 +89,11 @@ func TestAfterReaders_APlainUnknownAtABooleanArrayNameBecomesTheStar(t *testing.
 	if !ok {
 		t.Fatalf("expected a formattable value")
 	}
-	if formatted != "{each 0 | 1}" {
-		t.Fatalf("expected {each 0 | 1}, got %s", formatted)
+	// the ruled hover grammar (2026-08-22) renders element refinements
+	// on the element type inside native generics; the old spelling was
+	// "{each 0 | 1}"
+	if formatted != "Array<number {0 | 1}>" {
+		t.Fatalf("expected Array<number {0 | 1}>, got %s", formatted)
 	}
 }
 

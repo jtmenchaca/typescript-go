@@ -55,7 +55,7 @@ type Annotation struct {
 	// not the Date object itself.
 	Date bool
 	// KindTag is the sort the statement's values wear when it is not
-	// the double: "bigint" | "symbol" | "".
+	// the double: "bigint" | "symbol" | "boolean" | "".
 	KindTag string
 	// Passthrough is true for validation-only schemas whose output
 	// VALUES equal the input's exactly (`z.json()`). An exact

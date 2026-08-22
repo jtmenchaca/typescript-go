@@ -4,18 +4,19 @@
 // (docs/one-checker/reverse-pair.md, Half A — the mirror of
 // refinedpy_check.rs's export_file/export_module).
 //
-// The envelope is schema v2 (docs/one-checker/schema-v2.md,
-// walk/foreign_edge_artifact.go's doc comment): kind "fact-artifact",
-// version 2, language "typescript", and "es2023+" as the runtime
-// band (RULING 2026-08-21: one JS-family band claiming ECMA-level
-// behavior, replacing the provisional node-specific string — every
-// premise the edge discharges, JSON round-trip and Number semantics,
-// is an ECMA-262 claim, not a node-specific one, so any recognized JS
-// runner — node, deno, bun, npx tsx — satisfies it).
+// The envelope is the RULED cases schema (no version field, ever —
+// "refined":{"kind":"fact-artifact"} is an identity marker only; the
+// reader parses the CURRENT shape strictly, and any other shape is
+// NO-FACT): kind "fact-artifact", language "typescript", and "es2023+"
+// as the runtime band (RULING 2026-08-21: one JS-family band claiming
+// ECMA-level behavior, replacing the provisional node-specific string
+// — every premise the edge discharges, JSON round-trip and Number
+// semantics, is an ECMA-262 claim, not a node-specific one, so any
+// recognized JS runner — node, deno, bun, npx tsx — satisfies it).
 //
 // Every field is computed. A file with no recognized harness, a
 // harness calling an unexported or unexportable function, or a
-// function whose return derives no faithful set are OMISSIONS —
+// function whose return derives no faithful cases list are OMISSIONS —
 // printed by the caller (cmd/refinedts-check/main.go), never a stub
 // written into the artifact.
 package service
@@ -32,18 +33,13 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
-	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/walk"
 )
 
-// ExportFactArtifactKind and ExportFactArtifactVersion are the
-// envelope this producer writes: schema v2's one kind shared by every
-// language (walk.FactArtifactKindV2/FactArtifactVersionV2), rather
-// than a per-language kind string.
-const (
-	ExportFactArtifactKind    = walk.FactArtifactKindV2
-	ExportFactArtifactVersion = walk.FactArtifactVersionV2
-)
+// ExportFactArtifactKind is the envelope this producer writes: the
+// RULED schema's one kind shared by every language
+// (walk.FactArtifactKindV2) — no version field rides beside it.
+const ExportFactArtifactKind = walk.FactArtifactKindV2
 
 // ExportFactLanguage is the v2 `language` field this producer states —
 // it selects which pins the runtime band is checked against.
@@ -125,13 +121,15 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 	ctx := &walk.FlowContext{
 		P:         p,
 		Kernel:    kernel,
+		Registry:  facts.registry,
+		Objects:   facts.objects,
 		Contracts: entryContracts,
 		Aliases:   dataflowfacts.NewAliasClasses(),
 		Declared:  map[string]*annotations.DeclaredRefinement{},
 	}
 
 	var entryRows []walk.ForeignEntryRow
-	var returnSet refinementsets.RefinedSet
+	var returnCases []walk.Case
 	var provenanceLine int
 	var provenanceSaid string
 	stdoutPure := false
@@ -143,7 +141,7 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 		functionOmission = "the harness calls it, and this file states no checked contract for it"
 	default:
 		var exportOmission string
-		entryRows, returnSet, exportOmission = walk.ExportFunctionFact(ctx, calledContract)
+		entryRows, returnCases, exportOmission = walk.ExportFunctionFact(ctx, calledContract)
 		switch {
 		case exportOmission != "":
 			functionOmission = exportOmission
@@ -152,7 +150,7 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 		default:
 			stdoutPure = true
 			provenanceLine = walk.ProvenanceLineOf(p.Entry, calledContract.Declaration)
-			provenanceSaid = walk.ProvenanceSaidOf(entryRows, returnSet)
+			provenanceSaid = walk.ProvenanceSaidOf(entryRows, returnCases)
 			exported = true
 		}
 	}
@@ -170,7 +168,7 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 
 	rendered, marshalErr := json.MarshalIndent(
 		exportFactEnvelope(filepath.Base(entryFilePath), contentHash, calledName, harnessShape, argIndex,
-			exported, entryRows, returnSet, stdoutPure, provenanceLine, provenanceSaid),
+			exported, entryRows, returnCases, stdoutPure, provenanceLine, provenanceSaid),
 		"", "  ")
 	if marshalErr != nil {
 		return "", nil, fmt.Errorf("rendering the artifact for %s: %w", entryFilePath, marshalErr)
@@ -187,8 +185,10 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 }
 
 // exportFactEnvelope builds the artifact as raw JSON-serializable maps
-// — schema v2's shape (walk/foreign_edge_artifact.go's doc comment),
-// with `language` "typescript" and `surface.kind` one of "stdin-json"
+// — the RULED cases schema's shape (walk/foreign_edge_artifact.go's
+// doc comment): "refined" carries ONLY {"kind": "fact-artifact"}, no
+// version field, ever — an identity marker, not a ceremony. `language`
+// is "typescript" and `surface.kind` is one of "stdin-json"
 // (unchanged), "argv-json" (harnessShape == walk.HarnessShapeArgvJSON:
 // {"kind": "argv-json", "argIndex": <int>, "stdout": "json", "calls":
 // <fn>} — the same JSON.parse transport as stdin-json, carried through
@@ -197,9 +197,10 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 // walk.HarnessShapeFileJSON: {"kind": "file-json", "argIndex": <int>,
 // "stdout": "json", "calls": <fn>} — the target reads its JSON payload
 // from the FILE named at process.argv[argIndex], also with no "stdin"
-// field). Every <set> is kernelbridge.EncodeSet's own wire text,
-// embedded as json.RawMessage so it is never re-encoded through a
-// second string builder.
+// field). Every Case's own <set> is kernelbridge.EncodeSet's own wire
+// text, embedded as json.RawMessage so it is never re-encoded through
+// a second string builder — the SAME codec every kernel answer already
+// goes through, reused verbatim rather than a private artifact subset.
 //
 // exported is whether the harness-called function itself carried
 // enough to state a fact: false leaves "functions" an EMPTY object —
@@ -212,7 +213,7 @@ func exportFactEnvelope(
 	targetFile string, contentHash string, harnessCalls string,
 	harnessShape walk.HarnessShape, argIndex float64,
 	exported bool,
-	entryRows []walk.ForeignEntryRow, returnSet refinementsets.RefinedSet, stdoutPure bool,
+	entryRows []walk.ForeignEntryRow, returnCases []walk.Case, stdoutPure bool,
 	provenanceLine int, provenanceSaid string,
 ) map[string]any {
 	functions := map[string]any{}
@@ -223,21 +224,21 @@ func exportFactEnvelope(
 				entries = append(entries, map[string]any{
 					"name": row.Name,
 					"sequence": map[string]any{
-						"element":       json.RawMessage(kernelbridge.EncodeSet(row.Element)),
+						"element":       map[string]any{"cases": casesJSON(row.ElementCases)},
 						"lengthAtLeast": row.LengthAtLeast,
 					},
 				})
 				continue
 			}
 			entries = append(entries, map[string]any{
-				"name": row.Name,
-				"set":  json.RawMessage(kernelbridge.EncodeSet(row.Set)),
+				"name":  row.Name,
+				"cases": casesJSON(row.Cases),
 			})
 		}
 		functions[harnessCalls] = map[string]any{
 			"entry": entries,
 			"return": map[string]any{
-				"set":        json.RawMessage(kernelbridge.EncodeSet(returnSet)),
+				"cases":      casesJSON(returnCases),
 				"stdoutPure": stdoutPure,
 			},
 			"provenance": map[string]any{
@@ -248,8 +249,7 @@ func exportFactEnvelope(
 	}
 	return map[string]any{
 		"refined": map[string]any{
-			"kind":    ExportFactArtifactKind,
-			"version": ExportFactArtifactVersion,
+			"kind": ExportFactArtifactKind,
 		},
 		"target": map[string]any{
 			"file":        targetFile,
@@ -262,6 +262,42 @@ func exportFactEnvelope(
 		"surface":   exportFactSurface(harnessShape, argIndex, harnessCalls),
 		"functions": functions,
 	}
+}
+
+// casesJSON renders a []walk.Case as the RULED schema's own "cases"
+// array: a number/string case carries {"sort", "set"} — the set
+// kernelbridge.EncodeSet's own wire text, embedded as json.RawMessage
+// — a boolean/null case carries {"sort"} alone, since neither wears a
+// set (the whole-sort floor and the absent value need no wire forms to
+// state), and an object case carries {"sort", "members", "closed"} —
+// each member's own cases list rendered through this same function,
+// recursively (a member's cases may themselves carry object cases,
+// the schema's own "members recursive" rule), and Closed carried
+// through unchanged as the producer's completeness claim.
+func casesJSON(cases []walk.Case) []map[string]any {
+	rendered := make([]map[string]any, 0, len(cases))
+	for _, c := range cases {
+		switch c.Sort {
+		case walk.CaseSortBoolean, walk.CaseSortNull:
+			rendered = append(rendered, map[string]any{"sort": string(c.Sort)})
+		case walk.CaseSortObject:
+			members := make(map[string]any, len(c.Members))
+			for key, memberCases := range c.Members {
+				members[key] = casesJSON(memberCases)
+			}
+			rendered = append(rendered, map[string]any{
+				"sort":    string(c.Sort),
+				"members": members,
+				"closed":  c.Closed,
+			})
+		default:
+			rendered = append(rendered, map[string]any{
+				"sort": string(c.Sort),
+				"set":  json.RawMessage(kernelbridge.EncodeSet(c.Set)),
+			})
+		}
+	}
+	return rendered
 }
 
 // exportFactSurface builds the `surface` field per the recognized

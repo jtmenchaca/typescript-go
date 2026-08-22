@@ -82,14 +82,36 @@ func AnalyzeTryStatement(ctx *FlowContext, env Env, statement *ast.Node, result 
 	// caught mid-sequence, so it is forgotten at catch entry
 	tryEnv := env.Clone()
 	snapshots := []Env{tryEnv.Clone()}
-	tryExits := false
-	for _, s := range tryStmt.TryBlock.AsBlock().Statements.Nodes {
-		tryExits = AnalyzeStatement(ctx, tryEnv, s, result)
-		snapshots = append(snapshots, tryEnv.Clone())
-		if tryExits {
-			break
-		}
+	// the try body walks through listWalk directly — the SAME
+	// edge-serving, per-statement path every other block gets (a plain
+	// Block, a for body, and this same function's own catch/finally
+	// blocks below all reach it through AnalyzeStatements) — rather than
+	// a hand-rolled per-statement loop calling AnalyzeStatement in
+	// isolation. A recognized cross-language call inside try{} now
+	// reaches ForeignEdgeAt exactly as it does in those other shapes.
+	//
+	// listWalk directly, not AnalyzeStatements: AnalyzeStatements can
+	// split the SAME list into two speculative passes when it tests one
+	// immutable gate across two or more `if`s (the correlation pass),
+	// walking each pass over its OWN throwaway env before joining only
+	// at the end — there is no single per-statement state in that shape
+	// for a snapshot to name. listWalk is the unconditional per-
+	// statement walk underneath both that split and the plain path, so
+	// calling it here keeps the snapshot semantics well-defined for
+	// every try body, split-triggering or not, at the cost of not
+	// running the correlation pass over a try body specifically (the
+	// old hand loop never ran it either, so nothing this try walk did
+	// before now regresses).
+	//
+	// The snapshot semantics the hand loop existed for ride along on
+	// StatementObserver: listWalk calls it after every statement it
+	// walks, in the same order the old loop appended, so the exception
+	// join below still reads one state per try-body prefix.
+	tryCtx := *ctx
+	tryCtx.StatementObserver = func(stmtEnv Env, exits bool) {
+		snapshots = append(snapshots, stmtEnv.Clone())
 	}
+	tryExits := listWalk(&tryCtx, tryEnv, tryStmt.TryBlock.AsBlock().Statements.Nodes, result)
 	var catchEnv Env
 	catchExits := false
 	if tryStmt.CatchClause != nil {
@@ -106,16 +128,38 @@ func AnalyzeTryStatement(ctx *FlowContext, env Env, statement *ast.Node, result 
 		for _, s := range statementsFromFirstThrowing(tryStmt.TryBlock.AsBlock().Statements.Nodes) {
 			AssignedNamesDirect(s, written)
 		}
+		// entryValues holds each havocked name's value from BEFORE the
+		// havoc below runs — the seed the join must start from. Reading
+		// the seed off `held` AFTER havoc would start every havocked
+		// name's join at Unknown, and JoinKnown treats Unknown as
+		// absorbing (an unknown SIDE of an ordinary branch join must
+		// stay unknown, since that branch's true value is unproven) —
+		// so seeding from the post-havoc value makes the join a no-op
+		// for exactly the names it exists to serve. The pre-havoc entry
+		// value is the correct seed: an exception can fire before the
+		// try body's first statement runs at all, so the entry value is
+		// itself one of the states catch must join over.
+		entryValues := map[string]abstractdomain.AbstractValue{}
 		for name := range written {
-			if _, ok := catchEnv.Get(name); ok {
+			if v, ok := catchEnv.Get(name); ok {
+				entryValues[name] = v
 				HavocEnv(ctx.Aliases, catchEnv, name)
 			}
 		}
+		// The havoc above marks which names need the join: a name it
+		// forgot to Unknown is exactly a name this join must recover,
+		// by joining its pre-havoc entry value with every try-prefix
+		// snapshot. A name never in `written` was never havocked, so
+		// `held` here already holds its correct value, unchanged by the
+		// try body — joining it against snapshots that all repeat that
+		// same value back is a no-op. Running the join unconditionally
+		// over every held name therefore changes nothing for the
+		// untouched names and recovers the join for the havocked ones.
 		catchEnv.Range(func(name string, held abstractdomain.AbstractValue) bool {
-			if held.Kind == abstractdomain.KindUnknown {
-				return true
+			joined, wasHavocked := entryValues[name]
+			if !wasHavocked {
+				joined = held
 			}
-			joined := held
 			for _, snapshot := range snapshots {
 				joined = abstractdomain.JoinKnown(joined, envOrResidue(snapshot, name))
 			}

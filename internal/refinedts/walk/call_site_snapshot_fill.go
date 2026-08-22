@@ -107,21 +107,26 @@ func fillSnapshotsUnder(ctx CallSiteCtx, owner *ast.Node) {
 	}
 	var initialStates map[string]abstractdomain.AbstractValue
 	if ast.IsFunctionDeclaration(owner) {
-		needsJoin := false
-		for i := range owner.Parameters() {
-			var stated *annotations.DeclaredRefinement
-			if i < len(contract.Params) {
-				stated = contract.Params[i]
-			}
-			if stated == nil {
-				needsJoin = true
-				break
-			}
-		}
-		if needsJoin {
-			if env, ok := CallSiteBindings(ctx, owner); ok {
-				initialStates = env.AsMap()
-			}
+		// a call-site join is worth asking for whenever ANY parameter
+		// could use one -- not only an unstated parameter. A STATED
+		// parameter still wants the join: entryStateMeet (entry_env.go)
+		// takes the MEET of a call-site-derived exact value against the
+		// declared ceiling, which only ever narrows, never widens, so
+		// asking costs nothing a stated-only parameter did not already
+		// have to offer. Gating on "some parameter is unstated" was
+		// sound only while a bare keyword (`number`, `string`,
+		// `boolean`) compiled to no DeclaredRefinement at all; now that
+		// annotations/type_node_sets.go grounds those keywords, a
+		// function whose every parameter carries a written bare-keyword
+		// type had EVERY stated slot non-nil and this gate never asked
+		// for the join, silently losing every call-site-derived exact
+		// value the same function used to carry before grounding
+		// existed. declaredJoin itself already refuses fast (the
+		// exported-function check, the escapes check) where nothing can
+		// be determined, so asking unconditionally costs one more no-op
+		// lookup on those paths rather than a correctness gap here.
+		if env, ok := CallSiteBindings(ctx, owner); ok {
+			initialStates = env.AsMap()
 		}
 	}
 	tracing.Count("snapshot.fill", 0)

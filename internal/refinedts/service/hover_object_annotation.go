@@ -18,10 +18,14 @@ import (
 )
 
 // FormatObjectAnnotation is formatObjectAnnotation in the TS source:
-// an object STATEMENT rendered for hover — each key with what it
-// states, a `?` where the count admits absence, the same shape the
-// developer wrote in the z.object. ok=false is the TS null (nothing
-// to show).
+// an object STATEMENT rendered for hover — a type-literal shape with
+// each member's own refinement braces sitting inline at that member —
+// `{ heartRate: number {...}; spo2: number {...} }` — never a trailing
+// blob after the closing brace. A `?` where the count admits absence,
+// the same shape the developer wrote in the z.object. Members are
+// semicolon-separated (the type-literal's own punctuation), matching
+// the ruled grammar's "structure lives in the type" rule. ok=false is
+// the TS null (nothing to show).
 func FormatObjectAnnotation(object *annotations.ObjectAnnotation) (string, bool) {
 	if object == nil || len(object.Keys) == 0 {
 		return "", false
@@ -34,7 +38,40 @@ func FormatObjectAnnotation(object *annotations.ObjectAnnotation) (string, bool)
 		}
 		keys = append(keys, name+": "+formatKeyValue(key.Value))
 	}
-	return "{" + strings.Join(keys, ", ") + "}", true
+	return "{ " + strings.Join(keys, "; ") + " }", true
+}
+
+// formatKeyFacts is the set-algebra facts a plain "set" key states,
+// parenthesized exactly as an "or" side is (unions inside a key still
+// read that way) -- WITHOUT the leading sort word, which formatKeyValue
+// adds once the facts are in hand. ok=false where the key states no
+// more than its type.
+func formatKeyFacts(value annotations.ObjectKeyValue) (string, bool) {
+	// the key speaks its WORD where one rides — `email`, never the
+	// grammar's algebra — and unread says so in the same breath
+	wordText, wordCovers, hasWord := "", 0, false
+	if value.Word != nil {
+		wordText, wordCovers, hasWord = value.Word.Text, value.Word.Covers, true
+	}
+	var shown string
+	shownOk := false
+	if value.Set != nil {
+		shown, shownOk = abstractdomain.FormatWordedSet(*value.Set, wordText, wordCovers, hasWord, value.Unread)
+	}
+	// a DEPENDENT bound rides beside the base facts, speaking about the
+	// same 𝑥 the other facts do — `𝑥 ≥ lo`
+	depends := dependentBoundWords(value.Depends)
+	if !shownOk {
+		if depends == "" {
+			return "", false
+		}
+		return depends, true
+	}
+	inner := bareBraces(shown)
+	if depends == "" {
+		return inner, true
+	}
+	return inner + ", " + depends, true
 }
 
 func formatKeyValue(value annotations.ObjectKeyValue) string {
@@ -42,7 +79,9 @@ func formatKeyValue(value annotations.ObjectKeyValue) string {
 	case annotations.KeyValueSet:
 		// a symbol key's whole claim is its sort; a bigint key says
 		// its sort and then its windows — integrality is the sort's
-		// own fact, so the word "integer" would only repeat it
+		// own fact, so the word "integer" would only repeat it. Neither
+		// wears the number/string sort word: they ARE their own sort
+		// word, the same way "number"/"string" lead every other key.
 		if value.KindTag == "symbol" {
 			return "symbol"
 		}
@@ -60,44 +99,21 @@ func formatKeyValue(value annotations.ObjectKeyValue) string {
 			if !ok {
 				return "bigint"
 			}
-			return "bigint, " + bareBraces(shown)
+			return "bigint {" + bareBraces(shown) + "}"
 		}
-		// the key speaks its WORD where one rides — `email`, never the
-		// grammar's algebra — and unread says so in the same breath
-		wordText, wordCovers, hasWord := "", 0, false
-		if value.Word != nil {
-			wordText, wordCovers, hasWord = value.Word.Text, value.Word.Covers, true
+		// no set at all: no sort to name, the same "unconstrained" the
+		// key formatter has always said here (never reached by a real
+		// compiled key -- object_key_compiler.go always sets Set -- but
+		// kept for a hand-built ObjectKeyValue that carries none)
+		if value.Set == nil {
+			return "unconstrained"
 		}
-		var shown string
-		shownOk := false
-		if value.Set != nil {
-			shown, shownOk = abstractdomain.FormatWordedSet(*value.Set, wordText, wordCovers, hasWord, value.Unread)
+		facts, factsOk := formatKeyFacts(value)
+		word := refinementsets.SortWordForHover(*value.Set)
+		if !factsOk {
+			return word
 		}
-		// a DEPENDENT bound rides beside the base facts, speaking
-		// about the same 𝑥 the other facts do — `𝑥 ≥ lo`
-		depends := dependentBoundWords(value.Depends)
-		// the key states no more than its type — say that, never "any"
-		if !shownOk {
-			if depends == "" {
-				return "unconstrained"
-			}
-			return depends
-		}
-		if !strings.HasPrefix(shown, "{") {
-			if depends == "" {
-				return shown
-			}
-			return shown + ", " + depends
-		}
-		inner := shown[1 : len(shown)-1]
-		joined := inner
-		if depends != "" {
-			joined = inner + ", " + depends
-		}
-		if strings.Contains(joined, ", ") {
-			return "(" + joined + ")"
-		}
-		return joined
+		return word + " {" + facts + "}"
 	case annotations.KeyValueObject:
 		shown, ok := FormatObjectAnnotation(value.Object)
 		if !ok {

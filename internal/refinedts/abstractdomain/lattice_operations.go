@@ -34,6 +34,27 @@ func MeetKnown(a, b AbstractValue) AbstractValue {
 	if b.Kind == KindValues {
 		return b
 	}
+	// a PINNED NaN met against a plain KindSet: the set is a refinement
+	// (refinementsets.RefinedSet's ray/star forms never mention NaN —
+	// see refinement_forms.go's IsNumberGround comment), so no bare
+	// KindSet EVER admits NaN as a member. A call-site join that
+	// contributes pinned NaN here is an ILL-TYPED caller (entryStateMeet's
+	// own doc: "a caller handing a value the annotation excludes is
+	// tsc's own error, never a fact this walk inherits" — the same rule
+	// the KindKindUnion arm above already applies arm-by-arm), so the
+	// declared side stands alone, exactly as an excluded union arm
+	// already drops out above. Without this arm the meet fell through
+	// to the bottom `return a`, which handed the well-typed body an
+	// entry value of PINNED NaN sourced from a DIFFERENT, ill-typed
+	// call site -- surfacing as a false "returned value of type NaN"
+	// refutation on a position no real caller of this function ever
+	// sends NaN through.
+	if a.Kind == KindNaN && b.Kind == KindSet {
+		return b
+	}
+	if b.Kind == KindNaN && a.Kind == KindSet {
+		return a
+	}
 	// two object-stars over the same runtime value: both claims hold of
 	// every position, so the position holds their MEET. The length is
 	// unstated on both sides, so there is nothing to reconcile there.
@@ -85,9 +106,26 @@ func MeetKnown(a, b AbstractValue) AbstractValue {
 			return KnownWithMeasures(KnownSet(met, nil, grade, SetKindTagNone), measures)
 		}
 		combined := append(append([]refinementsets.Refinement{}, a.Set.Forms...), b.Set.Forms...)
+		// CANONICALIZE the combined conjunction before it rides onward —
+		// the same hygiene JoinKnown's own scalar fallback already runs
+		// (line ~1145, "CanonicalScalarForms first: a meet-concatenated
+		// side wears duplicate conjuncts and vacuous +-inf bounds that
+		// blind the run collapse"). A caller's exact recovered value
+		// ({200}) met with a GROUNDED declared return type (R-bar,
+		// AtLeast(-Inf)) built this exact two-conjunct shape for the
+		// first time once bare `number` began grounding
+		// (annotations/type_node_sets.go's primitive-keyword arm):
+		// {200} ∩ R-bar denotes exactly {200}, but the uncanonicalized
+		// spelling kept AtLeast(-Inf) riding as a second, vacuous
+		// conjunct — a value a reader checking len(Forms)==1 for
+		// exactness then read as no longer exact, though nothing about
+		// the DENOTED set had widened. CanonicalScalarForms drops a
+		// vacuous bound beside any other conjunct (canonical_forms.go's
+		// isVacuousBound), restoring the single-form spelling without
+		// changing which values the set holds.
 		return KnownWithMeasures(
 			KnownSet(
-				refinementsets.MakeRefinedSet(combined...),
+				refinementsets.CanonicalScalarForms(refinementsets.MakeRefinedSet(combined...)),
 				nil,
 				grade,
 				SetKindTagNone,
@@ -657,6 +695,28 @@ func stringWordSet(k AbstractValue) (refinementsets.RefinedSet, bool) {
 	return refinementsets.RefinedSet{}, false
 }
 
+// stringSideSet reads a value's plain RefinedSet where the value is
+// DEMONSTRABLY string-sorted — an exact string word (any length,
+// including a single codepoint) or an untagged set whose forms state a
+// sequence (refinementsets.StatesSequence — the SAME structural test
+// fact_export.go's caseOfSet already reads a string case off of).
+// Unlike stringWordSet, this carries NO 1-tuple-reread restriction: it
+// exists only for STRING-GROUND ABSORPTION below, which returns one
+// side's set UNCHANGED (never builds a new word-union set), so a
+// 1-character member already stated by that side introduces no fresh
+// scalar-reread risk the side did not already carry on its own.
+// (nil, false) for anything else — a number-sorted set, a tagged set,
+// a non-string KindValues word.
+func stringSideSet(k AbstractValue) (refinementsets.RefinedSet, bool) {
+	if k.Kind == KindValues && k.KindTag == PrimitiveString {
+		return refinementsets.StringTuple(stringOf(k.Values)), true
+	}
+	if k.Kind == KindSet && k.SetKindTag == SetKindTagNone && refinementsets.StatesSequence(k.Set) {
+		return k.Set, true
+	}
+	return refinementsets.RefinedSet{}, false
+}
+
 // absentFlavorOf reads the AbsentFlavor a value's own absent side
 // carries, and whether the value HAS an absent side to carry at all
 // (ok=false for a plain present value — that side contributes no
@@ -1121,6 +1181,30 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 			other, otherOK := stringWordSet(b)
 			if otherOK {
 				return KnownSet(refinementsets.MakeRefinedSet(refinementsets.Union(words, other)), nil, grade, SetKindTagNone)
+			}
+		}
+	}
+	// STRING-GROUND ABSORPTION: one side may fail stringWordSet's own
+	// 1-tuple-reread gate (the whole string ground C* — Star(Codepoints)
+	// — genuinely admits 1-character words, so it can never pass that
+	// gate) while still PROVABLY containing the other side outright —
+	// `"xxx"` (a 2+-char word) union Strings is Strings itself, no new
+	// 1-tuple risk introduced, since Strings already stated every 1-char
+	// word before this join ever ran. The kernel's own seqSubset ask
+	// (kernel_seq_subset — a proved theorem in the TRUE direction,
+	// seqSubsetB_true) certifies containment; this never DECIDES
+	// syntactically which side is bigger. A refused question (no
+	// kernel, or a non-sequence shape on either side) falls through to
+	// the unchanged path below — the deliberately pinned two-1-codepoint
+	// refusal (empty_word_join_test.go) stays exactly as strict, since
+	// neither "a" nor "b" contains the other.
+	if aSet, aOK := stringSideSet(a); aOK {
+		if bSet, bOK := stringSideSet(b); bOK {
+			if contains, ok := kernelSeqSubset(bSet, aSet); ok && contains {
+				return KnownSet(aSet, nil, grade, SetKindTagNone)
+			}
+			if contains, ok := kernelSeqSubset(aSet, bSet); ok && contains {
+				return KnownSet(bSet, nil, grade, SetKindTagNone)
 			}
 		}
 	}

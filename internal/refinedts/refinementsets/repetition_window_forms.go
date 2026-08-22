@@ -75,7 +75,20 @@ func TightenRepetition(
 		default:
 			hi = rep.Hi
 		}
-		rebuilt := Repetition(rep.Element, lo, hi)
+		// the tightened window can CONTRADICT the base's own bound — a
+		// `.max(3)` value under a `min` guard proving length >= 6 asks for
+		// [6, 3], the empty window: no value satisfies both. That is the
+		// vacuous branch, not a malformed set — this layer has no
+		// spelling for "no such value" (metRepetition's own comment states
+		// the same for the meet), so every caller here already reads
+		// tightenedOk=false as "no tightened row", same as the sequence-
+		// shaped-conjoin arm below. repetitionSafe keeps that reading
+		// uniform instead of letting Repetition's invariant panic escape
+		// this constructor.
+		rebuilt, rebuiltOk := repetitionSafe(rep.Element, lo, hi)
+		if !rebuiltOk {
+			return RefinedSet{}, false
+		}
 		result := MakeRefinedSet()
 		result.Forms = append(result.Forms, base.Forms[:i]...)
 		result.Forms = append(result.Forms, rebuilt.Forms...)
@@ -114,9 +127,10 @@ func TightenRepetition(
 }
 
 // repetitionSafe wraps Repetition's panics as a (value, ok) pair, for
-// the one caller (TightenRepetition) that reads a construction failure
-// as "no chain spelling" rather than propagating the panic -- the TS
-// source's try/catch around `repetition(...)`.
+// TightenRepetition's two build sites (a rebuilt repetition form, and a
+// conjoined pattern window), both of which read a construction failure
+// as "no chain spelling" / "no tightened row" rather than propagating
+// the panic -- the TS source's try/catch around `repetition(...)`.
 func repetitionSafe(element RefinedSet, lo int, hi *int) (result RefinedSet, ok bool) {
 	defer func() {
 		if recover() != nil {

@@ -17,6 +17,7 @@
 package walk
 
 import (
+	"math"
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -150,10 +151,22 @@ func TestThisParameterCall_TheFirstArgumentBindsTheDeclaredThisParameter(t *test
 // TestThisParameterCall_APlainThisReadOutsideACallStillDeclines pins
 // the OTHER half of the ThisKeyword arm's widening: a this-parameter
 // function's body called through .call reads its bound this, but the
-// SAME body reached any other way (no caller binding in env) still
-// declines — EnclosingThisParameterFunction recognizes the site, but
-// env.Get("this") finds nothing, so the read falls to silence exactly
-// as it did before this recognizer existed.
+// SAME body reached any other way (no caller binding in env) reads
+// only what the this-parameter's own declared shape states —
+// EnclosingThisParameterFunction recognizes the site, but env.Get
+// ("this") finds nothing, so the read falls back to the DECLARED
+// type's own ground rather than a caller-bound exact value.
+//
+// OLD PREMISE: "the read falls to silence" (asserted KindUnknown) —
+// true only while a bare `number` field inside `this: { age: number }`
+// stated nothing (AnnotationOfType answered nil for age's type node).
+// Now that a bare `number` keyword grounds (JT's ruling,
+// annotations/type_node_sets.go), `age`'s own declared statement is
+// R-bar, and reading `this.age` with no caller binding honestly
+// determines "some number" (KnownSet(Numbers)) rather than the
+// visible gap KindUnknown used to stand in for — the walk determines
+// MORE here, not something different in kind: every number is still
+// admitted, exactly as the bare keyword itself claims.
 func TestThisParameterCall_APlainThisReadOutsideACallStillDeclines(t *testing.T) {
 	kernel := yieldContractKernel(t)
 	source := "function withThis(this: { age: number }): number {\n" +
@@ -170,8 +183,11 @@ func TestThisParameterCall_APlainThisReadOutsideACallStillDeclines(t *testing.T)
 		t.Fatalf("withThis's own body recorded no return value")
 	}
 	returned := JoinSinkSummarized(sink)
-	if returned.Kind != abstractdomain.KindUnknown {
-		t.Errorf("this.age read with no caller binding determined %+v, want KindUnknown (undetermined, not a wrong value)", returned)
+	if returned.Kind != abstractdomain.KindSet {
+		t.Fatalf("this.age read with no caller binding determined %+v, want KindSet (the now-grounded plain number ground)", returned)
+	}
+	if len(returned.Set.Forms) != 1 || returned.Set.Forms[0].Form != refinementsets.FormAtLeast || !math.IsInf(returned.Set.Forms[0].A, -1) {
+		t.Errorf("this.age's set = %+v, want R-bar (AtLeast(-Inf)) — the plain number ground", returned.Set)
 	}
 }
 

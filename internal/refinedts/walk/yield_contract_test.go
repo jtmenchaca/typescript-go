@@ -60,9 +60,19 @@ func yieldContractOf(t *testing.T, source string, name string) (*FunctionContrac
 // pins the contract-compile half: `Generator<10 | 40, 10 | 40,
 // unknown>` on a starred declaration compiles Y into contract.Yield
 // and R into contract.Result, and either position grounds the
-// contract. A generator whose type arguments are plain (`number`)
-// states nothing at either position, and a plain function's result
-// still reads through the old route with no yield position.
+// contract. A plain function's result still reads through the old
+// route with no yield position.
+//
+// OLD PREMISE: "A generator whose type arguments are plain (`number`)
+// states nothing at either position" (asserted plainContract.Yield ==
+// nil, .Result == nil, .Grounded == false) — true only while a bare
+// `number` type-argument read as no DeclaredRefinement. Now that a
+// bare `number` keyword grounds (JT's ruling,
+// annotations/type_node_sets.go), `Generator<number, number,
+// unknown>`'s Y and R positions BOTH compile to a DeclaredSet over
+// R-bar, exactly as `Generator<10 | 40, 10 | 40, unknown>`'s literal
+// union positions do — so `plain` now grounds too, on the same two
+// positions this test already checks `judged` grounds by.
 func TestGeneratorContract_TheDeclaredReturnTypeStatesYieldAndReturnPositions(t *testing.T) {
 	source := "function* judged(): Generator<10 | 40, 10 | 40, unknown> {\n" +
 		"  yield 40;\n" +
@@ -92,14 +102,20 @@ func TestGeneratorContract_TheDeclaredReturnTypeStatesYieldAndReturnPositions(t 
 	}
 
 	plainContract, _, _ := yieldContractOf(t, source, "plain")
-	if plainContract.Yield != nil {
-		t.Errorf("Generator<number, …> stated a yield position; plain type arguments state nothing")
+	if plainContract.Yield == nil {
+		t.Fatalf("Generator<number, …>'s yield position compiled nil — a bare `number` type argument grounds like any other DeclaredSet now")
 	}
-	if plainContract.Result != nil {
-		t.Errorf("Generator<…, number, …> stated a result position; plain type arguments state nothing")
+	if plainContract.Yield.Kind != annotations.DeclaredSet {
+		t.Errorf("the plain yield position compiled as kind %v, want a DeclaredSet", plainContract.Yield.Kind)
 	}
-	if plainContract.Grounded {
-		t.Errorf("a generator contract with only plain positions grounded")
+	if plainContract.Result == nil {
+		t.Fatalf("Generator<…, number, …>'s result position compiled nil — a bare `number` type argument grounds like any other DeclaredSet now")
+	}
+	if plainContract.Result.Kind != annotations.DeclaredSet {
+		t.Errorf("the plain result position compiled as kind %v, want a DeclaredSet", plainContract.Result.Kind)
+	}
+	if !plainContract.Grounded {
+		t.Errorf("a generator contract with plain-but-grounded yield and return positions did not ground")
 	}
 
 	normalContract, _, _ := yieldContractOf(t, source, "normal")

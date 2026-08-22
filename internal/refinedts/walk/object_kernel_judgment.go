@@ -146,7 +146,12 @@ func annotationLowersWhole(
 	}
 	for _, key := range object.Keys {
 		v := key.Value
-		if v.Unread || len(v.Depends) > 0 || v.Measures != nil || v.KindTag != "" {
+		// a boolean key's known value still arrives as KindValues (the
+		// same shape a plain number key's does — a whole-sort {0,1} set
+		// with no candidate-encoding difference), unlike bigint/symbol
+		// (a different abstractdomain.Kind the value-encoding path
+		// cannot read at all), so it is not the gate this gap guards
+		if v.Unread || len(v.Depends) > 0 || v.Measures != nil || (v.KindTag != "" && v.KindTag != "boolean") {
 			return false
 		}
 		switch v.Kind {

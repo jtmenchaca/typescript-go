@@ -21,11 +21,14 @@ import (
 )
 
 // ReplacesHostType is whether a rendering REPLACES the host type on
-// the line, or rides after it. A brace opens a suffix; anything else
-// names the type itself. The editor plugin asks this rather than
-// deciding it.
+// the line, or rides after it. A tight brace ("{fact, ...}", no space
+// after the open brace) opens a suffix; anything else -- including a
+// spaced brace ("{ key: ... }", the ruled object grammar's own
+// type-literal shape, ALWAYS replacing rather than appending after a
+// second copy of the same structure) -- names the type itself. The
+// editor plugin asks this rather than deciding it.
 func ReplacesHostType(display string) bool {
-	return !strings.HasPrefix(display, "{")
+	return !strings.HasPrefix(display, "{") || strings.HasPrefix(display, "{ ")
 }
 
 // Two placeholders, one convention: value is the value, length is its
@@ -51,12 +54,19 @@ type hoverBound struct {
 }
 
 // chain is a bound pair over one placeholder: chained where both sides
-// are known, the placeholder first where only one is.
+// are known, the placeholder first where only one is. A degenerate
+// window (equal, non-strict bounds) reads as "= value" instead of
+// repeating the bound twice -- the ruled grammar's dedup for a value
+// window (number {= 0.3} rather than 0.3 <= x <= 0.3); a length window
+// keeps its own separate "len = n" spelling, unaffected.
 func chain(placeholder string, lower, upper *hoverBound, formatAt func(float64) string) (string, bool) {
 	if formatAt == nil {
 		formatAt = FormatNumber
 	}
 	if lower != nil && upper != nil {
+		if lower.a == upper.a && !lower.strict && !upper.strict {
+			return "= " + formatAt(lower.a), true
+		}
 		lowerOp := "≤"
 		if lower.strict {
 			lowerOp = "<"
@@ -135,7 +145,13 @@ func stringFactsInHover(r RefinedSet) ([]string, bool) {
 		return facts, true
 	}
 	rep, repOk := AsRepetition(r)
-	if repOk && IsCharacter(rep.Element) {
+	// the element reads as a codepoint two ways: plainly (IsCharacter,
+	// the ordinary z.string() encoding) or FOLDED into a Union tree
+	// (IsCodepointAlphabetFold -- kernel.SeqPrefix's own answer for an
+	// open-left concatenation slice, prefix_read.lean's foldAlphabet,
+	// wears exactly this shape: Repeat over a Union of the operands'
+	// alphabets, never Codepoints itself at the top).
+	if repOk && (IsCharacter(rep.Element) || IsCodepointAlphabetFold(rep.Element)) {
 		if rep.Lo == 0 && rep.Hi == nil {
 			return []string{}, true
 		}
@@ -410,12 +426,171 @@ func containsString(xs []string, x string) bool {
 	return false
 }
 
+// SortWordForHover is the plain scalar sort word for a set that is NOT
+// itself a container -- "string" for a codepoint-shaped set (the same
+// structural test stringFactsInHover already runs), "number"
+// otherwise. Shared by the container hover (an array/tuple element's
+// own word) and the object hover (a key's own word, in the service
+// package) -- ONE decision about a set's sort, asked from both call
+// sites rather than re-derived at each.
+func SortWordForHover(set RefinedSet) string {
+	if IsStrings(set) || IsCharacter(set) {
+		return "string"
+	}
+	if _, ok := stringFactsInHover(set); ok {
+		return "string"
+	}
+	return "number"
+}
+
+// isNumericConcatenation is whether a Concatenation/EmptyTuple-shaped
+// set is built over NUMBERS rather than codepoints -- the precise
+// discriminator FormatStringLiteral's own doc names as unrecoverable
+// from the top form alone ("a tuple of numbers has the same shape [as
+// a string literal]... only the checked position's sort could tell
+// them apart"). Unlike SequenceShaped (which reads ANY Concatenation
+// or EmptyTuple as string-shaped unconditionally -- correct for its
+// own callers, which already know the position's sort from context),
+// this peels every leaf through ConcatParts and looks for a
+// DEFINITIVE string signal: IsCharacter (a single codepoint slot) or
+// IsStrings (the star tail a startsWith/endsWith/includes chain ends
+// in) on ANY leaf marks the WHOLE chain a string -- a numeric tuple
+// never mixes in a codepoint-alphabet leaf. A bare OneOf singleton
+// leaf (z.tuple's own concatenated windows, or a single character's
+// own codepoint value) is AMBIGUOUS in isolation
+// (unambiguousStringLiteral's own doc: "a lone scalar singleton has
+// the same shape as a one-character string"), so it decides nothing
+// by itself; only the alphabet-reference leaves are decisive.
+// z.tuple's own right-nested Concatenation of ordinary number windows
+// (z.tuple([zChannel, zChannel, zChannel])) carries no such leaf, so
+// it reads as the numeric tuple it is.
+func isNumericConcatenation(set RefinedSet) bool {
+	if len(set.Forms) != 1 {
+		return false
+	}
+	form := set.Forms[0].Form
+	if form != FormConcatenation && form != FormEmptyTuple {
+		return false
+	}
+	for _, part := range ConcatParts(set) {
+		if IsCharacter(part) || IsStrings(part) {
+			return false
+		}
+	}
+	return true
+}
+
+// containerNumericCandidate is whether a set's top form is the kind of
+// sequence shape a NUMERIC array/tuple builds: an unbounded Star or a
+// counted Repeat/RepeatWord whose own element is NOT a codepoint
+// alphabet (plainly, via IsCharacter/IsStrings, or folded into a
+// Union/Difference tree, via IsCodepointAlphabetFold -- the exact
+// shape kernel.SeqPrefix's own prefixReadOf answer wears for an
+// open-left concatenation slice: Repeat over prefix_read.lean's own
+// foldAlphabet), or a Concatenation/EmptyTuple that
+// isNumericConcatenation confirms is not a string. StatesSequence
+// alone would also admit a genuine string Concatenation/Repeat (the
+// same shape a numeric one wears) -- this is the precise gate the
+// container hover needs where SequenceShaped's blanket "Concatenation
+// is always string-shaped" reading would misclassify a numeric tuple,
+// and where a bare repetition-element check would miss a FOLDED
+// alphabet (the fold's own top form is Union, never Codepoints/Strings
+// itself).
+func containerNumericCandidate(set RefinedSet) bool {
+	if len(set.Forms) != 1 {
+		return false
+	}
+	switch set.Forms[0].Form {
+	case FormStar, FormRepeat, FormRepeatWord:
+		element := *set.Forms[0].A_
+		return !IsCharacter(element) && !IsStrings(element) && !IsCodepointAlphabetFold(element)
+	case FormConcatenation, FormEmptyTuple:
+		return isNumericConcatenation(set)
+	default:
+		return false
+	}
+}
+
+// containerElementWord is the element's own type word for a container
+// hover -- recurses for a nested NUMERIC container (Array<Array<number
+// {...}> {...}> {...}), reads as "string" for a codepoint-shaped
+// element, and "number" otherwise.
+func containerElementWord(element RefinedSet) string {
+	if containerNumericCandidate(element) {
+		if nested, ok := formatContainerForHover(element); ok {
+			return nested
+		}
+	}
+	return SortWordForHover(element)
+}
+
+// formatContainerForHover is the ruled container hover: native generic
+// spelling with each layer's refinement on its own layer. An exact
+// length fans out to a tuple, per position (`[number {...}, number
+// {...}, number {...}]`); anything else (unbounded, a floor, a
+// floor-and-ceiling window) reads as `Array<element {...}> {len ...}`,
+// the length fact riding after the generic rather than inside it.
+// ok=false where the set is neither an unbounded star nor a recognized
+// repetition.
+func formatContainerForHover(r RefinedSet) (string, bool) {
+	if len(r.Forms) == 1 && r.Forms[0].Form == FormStar {
+		element := *r.Forms[0].A_
+		word := containerElementWord(element)
+		elementFacts, factsOk := FormatForHover(element)
+		elementSpelled := word
+		if factsOk {
+			elementSpelled = word + " " + elementFacts
+		}
+		return "Array<" + elementSpelled + ">", true
+	}
+	rep, repOk := AsRepetition(r)
+	if !repOk {
+		return "", false
+	}
+	word := containerElementWord(rep.Element)
+	elementFacts, factsOk := FormatForHover(rep.Element)
+	elementSpelled := word
+	if factsOk {
+		elementSpelled = word + " " + elementFacts
+	}
+	if rep.Hi != nil && rep.Lo == *rep.Hi {
+		// an exact length: per-position tuple slots, the same spelling
+		// fanned out rep.Lo times -- this checker holds one element set
+		// for the whole tuple (no per-position heterogeneity is
+		// modeled), so every slot reads identically
+		slots := make([]string, rep.Lo)
+		for i := range slots {
+			slots[i] = elementSpelled
+		}
+		return "[" + joinStrings(slots, ", ") + "]", true
+	}
+	var lower, upper *hoverBound
+	if rep.Lo != 0 {
+		b := countBound(float64(rep.Lo))
+		lower = &b
+	}
+	if rep.Hi != nil {
+		b := countBound(float64(*rep.Hi))
+		upper = &b
+	}
+	lengthFacts, lengthOk := chain(hoverLength, lower, upper, nil)
+	container := "Array<" + elementSpelled + ">"
+	if !lengthOk {
+		return container, true
+	}
+	return container + " {" + lengthFacts + "}", true
+}
+
 // FormatForHover is the hover rendering of a stated set: its facts in
 // braces after tsc's own type, so `type Port = number` reads on as
 // `number {integer, 1 <= x <= 65535}`. A set that is exactly ONE value
 // renders as that value instead -- the type language can say it, so it
-// replaces the type rather than annotating it. ok=false where the set
-// adds nothing tsc's type does not already carry.
+// replaces the type rather than annotating it. A set that DEMONSTRABLY
+// states a non-string sequence (an array or tuple, never a string --
+// stringFactsInHover intercepts those first) renders as its own
+// container spelling, replacing the host type wholesale rather than
+// appending after it. ok=false where the set adds nothing tsc's type
+// does not already carry.
 func FormatForHover(r RefinedSet) (string, bool) {
 	folded := FoldedForms(r)
 	if len(folded) == 1 && folded[0].Form == FormOneOf && len(folded[0].W) == 1 {
@@ -426,6 +601,21 @@ func FormatForHover(r RefinedSet) (string, bool) {
 	// exactly one string: the literal type, like the one number above
 	if literal, ok := unambiguousStringLiteral(r); ok {
 		return literal, true
+	}
+	// the container path is for a NUMERIC array/tuple only:
+	// containerNumericCandidate peels a Concatenation/EmptyTuple's own
+	// leaves rather than trusting the top form alone (a numeric tuple and
+	// a string are the SAME shape at a bare Concatenation node --
+	// FormatStringLiteral's own doc names this). Where stringFactsInHover
+	// could not spell its facts (an open-left concatenation whose literal
+	// side is more than one character, e.g.) but the leaves ARE
+	// codepoints, containerNumericCandidate correctly declines too.
+	if _, stringOk := stringFactsInHover(r); !stringOk {
+		if containerNumericCandidate(r) {
+			if container, ok := formatContainerForHover(r); ok {
+				return container, true
+			}
+		}
 	}
 	facts, ok := hoverFacts(r)
 	if !ok || len(facts) == 0 {

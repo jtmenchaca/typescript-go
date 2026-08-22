@@ -221,7 +221,25 @@ func receiverPathText(expression *ast.Node) string {
 //     list's sum/len/sorted/enumerate/zip/all/any/min/max/abs/round/
 //     pow/divmod are exactly this shape moved onto a method receiver.
 //     Their own callback argument, if any, is still walked by the
-//     caller — a `.map(x => console.log(x))` callback still counts.
+//     caller — a `.map(x => console.log(x))` callback still counts;
+//   - the pure STRING methods (.padStart/.padEnd/.slice/.substring/
+//     .toUpperCase/.toLowerCase/.trim/.trimStart/.trimEnd/.repeat/
+//     .concat/.at/.charAt/.replace/.replaceAll/.split/.join) on ANY
+//     receiver — each read its receiver string (and, for replace/
+//     replaceAll/split, a search argument) and construct a new string,
+//     with no I/O semantics in ECMA-262's own algorithm for any of
+//     them (specifications/javascript/spec.html): padStart's own
+//     steps are RequireObjectCoercible then StringPaddingBuiltinsImpl
+//     (sec-string.prototype.padstart) — a string-construction
+//     operation only, the same shape every other row in this group
+//     reads as. replace/replaceAll admit a FUNCTION replacer
+//     (sec-string.prototype.replaceall's own ReplaceValue clause), so
+//     their own dirt would be inside that callback argument, not the
+//     call itself — exactly the array-iteration methods' own posture
+//     above, and the same fix: the callback argument is still walked
+//     by the general traversal below (ForEachChild), so a
+//     `.replace(x, () => { console.log(x); return x; })` callback
+//     still counts, identically to a `.map` callback.
 func isPureBuiltinCall(callee *ast.Node) bool {
 	node := Unwrapped(callee)
 	if node == nil || !ast.IsPropertyAccessExpression(node) {
@@ -264,13 +282,17 @@ func isPureBuiltinCall(callee *ast.Node) bool {
 		return method.Text() == "isArray"
 	}
 	// a method call on ANY OTHER receiver — the array iteration methods
-	// read their own receiver and callback, and write nothing on their
-	// own account; the receiver itself is not walked as a callee, only
-	// as a plain expression the traversal already reaches
+	// and the pure string methods read their own receiver and callback,
+	// and write nothing on their own account; the receiver itself is
+	// not walked as a callee, only as a plain expression the traversal
+	// already reaches
 	switch method.Text() {
 	case "map", "filter", "reduce", "reduceRight", "slice", "concat",
 		"forEach", "some", "every", "find", "findIndex", "flatMap",
-		"join", "sort", "reverse", "includes", "indexOf", "lastIndexOf", "flat":
+		"join", "sort", "reverse", "includes", "indexOf", "lastIndexOf", "flat",
+		"padStart", "padEnd", "substring", "toUpperCase", "toLowerCase",
+		"trim", "trimStart", "trimEnd", "repeat", "at", "charAt",
+		"replace", "replaceAll", "split":
 		return true
 	}
 	return false

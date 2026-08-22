@@ -376,9 +376,11 @@ func TestReadTypeNode_BooleanArrayIsAStarOfTheTwoCodes(t *testing.T) {
 	if worn.Set.Forms[0].Form != "star" {
 		t.Errorf("Set.Forms[0].Form = %v, want star", worn.Set.Forms[0].Form)
 	}
+	// the ruled hover grammar (2026-08-22) renders element refinements
+	// on the element type; the old spelling was "{each 0 | 1}"
 	formatted, ok := abstractdomain.FormatAbstractValue(worn)
-	if !ok || formatted != "{each 0 | 1}" {
-		t.Errorf("FormatAbstractValue = %q, %v, want %q, true", formatted, ok, "{each 0 | 1}")
+	if !ok || formatted != "Array<number {0 | 1}>" {
+		t.Errorf("FormatAbstractValue = %q, %v, want %q, true", formatted, ok, "Array<number {0 | 1}>")
 	}
 }
 
@@ -402,14 +404,16 @@ func TestReadDeclaredType_ObjectWithArrayBooleanFillsTheKeySyntaxSkipped(t *test
 	if !hostOk {
 		t.Fatalf("expected host to be a value")
 	}
-	if formatted, ok := abstractdomain.FormatAbstractValue(host); !ok || formatted != "{name: string, flags: each 0 | 1}" {
-		t.Errorf("FormatAbstractValue(host) = %q, %v, want %q, true", formatted, ok, "{name: string, flags: each 0 | 1}")
+	// the ruled hover grammar (2026-08-22): the old spelling was
+	// "{name: string, flags: each 0 | 1}"
+	if formatted, ok := abstractdomain.FormatAbstractValue(host); !ok || formatted != "{name: string, flags: Array<number {0 | 1}>}" {
+		t.Errorf("FormatAbstractValue(host) = %q, %v, want %q, true", formatted, ok, "{name: string, flags: Array<number {0 | 1}>}")
 	}
 	if !joinedOk {
 		t.Fatalf("expected joined to be a value")
 	}
-	if formatted, ok := abstractdomain.FormatAbstractValue(joined); !ok || formatted != "{name: string, flags: each 0 | 1}" {
-		t.Errorf("FormatAbstractValue(joined) = %q, %v, want %q, true", formatted, ok, "{name: string, flags: each 0 | 1}")
+	if formatted, ok := abstractdomain.FormatAbstractValue(joined); !ok || formatted != "{name: string, flags: Array<number {0 | 1}>}" {
+		t.Errorf("FormatAbstractValue(joined) = %q, %v, want %q, true", formatted, ok, "{name: string, flags: Array<number {0 | 1}>}")
 	}
 }
 

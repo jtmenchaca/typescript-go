@@ -88,6 +88,42 @@ function f(xs: number[]) {
 	}
 }
 
+// TestWritesNothingToStdout_PadStartIsPure pins the fix for the
+// ledgered defect (padStart read as an opaque call, refusing channel
+// purity): String(year).padStart(4, "0") must read as stdout-pure —
+// padStart's own ECMA-262 algorithm (RequireObjectCoercible then
+// StringPaddingBuiltinsImpl, sec-string.prototype.padstart) carries no
+// I/O semantics, and isPureBuiltinCall's method allowlist now admits
+// it alongside the other pure string methods.
+func TestWritesNothingToStdout_PadStartIsPure(t *testing.T) {
+	p, fn := factExportPurityFunction(t, `
+function f(year: number) {
+  const padded = String(year).padStart(4, "0");
+  return padded + "-01-01T00:00:00Z";
+}
+`, "f")
+	if !WritesNothingToStdout(p.Entry, fn) {
+		t.Errorf("WritesNothingToStdout = false, want true — padStart carries no I/O semantics in ECMA-262")
+	}
+}
+
+// TestWritesNothingToStdout_AnOpaqueMethodStillRefusesTheClaim pins
+// the conservative-only-admits posture alongside the padStart fix: a
+// method this scan does not recognize (an arbitrary receiver method
+// outside the allowlist) still refuses the claim rather than being
+// swept in by the widened list.
+func TestWritesNothingToStdout_AnOpaqueMethodStillRefusesTheClaim(t *testing.T) {
+	p, fn := factExportPurityFunction(t, `
+function f(x: SomeLogger) {
+  x.emitToRemote("hello");
+  return 1;
+}
+`, "f")
+	if WritesNothingToStdout(p.Entry, fn) {
+		t.Errorf("WritesNothingToStdout = true, want false — emitToRemote is not on the pure-builtin allowlist and must read as opaque")
+	}
+}
+
 // TestWritesNothingToStdout_ExecFileSyncSpawnIsPure pins the fix for
 // the ledgered conservative-wrong refusal (ISSUES.md, "Go export: the
 // stdout-purity guard refuses any body that spawns a child"): a body

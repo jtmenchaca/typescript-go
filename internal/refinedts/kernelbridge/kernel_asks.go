@@ -111,6 +111,28 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 		}
 		return BooleanField(raw, "subset")
 	}
+	kernel.SeqPrefix = func(set refinementsets.RefinedSet, n int) (refinementsets.RefinedSet, bool) {
+		key := CanonicalKeyOf(wireSet(set))
+		var keyStr string
+		hasKey := key != nil
+		if hasKey {
+			keyStr = fmt.Sprintf("%s#%d", *key, n)
+		}
+		raw, err := ask2WithOptionalKey(ask2, "seq.prefix", "kernel_seq_prefix", EncodeSet(set), strconv.Itoa(n), keyStr, hasKey)
+		if err != nil {
+			panic(err.Error())
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			panic(fmt.Sprintf("kernel: unparseable answer: %v", err))
+		}
+		// a decline ("the set is not a recognized sequence shape") keeps
+		// the caller's row unread, never a claim
+		if answeredSet, held := parsed["set"]; held && answeredSet != nil {
+			return DecodeWireSet(answeredSet), true
+		}
+		return refinementsets.RefinedSet{}, false
+	}
 	kernel.SeqNoScalarReread = func(set refinementsets.RefinedSet) bool {
 		raw, err := ask1WithOptionalKey(ask1, "seqNoScalarReread", "kernel_seq_no_scalar_reread", EncodeSet(set), CanonicalKeyOf(wireSet(set)))
 		if err != nil {

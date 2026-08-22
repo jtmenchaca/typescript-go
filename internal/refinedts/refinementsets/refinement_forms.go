@@ -208,6 +208,19 @@ func MakeRefinedSet(forms ...Refinement) RefinedSet {
 // refinements.)
 var Numbers = MakeRefinedSet(AtLeast(math.Inf(-1)))
 
+// IsNumberGround is whether a set spells R-bar itself -- the whole
+// number ground, the same bare ray z.number() (and a bare `number`
+// keyword's own grounded set) both compile to. A caller that reaches
+// this set through the bare-keyword path still needs to know it may
+// hold NaN at runtime (R-bar's own ray forms never mention NaN --
+// NaN is worn as the separate PossiblyNaN wrapper, never a set
+// member), which is why the grounding of a bare `number` keyword
+// must wrap this exact set in PossiblyNaN rather than handing it out
+// bare (declared_value.go's AbstractValueOfDeclared).
+func IsNumberGround(set RefinedSet) bool {
+	return sameSetJSON(set, Numbers)
+}
+
 type rayCandidate struct {
 	a      float64
 	strict bool
@@ -313,6 +326,152 @@ func StatesSequence(set RefinedSet) bool {
 		}
 	}
 	return false
+}
+
+// SequenceShaped is whether EVERY top-level form of set is itself a
+// string/sequence form -- EmptyTuple/Concatenation outright, a
+// Star/Repeat/RepeatWord whose own element is demonstrably codepoints
+// (repetitionElementIsCodepoints, below -- Star/Repeat also carry a
+// NUMERIC element for a declared list[number]/z.array(z.number()), so
+// wearing the form alone is not enough), or a Union/Difference whose
+// BOTH operands recurse into this same reading. Unlike StatesSequence
+// (a fast, non-recursive, POSITIVE test -- one sequence-shaped form
+// anywhere is enough), SequenceShaped requires the WHOLE set to
+// qualify, and is what catches a DERIVED string union whose top form
+// is a Union of two sequence-shaped branches rather than a bare
+// sequence form itself -- e.g. `["ok", "warn", "error"][code]`'s own
+// join over a bounded index builds Union(Concatenation, Concatenation)
+// at the top, never a bare Concatenation. Ported from
+// fact_export.rs's sequence_shaped (assignability.rs:780).
+//
+// The whole-set alphabet shortcut (IsCharacter/IsStrings) below is not
+// part of that port: Codepoints ITSELF (`{integer, union(atLeast(0) ∧
+// atMost(0xD7FF), atLeast(0xE000) ∧ atMost(0x10FFFF))}`) carries
+// FormInteger among its own top-level forms, which the per-form loop
+// below always reads as scalar (the FormInteger case returns false
+// unconditionally) — so without this shortcut SequenceShaped(Codepoints)
+// itself answers false, and any Union built from the codepoint
+// alphabet (prefix_read.lean's foldAlphabet, kernel.SeqPrefix's own
+// answer for an open-left concatenation slice: Repeat over a folded
+// Union of the operands' alphabets) reads as NOT sequence-shaped even
+// though every leaf is a codepoint. The shortcut recognizes the
+// alphabet wherever the recursion reaches it, at the top of a fresh
+// set or nested arbitrarily deep inside a Union/Difference tree.
+func SequenceShaped(set RefinedSet) bool {
+	if IsCharacter(set) || IsStrings(set) {
+		return true
+	}
+	if len(set.Forms) == 0 {
+		return false
+	}
+	for _, form := range set.Forms {
+		switch form.Form {
+		case FormEmptyTuple, FormConcatenation:
+			// neither carries a separate "element sort" of its own -- an
+			// EmptyTuple names no element at all, and a Concatenation's
+			// operands are themselves nested sets this checker only ever
+			// builds over codepoints (the string-tuple encoding) --
+			// sequence-shaped unconditionally
+		case FormStar, FormRepeat, FormRepeatWord:
+			if !repetitionElementIsCodepoints(form) {
+				return false
+			}
+		case FormUnion, FormDifference:
+			if form.A_ == nil || form.B == nil {
+				return false
+			}
+			if !SequenceShaped(*form.A_) || !SequenceShaped(*form.B) {
+				return false
+			}
+		case FormAtLeast, FormAbove, FormAtMost, FormBelow,
+			FormInteger, FormMultipleOf, FormOneOf:
+			return false
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// IsCodepointAlphabetFold is whether set is prefix_read.lean's own
+// foldAlphabet shape: a Union/Difference tree built ENTIRELY from
+// codepoint-alphabet pieces (Codepoints/Strings, wherever the
+// recursion reaches one) and ambiguous OneOf singletons (a fixed
+// literal character's own codepoint value, one per position folded
+// in) -- ANCHORED by at least one genuine alphabet leaf somewhere in
+// the tree, never by singletons alone. This is a SEPARATE test from
+// SequenceShaped, not a widening of it: SequenceShaped's contract is
+// "both operands of a Union independently qualify" (correct for a
+// DERIVED string union, e.g. Union(Concatenation, Concatenation)), and
+// loosening FormOneOf to pass unconditionally there would also pass a
+// genuinely numeric two-value union like {5}|{7}, which carries no
+// codepoint anchor anywhere and must stay numeric.
+// kernel.SeqPrefix's own answer for an open-left concatenation slice
+// (Repeat over prefixReadOf's folded alphabet) is exactly this shape:
+// one operand is the receiver's own scalar alphabet (Codepoints, from
+// Strings' star), the other is a chain of Union(OneOf[literal
+// codepoint], ...) folding in each fixed character the concatenation's
+// literal side supplied. Called from containerNumericCandidate
+// (format_for_hover.go) so the container hover reads this fold as a
+// string, never a numeric tuple; the exporter's caseOfSet
+// (walk/fact_export.go) shares the identical decision through the
+// same StatesSequence/SequenceShaped/IsCodepointAlphabetFold trio, so
+// hover and export can never disagree about this set.
+func IsCodepointAlphabetFold(set RefinedSet) bool {
+	anchored, sawAnchor := codepointAlphabetFold(set)
+	return anchored && sawAnchor
+}
+
+// codepointAlphabetFold is IsCodepointAlphabetFold's recursive walk:
+// ok=false the moment a form this fold never builds is found (a
+// window, multipleOf, integer, concatenation, star/repeat over a
+// non-codepoint element, or anything else); anchored=true once at
+// least one genuine alphabet leaf (IsCharacter/IsStrings) is seen
+// anywhere in the walk.
+func codepointAlphabetFold(set RefinedSet) (ok bool, anchored bool) {
+	if IsCharacter(set) || IsStrings(set) {
+		return true, true
+	}
+	if len(set.Forms) != 1 {
+		return false, false
+	}
+	form := set.Forms[0]
+	switch form.Form {
+	case FormOneOf:
+		// an ambiguous literal leaf -- decides nothing alone, and
+		// contributes no anchor of its own
+		return true, false
+	case FormUnion, FormDifference:
+		if form.A_ == nil || form.B == nil {
+			return false, false
+		}
+		aOk, aAnchor := codepointAlphabetFold(*form.A_)
+		if !aOk {
+			return false, false
+		}
+		bOk, bAnchor := codepointAlphabetFold(*form.B)
+		if !bOk {
+			return false, false
+		}
+		return true, aAnchor || bAnchor
+	default:
+		return false, false
+	}
+}
+
+// repetitionElementIsCodepoints is whether a Star/Repeat/RepeatWord
+// form's own element sits inside the codepoint alphabet -- the same
+// gate SequenceShaped's Rust twin checks for the identical reason:
+// this checker's grammar reuses Star/Repeat for a NUMERIC element too
+// (a declared list[number]/z.array(z.number()) parameter seed), so a
+// bare repetition form is sequence-shaped only when its element
+// demonstrably IS codepoints, never merely because it wears one of
+// these forms.
+func repetitionElementIsCodepoints(form Refinement) bool {
+	if form.A_ == nil {
+		return false
+	}
+	return IsCharacter(*form.A_)
 }
 
 // OnOneTupleLayer stays on the 1-tuple layer: only the 1-tuple forms,

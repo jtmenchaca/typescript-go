@@ -76,3 +76,33 @@ func TestBoundsAreNaturalsOrdered(t *testing.T) {
 	mustPanicWith(t, "natural", func() { Repetition(repetitionWindowsE, -1, nil) })
 	mustPanicWith(t, "natural", func() { Repetition(repetitionWindowsE, 3, intPtr(2)) })
 }
+
+// TestTightenRepetitionDeclinesAContradictoryWindow pins the crash-class
+// fix: a base already bounded above (hi=3) tightened by a "min" guard
+// that asks for a floor past that ceiling (min=6) is the EMPTY
+// intersection -- no value satisfies both bounds at once. That is a
+// vacuous row, not a malformed set, so TightenRepetition must decline
+// it (ok=false) rather than let Repetition's own natural-ordered-bound
+// invariant panic out of this constructor.
+func TestTightenRepetitionDeclinesAContradictoryWindow(t *testing.T) {
+	E := repetitionWindowsE
+	base := Repetition(E, 0, intPtr(3))
+	if _, ok := TightenRepetition(base, "min", 6, nil); ok {
+		t.Errorf("TightenRepetition(base, min, 6) should decline -- [6,3] is the empty window")
+	}
+	// the same contradiction from the other direction: an already
+	// min-floored base tightened by a "max" guard below that floor
+	baseFloored := Repetition(E, 5, nil)
+	if _, ok := TightenRepetition(baseFloored, "max", 2, nil); ok {
+		t.Errorf("TightenRepetition(baseFloored, max, 2) should decline -- [5,2] is the empty window")
+	}
+	// a non-contradictory tighten still builds, unaffected by the guard
+	tightened, ok := TightenRepetition(base, "min", 2, nil)
+	if !ok {
+		t.Fatalf("TightenRepetition(base, min, 2) should succeed -- [2,3] is a real window")
+	}
+	rep, repOk := AsRepetition(tightened)
+	if !repOk || rep.Lo != 2 || rep.Hi == nil || *rep.Hi != 3 {
+		t.Errorf("TightenRepetition(base, min, 2) = %+v (ok=%v), want [2,3]", rep, repOk)
+	}
+}

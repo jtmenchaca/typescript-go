@@ -38,8 +38,21 @@ func SetLatticeKernel(kernel *kernelbridge.RefinedTSKernel) {
 // kernelNoScalarReread asks the kernel whether a set's language misses
 // the 1-tuple layer entirely — the reread-safety property the string-
 // word join rests on. (safe=true, ok=true) is the kernel's theorem;
-// ok=false is a refusal (no kernel, or a question it declined), and the
-// caller falls back to its own conservative recursion there.
+// ok=false is a refusal (no kernel, a question it declined, OR the
+// kernel's own `false` answer — kernel_interface.go's SeqNoScalarReread
+// field states its OWN contract plainly: "`false` is a decline that
+// proves nothing, and the caller keeps its own conservative answer
+// there" — the kernel asks one recognized shape's own recursion and
+// answers `false` for a shape it did not walk (e.g. a union of two
+// concatenations, this join's own everyday shape), not for a shape it
+// proved UNSAFE. Reading that `false` as a proof let a plain three-
+// member string-literal array join to Unknown the moment a kernel was
+// seated (empty_word_join_test.go's own literal-array cases determined
+// fine with no kernel; the identical join failed once
+// SetLatticeKernel ran) — the local recursion (statesOnlyLongSequences)
+// already proves the SAME shape safe, so a kernel `false` must fall
+// through to it exactly as an outright refusal would, never override
+// it as though the kernel had proved the opposite.
 //
 // A refused question panics through the bridge, exactly as every other
 // kernel ask does; recover() turns that back into ok=false.
@@ -53,7 +66,33 @@ func kernelNoScalarReread(set refinementsets.RefinedSet) (safe bool, ok bool) {
 			safe, ok = false, false
 		}
 	}()
-	return kernel.SeqNoScalarReread(set), true
+	if kernel.SeqNoScalarReread(set) {
+		return true, true
+	}
+	return false, false
+}
+
+// kernelSeqSubset asks the kernel whether a ⊆ b over recognized
+// sequence shapes — JoinKnown's string-ground absorption arm
+// (`"xxx"` ⊆ Strings, so the join answers Strings rather than
+// declining) rests on this. (contains=true, ok=true) is the kernel's
+// theorem (seqSubsetB_true); ok=false is a refusal (no kernel, or
+// either side not a recognized sequence shape), and the caller keeps
+// its own path — never a syntactic guess at which side is bigger.
+//
+// A refused question panics through the bridge, exactly as every
+// other kernel ask does; recover() turns that back into ok=false.
+func kernelSeqSubset(a, b refinementsets.RefinedSet) (contains bool, ok bool) {
+	kernel := LatticeKernel()
+	if kernel == nil || kernel.SeqSubset == nil {
+		return false, false
+	}
+	defer func() {
+		if recover() != nil {
+			contains, ok = false, false
+		}
+	}()
+	return kernel.SeqSubset(a, b), true
 }
 
 // TruthinessDecided is Truthiness with the kernel's proved truthiness

@@ -487,6 +487,18 @@ func negateImage(rawA abstractdomain.AbstractValue) abstractdomain.AbstractValue
 	if a.Kind == abstractdomain.KindNaN {
 		return abstractdomain.AtTrustLevel(abstractdomain.NaNValue, abstractdomain.TrustLevelOf(a)) // −NaN is NaN
 	}
+	// an exact singleton negates to the exact float −v: this is plain
+	// arithmetic on a value the walk already holds outright, not a
+	// range/set question — so it answers without the kernel, the same
+	// way a literal `2.5` reads without one. Every other numeric shape
+	// (a range, a variable-bound set) still needs the kernel's own
+	// enclosure-sound negation question below.
+	if a.Kind == abstractdomain.KindValues && a.KindTag == abstractdomain.PrimitiveNumber && len(a.Values) == 1 {
+		return abstractdomain.AtTrustLevel(
+			abstractdomain.KnownValues([]float64{-a.Values[0]}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+			abstractdomain.TrustLevelOf(a),
+		)
+	}
 	kernel := currentTransferKernel()
 	if kernel == nil {
 		return silence.Residue()

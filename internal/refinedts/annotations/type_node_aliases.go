@@ -161,6 +161,7 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 					Refine:         annotation.Refine,
 					Temporal:       annotation.Temporal,
 					LibraryAdapter: annotation.LibraryAdapter,
+					KindTag:        annotation.KindTag,
 					Measures:       annotation.Measures,
 					Unread:         annotation.Unread,
 					Word:           annotation.Word,

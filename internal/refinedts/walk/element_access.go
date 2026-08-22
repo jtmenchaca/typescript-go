@@ -469,6 +469,59 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 					out := silence.Residue()
 					return &out
 				}
+				// a RANGED (set-shaped) numeric index into a KindList: the
+				// runtime read lands on ONE position, whichever the index
+				// picks that run — every position in [0, len) the index's own
+				// admitted range overlaps contributes its element to the
+				// join (sec-array-exotic-objects' OrdinaryGet: a numeric
+				// property key that names an existing slot answers that
+				// slot). Where the index ALSO admits a value outside [0,
+				// len) — negative, non-integer (ToPropertyKey stringifies it
+				// to a name no array index matches), or >= len — that run
+				// reads no own property and answers exactly undefined
+				// (never a decline for a plainly bounded window: the JOIN
+				// stays exact, only the possibly-undefined arm rides beside
+				// it). RangedListElementOf answers nil where the index is
+				// not numeric at all (a string/array-sorted index reads no
+				// element position here).
+				//
+				// A POSSIBLY-NaN index (a bare `number`-typed parameter,
+				// annotations/type_node_sets.go's grounding, worn as
+				// PossiblyNaN by declared_value.go's AbstractValueOfDeclared)
+				// unwraps here rather than skipping the whole ranged-index
+				// arm: NaN's own runtime read is exactly the out-of-bounds
+				// case already reasoned about above — ToPropertyKey stringifies
+				// NaN to the property name "NaN", which no array index
+				// names, so that run answers undefined the same way a
+				// negative or overlong index does (OrdinaryGet's own miss).
+				// The real half still reads its in-bounds join normally; the
+				// NaN half only ever CONTRIBUTES the possibly-undefined arm,
+				// never blocks the real half's own determination.
+				rangedIndex := index
+				indexMayBeNaN := false
+				if rangedIndex.Kind == abstractdomain.KindPossiblyNaN && rangedIndex.Inner != nil {
+					indexMayBeNaN = true
+					rangedIndex = *rangedIndex.Inner
+				}
+				if receiver.Kind == abstractdomain.KindList && rangedIndex.Kind == abstractdomain.KindSet &&
+					rangedIndex.SetKindTag == abstractdomain.SetKindTagNone {
+					if out := RangedListElementOf(receiver, rangedIndex); out != nil {
+						if indexMayBeNaN {
+							withNaN := abstractdomain.PossiblyAbsent(*out, abstractdomain.AbsentFlavorUndefOnly, abstractdomain.TrustSpec, true, true)
+							if out.Kind == abstractdomain.KindPossiblyUndefined {
+								// the real half already carries its own
+								// possibly-undefined arm (an out-of-bounds
+								// admission RangedListElementOf found on its
+								// own) — the NaN half adds no NEW flavor
+								// beyond UndefOnly, already worn, so the
+								// unwrapped answer stands as it came.
+								withNaN = *out
+							}
+							return &withNaN
+						}
+						return out
+					}
+				}
 				// an array-holes receiver's element read: the PRESENT-element
 				// set (receiver.ElementSet) is ∅ — nothing is a member of
 				// it, so there is no present value any index could name, in

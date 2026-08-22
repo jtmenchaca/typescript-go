@@ -194,7 +194,11 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 		// (relational_accumulation.go). Both statements still walk
 		// ordinarily below; what the kernel proved MEETS what they left.
 		accumulation, hasAccumulation := RelationalAccumulationOf(running, env, statements, index)
-		if AnalyzeStatement(running, env, statement, result) {
+		exitsHere := AnalyzeStatement(running, env, statement, result)
+		if running.StatementObserver != nil {
+			running.StatementObserver(env, exitsHere)
+		}
+		if exitsHere {
 			return true
 		}
 		// a condition-tested loop hands its NEGATED condition to the
@@ -231,6 +235,9 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 		// already consumed its answer through the override above
 		if answered {
 			MeetRelationalQuotientInto(env, accumulation, answer)
+		}
+		if running.StatementObserver != nil {
+			running.StatementObserver(env, exits)
 		}
 		if exits {
 			return true

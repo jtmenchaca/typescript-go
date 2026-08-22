@@ -88,17 +88,17 @@ func TestToUint8Clamp_ClampsToZeroTwoFiftyFiveNeverWraps(t *testing.T) {
 	}
 }
 
-func TestTypedArrayConversion_NamesTheEightModeledConstructorsOnly(t *testing.T) {
+func TestTypedArrayConversion_NamesTheNineModeledConstructorsOnly(t *testing.T) {
 	for _, name := range []string{
 		"Uint8Array", "Int8Array", "Uint8ClampedArray",
 		"Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
-		"Float64Array",
+		"Float64Array", "Float32Array",
 	} {
 		if _, ok := typedArrayConversion(name); !ok {
 			t.Errorf("typedArrayConversion(%q) answered false, want a row", name)
 		}
 	}
-	for _, name := range []string{"Float32Array", "BigInt64Array", "BigUint64Array", "Array", "NotAConstructor"} {
+	for _, name := range []string{"BigInt64Array", "BigUint64Array", "Array", "NotAConstructor"} {
 		if _, ok := typedArrayConversion(name); ok {
 			t.Errorf("typedArrayConversion(%q) answered a row, want false — not modeled", name)
 		}
@@ -183,6 +183,32 @@ func TestIdentityConversion_Float64ArrayElementCarriesTheValueUnchanged(t *testi
 		if got := identityConversion(v); got != v {
 			t.Errorf("identityConversion(%v) = %v, want %v unchanged", v, got, v)
 		}
+	}
+}
+
+// toFloat32RoundTrip is Go's own float64(float32(v)): round v to
+// binary32 (Go's non-constant conversion rule), then widen back to
+// binary64. Every "want" here is computed by that same expression, not
+// transcribed, so the test checks the function IS this composition
+// rather than checking it against a copied number.
+func TestToFloat32RoundTrip_RoundsThroughBinary32ThenWidensBack(t *testing.T) {
+	cases := []float64{0, 121, -50, 0.1, 1.5, 3.14159, 1e30, -1e-30}
+	for _, v := range cases {
+		want := float64(float32(v))
+		if got := toFloat32RoundTrip(v); got != want {
+			t.Errorf("toFloat32RoundTrip(%v) = %v, want %v (float64(float32(v)))", v, got, want)
+		}
+	}
+	// 0.1 is NOT exactly representable in binary32: the round-trip
+	// visibly changes it — confirms this test actually exercises a
+	// real rounding step, not a no-op on every case.
+	if got := toFloat32RoundTrip(0.1); got == 0.1 {
+		t.Errorf("toFloat32RoundTrip(0.1) = %v, want a visibly rounded value (0.1 has no exact binary32 representation)", got)
+	}
+	// 1.5 IS exactly representable in binary32: the round-trip is a
+	// true no-op, unlike 0.1's.
+	if got := toFloat32RoundTrip(1.5); got != 1.5 {
+		t.Errorf("toFloat32RoundTrip(1.5) = %v, want 1.5 unchanged (exactly representable in binary32)", got)
 	}
 }
 
@@ -331,24 +357,23 @@ func TestReadTypedArrayConstruction_ASpreadInsideTheLiteralDeclines(t *testing.T
 // modeled — nil, not a wrong answer.
 func TestReadTypedArrayConstruction_AnUnmodeledWidthDeclines(t *testing.T) {
 	p := entryEnvTestProgram(t,
-		"function f(): number { return new Float32Array([1, 2])[0]; }\n")
+		"function f(): bigint { return new BigInt64Array([1n, 2n])[0]; }\n")
 	ctx := superArrayContracts(t, p)
 	built := ReadTypedArrayConstruction(ctx, NewEnv(), superArrayNewIn(t, p, "f"))
 	if built != nil {
-		t.Errorf("`new Float32Array([1, 2])` answered %+v, want nil (Float32Array has no row in this table)", *built)
+		t.Errorf("`new BigInt64Array([1n, 2n])` answered %+v, want nil (BigInt64Array has no row in this table)", *built)
 	}
 }
 
-// A construction on Float32Array/BigInt64Array/BigUint64Array names
-// the family in the recorded decline instead of falling to the
-// generic constructor-name-blind "new builds a value the walk does
-// not model" sentence.
+// A construction on BigInt64Array/BigUint64Array names the family in
+// the recorded decline instead of falling to the generic
+// constructor-name-blind "new builds a value the walk does not model"
+// sentence.
 func TestReadTypedArrayConstruction_UnmodeledFamiliesNameThemselvesInTheDecline(t *testing.T) {
 	for _, tc := range []struct {
 		source string
 		family string
 	}{
-		{"function f(): number { return new Float32Array([1, 2])[0]; }\n", "Float32Array"},
 		{"function f(): bigint { return new BigInt64Array([1n, 2n])[0]; }\n", "BigInt64Array"},
 		{"function f(): bigint { return new BigUint64Array([1n, 2n])[0]; }\n", "BigUint64Array"},
 	} {
@@ -423,14 +448,6 @@ func TestEvaluate_TypedArrayOutOfBoundsElementReadIsUndefined(t *testing.T) {
 // Float64Array's own conversion is the identity — the element holds
 // the constructed literal's value unchanged, the same shape the
 // corpus's float64ArrayElementUndetermined row pins.
-//
-// Uses positive decimal literals only: a NEGATIVE literal (`-2.5`)
-// parses as a PrefixUnaryExpression wrapping `2.5`, and
-// evaluateExpression does not fold that to a KindValues number in
-// this walk today (confirmed with a plain `[-2.5]` array literal,
-// same KindUnknown result, independent of anything in this file) —
-// out of scope for this table, so this pin stays inside what the
-// evaluator already folds.
 func TestEvaluate_Float64ArrayElementReadIsTheValueUnchanged(t *testing.T) {
 	p := entryEnvTestProgram(t,
 		"function f(): number { const xs = new Float64Array([3.14159, 2.5]); return xs[0]; }\n")
@@ -446,6 +463,53 @@ func TestEvaluate_Float64ArrayElementReadIsTheValueUnchanged(t *testing.T) {
 	value := evaluateExpression(ctx, env, elementRead)
 	if value.Kind != abstractdomain.KindValues || len(value.Values) != 1 || value.Values[0] != 3.14159 {
 		t.Errorf("xs[0] = %+v, want the exact scalar 3.14159 (Float64Array carries it unchanged)", value)
+	}
+}
+
+// A plain (non-typed) array literal with a NEGATIVE element —
+// `[-2.5]` — parses that element as a PrefixUnaryExpression wrapping
+// the literal `2.5`. EvaluateArrayLiteral evaluates each element
+// through the general evaluateExpression, which now folds an exact
+// singleton's unary minus without a kernel (arithmetic_transfer.go's
+// negateImage) — so the whole literal collapses to the flat
+// KnownValues tuple {-2.5}, the same shape a positive-only literal
+// gets, rather than answering unknown.
+func TestEvaluate_ArrayLiteralWithANegativeElementReadsTheNegatedValue(t *testing.T) {
+	p := entryEnvTestProgram(t,
+		"function f(): number { const xs = [-2.5]; return xs[0]; }\n")
+	ctx := superArrayContracts(t, p)
+	env := NewEnv()
+	literal := superArrayFirstNode(t, entryEnvFunctionNamed(t, p, "f").Body(), "the [-2.5] array literal", ast.IsArrayLiteralExpression)
+	built := evaluateExpression(ctx, env, literal)
+	if built.Kind != abstractdomain.KindValues || built.KindTag != abstractdomain.PrimitiveArray {
+		t.Fatalf("`[-2.5]` = %+v, want KindValues{PrimitiveArray}", built)
+	}
+	if len(built.Values) != 1 || built.Values[0] != -2.5 {
+		t.Errorf("`[-2.5]` = %+v, want the exact scalar -2.5", built.Values)
+	}
+}
+
+// A positive-literal array alongside the negative one stays unchanged
+// by the negateImage fix — the flat KnownValues collapse never touched
+// the positive-literal path.
+func TestEvaluate_ArrayLiteralWithPositiveElementsIsUnchanged(t *testing.T) {
+	p := entryEnvTestProgram(t,
+		"function f(): number { const xs = [1, 2.5, 3]; return xs[0]; }\n")
+	ctx := superArrayContracts(t, p)
+	env := NewEnv()
+	literal := superArrayFirstNode(t, entryEnvFunctionNamed(t, p, "f").Body(), "the [1, 2.5, 3] array literal", ast.IsArrayLiteralExpression)
+	built := evaluateExpression(ctx, env, literal)
+	want := []float64{1, 2.5, 3}
+	if built.Kind != abstractdomain.KindValues || built.KindTag != abstractdomain.PrimitiveArray {
+		t.Fatalf("`[1, 2.5, 3]` = %+v, want KindValues{PrimitiveArray}", built)
+	}
+	if len(built.Values) != len(want) {
+		t.Fatalf("`[1, 2.5, 3]` has %d elements, want %d", len(built.Values), len(want))
+	}
+	for i, v := range want {
+		if built.Values[i] != v {
+			t.Errorf("slot %d = %v, want %v", i, built.Values[i], v)
+		}
 	}
 }
 
@@ -511,6 +575,53 @@ func TestEvaluate_Uint32ArrayElementReadIsTheWrappedValue(t *testing.T) {
 	value := evaluateExpression(ctx, env, elementRead)
 	if value.Kind != abstractdomain.KindValues || len(value.Values) != 1 || value.Values[0] != 1 {
 		t.Errorf("xs[0] = %+v, want 1 (ToUint32(4294967297) = 4294967297 mod 4294967296)", value)
+	}
+}
+
+// Float32Array's own conversion rounds through IEEE 754 binary32
+// (roundTiesToEven) then widens back to binary64 — a value that is
+// NOT exactly representable in binary32 (0.1) comes back visibly
+// changed. The pinned want is computed by the same
+// float64(float32(...)) round-trip toFloat32RoundTrip runs, not
+// hand-transcribed, so the test measures the function under test
+// against Go's own conversion rather than against a copied literal.
+func TestEvaluate_Float32ArrayElementReadRoundsThroughBinary32(t *testing.T) {
+	p := entryEnvTestProgram(t,
+		"function f(): number { const xs = new Float32Array([0.1]); return xs[0]; }\n")
+	ctx := superArrayContracts(t, p)
+	env := NewEnv()
+	construction := superArrayNewIn(t, p, "f")
+	built := evaluateExpression(ctx, env, construction)
+	if built.Kind != abstractdomain.KindValues || built.KindTag != abstractdomain.PrimitiveArray {
+		t.Fatalf("`new Float32Array([0.1])` = %+v, want KindValues{PrimitiveArray}", built)
+	}
+	env.Set("xs", built)
+	elementRead := superArrayFirstNode(t, entryEnvFunctionNamed(t, p, "f").Body(), "the [0] element read", ast.IsElementAccessExpression)
+	value := evaluateExpression(ctx, env, elementRead)
+	want := float64(float32(0.1)) // the same round-trip toFloat32RoundTrip runs
+	if want == 0.1 {
+		t.Fatalf("test setup: float64(float32(0.1)) == 0.1 unrounded — 0.1 no longer exercises a visible round, pick a different input")
+	}
+	if value.Kind != abstractdomain.KindValues || len(value.Values) != 1 || value.Values[0] != want {
+		t.Errorf("xs[0] = %+v, want %v (0.1 rounds through binary32, roundTiesToEven)", value, want)
+	}
+}
+
+// A value exactly representable in binary32 (1.5 — a terminating
+// binary fraction well within the mantissa's precision) passes through
+// the round-trip unchanged: no rounding step has anything to round.
+func TestEvaluate_Float32ArrayElementReadPassesThroughAnExactBinary32Value(t *testing.T) {
+	p := entryEnvTestProgram(t,
+		"function f(): number { const xs = new Float32Array([1.5]); return xs[0]; }\n")
+	ctx := superArrayContracts(t, p)
+	env := NewEnv()
+	construction := superArrayNewIn(t, p, "f")
+	built := evaluateExpression(ctx, env, construction)
+	env.Set("xs", built)
+	elementRead := superArrayFirstNode(t, entryEnvFunctionNamed(t, p, "f").Body(), "the [0] element read", ast.IsElementAccessExpression)
+	value := evaluateExpression(ctx, env, elementRead)
+	if value.Kind != abstractdomain.KindValues || len(value.Values) != 1 || value.Values[0] != 1.5 {
+		t.Errorf("xs[0] = %+v, want the exact scalar 1.5 unchanged (1.5 is exactly representable in binary32)", value)
 	}
 }
 

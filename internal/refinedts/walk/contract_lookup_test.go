@@ -170,17 +170,20 @@ func TestEvaluateCallExpression_ANestedFunctionsCallSiteInlinesLikeATopLevelOnes
 	}
 	env := NewEnv()
 
+	// degenerate windows dedup to "= value" (the ruled grammar's OPEN-1
+	// fix); old wording (pre dedup): "{integer, multipleOf 1, 121 ≤ 𝑥 ≤ 121}"
 	overCall := contractLookupCallArg(t, p.Entry.AsNode(), "nextYear", "120")
 	overValue := evaluateExpression(ctx, env, overCall)
 	overSpelled, overOk := abstractdomain.FormatAbstractValue(overValue)
-	if !overOk || overSpelled != "{integer, multipleOf 1, 121 ≤ 𝑥 ≤ 121}" {
+	if !overOk || overSpelled != "{integer, multipleOf 1, = 121}" {
 		t.Errorf("nextYear(120) through the nested declaration answered %q (ok %v), want the exact set {121}", overSpelled, overOk)
 	}
 
+	// old wording (pre dedup): "{integer, multipleOf 1, 41 ≤ 𝑥 ≤ 41}"
 	okCall := contractLookupCallArg(t, p.Entry.AsNode(), "nextYear", "40")
 	okValue := evaluateExpression(ctx, env, okCall)
 	okSpelled, okOk := abstractdomain.FormatAbstractValue(okValue)
-	if !okOk || okSpelled != "{integer, multipleOf 1, 41 ≤ 𝑥 ≤ 41}" {
+	if !okOk || okSpelled != "{integer, multipleOf 1, = 41}" {
 		t.Errorf("nextYear(40) through the nested declaration answered %q (ok %v), want the exact set {41}", okSpelled, okOk)
 	}
 }

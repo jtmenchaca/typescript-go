@@ -39,6 +39,16 @@ type RefinedTSKernel struct {
 	// theorem (seqSubsetB_true); `false` means no positional proof —
 	// read it conservatively (the counterexample construction is owed).
 	SeqSubset func(a, b refinementsets.RefinedSet) bool
+	// SeqPrefix: the fixed-length prefix read — `take n s` for every
+	// `s` in a recognized sequence shape, what a slice `(expr).slice(0,
+	// n)` lowers to when the receiver's exact positions are not
+	// tracked. Answers the sound over-approximation `prefixReadOf` (a
+	// counting window over the folded alphabet, length [min lo n, n])
+	// — a theorem in the direction membership needs
+	// (prefixReadOf_sound): every taken prefix sits in the answered
+	// set. The bool is false where the set is not seqOf-recognized —
+	// a decline, never a claim.
+	SeqPrefix func(set refinementsets.RefinedSet, n int) (refinementsets.RefinedSet, bool)
 	// SeqNoScalarReread: does the set's language MISS the 1-tuple layer
 	// entirely — so a union built from it holds no member a scalar
 	// position could reread as a bare number? `true` is a theorem

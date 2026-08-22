@@ -248,7 +248,30 @@ func BindEntryEnv(input BindEntryEnvInput) {
 		}
 		name := decl.Name().Text()
 		if stated != nil {
-			input.Env.Set(name, AbstractValueOfDeclared(*stated))
+			declaredValue := AbstractValueOfDeclared(*stated)
+			// a STATED annotation is a CEILING, never a floor: where a
+			// call-site join also reaches this parameter, the entry
+			// value is the MEET of the two (entryStateMeet, the same
+			// law the unstated branch below applies against the plain
+			// type) rather than the declared reading alone. Without
+			// this, a bare-keyword ground (annotations/type_node_sets.go's
+			// grounding of `number`/`string`/`boolean`, which makes
+			// `stated` non-nil for types that used to compile to
+			// nothing) would make EVERY call-site-derived exact value
+			// vanish behind the ground the moment its parameter carries
+			// a written bare-keyword type -- exactly the widening this
+			// checker forbids, just reached through the stated branch
+			// instead of the unstated one.
+			if input.CallSiteInitialStates != nil {
+				if fromCall, ok := input.CallSiteInitialStates[name]; ok {
+					input.Env.Set(name, entryStateMeet(input.P.Checker, parameter, fromCall, declaredValue))
+					if input.OnStated != nil {
+						input.OnStated(name, stated)
+					}
+					continue
+				}
+			}
+			input.Env.Set(name, declaredValue)
 			if input.OnStated != nil {
 				input.OnStated(name, stated)
 			}
