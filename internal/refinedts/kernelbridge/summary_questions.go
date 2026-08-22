@@ -146,3 +146,23 @@ func AskApplySummary(blob SummaryBlob, entries []KnownStateWire) (exits []KnownS
 	}()
 	return kernel.ApplySummary(blob, entries), true
 }
+
+// AskRetSplit reads a ret-row state's returned/mayThrow halves off the
+// kernel (refined_ret_split, exports_state.lean). Same refusal
+// discipline as AskSummarize/AskApplySummary: no kernel loaded, or a
+// kernel that declines the question, answers ok=false and the caller
+// falls back to its own local split — the kernel is asked FIRST, and
+// only its refusal hands the question back to the local computation.
+func AskRetSplit(state KnownStateWire) (returned KnownStateWire, mayThrow bool, ok bool) {
+	kernel := KernelIfLoaded()
+	if kernel == nil {
+		return KnownStateWire{}, false, false
+	}
+	defer func() {
+		if recover() != nil {
+			returned, mayThrow, ok = KnownStateWire{}, false, false
+		}
+	}()
+	returned, mayThrow = kernel.RetSplit(state)
+	return returned, mayThrow, true
+}

@@ -363,6 +363,15 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 		parsed := Answered(raw)
 		return DecodeWireState(parsed["state"])
 	}
+	kernel.RetSplit = func(state KnownStateWire) (KnownStateWire, bool) {
+		wire := fmt.Sprintf(`{"state":%s}`, StateWire(state))
+		raw, err := ask1("retSplit", "kernel_ret_split", wire)
+		if err != nil {
+			panic(err.Error())
+		}
+		parsed := Answered(raw)
+		return DecodeWireState(parsed["returned"]), BooleanField(raw, "mayThrow")
+	}
 	kernel.NarrowState = func(state KnownStateWire, op string, w float64, hasW bool) (KnownStateWire, KnownStateWire) {
 		if op == "eq" && (!hasW || isNaN(w)) {
 			panic("the eq narrowing takes a real word")

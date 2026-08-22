@@ -178,10 +178,19 @@ func DecodeWireState(raw any) KnownStateWire {
 // flag cleared, which removes no value — the kernel proves this exact
 // reading sound (returned_denotes, set_functions/known_state.lean).
 //
+// The KERNEL answers first (refined_ret_split, AskRetSplit in
+// summary_questions.go). Only where it refuses — no kernel loaded, or
+// the question declined — does the local computation stand in:
+// clearing Thrown locally, which is the same reading the kernel's own
+// `returned` half states for the shapes it accepts.
+//
 // A caller that has PROVED the throw arm dead, or handled it with a
 // try, reads this in place of the whole state. A caller that has done
 // neither must account for the thrown exit, and MayThrow says so.
 func (s KnownStateWire) Returned() KnownStateWire {
+	if returned, _, ok := AskRetSplit(s); ok {
+		return returned
+	}
 	if s.Top {
 		return s
 	}
@@ -192,7 +201,15 @@ func (s KnownStateWire) Returned() KnownStateWire {
 // MayThrow says whether this state admits a thrown exit. An unknown
 // state admits one, as it admits everything (mayThrow_denotes,
 // set_functions/known_state.lean).
+//
+// The KERNEL answers first (refined_ret_split, AskRetSplit in
+// summary_questions.go); its refusal falls back to the same local
+// reading (Top or the Thrown flag up) the kernel's own mayThrow half
+// states for the shapes it accepts.
 func (s KnownStateWire) MayThrow() bool {
+	if _, mayThrow, ok := AskRetSplit(s); ok {
+		return mayThrow
+	}
 	return s.Top || s.Thrown
 }
 

@@ -171,6 +171,15 @@ type RefinedTSKernel struct {
 	// checker's own join mirrors this algebra for speed; the
 	// conformance suite holds the mirror to this entry.
 	JoinState func(a, b KnownStateWire) KnownStateWire
+	// RetSplit: one ret-row state read in two — the RETURNED half (what
+	// the runs that completed left in the slot, thrown flag cleared) and
+	// MAYTHROW (whether any run could have left by throwing instead).
+	// Exact and independent (returned_denotes, mayThrow_denotes,
+	// split_complete, set_functions/known_state.lean). A caller that has
+	// proved the throw arm dead, or handled it with a try, reads the
+	// returned half alone; a caller that has done neither must account
+	// for mayThrow too.
+	RetSplit func(state KnownStateWire) (returned KnownStateWire, mayThrow bool)
 	// NarrowState: a structural narrowing on a knowledge state —
 	// definedness, truthiness under the number or string sort, or
 	// strict equality against a real word. Both sides come back as
