@@ -2492,6 +2492,14 @@ func checkSequenceCrossing(
 // collapse) — that tuple stays undetermined with the ordinary "not read
 // as one here" sentence, the same as any other shape this reader cannot
 // convert, rather than silently misreading a 1-element array as a scalar.
+//
+// The built window is marked PROVED DENSE (KnownSetDense,
+// abstract_value.go's SeqDense/SeqDenseKnown pair): crossing.Values comes
+// from EvaluateArrayLiteral's flat KindValues{PrimitiveArray} reading
+// (array_literal.go), which is built one literal slot at a time — the same
+// element-by-element construction MapOutcome's own dense mark rests on
+// (callback_element_outcome.go) — and no hole grammar exists for a
+// KindValues array, so every counted position really is present.
 func sequenceCrossingOfExactTuple(crossing abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
 	if len(crossing.Values) == 0 {
 		return abstractdomain.AbstractValue{}, false
@@ -2502,9 +2510,12 @@ func sequenceCrossingOfExactTuple(crossing abstractdomain.AbstractValue) (abstra
 	if _, ok := refinementsets.AsRepetition(window); !ok {
 		return abstractdomain.AbstractValue{}, false
 	}
-	return abstractdomain.KnownSet(
+	built := abstractdomain.KnownSet(
 		window, nil, abstractdomain.TrustLevelOf(crossing), abstractdomain.SetKindTagNone,
-	), true
+	)
+	// dense per this function's own doc above — a no-op unless built reads
+	// back as a KindSet repetition, which the AsRepetition check just did
+	return abstractdomain.KnownSetDense(built), true
 }
 
 // sequenceCrossingOfKindList rebuilds a KindList array literal (one
@@ -2526,6 +2537,14 @@ func sequenceCrossingOfExactTuple(crossing abstractdomain.AbstractValue) (abstra
 // Repetition itself cannot spell back through AsRepetition (a single
 // slot, which collapses to the bare scalar element — see
 // sequenceCrossingOfExactTuple's own doc on that corner).
+//
+// The built window is marked PROVED DENSE (KnownSetDense,
+// abstract_value.go's SeqDense/SeqDenseKnown pair): crossing.Items comes
+// from EvaluateArrayLiteral's non-flat KindList reading (array_literal.go),
+// which is built one literal slot at a time — the same element-by-element
+// construction MapOutcome's own dense mark rests on
+// (callback_element_outcome.go) — and no hole grammar exists for a
+// KindList array, so every counted position really is present.
 func sequenceCrossingOfKindList(crossing abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
 	if len(crossing.Items) == 0 {
 		return abstractdomain.AbstractValue{}, false
@@ -2549,9 +2568,12 @@ func sequenceCrossingOfKindList(crossing abstractdomain.AbstractValue) (abstract
 	if _, ok := refinementsets.AsRepetition(window); !ok {
 		return abstractdomain.AbstractValue{}, false
 	}
-	return abstractdomain.KnownSet(
+	built := abstractdomain.KnownSet(
 		window, nil, abstractdomain.TrustLevelOf(crossing), abstractdomain.SetKindTagNone,
-	), true
+	)
+	// dense per this function's own doc above — a no-op unless built reads
+	// back as a KindSet repetition, which the AsRepetition check just did
+	return abstractdomain.KnownSetDense(built), true
 }
 
 // checkScalarCrossing judges a scalar payload against a scalar entry —

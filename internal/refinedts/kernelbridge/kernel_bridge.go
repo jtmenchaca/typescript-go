@@ -16,6 +16,8 @@
 package kernelbridge
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 )
@@ -102,6 +104,24 @@ func init() {
 // instance). Returns an error if the dylib is absent. A module that
 // aborted is not shared again — the next call builds a replacement
 // (AdoptKernel/Invalidate).
+//
+// Between InstantiateNative and sharing the instance, ProbeKernelAlive
+// asks one trivial, known-answer question on the freshly loaded dylib.
+// This is a LOAD-TIME check, not a mid-session one: the dylib runs
+// in-process (dlopen'd straight into this binary, on the locked worker
+// OS thread instantiate_kernel.go's serve owns), and
+// lean_set_exit_on_panic(true) (kernel_wrapper.c) means a Lean panic
+// during any later ask ABORTS THIS PROCESS — there is no host thread
+// left afterward to detect the death, quarantine the kernel, or answer
+// KernelDied's decline for it. The probe cannot catch that failure
+// mode (a panic serving fabricated output was already ruled out by the
+// abort, and an abort is not observable, it is fatal). What it CAN
+// catch: dlopen succeeded and every symbol resolved, but the worker
+// answers the wrong boolean or malformed JSON to a question with a
+// known answer — evidence the dylib itself is bad before any caller's
+// real question ever reaches it. See KernelDied's comment for what a
+// genuine mid-session death means and why quarantining it needs a
+// different (out-of-process) architecture.
 func LoadKernel(dylibPath string) (*RefinedTSKernel, error) {
 	return AdoptKernel(func() (*RefinedTSKernel, *NativeKernel, error) {
 		if !KernelArtifactsPresent(dylibPath) {
@@ -111,12 +131,47 @@ func LoadKernel(dylibPath string) (*RefinedTSKernel, error) {
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := ProbeKernelAlive(native); err != nil {
+			native.Close()
+			return nil, nil, err
+		}
 		dylibPathMu.Lock()
 		kernelArtifactPath = dylibPath
 		dylibPathMu.Unlock()
 		kernel := KernelFromCalls(KernelFromCallsInput{Native: native, InitMs: native.InitMs})
 		return kernel, native, nil
 	})
+}
+
+// ProbeKernelAlive asks one trivial, known-answer question — is the
+// impossible set (max 5 AND min 10) scalar-empty — directly on the
+// NativeKernel, bypassing the cache and cost recorder (a probe answer
+// is not a real question and must not be remembered as one). The
+// known answer is `true`; anything else (a transport error, malformed
+// JSON, or the wrong boolean) fails the load before any caller ever
+// shares this instance.
+func ProbeKernelAlive(native *NativeKernel) error {
+	const impossibleSet = `{"forms":[{"form":"atMost","a":{"num":5,"exp":0}},{"form":"atLeast","a":{"num":10,"exp":0}}]}`
+	raw, err := native.Call1("kernel_scalar_empty", impossibleSet)
+	if err != nil {
+		return fmt.Errorf("kernel: load probe failed: %w", err)
+	}
+	var parsed map[string]any
+	if jsonErr := json.Unmarshal([]byte(raw), &parsed); jsonErr != nil {
+		return fmt.Errorf("kernel: load probe answered non-JSON: %q", raw)
+	}
+	if message, held := parsed["error"].(string); held {
+		return fmt.Errorf("kernel: load probe declined: %s", message)
+	}
+	empty, held := parsed["empty"].(bool)
+	if !held {
+		return fmt.Errorf("kernel: load probe answered without a boolean \"empty\": %s", raw)
+	}
+	if !empty {
+		return fmt.Errorf(
+			"kernel: load probe answered false for a known-empty set — the dylib is serving wrong answers")
+	}
+	return nil
 }
 
 type kernelArtifactsAbsentError struct{ path string }

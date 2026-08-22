@@ -1,39 +1,47 @@
-// Ask a live module; if it dies, replace it. A question that outruns
-// the Lean heap prints "INTERNAL PANIC: out of memory" and the module
-// ABORTS. It does not come back: every later call into it throws a
-// WebAssembly exception, measured (bench/poison.ts — six questions
-// with known answers, all six throwing afterwards).
+// Ask a live module; if it dies, replace it. In the TS/wasm source, a
+// question that outruns the Lean heap prints "INTERNAL PANIC: out of
+// memory" and the wasm module ABORTS without taking the host process
+// down with it — wasm's isolation makes every later call into that
+// module throw a catchable WebAssembly exception, measured
+// (bench/poison.ts — six questions with known answers, all six
+// throwing afterwards). Soundness survives that (a throw is silence
+// and the walk degrades to unknown); SERVICE does not unless the dead
+// module is detected, ANNOUNCED, and replaced — one pathological
+// expression used to leave every file checked after it with no
+// refinement checking at all, and nothing said so: a 629-file library
+// reported 18 refinement diagnostics because the kernel had died early
+// on.
 //
-// Soundness survives that, because a throw is silence and the walk
-// degrades to unknown. SERVICE does not: one pathological expression
-// used to leave every file checked after it with no refinement
-// checking at all, and nothing said so — a 629-file library reported
-// 18 refinement diagnostics because the kernel had died early on.
+// THIS TREE'S SUBSTRATE IS DIFFERENT IN THE WAY THAT MATTERS: the
+// native dylib (kernelbridge.NativeKernel, instantiate_kernel.go) is
+// dlopen'd straight into this process's own address space and runs on
+// a locked worker OS thread this same process owns (the Lean runtime
+// requires per-thread init; see instantiate_kernel.go's file comment).
+// There is no wasm-style sandbox between the kernel and the host here.
+// kernel_wrapper.c calls lean_set_exit_on_panic(true), so a Lean
+// `panic!` no longer prints and serves a fabricated default value —
+// it calls abort() on the worker thread, which kills THE WHOLE
+// PROCESS, this file included. A dead kernel is therefore never
+// something a later call observes and recovers from mid-session: by
+// the time any code could ask "did the kernel just die," the process
+// that would have asked is already gone. There is no "answer the
+// question that killed it as a decline, then keep serving on a fresh
+// kernel" path available to an in-process abort — that recovery shape
+// (which Invalidate below still documents, ported from the TS
+// wasm-module-replacement design) needs the kernel to run somewhere an
+// abort does not take the caller down with it: a separate process or
+// subprocess speaking the same wire over IPC. That is a genuine
+// architecture change (a new out-of-process seam), not a fix to this
+// file, and is not implemented here.
 //
-// So a dead module is detected, ANNOUNCED, and replaced. The question
-// that killed it still answers as a refusal (the caller degrades to
-// unknown); the next one gets a live kernel.
-//
-// The TS moduleDied() test recognizes `WebAssembly.RuntimeError` /
-// `WebAssembly.Exception` — wasm-specific abort signals with no native
-// analogue. This tree's only substrate is the native dylib
-// (kernelbridge.NativeKernel, instantiate_kernel.go): Call1/Call2
-// return a plain Go `error` for every failure — a missing symbol, a
-// null-pointer answer, or (per the task's framing) a decline. There is
-// no separate "the whole module died and must be replaced" signal the
-// native loader exposes today: NativeKernel's worker goroutine keeps
-// running after any single request's error (the `for req := range
-// k.requests` loop in instantiate_kernel.go does not exit on an
-// answer error), so nothing here currently observes a NativeKernel
-// going permanently dead the way a wasm module does. The
-// invalidate/adopt discipline is ported as far as the shape goes —
-// KernelDied names the question, Invalidate clears the shared pointers
-// exactly as the TS does — but KernelDied's body always answers false
-// until a native "the runtime is gone" signal exists. Reported as a
-// gap in the port report; the loop-goroutine's own crash (a panic
-// inside serve) is a separate, larger failure this file does not
-// attempt to cover either, matching the TS file's scope (module
-// aborts, not process crashes).
+// What IS implemented, given that constraint: ProbeKernelAlive
+// (kernel_bridge.go) asks one trivial known-answer question on a
+// freshly loaded dylib before LoadKernel ever shares it — catching a
+// dylib that loaded (dlopen + every symbol resolved) but answers
+// wrong, PRE-death, when the failure is still just a Go `error`
+// instead of a process abort. That is the entire quarantine this
+// architecture allows without the out-of-process seam: pre-death
+// verification at load, not mid-session detection-and-replace.
 package kernelbridge
 
 import (
@@ -59,10 +67,20 @@ var kernelInstance *RefinedTSKernel
 var kernelNative *NativeKernel
 
 // KernelDied is moduleDied in the TS source: did this error come from
-// a module that is no longer running? See the file comment — the
-// native loader has no such signal yet, so this always answers false;
-// every Call1/Call2 error is treated as an ordinary refusal (the TS
-// "else" path: `throw thrown` unchanged).
+// a module that is no longer running? On this tree's in-process native
+// substrate, the answer is structurally always no: a mid-session Lean
+// panic calls abort() (lean_set_exit_on_panic, kernel_wrapper.c) on the
+// same process this code runs in, so a "the kernel died and this call
+// observed it" moment never reaches a return statement — the process
+// is gone with it. Every Call1/Call2 error this code CAN see is an
+// ordinary refusal (a missing symbol, a null-pointer answer, a
+// declined question) from a kernel that is still running, so this
+// always answers false. A genuine mid-session death prints the Lean
+// panic message to stderr and ends the process; detecting it and
+// serving a KernelDied decline in its place instead of a process abort
+// would need the kernel moved out-of-process (a separate design unit
+// — see the file comment). What this tree does instead, pre-death,
+// is ProbeKernelAlive at load time (kernel_bridge.go).
 func KernelDied(err error) bool {
 	return false
 }
@@ -71,7 +89,10 @@ func KernelDied(err error) bool {
 // that aborted, so the next LoadedKernel call site builds a
 // replacement. Only clears the shared pointers when they still name
 // THIS module — a later instance must not be invalidated by an older
-// one's straggling call.
+// one's straggling call. Ported from the TS wasm design for shape
+// parity; on this tree's in-process substrate KernelDied never answers
+// true (see its comment), so throughModule never calls this today —
+// it would need the out-of-process seam to have a caller.
 func Invalidate(dead *RefinedTSKernel) {
 	kernelMu.Lock()
 	if kernelInstance == dead {

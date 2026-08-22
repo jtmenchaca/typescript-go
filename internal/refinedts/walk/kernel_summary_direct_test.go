@@ -1421,16 +1421,18 @@ func TestKernelSummaryDirect_ANonObjectReceiverFillsEveryThisEntryTop(t *testing
 
 /* ── the serving rule ────────────────────────────────────────────── */
 
-func TestKernelSummaryDirect_ACompleteBlobServesEvenOnATopRet(t *testing.T) {
+func TestKernelSummaryDirect_ACompleteBlobDeclinesOnATopRet(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	SetEngineKernel(kernel)
 	ClearResolvedRecordMembers()
 	ClearSummaryOutcomes()
-	// the body lowers whole — every statement read, nothing havocked — so
+	// The body lowers whole — every statement read, nothing havocked — so
 	// its outcome is complete. Its return leans on an UNKNOWN-sorted
-	// parameter, so the ret comes back TOP: the compile is proved equal to
-	// the walk, and the walk would derive the same nothing, so the route
-	// SERVES rather than sending the caller back to re-walk it.
+	// parameter, so the ret comes back TOP, and a complete body that
+	// determines NOTHING declines: serving silence would take the call
+	// away from the inline walk, which reads this call's own arguments and
+	// can determine a value the compiled blob cannot. Completeness alone
+	// does not earn the serve; determining something does.
 	declaration := summaryDeclarationOf(t, "function f(x) { return x; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
@@ -1446,8 +1448,8 @@ func TestKernelSummaryDirect_ACompleteBlobServesEvenOnATopRet(t *testing.T) {
 		t.Fatalf("this call's ret is not TOP — the case would not exercise the serving rule")
 	}
 	contract := &FunctionContract{Declaration: declaration}
-	if _, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{silenceValue()}, contract); !ok {
-		t.Errorf("a complete blob declined on a TOP ret — a complete body serves unconditionally")
+	if _, ok := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{silenceValue()}, contract); ok {
+		t.Errorf("a complete blob served a TOP ret — an unknown ret is never served, whatever produced it")
 	}
 }
 

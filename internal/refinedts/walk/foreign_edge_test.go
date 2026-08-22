@@ -3008,6 +3008,102 @@ func TestSequenceCrossingOfKindList_AnObjectShapedSlotDeclines(t *testing.T) {
 	}
 }
 
+/* ── construct: both crossing converters mark their rebuilt window PROVED DENSE ── */
+//
+// sequenceCrossingOfExactTuple and sequenceCrossingOfKindList both rebuild
+// their Repetition window from a source AbstractValue built element-by-element
+// with no hole grammar (a KindValues{PrimitiveArray} tuple, a KindList array
+// literal) — the same "every counted index is an own property" proof
+// MapOutcome's own KnownSetDense mark rests on (callback_element_outcome.go).
+// Both converters now carry that mark forward, and InBoundsElementOf's
+// proved-in-bounds arm (element_in_bounds.go) reads it to skip the
+// PossiblyAbsent wrap it otherwise always applies to a repetition-shaped
+// receiver.
+
+func TestSequenceCrossingOfExactTuple_ConvertedWindowCarriesSeqDense(t *testing.T) {
+	crossing := abstractdomain.KnownValues([]float64{0.5, -0.3, 0.2}, abstractdomain.PrimitiveArray, abstractdomain.TrustProved)
+	converted, ok := sequenceCrossingOfExactTuple(crossing)
+	if !ok {
+		t.Fatalf("sequenceCrossingOfExactTuple declined an exact 3-element tuple")
+	}
+	if !converted.SeqDenseKnown || !converted.SeqDense {
+		t.Fatalf("converted = %+v, want SeqDenseKnown && SeqDense", converted)
+	}
+}
+
+func TestSequenceCrossingOfKindList_ConvertedWindowCarriesSeqDense(t *testing.T) {
+	items := []abstractdomain.AbstractValue{
+		abstractdomain.KnownSet(
+			refinementsets.MakeRefinedSet(refinementsets.AtLeast(-1), refinementsets.AtMost(1)),
+			nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
+		abstractdomain.KnownValues([]float64{-0.3}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+		abstractdomain.KnownValues([]float64{0.2}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+	}
+	crossing := abstractdomain.KnownList(items, abstractdomain.TrustProved)
+	converted, ok := sequenceCrossingOfKindList(crossing)
+	if !ok {
+		t.Fatalf("sequenceCrossingOfKindList declined a list of scalar-shaped slots")
+	}
+	if !converted.SeqDenseKnown || !converted.SeqDense {
+		t.Fatalf("converted = %+v, want SeqDenseKnown && SeqDense", converted)
+	}
+}
+
+// TestInBoundsElementOf_ExactTupleCrossingDropsTheAbsenceWrapper pins the
+// consumer side for sequenceCrossingOfExactTuple's dense mark: an in-bounds
+// read of the converted window determines the bare element set outright,
+// mirroring TestMapProductLengthFloor_IndexZeroReadIsDetermined's own
+// MapOutcome pin (map_product_length_floor_test.go) but built directly from
+// the converter rather than through a full .map() pipeline.
+func TestInBoundsElementOf_ExactTupleCrossingDropsTheAbsenceWrapper(t *testing.T) {
+	p := entryEnvTestProgram(t, "function f(i: number) { const xs = 0; xs[i]; }\n")
+	node := elementAccessNodeOf(t, p, "f")
+	ctx := elementAccessAbsentFlavorContext(p, nil)
+	env := NewEnv()
+	crossing := abstractdomain.KnownValues([]float64{0.5, -0.3, 0.2}, abstractdomain.PrimitiveArray, abstractdomain.TrustProved)
+	receiver, ok := sequenceCrossingOfExactTuple(crossing)
+	if !ok {
+		t.Fatalf("sequenceCrossingOfExactTuple declined an exact 3-element tuple")
+	}
+	index := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	got := InBoundsElementOf(InBoundsElementOfParams{Ctx: ctx, Env: env, Expression: node, Receiver: receiver, Index: index})
+	if got == nil {
+		t.Fatalf("InBoundsElementOf(exact-tuple crossing, in bounds) = nil, want a determined result")
+	}
+	if got.Kind == abstractdomain.KindPossiblyUndefined {
+		t.Errorf("got = %+v, want the bare element with no absence wrapper — the source tuple is hole-free by construction", *got)
+	}
+}
+
+// TestInBoundsElementOf_KindListCrossingDropsTheAbsenceWrapper is the same
+// consumer-side pin for sequenceCrossingOfKindList's dense mark.
+func TestInBoundsElementOf_KindListCrossingDropsTheAbsenceWrapper(t *testing.T) {
+	p := entryEnvTestProgram(t, "function f(i: number) { const xs = 0; xs[i]; }\n")
+	node := elementAccessNodeOf(t, p, "f")
+	ctx := elementAccessAbsentFlavorContext(p, nil)
+	env := NewEnv()
+	items := []abstractdomain.AbstractValue{
+		abstractdomain.KnownSet(
+			refinementsets.MakeRefinedSet(refinementsets.AtLeast(-1), refinementsets.AtMost(1)),
+			nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
+		abstractdomain.KnownValues([]float64{-0.3}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+		abstractdomain.KnownValues([]float64{0.2}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+	}
+	crossing := abstractdomain.KnownList(items, abstractdomain.TrustProved)
+	receiver, ok := sequenceCrossingOfKindList(crossing)
+	if !ok {
+		t.Fatalf("sequenceCrossingOfKindList declined a list of scalar-shaped slots")
+	}
+	index := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	got := InBoundsElementOf(InBoundsElementOfParams{Ctx: ctx, Env: env, Expression: node, Receiver: receiver, Index: index})
+	if got == nil {
+		t.Fatalf("InBoundsElementOf(KindList crossing, in bounds) = nil, want a determined result")
+	}
+	if got.Kind == abstractdomain.KindPossiblyUndefined {
+		t.Errorf("got = %+v, want the bare element with no absence wrapper — the source list is hole-free by construction", *got)
+	}
+}
+
 /* ── the bare-sort declared return, at a recognized crossing ──────── */
 //
 // ISSUES.md's own Python-side finding: "loop blockers unnamed when
