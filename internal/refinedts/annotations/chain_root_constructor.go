@@ -243,13 +243,31 @@ func RootConstructor(params RootConstructorParams) *Compiled {
 		absent := false
 		unread := false
 		var sets []refinementsets.RefinedSet
+		// allNumericLiterals tracks whether EVERY present member so far
+		// is a bare `z.literal(<number>)` -- the one SORT the checker
+		// can still tell apart at this point (a compiled oneOf singleton
+		// no longer carries whether it came from a number or a
+		// single-codepoint string). Only members of this one sort
+		// qualify for the flat oneOf merge below; a string literal, a
+		// window, or any other member turns this false and the
+		// nested-union spelling (matching a mixed z.literal/string
+		// union, and matching every string-literal union, which never
+		// merges -- surface.rs's own string_literal_set never flattens
+		// either) stays exactly as built.
+		allNumericLiterals := true
 		for _, member := range args[0].AsArrayLiteralExpression().Elements.Nodes {
 			if ast.IsCallExpression(member) && ast.IsPropertyAccessExpression(member.AsCallExpression().Expression) {
-				accessName := member.AsCallExpression().Expression.AsPropertyAccessExpression().Name().Text()
+				access := member.AsCallExpression().Expression.AsPropertyAccessExpression()
+				accessName := access.Name().Text()
 				if accessName == "null" || accessName == "undefined" || accessName == "void" {
 					absent = true
 					continue
 				}
+				if !(accessName == "literal" && isNumericLiteralCall(p, member.AsCallExpression())) {
+					allNumericLiterals = false
+				}
+			} else {
+				allNumericLiterals = false
 			}
 			compiled := CompileAnnotation(p, member, registry)
 			if IsUnsupported(compiled) {
@@ -262,6 +280,15 @@ func RootConstructor(params RootConstructorParams) *Compiled {
 		}
 		if len(sets) == 0 {
 			return unsupportedf(at, "z.union takes at least one present member")
+		}
+		// a union of ONLY numeric z.literal members is one flat oneOf --
+		// matching Literal[1, 2, 3]'s own one_of([1,2,3]) reading
+		// (surface.rs's literal_alias_set); every other member mix keeps
+		// the nested Union tree its own arms already denote correctly.
+		if allNumericLiterals && len(sets) > 1 {
+			if merged, ok := refinementsets.MergeScalarOneOfArms(sets); ok {
+				return &Compiled{Annotation: &Annotation{Set: setPtr(merged), Absent: absent, Unread: unread}}
+			}
 		}
 		set := sets[0]
 		for _, member := range sets[1:] {
@@ -366,4 +393,14 @@ func oneArg(args []*ast.Node) *ast.Node {
 		return nil
 	}
 	return args[0]
+}
+
+// isNumericLiteralCall is whether a `z.literal(...)` call's own sole
+// argument reads as a NUMBER (oneNumberArg's own reading, not a
+// string) -- the union case's own sort test, kept beside the
+// "literal" case's identical number/string branch above so both read
+// the argument the same way.
+func isNumericLiteralCall(p *program.CheckerProgram, call *ast.CallExpression) bool {
+	_, ok := oneNumberArg(p, call.Arguments.Nodes)
+	return ok
 }

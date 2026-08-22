@@ -109,3 +109,51 @@ func TestCanonicalScalarForms_MixedDirectionBoundsUntouched(t *testing.T) {
 		t.Errorf("CanonicalScalarForms(atLeast(3) ∧ atMost(7) ∧ integer) = %+v, want unchanged %+v", canon, set)
 	}
 }
+
+// three bare oneOf singletons merge to one flat oneOf over every
+// member -- the numeric-literal-union shape (z.literal(1) ∪
+// z.literal(2) ∪ z.literal(3)).
+func TestMergeScalarOneOfArms_SingletonArmsMergeToOneOneOf(t *testing.T) {
+	arms := []RefinedSet{
+		MakeRefinedSet(OneOf([]float64{1})),
+		MakeRefinedSet(OneOf([]float64{2})),
+		MakeRefinedSet(OneOf([]float64{3})),
+	}
+	merged, ok := MergeScalarOneOfArms(arms)
+	if !ok {
+		t.Fatalf("MergeScalarOneOfArms(singletons) ok = false, want true")
+	}
+	want := MakeRefinedSet(OneOf([]float64{1, 2, 3}))
+	if !sameSetJSON(merged, want) {
+		t.Errorf("MergeScalarOneOfArms(singletons) = %+v, want %+v", merged, want)
+	}
+}
+
+// an arm that is not a bare single-form oneOf (a window) declines the
+// whole merge -- the caller falls back to the nested union spelling.
+func TestMergeScalarOneOfArms_ANonOneOfArmDeclines(t *testing.T) {
+	arms := []RefinedSet{
+		MakeRefinedSet(OneOf([]float64{1})),
+		MakeRefinedSet(AtLeast(0)),
+	}
+	if _, ok := MergeScalarOneOfArms(arms); ok {
+		t.Errorf("MergeScalarOneOfArms(oneOf, atLeast) ok = true, want false")
+	}
+}
+
+// a multi-member oneOf arm still merges cleanly (every member folds
+// into the one flat list) -- the merge is not singleton-only.
+func TestMergeScalarOneOfArms_AMultiMemberArmMergesToo(t *testing.T) {
+	arms := []RefinedSet{
+		MakeRefinedSet(OneOf([]float64{1, 2})),
+		MakeRefinedSet(OneOf([]float64{3})),
+	}
+	merged, ok := MergeScalarOneOfArms(arms)
+	if !ok {
+		t.Fatalf("MergeScalarOneOfArms ok = false, want true")
+	}
+	want := MakeRefinedSet(OneOf([]float64{1, 2, 3}))
+	if !sameSetJSON(merged, want) {
+		t.Errorf("MergeScalarOneOfArms = %+v, want %+v", merged, want)
+	}
+}

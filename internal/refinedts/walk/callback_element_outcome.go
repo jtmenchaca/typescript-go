@@ -111,7 +111,24 @@ func MapOutcome(walk *CallbackWalk, method string) abstractdomain.AbstractValue 
 		} else {
 			built = refinementsets.Repetition(outSet, window.Lo, window.Hi)
 		}
-		return finish(abstractdomain.KnownSet(built, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+		result := abstractdomain.KnownSet(built, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
+		// map is DENSE at every counted position: sec-array.prototype.map
+		// step 6.a runs CreateDataPropertyOrThrow at index k only where
+		// kPresent holds, but the receiver here is a `window`-shaped
+		// KindSet repetition — a tuple-layer MEMBERSHIP claim, the one
+		// shape this checker has for a tracked array that is not
+		// KindArrayHoles, and the checker attaches no "may hold a hole"
+		// caveat to that shape at any of its own builders (a hole-
+		// admitting array is always the wholly separate KindArrayHoles
+		// kind instead). So every counted position map's callback
+		// actually ran over WAS present, and CreateDataPropertyOrThrow
+		// then writes that same position in the result — the mapped
+		// array is dense wherever the receiver's own repetition window
+		// counts it.
+		if window != nil {
+			result = abstractdomain.KnownSetDense(result)
+		}
+		return finish(result)
 	}
 	// an output the tuple layer cannot hold — the callback answered a
 	// record or a class instance — builds the OBJECT-STAR instead: map

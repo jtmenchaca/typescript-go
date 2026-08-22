@@ -68,6 +68,88 @@ func TestEffectLastIndexOf_RidesTheSameSeqNumRowAsIndexOf(t *testing.T) {
 	}
 }
 
+func TestEffectCharCodeAt_ServesTheFixedCodeUnitWindowWithNaN(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	stmts := numericStringMethodLowered(t, kernel, `out = s.charCodeAt(1);`)
+	if stmts[0].Effect.Kind != kernelbridge.LoopEffectSeqNum {
+		t.Fatalf("effect kind = %q, want %q", stmts[0].Effect.Kind, kernelbridge.LoopEffectSeqNum)
+	}
+	if stmts[0].Effect.Op != kernelbridge.LoopOpCharCodeAt {
+		t.Fatalf("effect op = %q, want %q", stmts[0].Effect.Op, kernelbridge.LoopOpCharCodeAt)
+	}
+	exit := kernel.Walk(
+		[]kernelbridge.KnownStateWire{
+			{Set: refinementsets.StringTuple("abc")},
+			{Top: true},
+		},
+		stmts,
+	)
+	out := exit[1]
+	if out.Top {
+		t.Fatalf("out.Top = true, want false")
+	}
+	if !out.Nan {
+		t.Errorf("out.Nan = false, want true — an out-of-range call answers NaN")
+	}
+	set := loweringSetOf(t, out)
+	if !kernel.Member(set, []float64{0}) {
+		t.Errorf("member(out, [0]) = false, want true — the code-unit floor")
+	}
+	if !kernel.Member(set, []float64{0xFFFF}) {
+		t.Errorf("member(out, [0xFFFF]) = false, want true — the code-unit ceiling")
+	}
+	if kernel.Member(set, []float64{0x10000}) {
+		t.Errorf("member(out, [0x10000]) = true, want false — past the UTF-16 code-unit range")
+	}
+}
+
+func TestEffectCodePointAt_ServesTheFixedScalarWindowOrAbsent(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	stmts := numericStringMethodLowered(t, kernel, `out = s.codePointAt(1);`)
+	if stmts[0].Effect.Kind != kernelbridge.LoopEffectOrAbsent {
+		t.Fatalf("effect kind = %q, want %q — an out-of-range call answers undefined, not NaN", stmts[0].Effect.Kind, kernelbridge.LoopEffectOrAbsent)
+	}
+	inner := stmts[0].Effect.A
+	if inner == nil || inner.Kind != kernelbridge.LoopEffectSeqNum {
+		t.Fatalf("inner effect = %+v, want a seqNum wrapping", inner)
+	}
+	if inner.Op != kernelbridge.LoopOpCodePointAt {
+		t.Fatalf("inner op = %q, want %q", inner.Op, kernelbridge.LoopOpCodePointAt)
+	}
+	exit := kernel.Walk(
+		[]kernelbridge.KnownStateWire{
+			{Set: refinementsets.StringTuple("abc")},
+			{Top: true},
+		},
+		stmts,
+	)
+	out := exit[1]
+	if out.Top {
+		t.Fatalf("out.Top = true, want false")
+	}
+	if !out.Undef {
+		t.Errorf("out.Undef = false, want true — an out-of-range call answers undefined")
+	}
+	set := loweringSetOf(t, out)
+	if !kernel.Member(set, []float64{0}) {
+		t.Errorf("member(out, [0]) = false, want true — the scalar floor")
+	}
+	if !kernel.Member(set, []float64{0x10FFFF}) {
+		t.Errorf("member(out, [0x10FFFF]) = false, want true — the scalar ceiling")
+	}
+	if kernel.Member(set, []float64{0x110000}) {
+		t.Errorf("member(out, [0x110000]) = true, want false — past the Unicode scalar range")
+	}
+}
+
+func TestEffectCharCodeAt_ATwoArgumentCallDeclines(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	stmts := numericStringMethodLowered(t, kernel, `out = s.charCodeAt(1, 2);`)
+	if stmts[0].Effect.Kind != kernelbridge.LoopEffectUnknown {
+		t.Fatalf("effect kind = %q, want %q — charCodeAt takes exactly one argument", stmts[0].Effect.Kind, kernelbridge.LoopEffectUnknown)
+	}
+}
+
 func TestEffectLastIndexOf_ATwoArgumentCallDeclines(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	// a position argument shifts the search; this reader has not read

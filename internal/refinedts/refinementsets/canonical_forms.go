@@ -32,6 +32,30 @@ package refinementsets
 
 import "math"
 
+// MergeScalarOneOfArms is the flat-spelling equality for a union of
+// bare scalar singletons: `oneOf(A) ∪ oneOf(B) ∪ ...` is exactly
+// `oneOf(A ∪ B ∪ ...)`, one form instead of a nested union tree.
+// ok=false the moment any arm is not EXACTLY a single-form oneOf set
+// (a window, a pattern, a nested union, a multi-member oneOf already
+// merged elsewhere) — the caller decides which arms are eligible
+// (SORT membership: a numeric z.literal's singleton oneOf and a
+// single-codepoint string literal's singleton oneOf are the same
+// wire shape and this helper cannot and does not tell them apart;
+// the caller passes only arms it already knows share one sort).
+func MergeScalarOneOfArms(arms []RefinedSet) (RefinedSet, bool) {
+	var merged []float64
+	for _, arm := range arms {
+		if len(arm.Forms) != 1 || arm.Forms[0].Form != FormOneOf {
+			return RefinedSet{}, false
+		}
+		merged = append(merged, arm.Forms[0].W...)
+	}
+	if len(merged) == 0 {
+		return RefinedSet{}, false
+	}
+	return MakeRefinedSet(OneOf(merged)), true
+}
+
 // CanonicalScalarForms rewrites a set's spelling by the equalities
 // above, recursively through union arms. The members are untouched.
 func CanonicalScalarForms(set RefinedSet) RefinedSet {

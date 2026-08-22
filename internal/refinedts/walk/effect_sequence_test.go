@@ -177,6 +177,136 @@ func TestEffectTemplateSubstitution_AnUnreadableSpanStillDeclinesTheWholeTemplat
 	}
 }
 
+func TestEffectRepeatElem_ARidesTheDrawnFromRowWithNoCeiling(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	stmts := sequenceLowered(t, kernel, []string{"s", "out"},
+		[]BindingKind{BindingKindString, BindingKindString}, `out = s.repeat(3);`)
+	if stmts[0].Effect.Kind != kernelbridge.LoopEffectSeqUnary {
+		t.Fatalf("effect kind = %q, want %q", stmts[0].Effect.Kind, kernelbridge.LoopEffectSeqUnary)
+	}
+	if stmts[0].Effect.Op != kernelbridge.LoopOpRepeatElem {
+		t.Fatalf("effect op = %q, want %q", stmts[0].Effect.Op, kernelbridge.LoopOpRepeatElem)
+	}
+	ceiling := 2
+	exit := kernel.Walk(
+		[]kernelbridge.KnownStateWire{
+			{Set: refinementsets.MakeRefinedSet(refinementsets.RepeatOf(
+				refinementsets.MakeRefinedSet(refinementsets.OneOf(loweringCodePoints("a"))),
+				0, &ceiling))},
+			{Top: true},
+		},
+		stmts,
+	)
+	out := exit[1]
+	if out.Top {
+		t.Fatalf("out.Top = true, want false")
+	}
+	set := loweringSetOf(t, out)
+	if !kernel.Member(set, loweringCodePoints("")) {
+		t.Errorf(`member(out, "") = false, want true — the drawn-from claim keeps the floor at 0`)
+	}
+	// the ceiling is DROPPED entirely (LoopOpRepeatElem's own doc): a
+	// word far longer than 3 copies of a 2-scalar-ceiling receiver is
+	// still admitted, since no length bound rides this row at all
+	if !kernel.Member(set, loweringCodePoints("aaaaaaaaaa")) {
+		t.Errorf(`member(out, "aaaaaaaaaa") = false, want true — no ceiling is stated`)
+	}
+	if kernel.Member(set, loweringCodePoints("b")) {
+		t.Errorf(`member(out, "b") = true, want false — "b" is outside the receiver's alphabet`)
+	}
+}
+
+func TestEffectRepeatElem_ANegativeCountLiteralDeclines(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	stmts, ok := LowerStatements(&LoweringContext{
+		Bindings: []string{"s", "out"},
+		Sorts:    []BindingKind{BindingKindString, BindingKindString},
+		Narrow:   kernel.Narrow,
+	}, loweringParse(t, `out = s.repeat(-1);`))
+	if !ok {
+		t.Fatalf("LowerStatements ok = false, want true (the havoc floor still lowers)")
+	}
+	sawTarget := false
+	for _, stmt := range stmts {
+		if stmt.Kind == kernelbridge.IrStatementAssign && stmt.Target == 1 &&
+			stmt.Effect.Kind == kernelbridge.LoopEffectUnknown {
+			sawTarget = true
+		}
+	}
+	if !sawTarget {
+		t.Errorf("out (slot 1) was not havocked by the negative-count decline — RangeError makes the drawn-from claim unsound there")
+	}
+}
+
+func TestEffectPadUnion_OverARepetitionReceiverRidesTheUnionAlphabetRow(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	stmts := sequenceLowered(t, kernel, []string{"s", "out"},
+		[]BindingKind{BindingKindString, BindingKindString}, `out = s.padStart(4, "0");`)
+	if stmts[0].Effect.Kind != kernelbridge.LoopEffectSeqUnary {
+		t.Fatalf("effect kind = %q, want %q", stmts[0].Effect.Kind, kernelbridge.LoopEffectSeqUnary)
+	}
+	if stmts[0].Effect.Op != kernelbridge.LoopOpPadUnion {
+		t.Fatalf("effect op = %q, want %q", stmts[0].Effect.Op, kernelbridge.LoopOpPadUnion)
+	}
+	three := 3
+	exit := kernel.Walk(
+		[]kernelbridge.KnownStateWire{
+			{Set: refinementsets.Repetition(refinementsets.Digits, 1, &three)},
+			{Top: true},
+		},
+		stmts,
+	)
+	out := exit[1]
+	if out.Top {
+		t.Fatalf("out.Top = true, want false")
+	}
+	set := loweringSetOf(t, out)
+	// the union alphabet admits the fill scalar "0" beside the receiver's
+	// own Digits — a result built entirely from "0" is admitted, which
+	// the receiver's OWN alphabet already covers (Digits includes "0"),
+	// so this also confirms the floor survived unchanged
+	if !kernel.Member(set, loweringCodePoints("0")) {
+		t.Errorf(`member(out, "0") = false, want true — the receiver's floor of 1 survives`)
+	}
+	if kernel.Member(set, loweringCodePoints("")) {
+		t.Errorf(`member(out, "") = true, want false — a pad never shortens below the receiver's own floor`)
+	}
+	// NO ceiling rides this row — a word far longer than any pad to 4
+	// could produce is still admitted, since padUnionForm drops hi
+	// entirely
+	if !kernel.Member(set, loweringCodePoints("0000000000")) {
+		t.Errorf(`member(out, "0000000000") = false, want true — no ceiling is stated`)
+	}
+	if kernel.Member(set, loweringCodePoints("x")) {
+		t.Errorf(`member(out, "x") = true, want false — "x" is outside both the receiver's and the fill's alphabet`)
+	}
+}
+
+func TestEffectPadUnion_ANonExactFillArgumentDeclines(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	// the fill text must be exactly known — the kernel needs its
+	// scalar SET as an operand, and a tracked (non-literal) fill has
+	// no set this reader can read syntactically
+	stmts, ok := LowerStatements(&LoweringContext{
+		Bindings: []string{"s", "pad", "out"},
+		Sorts:    []BindingKind{BindingKindString, BindingKindString, BindingKindString},
+		Narrow:   kernel.Narrow,
+	}, loweringParse(t, `out = s.padStart(4, pad);`))
+	if !ok {
+		t.Fatalf("LowerStatements ok = false, want true (the havoc floor still lowers)")
+	}
+	sawTarget := false
+	for _, stmt := range stmts {
+		if stmt.Kind == kernelbridge.IrStatementAssign && stmt.Target == 2 &&
+			stmt.Effect.Kind == kernelbridge.LoopEffectUnknown {
+			sawTarget = true
+		}
+	}
+	if !sawTarget {
+		t.Errorf("out (slot 2) was not havocked by the non-exact-fill decline")
+	}
+}
+
 func TestEffectTrimAliases_TrimLeftRidesTheTrimStartRow(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	left := sequenceLowered(t, kernel, []string{"s", "out"},

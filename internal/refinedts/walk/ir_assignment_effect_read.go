@@ -131,6 +131,13 @@ func EffectOf(context *LoweringContext, e *ast.Node) (kernelbridge.LoopEffect, b
 			if held, ok := stringIndexOfEffect(context, node); ok {
 				return held, true
 			}
+			// `s.charCodeAt(i)` / `s.codePointAt(i)` — a NUMBER off a word
+			// receiver, each its own kernel row (see
+			// stringCodeUnitEffect's doc). Ahead of the hoist for the same
+			// reason as indexOf.
+			if held, ok := stringCodeUnitEffect(context, node); ok {
+				return held, true
+			}
 			// `s.includes(needle)` / `s.startsWith(needle)` /
 			// `s.endsWith(needle)` — a BOOLEAN off a word receiver: the
 			// two-value set, exactly as a comparison's. Ahead of the
@@ -256,6 +263,80 @@ func stringIndexOfEffect(context *LoweringContext, node *ast.Node) (kernelbridge
 		Kind: kernelbridge.LoopEffectSeqNum,
 		Op:   kernelbridge.LoopOpIndexOf,
 		A:    &receiver,
+	}, true
+}
+
+// stringCodeUnitEffect reads `s.charCodeAt(i)` OR `s.codePointAt(i)` over a
+// WORD receiver and answers the kernel's own numeric-from-sequence row for
+// each — LoopOpCharCodeAt / LoopOpCodePointAt, neither depending on the
+// receiver's own set (the window is fixed by the language's declaration,
+// bmpCap/codepointMax): the kernel keeps stating the same claim whatever the
+// receiver's shape.
+//
+// charCodeAt's out-of-range outcome IS a NaN (sec-string.prototype.
+// charcodeat step 4), which the kernel's own written state spells directly
+// by raising the NaN flag unconditionally — so the bare LoopEffectSeqNum
+// effect already carries the full claim (a code unit in [0, 0xFFFF], or
+// NaN, never absent, never thrown).
+//
+// codePointAt's out-of-range outcome is the undefined value instead
+// (sec-string.prototype.codepointat) — an ABSENCE the seqNum family's flags
+// cannot spell, left to the caller exactly as an unguarded index read is
+// (LoopEffectOrAbsent's own doc). This reader wraps codePointAt's effect in
+// LoopEffectOrAbsent to state that half; charCodeAt is sent bare.
+//
+// The INDEX argument is not sent, the same way indexOf's needle is not: the
+// window holds for every index, an in-range one and an out-of-range one
+// alike (the kernel's own arm reads only whether the receiver is a
+// sequence, never the index value). What must still hold is that evaluating
+// the index moves nothing and that exactly one argument is given — a second
+// argument is not a shape either method's clause admits, so it declines
+// rather than guess.
+func stringCodeUnitEffect(context *LoweringContext, node *ast.Node) (kernelbridge.LoopEffect, bool) {
+	head := Unwrapped(node)
+	if !ast.IsCallExpression(head) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	call := head.AsCallExpression()
+	if !ast.IsPropertyAccessExpression(call.Expression) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	access := call.Expression.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if !ast.IsIdentifier(access.Name()) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	name := access.Name().Text()
+	if name != "charCodeAt" && name != "codePointAt" {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if ast.IsSpreadElement(call.Arguments.Nodes[0]) || !writeAndCallFree(call.Arguments.Nodes[0]) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	receiver, receiverOk := SequenceEffectOf(context, access.Expression)
+	if !receiverOk {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if name == "charCodeAt" {
+		return kernelbridge.LoopEffect{
+			Kind: kernelbridge.LoopEffectSeqNum,
+			Op:   kernelbridge.LoopOpCharCodeAt,
+			A:    &receiver,
+		}, true
+	}
+	inner := kernelbridge.LoopEffect{
+		Kind: kernelbridge.LoopEffectSeqNum,
+		Op:   kernelbridge.LoopOpCodePointAt,
+		A:    &receiver,
+	}
+	return kernelbridge.LoopEffect{
+		Kind: kernelbridge.LoopEffectOrAbsent,
+		A:    &inner,
 	}, true
 }
 

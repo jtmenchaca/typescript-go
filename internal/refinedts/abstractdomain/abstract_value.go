@@ -140,6 +140,35 @@ type AbstractValue struct {
 	Measures    *Measures
 	NaNElements bool
 
+	// "set", REPETITION-SHAPED only (refinementsets.AsRepetition succeeds
+	// on Set): SeqDense and SeqDenseKnown are KindArrayHoles's Dense/
+	// DenseKnown pair, carried on the one other array shape that needed
+	// it. A Repetition states MEMBERSHIP-IF-PRESENT over its counted
+	// window ("every element lies in this set, count between lo and
+	// hi") and nothing about which of those counted positions are OWN
+	// PROPERTIES versus holes — the same gap KindArrayHoles's own Dense
+	// field closes for the all-holes shape, needed here because a
+	// Repetition arriving from an untraced source (a parameter, a
+	// summary) carries no density proof, while one a constructor BUILT
+	// by writing every counted index (MapOutcome's per-index
+	// CreateDataPropertyOrThrow, sec-array.prototype.map) does.
+	// InBoundsElementOf's proved-in-bounds arm reads SeqDenseKnown &&
+	// SeqDense to skip the PossiblyAbsent wrap it otherwise always
+	// applies at that arm — in bounds is a claim about the LENGTH,
+	// density a claim about OWN PROPERTIES, and a plain Repetition
+	// states only the former.
+	//
+	// SeqDenseKnown false (the zero value) means "density not
+	// established" — every existing Repetition-building call site
+	// leaves both fields at their zero value and keeps today's
+	// PossiblyAbsent wrap exactly as before. SeqDenseKnown true,
+	// SeqDense true is the proved-dense fact; SeqDenseKnown true,
+	// SeqDense false would be proved-sparse (not produced by any
+	// constructor yet, but a name a reader can check without assuming
+	// the pair is boolean-only).
+	SeqDense      bool
+	SeqDenseKnown bool
+
 	// "object": rooted-keys record, stated annotation (blocked — see
 	// package doc), completeness, variants, bareProto, maybeArray.
 	Keys       []ObjectKey
@@ -515,6 +544,34 @@ func KnownSet(set refinementsets.RefinedSet, temporal *refinementsets.TemporalAn
 	}
 	base.Grade = grade
 	return base
+}
+
+// KnownSetDense marks an ALREADY-BUILT KindSet value's repetition
+// window as PROVED DENSE — every counted position is an own property,
+// never a hole — the same fact KindArrayHoles's Dense/DenseKnown pair
+// states for the all-holes shape. A new wrapper constructor rather
+// than a widened KnownSet signature, per the package's convention
+// (PossiblyAbsent beside PossiblyUndefined, KnownWithMeasures beside
+// KnownSet): every existing KnownSet call site keeps compiling and
+// keeps SeqDenseKnown=false unchanged, and only a caller that has
+// actually proved density — a constructor whose own algorithm writes
+// every counted index — reaches for this one.
+//
+// A no-op on anything that is not a set-kind repetition (kindTag !=
+// none, or Set does not read back as a repetition/star at all): dense
+// is a fact about the counted window, and there is no window to mark
+// dense where AsRepetition refuses.
+func KnownSetDense(known AbstractValue) AbstractValue {
+	if known.Kind != KindSet || known.SetKindTag != SetKindTagNone {
+		return known
+	}
+	if _, ok := refinementsets.AsRepetition(known.Set); !ok {
+		return known
+	}
+	out := known
+	out.SeqDense = true
+	out.SeqDenseKnown = true
+	return out
 }
 
 // KnownWithMeasures is knownWithMeasures in the TS source: the MEET of

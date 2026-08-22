@@ -48,7 +48,20 @@ func NarrowKnown(k AbstractValue, forms []refinementsets.Refinement) AbstractVal
 		return k
 	case KindSet:
 		combined := append(append([]refinementsets.Refinement{}, k.Set.Forms...), forms...)
-		return narrowedSet(refinementsets.FoldRayForms(combined), TrustLevelOf(k))
+		narrowed := narrowedSet(refinementsets.FoldRayForms(combined), TrustLevelOf(k))
+		// a guard's forms tighten what is known about the SAME runtime
+		// value -- narrowing never changes which value is under
+		// discussion, only which claims about it are pinned down -- so a
+		// density proof k already carried survives onto the narrowed
+		// (equal-or-tighter) window, the same "same value" reasoning
+		// MeetKnown's own metRepetition arm applies. KnownSetDense is a
+		// no-op where the fold left no repetition-shaped window to mark
+		// (narrowed.Kind != KindSet, e.g. the exact-scalar-values arm
+		// above, or a shape AsRepetition no longer reads back).
+		if k.SeqDenseKnown && k.SeqDense {
+			narrowed = KnownSetDense(narrowed)
+		}
+		return narrowed
 	case KindVariable:
 		// a guard on a T-typed value: what is known is bound ∩ forms
 		// (the variable identity does not survive a narrowing)

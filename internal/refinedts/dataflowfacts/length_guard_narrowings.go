@@ -126,12 +126,22 @@ func LengthGuardNarrowings(
 		}
 		// measures are facts about the VALUE, so the tightened
 		// knowledge keeps them
+		tightenedKnown := abstractdomain.KnownWithMeasures(
+			abstractdomain.KnownSet(tightened, nil, abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(heldValue), abstractdomain.TrustSpec), abstractdomain.SetKindTagNone),
+			heldValue.Measures,
+		)
+		// a length guard narrows the SAME array `xs` the held value
+		// already named -- `xs.length >= k` says more about the count of
+		// that one runtime value, never a different value -- so a density
+		// proof heldValue already carried (SeqDenseKnown && SeqDense) is
+		// still a true fact of the narrower window: every position the
+		// wider window proved present, the narrower one still counts.
+		if heldValue.SeqDenseKnown && heldValue.SeqDense {
+			tightenedKnown = abstractdomain.KnownSetDense(tightenedKnown)
+		}
 		rows = append(rows, LengthGuardNarrowing{
 			Binding: side.Binding,
-			Known: abstractdomain.KnownWithMeasures(
-				abstractdomain.KnownSet(tightened, nil, abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(heldValue), abstractdomain.TrustSpec), abstractdomain.SetKindTagNone),
-				heldValue.Measures,
-			),
+			Known:   tightenedKnown,
 		})
 	}
 

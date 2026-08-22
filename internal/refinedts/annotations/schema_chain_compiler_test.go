@@ -174,3 +174,79 @@ func TestCompileAnnotation_StringLiteralAndEnumCompileToCodepointTuples(t *testi
 		t.Errorf("z.enum forms[0] = %v, want union", derefSet(two.Annotation.Set).Forms[0].Form)
 	}
 }
+
+// a union of ONLY numeric z.literal members collapses to one flat
+// oneOf -- matching Python's Literal[1, 2, 3] reading (surface.rs's
+// literal_alias_set, one one_of([1,2,3]) form), never the nested
+// union(union(oneOf[1], oneOf[2]), oneOf[3]) each pairwise Union call
+// would otherwise leave stacked (chain_root_constructor.go's "union"
+// case, refinementsets.MergeScalarOneOfArms).
+func TestCompileAnnotation_NumericLiteralUnionCollapsesToOneFlatOneOf(t *testing.T) {
+	c := compileTopLevel(t, "const X = z.union([z.literal(1), z.literal(2), z.literal(3)]);\n", "X")
+	if IsUnsupported(c) {
+		t.Fatalf("unexpected unsupported: %s", c.Unsupported.Unsupported)
+	}
+	set := derefSet(c.Annotation.Set)
+	if len(set.Forms) != 1 || set.Forms[0].Form != refinementsets.FormOneOf {
+		t.Fatalf("forms = %+v, want exactly one oneOf form", set.Forms)
+	}
+	if got := set.Forms[0].W; len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Errorf("oneOf members = %+v, want [1, 2, 3]", got)
+	}
+}
+
+// a string-literal union of single-codepoint members stays the
+// nested union of singleton tuples -- Python's own string_literal_set
+// never flattens a Literal["a", "b", ...] union either (surface.rs),
+// so this is not a case the merge collapses even though each arm's
+// compiled set is structurally a bare oneOf singleton exactly like
+// the numeric case above (the wire shapes coincide; the SORT does
+// not, and only the source call's own literal argument tells them
+// apart -- chain_root_constructor.go's isNumericLiteralCall).
+func TestCompileAnnotation_StringLiteralUnionStaysNested(t *testing.T) {
+	c := compileTopLevel(t, `const X = z.union([z.literal("a"), z.literal("b")]);`+"\n", "X")
+	if IsUnsupported(c) {
+		t.Fatalf("unexpected unsupported: %s", c.Unsupported.Unsupported)
+	}
+	set := derefSet(c.Annotation.Set)
+	if len(set.Forms) != 1 || set.Forms[0].Form != refinementsets.FormUnion {
+		t.Fatalf("forms = %+v, want a single union form (not merged)", set.Forms)
+	}
+}
+
+// a union mixing a numeric literal arm with a NON-literal arm (a
+// window) does not collapse -- the merge only fires when EVERY
+// present member is a bare numeric z.literal.
+func TestCompileAnnotation_MixedLiteralAndWindowUnionStaysNested(t *testing.T) {
+	c := compileTopLevel(t, "const X = z.union([z.literal(1), z.number().gte(0)]);\n", "X")
+	if IsUnsupported(c) {
+		t.Fatalf("unexpected unsupported: %s", c.Unsupported.Unsupported)
+	}
+	set := derefSet(c.Annotation.Set)
+	if len(set.Forms) != 1 || set.Forms[0].Form != refinementsets.FormUnion {
+		t.Fatalf("forms = %+v, want a single union form (not merged)", set.Forms)
+	}
+}
+
+// z.number().int().gte(0).lte(100).multipleOf(5) carries no redundant
+// unbounded ray beside the tighter atLeast(0) -- the numeric chain's
+// own CanonicalScalarForms call (chain_numeric_method.go's withForm)
+// folds it away exactly as the string chain's WithoutStringGround
+// drops its own redundant C* ground. Matching Python's
+// Annotated[int, Field(ge=0, le=100, multiple_of=5)] reading, which
+// never seeds the unbounded ray at all.
+func TestCompileAnnotation_NumericWindowDropsTheRedundantUnboundedRay(t *testing.T) {
+	c := compileTopLevel(t, "const X = z.number().int().gte(0).lte(100).multipleOf(5);\n", "X")
+	if IsUnsupported(c) {
+		t.Fatalf("unexpected unsupported: %s", c.Unsupported.Unsupported)
+	}
+	set := derefSet(c.Annotation.Set)
+	for _, f := range set.Forms {
+		if f.Form == refinementsets.FormAtLeast && f.A < -1e300 {
+			t.Errorf("forms = %+v, kept a redundant unbounded atLeast ray beside the tighter atLeast(0)", set.Forms)
+		}
+	}
+	if len(set.Forms) != 4 {
+		t.Errorf("forms = %+v, want exactly 4 (atLeast(0), atMost(100), integer, multipleOf(5))", set.Forms)
+	}
+}

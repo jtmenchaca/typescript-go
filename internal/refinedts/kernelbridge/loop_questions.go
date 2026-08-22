@@ -238,6 +238,28 @@ const (
 	// -- and {-1} u [0, +inf) with integrality when the receiver states
 	// no ceiling. Nothing gates it: the window holds for every needle.
 	LoopOpIndexOf LoopEffectOp = "seq.indexOf"
+	// LoopOpCharCodeAt is the numeric-from-sequence op for
+	// `s.charCodeAt(i)` (sec-string.prototype.charcodeat). Unlike
+	// indexOf's window, this one does NOT depend on the receiver's own
+	// set at all -- it is fixed by the language's own declaration
+	// (bmpCap): every in-range answer is a UTF-16 code unit, an integer
+	// in [0, 0xFFFF]. The kernel raises the NaN flag on the WRITTEN
+	// STATE unconditionally rather than narrowing the window, since no
+	// receiver-side fact bounds whether a given call falls in range
+	// (evalSeqNum's `.charCodeAt` arm, set_functions/walk_sequences.lean)
+	// -- so this op alone, un-wrapped, already states the full claim:
+	// a code unit or NaN, never absent, never thrown.
+	LoopOpCharCodeAt LoopEffectOp = "seq.charCodeAt"
+	// LoopOpCodePointAt is charCodeAt's scalar-valued sibling for
+	// `s.codePointAt(i)` (sec-string.prototype.codepointat): every
+	// in-range answer is a scalar value, an integer in [0, 0x10FFFF],
+	// the same receiver-independent claim charCodeAt carries. Out of
+	// range the clause answers the undefined value rather than NaN --
+	// an ABSENCE this family's window cannot spell on its own flags, so
+	// the kernel leaves that half to the caller (evalSeqNum's
+	// `.codePointAt` arm) exactly as an unguarded index read does: send
+	// this op wrapped in LoopEffectOrAbsent, never bare.
+	LoopOpCodePointAt LoopEffectOp = "seq.codePointAt"
 	// LoopOpSliceBmp is `s.slice(...)` over a receiver whose alphabet the
 	// KERNEL proves astral-free. String.prototype.slice cuts at UTF-16
 	// code UNIT positions (sec-string.prototype.slice), so on an
@@ -412,6 +434,48 @@ const (
 	// (ClosureEscapesTrackedWrite names the boundary) -- exactly as any
 	// other escaping-closure call site is handled.
 	LoopOpReplaceSortThrowSafe LoopEffectOp = "seq.replaceSortThrow"
+	// LoopOpRepeatElem is `s.repeat(n)` (sec-string.prototype.repeat): n
+	// concatenated copies of the receiver. The claim is the SAME
+	// drawn-from closure the trims and split carry -- every result
+	// scalar already occurred in the receiver -- with the length
+	// CEILING dropped entirely rather than bounded by n, since n itself
+	// is not sent (`repeatElemForm`, theories/seq/repeat_elem.lean: the
+	// receiver's own alphabet survives, unbounded length). Nothing
+	// gates it: the closure holds for every receiver and every
+	// non-negative count, which is why the count argument does not
+	// ride the wire at all -- only the receiver, in A. A negative or
+	// infinite count THROWS rather than returning (RangeError,
+	// sec-string.prototype.repeat step 3/4), so the caller must
+	// establish the count non-negative and finite before sending this
+	// op; the row states nothing about the thrown shape.
+	LoopOpRepeatElem LoopEffectOp = "seq.repeatElem"
+	// LoopOpPadUnion is `s.padStart(n, pad)` / `s.padEnd(n, pad)`
+	// (sec-stringpad) over a receiver the kernel reads as a REPETITION
+	// shape (`Repeat A lo _`): the union-alphabet claim, `pad_union.lean`'s
+	// `padUnionForm` -- the result's alphabet becomes the receiver's
+	// scalars UNION the fill text's (every result scalar is drawn from
+	// one side or the other, since StringPad only ever concatenates
+	// fill text onto the receiver, never deletes from it), the FLOOR
+	// kept unchanged (a pad never shortens), and the CEILING dropped
+	// entirely -- no length-budget parameter rides this wire the way
+	// replaceUnion's Bump does, so the kernel states no ceiling rather
+	// than guess one from n.
+	//
+	// THE GATE is the receiver's own SET, which the kernel decides
+	// itself (padUnionForm matches only a Repeat form) -- the same
+	// shape-decided-kernel-side discipline LoopOpSliceBmp carries, not
+	// the adapter-vouched premise LoopOpReplaceUnionSafe needs. Send it
+	// on syntax alone; a receiver whose set is not Repeat-shaped costs
+	// the claim, never soundness (padUnionSet's own filterMap drops any
+	// non-Repeat form silently).
+	//
+	// The fill text rides in the effect's own PadSet field, the same
+	// operand shape LoopOpReplaceUnionSafe's ReplSet carries -- the
+	// kernel needs the fill's scalar set to STATE the union, and cannot
+	// see it any other way. Neither n nor which side (start/end) rides:
+	// the union-alphabet claim is symmetric in both, and n decides only
+	// the ceiling, which this row already leaves unstated.
+	LoopOpPadUnion LoopEffectOp = "seq.padUnion"
 )
 
 // LoopEffect is one binding's body effect, lowered for the kernel's
@@ -451,6 +515,15 @@ type LoopEffect struct {
 	// `replaceAll` rides.
 	ReplSet refinementsets.RefinedSet
 	Bump    int
+
+	// PadSet: LoopOpPadUnion only — the fill text's own scalar set. The
+	// kernel needs it to STATE the union claim (padUnionForm's `A ∪ B`),
+	// the same reason ReplSet exists for LoopOpReplaceUnionSafe — this
+	// is an OPERAND the kernel cannot see and cannot reconstruct from
+	// the receiver's set alone. No Bump twin: padUnionForm drops the
+	// ceiling entirely rather than reading a length budget off the
+	// wire.
+	PadSet refinementsets.RefinedSet
 }
 
 // AbsentConst is the state constant exactly `undefined` writes: the
@@ -535,10 +608,16 @@ func EffectWire(e LoopEffect) string {
 		return fmt.Sprintf(`{"concat":[%s,%s]}`, EffectWire(*e.A), EffectWire(*e.B))
 	case LoopEffectSeqUnary:
 		// the substitution row carries its two operands beside the name;
-		// every other sequence op writes the two-field shape it always did
+		// padUnion carries its one extra operand (the fill's scalar set,
+		// no length budget); every other sequence op writes the plain
+		// two-field shape it always did
 		if e.Op == LoopOpReplaceUnionSafe {
 			return fmt.Sprintf(`{"seqOp":"%s","replSet":%s,"bump":%d,"A":%s}`,
 				e.Op, EncodeSet(e.ReplSet), e.Bump, EffectWire(*e.A))
+		}
+		if e.Op == LoopOpPadUnion {
+			return fmt.Sprintf(`{"seqOp":"%s","padSet":%s,"A":%s}`,
+				e.Op, EncodeSet(e.PadSet), EffectWire(*e.A))
 		}
 		return fmt.Sprintf(`{"seqOp":"%s","A":%s}`, e.Op, EffectWire(*e.A))
 	case LoopEffectSeqNum:

@@ -3,7 +3,10 @@
 package walk
 
 import (
+	"math"
+
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -213,6 +216,28 @@ func sequenceEffectOf(context *LoweringContext, e *ast.Node, inSequence bool) (k
 		// replacement's scalars.
 		if substitution, ok := replaceUnionEffect(context, call); ok {
 			return substitution, true
+		}
+		// s.repeat(n) over a NON-exact sequence-readable receiver rides the
+		// kernel's drawn-from row unconditionally: the closure holds for
+		// every receiver and every non-negative, finite count, so the
+		// count itself is not read here (see LoopOpRepeatElem's doc). A
+		// negative or infinite count throws rather than returns
+		// (sec-string.prototype.repeat step 3/4), so this reader gates on
+		// the argument being a plain, non-negative numeric literal, and
+		// declines every other shape to the havoc floor rather than
+		// assert past a throw.
+		if repeated, ok := repeatElemEffect(context, call); ok {
+			return repeated, true
+		}
+		// s.padStart(n, pad) / s.padEnd(n, pad) over a receiver the kernel
+		// reads as a REPETITION shape: the union-alphabet claim
+		// LoopOpPadUnion states. The fill text must be exactly known here
+		// (padUnionEffect reads it as a sequence effect) since the kernel
+		// needs its scalar SET as an operand, not merely its sort; the
+		// target length n is not read at all -- the row states no
+		// ceiling.
+		if padded, ok := padUnionEffect(context, call); ok {
+			return padded, true
 		}
 		// slice carries ARGUMENTS (the cut positions), so it sits apart
 		// from the zero-argument methods above. The positions themselves
@@ -523,4 +548,98 @@ func stringConstructorCallOf(head *ast.Node) (*ast.Node, bool) {
 		return nil, false
 	}
 	return call.Arguments.Nodes[0], true
+}
+
+// repeatElemEffect reads `s.repeat(n)` over a sequence-readable receiver
+// and answers the kernel's LoopOpRepeatElem row — the drawn-from closure
+// with the length ceiling dropped entirely (see that op's own doc).
+//
+// The COUNT is read only far enough to establish that the call cannot
+// throw: sec-string.prototype.repeat steps 3-4 raise a RangeError for a
+// negative count or +Infinity, so this reader admits only a plain,
+// non-negative integer LITERAL for n — the one shape provably clear of
+// both throwing rows without evaluating anything. Any other count
+// expression (a variable, an arithmetic expression, a negative or
+// non-integer literal) declines to the havoc floor rather than assert
+// a claim across an unproven throw.
+func repeatElemEffect(context *LoweringContext, call *ast.CallExpression) (kernelbridge.LoopEffect, bool) {
+	if call.QuestionDotToken != nil || !ast.IsPropertyAccessExpression(call.Expression) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	access := call.Expression.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil || !ast.IsIdentifier(access.Name()) || access.Name().Text() != "repeat" {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+		return kernelbridge.LoopEffect{}, false
+	}
+	countNode := Unwrapped(call.Arguments.Nodes[0])
+	if countNode == nil || !ast.IsNumericLiteral(countNode) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	count := float64(jsnum.FromString(countNode.AsNumericLiteral().Text))
+	if count < 0 || count != math.Trunc(count) || math.IsInf(count, 0) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	receiver, receiverOk := sequenceEffectOf(context, access.Expression, true /*inSequence*/)
+	if !receiverOk {
+		return kernelbridge.LoopEffect{}, false
+	}
+	return kernelbridge.LoopEffect{
+		Kind: kernelbridge.LoopEffectSeqUnary,
+		Op:   kernelbridge.LoopOpRepeatElem,
+		A:    &receiver,
+	}, true
+}
+
+// padUnionEffect reads `s.padStart(n, pad)` / `s.padEnd(n, pad)` over a
+// sequence-readable receiver and answers the kernel's LoopOpPadUnion
+// row: the union-alphabet claim over the receiver and the fill text,
+// with the floor kept and the ceiling left unstated (see that op's own
+// doc).
+//
+// The FILL TEXT must be EXACTLY known here — the kernel needs its
+// scalar SET as an operand (PadSet), not merely its sort, the same
+// reason LoopOpReplaceUnionSafe's ReplSet is read syntactically rather
+// than through a slot. A one-argument call omits pad, whose default is
+// the single space " " (sec-stringpad step 1: "If fillString is
+// undefined, set fillString to the String value consisting solely of
+// the code unit 0x0020"). THE TARGET LENGTH n is not read at all: the
+// row states no ceiling, so nothing about n changes the claim, and the
+// gate the kernel itself decides (padUnionForm matches only a Repeat
+// receiver shape) is the only premise this row needs.
+func padUnionEffect(context *LoweringContext, call *ast.CallExpression) (kernelbridge.LoopEffect, bool) {
+	if call.QuestionDotToken != nil || !ast.IsPropertyAccessExpression(call.Expression) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	access := call.Expression.AsPropertyAccessExpression()
+	if access.QuestionDotToken != nil || !ast.IsIdentifier(access.Name()) {
+		return kernelbridge.LoopEffect{}, false
+	}
+	method := access.Name().Text()
+	if method != "padStart" && method != "padEnd" {
+		return kernelbridge.LoopEffect{}, false
+	}
+	if call.Arguments == nil || len(call.Arguments.Nodes) < 1 || len(call.Arguments.Nodes) > 2 {
+		return kernelbridge.LoopEffect{}, false
+	}
+	fill := " "
+	if len(call.Arguments.Nodes) == 2 {
+		exact, ok := exactSyntacticStringOf(call.Arguments.Nodes[1])
+		if !ok {
+			return kernelbridge.LoopEffect{}, false
+		}
+		fill = exact
+	}
+	receiver, receiverOk := sequenceEffectOf(context, access.Expression, true /*inSequence*/)
+	if !receiverOk {
+		return kernelbridge.LoopEffect{}, false
+	}
+	padSet := refinementsets.MakeRefinedSet(refinementsets.OneOf(refinementsets.CodepointsOf(fill)))
+	return kernelbridge.LoopEffect{
+		Kind:   kernelbridge.LoopEffectSeqUnary,
+		Op:     kernelbridge.LoopOpPadUnion,
+		A:      &receiver,
+		PadSet: padSet,
+	}, true
 }

@@ -63,9 +63,16 @@ func NumericChainMethod(params NumericChainMethodParams) *Compiled {
 			return unsupportedf(at, "%s", errText)
 		}
 		// riders (measures, depends, libraryAdapter) survive later
-		// chain methods -- a tightened set still wears them
+		// chain methods -- a tightened set still wears them.
+		// CanonicalScalarForms folds the new ray against any ray base
+		// already carries (z.number()'s own atLeast(-Inf) beside a
+		// tighter .gte(0)) and drops what stays vacuous beside it --
+		// the same hygiene the string chain's WithoutStringGround call
+		// gives its own ground conjunct, generalized: FoldRayForms
+		// reads a same-direction ray dominance regardless of which
+		// ground the ray sits over.
 		result := inner
-		result.Set = setPtr(refinementsets.MakeRefinedSet(append(append([]refinementsets.Refinement{}, base.Forms...), forms...)...))
+		result.Set = setPtr(refinementsets.CanonicalScalarForms(refinementsets.MakeRefinedSet(append(append([]refinementsets.Refinement{}, base.Forms...), forms...)...)))
 		return &Compiled{Annotation: &result}
 	}
 
@@ -195,7 +202,7 @@ func NumericChainMethod(params NumericChainMethodParams) *Compiled {
 		result.Measures = &measures
 		return &Compiled{Annotation: &result}
 	case "int":
-		return &Compiled{Annotation: &Annotation{Set: setPtr(refinementsets.MakeRefinedSet(append(append([]refinementsets.Refinement{}, base.Forms...), refinementsets.Integer)...))}}
+		return &Compiled{Annotation: &Annotation{Set: setPtr(refinementsets.CanonicalScalarForms(refinementsets.MakeRefinedSet(append(append([]refinementsets.Refinement{}, base.Forms...), refinementsets.Integer)...)))}}
 	case "multipleOf":
 		return withForm(refinementsets.MultipleOf)
 	case "finite":
@@ -206,13 +213,13 @@ func NumericChainMethod(params NumericChainMethodParams) *Compiled {
 			return unsupportedf(at, ".finite takes no arguments")
 		}
 		return &Compiled{Annotation: &Annotation{
-			Set: setPtr(refinementsets.MakeRefinedSet(append(
+			Set: setPtr(refinementsets.CanonicalScalarForms(refinementsets.MakeRefinedSet(append(
 				append([]refinementsets.Refinement{}, base.Forms...),
 				refinementsets.Difference(
 					refinementsets.Numbers,
 					refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{math.Inf(-1), math.Inf(1)})),
 				),
-			)...)),
+			)...))),
 		}}
 	case "mod":
 		// the NORMALIZED modular window -- RefinedTS's own chain
@@ -234,7 +241,7 @@ func NumericChainMethod(params NumericChainMethodParams) *Compiled {
 			return unsupportedf(at, "%s", errText)
 		}
 		result := inner
-		result.Set = setPtr(refinementsets.MakeRefinedSet(append(append([]refinementsets.Refinement{}, base.Forms...), forms...)...))
+		result.Set = setPtr(refinementsets.CanonicalScalarForms(refinementsets.MakeRefinedSet(append(append([]refinementsets.Refinement{}, base.Forms...), forms...)...)))
 		return &Compiled{Annotation: &result}
 	default:
 		return nil

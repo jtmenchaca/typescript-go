@@ -103,7 +103,19 @@ func MeetKnown(a, b AbstractValue) AbstractValue {
 		}
 		grade := MinTrustLevel(TrustLevelOf(a), TrustLevelOf(b))
 		if met, ok := metRepetition(a.Set, b.Set); ok {
-			return KnownWithMeasures(KnownSet(met, nil, grade, SetKindTagNone), measures)
+			out := KnownWithMeasures(KnownSet(met, nil, grade, SetKindTagNone), measures)
+			// the meet is two claims BOTH true of the same runtime value
+			// (this function's own header), so a density proof either side
+			// carries stands on its own regardless of the other side's
+			// silence — the same "either side" reading this function
+			// already gives Measures two lines up. A window EITHER side
+			// proved dense meets to a NARROWER (or equal) window over the
+			// same physical indices, which the proving side already
+			// affirmed present.
+			if (a.SeqDenseKnown && a.SeqDense) || (b.SeqDenseKnown && b.SeqDense) {
+				out = KnownSetDense(out)
+			}
+			return out
 		}
 		combined := append(append([]refinementsets.Refinement{}, a.Set.Forms...), b.Set.Forms...)
 		// CANONICALIZE the combined conjunction before it rides onward —
@@ -312,9 +324,20 @@ func SameKnown(a, b AbstractValue) bool {
 	case KindValues:
 		return a.KindTag == b.KindTag && sameFloats(a.Values, b.Values)
 	case KindSet:
+		// SeqDenseKnown/SeqDense is a real observable difference the same
+		// way KindArrayHoles's own Dense/DenseKnown pair is (this switch's
+		// KindArrayHoles case, below): two otherwise-identical repetition
+		// claims where one proved every counted index present and the
+		// other did not are NOT the same claim — a caller reading SameKnown
+		// as license to keep EITHER side's fields (JoinKnown's own
+		// AtTrustLevel(a, grade) fast path, taken exactly when SameKnown
+		// holds) must not silently keep a's density mark while discarding
+		// b's absence of one, or the reverse.
 		return sameRefinedSet(a.Set, b.Set) &&
 			sameTemporal(a.Temporal, b.Temporal) &&
-			a.SetKindTag == b.SetKindTag
+			a.SetKindTag == b.SetKindTag &&
+			a.SeqDenseKnown == b.SeqDenseKnown &&
+			(!a.SeqDenseKnown || a.SeqDense == b.SeqDense)
 	case KindObject:
 		if a.Stated != b.Stated {
 			return false

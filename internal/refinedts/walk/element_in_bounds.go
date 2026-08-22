@@ -287,6 +287,17 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 				if receiverIsString {
 					return &read
 				}
+				// SeqDenseKnown/SeqDense (abstractdomain/abstract_value.go,
+				// KindArrayHoles's Dense/DenseKnown mirrored onto a
+				// repetition-shaped KindSet) is the proof this arm was
+				// missing: a receiver PROVED dense at this window --
+				// MapOutcome's own write-every-counted-index construction,
+				// callback_element_outcome.go -- has no hole to answer.
+				// In bounds under the window IS populated, and the read is
+				// exactly the element, no maybe wrapper at all.
+				if p.Receiver.SeqDenseKnown && p.Receiver.SeqDense {
+					return &read
+				}
 				// sec-ordinaryget: a hole (no own property at that index)
 				// falls through to the prototype, and Array.prototype has
 				// no numeric slots, so the get answers exactly undefined —
