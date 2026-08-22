@@ -235,42 +235,110 @@ func ForeignEdgeAt(
 	if parseSentence != "" {
 		return &ForeignEdgeOutcome{Decline: parseSentence, DeclineNode: edge.Call, TargetPath: edge.TargetPath}, true
 	}
-	// THE ±INFINITY CORNER (§4): `JSON.stringify` writes a JS number's
-	// ±Infinity as the bare token `null` on the OUTBOUND leg (checked
-	// above, nanFreedomObstacle's own premise); on this INBOUND leg the
-	// hazard is the mirror and worse — the TARGET is Python, and
-	// `json.dumps(float("inf"))` emits the bare token `Infinity` rather
-	// than a JSON number literal (JSON itself carries no fault here:
-	// `1e999` is a legal JSON number and parses to Infinity in both
-	// runtimes; the bare `Infinity` TOKEN is what Python's default
-	// serializer chooses to write instead, and that token is not a
-	// legal JSON value). `JSON.parse` of that text THROWS at runtime. A
-	// return set admitting either corner is a claim this transport
-	// cannot carry, so the fact never binds: it degrades to the same
-	// named-undetermined channel every other undischarged premise in
-	// this file uses. The corner rule runs PER NUMBER CASE — a cases
-	// list may carry more than one (a possibly-null return, a union of
-	// sorts), and any one of them admitting either corner still stops
-	// the whole return from binding.
-	for _, c := range artifact.Called.Return.Cases {
+	if parse == nil {
+		// NO expression consumes the target's stdout at all (the "no
+		// JSON.parse consumer" case, distinguished above from every real
+		// decline by carrying no sentence) — a recognized crossing whose
+		// result nothing reads needs NO fact: the outbound leg already
+		// judged (checkOutboundLeg, above), and there is no return-leg
+		// node left for one to attach to. Answering an outcome with
+		// neither Override nor Decline is exactly "nothing more to say" —
+		// ForeignEdgeAt still answers isEdge=true (the call WAS
+		// recognized and consumed), but publishes no fact and reports no
+		// undetermined row.
+		return &ForeignEdgeOutcome{TargetPath: edge.TargetPath}, true
+	}
+	// THE ±INFINITY CORNER (§4, sec-json.stringify / the JSON.parse
+	// grammar, specifications/javascript/spec.html): `JSON.stringify`
+	// writes a JS number's ±Infinity as the bare token `null` on the
+	// OUTBOUND leg (checked above, nanFreedomObstacle's own premise); on
+	// this INBOUND leg the hazard is the mirror and worse — the TARGET is
+	// Python, and `json.dumps(float("inf"))` emits the bare token
+	// `Infinity` rather than a JSON number literal (JSON itself carries
+	// no fault here: `1e999` is a legal JSON number and parses to
+	// Infinity in both runtimes; the bare `Infinity` TOKEN is what
+	// Python's default serializer chooses to write instead, and that
+	// token is not a legal JSON value — sec-json.parse's JSONNumber
+	// production admits no such token, so `JSON.parse` THROWS a
+	// SyntaxError at runtime whenever the concrete call actually derives
+	// that value).
+	//
+	// THE DETERMINATION (replacing an earlier decline): a completed
+	// `JSON.parse` call never actually returns ±Infinity, because every
+	// concrete run that would have carried it throws first and the
+	// assignment this fact attaches to is never reached on that arm —
+	// the same "returned half excludes the thrown exit" reading
+	// KnownStateWire.Returned() already states for statement-sequencing
+	// (kernelbridge/narrow_questions.go). There is no expression-level
+	// "value or throws" AbstractValue kind in this domain (abstractdomain
+	// carries KindNaN/KindPossiblyNaN for NaN's own wire hazard, and
+	// nothing analogous for a thrown parse), so the nearest SOUND
+	// determination is applied directly to the returned set: the corner
+	// value is DIFFERENCED OUT of the case's claimed window before it
+	// binds, per refinementsets.Difference (the same set-difference form
+	// kernel_bridge_test.go's own ℝ̄∖{0} row already asks the kernel
+	// about). The narrowed set is strictly weaker than the target's own
+	// stated return — a fact any completed call still satisfies — so the
+	// crossing judges normally against it rather than declining. The
+	// corner rule runs PER NUMBER CASE, exactly as before.
+	narrowedCases := make([]Case, len(artifact.Called.Return.Cases))
+	copy(narrowedCases, artifact.Called.Return.Cases)
+	for i, c := range narrowedCases {
 		if c.Sort != CaseSortNumber {
 			continue
 		}
-		if sentence := foreignReturnCornerObstacle(ctx, c.Set); sentence != "" {
-			return &ForeignEdgeOutcome{
-				Decline:     "the target " + artifact.Called.Name + "'s stated return " + sentence,
-				DeclineNode: parse,
-				TargetPath:  edge.TargetPath,
-			}, true
-		}
+		narrowedCases[i].Set = foreignFiniteReturnSet(ctx, c.Set)
 	}
 	return &ForeignEdgeOutcome{
 		Override: map[*ast.Node]abstractdomain.AbstractValue{
-			parse: foreignReturnValue(artifact),
+			parse: foreignAbstractValueOfCases(narrowedCases),
 		},
 		OverrideStatement: at,
 		TargetPath:        edge.TargetPath,
 	}, true
+}
+
+// foreignFiniteReturnSet answers returnSet with any ±Infinity corner
+// DIFFERENCED OUT — the finite portion a completed JSON.parse call can
+// actually still produce, per foreignReturnCornerObstacle's own Member
+// ask. A set admitting neither corner (the ordinary case) answers
+// unchanged; a refused or unavailable question (no kernel loaded, a
+// panic inside the ask) also answers unchanged — the SAME "no proof, no
+// obstacle" reading foreignReturnCornerObstacle itself gives a refused
+// question, so an untested corner never falsely narrows a set the
+// kernel simply could not answer for.
+func foreignFiniteReturnSet(ctx *FlowContext, returnSet refinementsets.RefinedSet) refinementsets.RefinedSet {
+	if ctx == nil || ctx.Kernel == nil || ctx.Kernel.Member == nil {
+		return returnSet
+	}
+	narrowed := returnSet
+	admitsPosInf := func() (ok bool) {
+		defer func() {
+			if recover() != nil {
+				ok = false
+			}
+		}()
+		return ctx.Kernel.Member(narrowed, []float64{math.Inf(1)})
+	}
+	admitsNegInf := func() (ok bool) {
+		defer func() {
+			if recover() != nil {
+				ok = false
+			}
+		}()
+		return ctx.Kernel.Member(narrowed, []float64{math.Inf(-1)})
+	}
+	if admitsPosInf() {
+		narrowed = refinementsets.MakeRefinedSet(refinementsets.Difference(
+			narrowed, refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{math.Inf(1)})),
+		))
+	}
+	if admitsNegInf() {
+		narrowed = refinementsets.MakeRefinedSet(refinementsets.Difference(
+			narrowed, refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{math.Inf(-1)})),
+		))
+	}
+	return narrowed
 }
 
 // foreignReturnCornerObstacle asks the kernel whether returnSet admits
@@ -535,10 +603,19 @@ func execFileSyncEdgeOf(
 		// no stdin `input` and no second argv element at all — the
 		// file-carried shape still needs SOME argv element to name the
 		// path, so a preceding writeFileSync here has nothing to match
-		// against; nothing crosses out at all
-		return nil, false, "this call runs " + runnerWord + " on " + script + " and sends it no " +
-			"JSON.stringify(...) input, so nothing crosses out on stdin and the transport " +
-			"model has no outbound leg to apply", args[2], resolvedPath
+		// against. This is a RECOGNIZED edge with no outbound payload at
+		// all (Payload nil, ArgvValue nil, FilePath nil): checkOutboundLeg's
+		// own no-channel branch is where the THE NO-COMPLETED-RUN
+		// DETERMINATION for a stdin-reading target lives (mirroring
+		// checkArgvCrossing's ForeignSurfaceMixedStdinArgv case) — never
+		// declined here, since whether this call's empty stdin actually
+		// contradicts anything depends on the target's own stated
+		// surface, which this recognizer has not read yet.
+		return &ForeignEdge{
+			Call:       call,
+			TargetPath: resolvedPath,
+			StdoutName: name,
+		}, true, "", nil, resolvedPath
 	}
 	return &ForeignEdge{
 		Call:       call,
@@ -1121,11 +1198,12 @@ const scriptPathLawTwoSentence = "the script path is computed; spell it as a wri
 // the runner word itself is already known by that point, so the call
 // IS this edge, only unfollowable.
 func runnerAndScriptArgvOf(ctx *FlowContext, runnerArgument *ast.Node, argvArgument *ast.Node) (runnerWord string, script string, dataElement *ast.Node, ok bool, sentence string, sentenceNode *ast.Node) {
-	interpreter, interpreterOk := stringLiteralText(runnerArgument)
+	interpreter, interpreterOk := runnerWordOf(ctx, runnerArgument)
 	if !interpreterOk {
-		// the runner word itself is not a written literal (a variable, a
-		// computed expression) — the reader cannot yet see this is python
-		// at all, so nothing is owed
+		// the runner word itself is not a written literal, a const bound
+		// to one, or a const-composed string (a variable holding a
+		// computed value, a parameter) — the reader cannot yet see this
+		// is python at all, so nothing is owed
 		return "", "", nil, false, "", nil
 	}
 	array := Unwrapped(argvArgument)
@@ -1188,14 +1266,42 @@ func runnerAndScriptArgvOf(ctx *FlowContext, runnerArgument *ast.Node, argvArgum
 	return "", "", nil, false, "", nil
 }
 
+// runnerWordOf reads argv[0] (the runner word) the same three ways
+// scriptElementOf reads a script path: a written string literal (or
+// no-substitution template) directly, an IDENTIFIER resolved through
+// resolvedConstStringLiteral to its const initializer's own literal,
+// or a COMPOSED string expression folded through foldedConstStringOf.
+// Unlike scriptElementOf, an unresolved runner word owes no sentence —
+// runnerAndScriptArgvOf's own doc already states why: the reader
+// cannot yet tell this call is even a Python edge, so a variable
+// runner word that resolves to nothing readable stays silent, not
+// recognized-and-declined.
+func runnerWordOf(ctx *FlowContext, element *ast.Node) (string, bool) {
+	node := Unwrapped(element)
+	if node == nil {
+		return "", false
+	}
+	if text, literalOk := stringLiteralText(node); literalOk {
+		return text, true
+	}
+	if ast.IsIdentifier(node) {
+		if text, resolvedOk := resolvedConstStringLiteral(ctx, node); resolvedOk {
+			return text, true
+		}
+	}
+	return foldedConstStringOf(ctx, node)
+}
+
 // scriptElementOf reads one argv element as the script's own path: a
-// written string literal (or no-substitution template) directly, or —
-// past this pass — an IDENTIFIER resolved through resolvedConstStringLiteral
-// to its const initializer's own literal. Anything else that is not a
-// plain written literal (a parameter reference, a computed expression
-// such as string concatenation) is a script path the checker can SEE
-// but cannot yet name: recognized, not silent, carrying the law-2
-// sentence naming exactly what would make it resolvable.
+// written string literal (or no-substitution template) directly, an
+// IDENTIFIER resolved through resolvedConstStringLiteral to its const
+// initializer's own literal, or — past those two — a COMPOSED string
+// expression (const-string concatenation, a template substitution
+// naming a const) folded exactly through foldedConstStringOf. Anything
+// past all three (a parameter reference, a call result, a template
+// substitution that is itself not const-foldable) is a script path the
+// checker can SEE but cannot yet name: recognized, not silent, carrying
+// the law-2 sentence naming exactly what would make it resolvable.
 func scriptElementOf(ctx *FlowContext, element *ast.Node) (script string, ok bool, sentence string, sentenceNode *ast.Node) {
 	node := Unwrapped(element)
 	if node == nil {
@@ -1209,9 +1315,96 @@ func scriptElementOf(ctx *FlowContext, element *ast.Node) (script string, ok boo
 			return text, true, "", nil
 		}
 	}
+	if text, foldedOk := foldedConstStringOf(ctx, node); foldedOk {
+		return text, true, "", nil
+	}
 	// past this point the reader knows there IS a script argv element —
 	// it is simply not one the checker can read a name from
 	return "", false, scriptPathLawTwoSentence, node
+}
+
+// foldedConstStringOf is a purely SYNTACTIC constant-string fold — no
+// runtime Env is consulted, only the same identifier→symbol→
+// ValueDeclaration→const-initializer follow resolvedConstStringLiteral
+// already performs, recursed over the two AST shapes a computed path
+// literal-composed-of-literals actually takes:
+//
+//   - a `+` BinaryExpression whose two sides both fold (constant-string
+//     concatenation, e.g. `directory + "level_ok.py"` where `directory`
+//     is a same-file or cross-module const) — folds to the
+//     concatenation of both sides' own folded text;
+//   - a TemplateExpression (with or without substitutions) whose every
+//     span expression folds — folds to the head text plus each span's
+//     folded text plus the following literal text, in source order
+//     (mirrors evaluateTemplate's own exact-template reading, but
+//     syntactically rather than through the walk's runtime Env, since
+//     this reader runs at RECOGNITION time before an edge — and
+//     therefore before any Env — exists).
+//
+// A bare literal or a directly-resolvable identifier is read by the two
+// checks scriptElementOf/argvLiteralTextOf already perform before
+// calling this; this function exists for the COMPOSED shapes past
+// those two, and answers ok=false for anything else (a parameter, a
+// call result, a template substitution that is not itself foldable) —
+// the genuinely unresolvable case stays declined with the law-2
+// sentence, unchanged.
+func foldedConstStringOf(ctx *FlowContext, node *ast.Node) (string, bool) {
+	node = Unwrapped(node)
+	if node == nil {
+		return "", false
+	}
+	if ast.IsBinaryExpression(node) {
+		bin := node.AsBinaryExpression()
+		if bin.OperatorToken.Kind != ast.KindPlusToken {
+			return "", false
+		}
+		left, leftOk := foldedConstStringLeafOf(ctx, bin.Left)
+		if !leftOk {
+			return "", false
+		}
+		right, rightOk := foldedConstStringLeafOf(ctx, bin.Right)
+		if !rightOk {
+			return "", false
+		}
+		return left + right, true
+	}
+	if ast.IsTemplateExpression(node) {
+		template := node.AsTemplateExpression()
+		text := template.Head.Text()
+		for _, spanNode := range template.TemplateSpans.Nodes {
+			span := spanNode.AsTemplateSpan()
+			part, partOk := foldedConstStringLeafOf(ctx, span.Expression)
+			if !partOk {
+				return "", false
+			}
+			text += part
+			text += span.Literal.Text()
+		}
+		return text, true
+	}
+	return "", false
+}
+
+// foldedConstStringLeafOf reads one OPERAND of a fold (a `+` side, a
+// template span) as a constant string: a written literal directly, an
+// identifier resolved through resolvedConstStringLiteral, or — recursed
+// — another composed expression through foldedConstStringOf itself
+// (so `a + b + "c"` and a template nesting a concatenation both fold,
+// not just the single-level shapes the two fixture rows exercise).
+func foldedConstStringLeafOf(ctx *FlowContext, expression *ast.Node) (string, bool) {
+	node := Unwrapped(expression)
+	if node == nil {
+		return "", false
+	}
+	if text, literalOk := stringLiteralText(node); literalOk {
+		return text, true
+	}
+	if ast.IsIdentifier(node) {
+		if text, resolvedOk := resolvedConstStringLiteral(ctx, node); resolvedOk {
+			return text, true
+		}
+	}
+	return foldedConstStringOf(ctx, node)
 }
 
 // resolvedConstStringLiteral follows an identifier BACK to a `const`
@@ -1305,12 +1498,25 @@ func execSyncEdgeOf(call *ast.Node, name string) (*ForeignEdge, bool, string, *a
 		return nil, false, "", nil, ""
 	}
 	command, literalOk := stringLiteralText(args[0])
-	if !literalOk {
-		return nil, false, execSyncShellStringSentence, args[0], ""
-	}
-	runnerWord, script, tokensOk := execSyncSimpleCommandTokens(command)
-	if !tokensOk {
-		return nil, false, execSyncShellStringSentence, args[0], ""
+	var runnerWord, script string
+	var payload *ast.Node
+	if literalOk {
+		var tokensOk bool
+		runnerWord, script, tokensOk = execSyncSimpleCommandTokens(command)
+		if !tokensOk {
+			return nil, false, execSyncShellStringSentence, args[0], ""
+		}
+	} else {
+		// the ONE substitution shape this reader still recognizes: a
+		// template whose constant prefix names `<runner> <script> <<<`
+		// and whose single substitution is JSON.stringify(<payload>) —
+		// the stdin-json convention spelled through a shell here-string
+		// rather than an options object's `input` key.
+		var heredocOk bool
+		runnerWord, script, payload, heredocOk = execSyncHeredocCommandOf(args[0])
+		if !heredocOk {
+			return nil, false, execSyncShellStringSentence, args[0], ""
+		}
 	}
 	resolvedPath, pathSentence := resolveForeignScriptPath(call, runnerWord, script)
 	if pathSentence != "" {
@@ -1336,9 +1542,96 @@ func execSyncEdgeOf(call *ast.Node, name string) (*ForeignEdge, bool, string, *a
 	return &ForeignEdge{
 		Call:       call,
 		TargetPath: resolvedPath,
-		Payload:    nil,
+		Payload:    payload,
 		StdoutName: name,
 	}, true, "", nil, resolvedPath
+}
+
+// execSyncHeredocOperator is the shell here-string operator this
+// reader recognizes as the ONE way a template substitution spells the
+// stdin-json convention through execSync's shell string rather than
+// execFileSync's options object.
+const execSyncHeredocOperator = "<<<"
+
+// execSyncHeredocCommandOf reads a template literal shaped exactly
+// `<argv tokens...> <<< '${JSON.stringify(<payload>)}'` (the closing
+// quote optional, and either single or double) — the stdin-json
+// convention spelled through a shell here-string. This is a
+// RECOGNIZER, not a shell interpreter: it accepts exactly this shape
+// and no other, tokenizing the constant prefix through the same
+// unsupported-character gate execSyncSimpleCommandTokens already
+// applies to a plain literal command, so a prefix carrying any other
+// shell metacharacter (a pipe, a second substitution, a second `<<<`)
+// is refused rather than partially read.
+//
+// Answers ok=false for anything past that one shape: more than one
+// template span, a substitution that is not JSON.stringify(...), a
+// constant prefix whose tokens do not end in the heredoc operator, or
+// trailing literal text past the one optional closing quote.
+func execSyncHeredocCommandOf(argument *ast.Node) (runnerWord string, script string, payload *ast.Node, ok bool) {
+	node := Unwrapped(argument)
+	if node == nil || !ast.IsTemplateExpression(node) {
+		return "", "", nil, false
+	}
+	template := node.AsTemplateExpression()
+	spans := template.TemplateSpans.Nodes
+	if len(spans) != 1 {
+		return "", "", nil, false
+	}
+	span := spans[0].AsTemplateSpan()
+	inner, stringifyOk := jsonStringifyArgumentOf(span.Expression)
+	if !stringifyOk {
+		return "", "", nil, false
+	}
+	// the trailing literal text — everything after the substitution —
+	// must be nothing but one optional closing quote (matching whatever
+	// quote character opened the here-string in the prefix, read below)
+	trailing := span.Literal.Text()
+	prefixWord, prefixOk := execSyncHeredocPrefixTokens(template.Head.Text(), trailing)
+	if !prefixOk {
+		return "", "", nil, false
+	}
+	runnerWord, script, tokensOk := execSyncSimpleCommandTokens(prefixWord)
+	if !tokensOk {
+		return "", "", nil, false
+	}
+	return runnerWord, script, inner, true
+}
+
+// execSyncHeredocPrefixTokens reads the template's constant prefix as
+// `<runner> <script> <<< <quote>` and the trailing literal (past the
+// substitution) as that SAME quote character alone (or nothing, for
+// an unquoted here-string) — the two ends of one matched optional
+// quote wrapping the substitution. Answers the `<runner> <script>`
+// words alone (space-joined, ready for execSyncSimpleCommandTokens),
+// discarding the operator and the quote once both are confirmed to
+// match.
+func execSyncHeredocPrefixTokens(head string, trailing string) (string, bool) {
+	quote := ""
+	switch {
+	case strings.HasSuffix(head, "'"):
+		quote = "'"
+	case strings.HasSuffix(head, "\""):
+		quote = "\""
+	}
+	head = strings.TrimSuffix(head, quote)
+	if trailing != quote {
+		// the quote that opens the here-string (if any) must be the SAME
+		// one that closes it, immediately after the substitution and
+		// nothing else — a mismatched or extra trailing character is
+		// shell syntax this reader does not model
+		return "", false
+	}
+	head = strings.TrimSuffix(head, " ")
+	if !strings.HasSuffix(head, execSyncHeredocOperator) {
+		return "", false
+	}
+	head = strings.TrimSuffix(head, execSyncHeredocOperator)
+	head = strings.TrimSuffix(head, " ")
+	if head == "" || strings.ContainsAny(head, execSyncUnsupportedShellTokenChars) {
+		return "", false
+	}
+	return head, true
 }
 
 // execSyncSimpleCommandTokens splits a command string on single spaces
@@ -1539,6 +1832,22 @@ func checkOutboundLeg(
 			DeclineNode: edge.Payload,
 		}
 	}
+	if edge.Payload == nil && artifact.Surface == ForeignSurfaceStdinJSON {
+		// THE NO-COMPLETED-RUN DETERMINATION (mirroring checkArgvCrossing's
+		// ForeignSurfaceMixedStdinArgv case): the target's own harness reads
+		// its ONE value from stdin (`json.load(sys.stdin)` or the
+		// equivalent), and this call closes stdin with no bytes written at
+		// all — the same EOF-on-empty-stream throw the mixed case's own
+		// missing-stdin-leg reasoning already names. Every concrete run
+		// throws at the target's own stdin read before the harness ever
+		// reaches a value to return, so there is no completed run for a
+		// return fact to attach to, and nothing about that outbound leg
+		// CONTRADICTS the target's stated entry — there is simply no value
+		// crossing out to judge against it. Recognized and determined
+		// (never declined): the outbound leg has nothing to check because
+		// the call itself never reaches the point where anything crosses.
+		return nil
+	}
 	if len(artifact.Called.Entry) == 0 {
 		return &ForeignEdgeOutcome{
 			Decline: "the target " + artifact.Called.Name + " states no entry position, so " +
@@ -1734,12 +2043,34 @@ func checkArgvCrossing(ctx *FlowContext, edge *ForeignEdge, artifact *ForeignArt
 			DeclineNode: edge.ArgvValue,
 		}
 	case ForeignSurfaceMixedStdinArgv:
-		return &ForeignEdgeOutcome{
-			Decline: "the call passes only the value as argv[1], but the target's fact serves a mixed " +
-				"surface reading a SECOND value from stdin as well — the channels do not meet: " +
-				"the stdin leg is absent",
-			DeclineNode: edge.ArgvValue,
+		// THE MISSING-STDIN-LEG DETERMINATION (replacing an earlier
+		// decline): the target's own mixed harness reads BOTH channels —
+		// this call sends only argv[1], so its stdin closes with no bytes
+		// written at all. The Python harness's own stdin read (json.load
+		// on an EOF-empty stream) throws json.JSONDecodeError before the
+		// argv leg is ever consulted — the same "a completed run never
+		// reaches the state this claim would contradict" reading
+		// foreignFiniteReturnSet applies to the return leg's ±Infinity
+		// corner, applied here to the CALL itself: every concrete run
+		// throws at the target's own stdin read, so there is no completed
+		// run for a return fact to attach to at all (the call already has
+		// no JSON.parse fact bound on this path — soleParseConsumerOf's
+		// own machinery runs downstream of this leg regardless), and
+		// nothing here CONTRADICTS that outcome. What still has a real
+		// premise to discharge is the argv leg's OWN fit — if the caller
+		// ever adds the missing stdin leg, the argv value crossing here
+		// must already fit the target's stated entry, so that check runs
+		// normally rather than being skipped for a channel mismatch that
+		// no longer stops the crossing.
+		if len(artifact.Called.Entry) != 2 {
+			return &ForeignEdgeOutcome{
+				Decline: "the target " + artifact.Called.Name + " states " +
+					strconv.Itoa(len(artifact.Called.Entry)) + " entry positions, and its mixed surface " +
+					"hands it two values (stdin, then argv) — the checker models no other split",
+				DeclineNode: edge.Call,
+			}
 		}
+		return argvScalarFitAgainst(ctx, edge.ArgvValue, artifact, artifact.Called.Entry[1])
 	default:
 		return &ForeignEdgeOutcome{
 			Decline: "the call passes the value as argv[1], but the target's fact serves " +
@@ -1908,6 +2239,26 @@ func checkSequenceCrossing(
 			crossing = converted
 		}
 	}
+	// a MIXED-ELEMENT array literal (`[this.level, -0.3, 0.2]`, a range
+	// beside exact numbers) evaluates through EvaluateArrayLiteral's own
+	// non-flat path to KindList — one AbstractValue per slot, never
+	// KindValues{PrimitiveArray}, since that flat form is reserved for a
+	// literal whose EVERY element is an exact singleton number
+	// (array_literal.go's own flat gate). sequenceCrossingOfKindList reads
+	// each slot the same way an array literal's own per-position claim
+	// already does (scalarPositionSet, array_literal.go) and rebuilds the
+	// same Repetition-shaped window an exact tuple or a declared array
+	// wears, so this gate and everything past it judge a mixed-element
+	// literal identically to an all-exact one. A slot that poses no
+	// per-position set at all (an object, an opaque read, a nested
+	// sequence) falls through to the existing decline unchanged — this
+	// converter is total only over literals every one of whose slots is
+	// itself scalar-shaped.
+	if crossing.Kind == abstractdomain.KindList {
+		if converted, ok := sequenceCrossingOfKindList(crossing); ok {
+			crossing = converted
+		}
+	}
 	if crossing.Kind != abstractdomain.KindSet || crossing.SetKindTag != abstractdomain.SetKindTagNone {
 		return &ForeignEdgeOutcome{
 			Decline: "the target " + artifact.Called.Name + " admits a sequence at " +
@@ -1985,6 +2336,53 @@ func sequenceCrossingOfExactTuple(crossing abstractdomain.AbstractValue) (abstra
 	element := refinementsets.MakeRefinedSet(refinementsets.OneOf(crossing.Values))
 	n := len(crossing.Values)
 	window := refinementsets.Repetition(element, n, &n)
+	if _, ok := refinementsets.AsRepetition(window); !ok {
+		return abstractdomain.AbstractValue{}, false
+	}
+	return abstractdomain.KnownSet(
+		window, nil, abstractdomain.TrustLevelOf(crossing), abstractdomain.SetKindTagNone,
+	), true
+}
+
+// sequenceCrossingOfKindList rebuilds a KindList array literal (one
+// AbstractValue per slot, at least one slot NOT an exact singleton
+// number — otherwise EvaluateArrayLiteral would have collapsed it to
+// the flat KindValues{PrimitiveArray} tuple sequenceCrossingOfExactTuple
+// already reads) as the SAME Repetition-shaped window: the union of
+// every slot's own per-position set (scalarPositionSet, array_literal.go
+// — a range, an exact number, or any other scalar-set form a single
+// array position can hold), repeated exactly len(Items) times.
+//
+// Answers ok=false where ANY slot poses no per-position set at all — an
+// object-shaped element, an Opaque/Unknown read, a nested sequence
+// whose own set spells several positions rather than one — since a
+// literal with such a slot has no sound single-element claim to build;
+// that literal stays undetermined with the ordinary "not read as one
+// here" sentence, the same as any other unconvertible shape. Also
+// false for the empty list (no element to union) and for the one shape
+// Repetition itself cannot spell back through AsRepetition (a single
+// slot, which collapses to the bare scalar element — see
+// sequenceCrossingOfExactTuple's own doc on that corner).
+func sequenceCrossingOfKindList(crossing abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
+	if len(crossing.Items) == 0 {
+		return abstractdomain.AbstractValue{}, false
+	}
+	var union *refinementsets.RefinedSet
+	for _, item := range crossing.Items {
+		set, ok := scalarPositionSet(item)
+		if !ok {
+			return abstractdomain.AbstractValue{}, false
+		}
+		if union == nil {
+			first := set
+			union = &first
+		} else {
+			joined := unionOf(*union, set)
+			union = &joined
+		}
+	}
+	n := len(crossing.Items)
+	window := refinementsets.Repetition(*union, n, &n)
 	if _, ok := refinementsets.AsRepetition(window); !ok {
 		return abstractdomain.AbstractValue{}, false
 	}
@@ -2171,8 +2569,15 @@ func soleParseConsumerOf(
 			"value parsed is not the value the Python target produced — no fact is attached"
 	}
 	if count == 0 {
-		return nil, -1, "nothing reads " + stdoutName + " through JSON.parse after the call, so the " +
-			"target's stated result has no expression to land on"
+		// nothing reads the target's stdout through JSON.parse at all — a
+		// recognized crossing whose result NO expression consumes needs NO
+		// fact: there is no node for one to land on, so this is not a
+		// defect to name, only an absent attach. soleAskUnused answers
+		// (nil, -1, "") — an EMPTY sentence — so the caller (ForeignEdgeAt)
+		// reads this as "nothing to attach", not as a decline: the
+		// outbound leg's own judgment (already discharged before this call
+		// runs) still stands unchanged.
+		return nil, -1, ""
 	}
 	if count > 1 {
 		return nil, -1, stdoutName + " is parsed " + strconv.Itoa(count) + " times after the call, " +

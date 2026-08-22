@@ -25,6 +25,7 @@ package walk
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1346,6 +1347,92 @@ func TestCheckOutboundLeg_AStdinOnlyCallAtAMixedSurfaceTargetDeclinesNamingTheAb
 	}
 }
 
+// TestCheckArgvCrossing_AnArgvOnlyCallAtAMixedSurfaceTargetDeterminesRatherThanDeclines
+// pins d-data-legs.ts's mixedStdinAndArgvChannelUndetermined row's own
+// construct: a call sending ONLY argv[1] (no stdin `input` at all) at a
+// target whose fact serves the mixed stdin-json-argv-scalar surface no
+// longer declines with "the channels do not meet" — the target's own
+// stdin read (json.load on an EOF-empty stream, since this call writes
+// no stdin bytes) throws before the argv leg is ever consulted, so
+// every concrete run already fails before reaching a state this fact
+// could contradict. checkArgvCrossing now judges the argv leg's OWN fit
+// against entry[1] instead (argvScalarFitAgainst, the same function the
+// pure argv-scalar surface and the true-mixed call both route through):
+// a fitting literal answers a clean outcome (nil), exactly as if the
+// channel mismatch had never been a decline at all.
+func TestCheckArgvCrossing_AnArgvOnlyCallAtAMixedSurfaceTargetDeterminesRatherThanDeclines(t *testing.T) {
+	targetPath, contentHash := writeForeignMixedTarget(t)
+	writeForeignArtifact(t, targetPath, foreignMixedArtifactJSON(contentHash, targetPath))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	p := entryEnvTestProgram(t, `function f() { const gain = "0.5"; gain; }` + "\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	gainDeclaration := statements[0].AsVariableStatement().DeclarationList.
+		AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration()
+	argvValue := gainDeclaration.Initializer
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report:    func(assignability.RefinementDiagnostic) {},
+	}
+	// ArgvValue set, Payload nil: only the argv leg, at a mixed-surface
+	// target whose stdin the call never writes — d:115's own shape.
+	edge := &ForeignEdge{Call: argvValue, TargetPath: targetPath, ArgvValue: argvValue, StdoutName: "stdout"}
+	outcome := checkOutboundLeg(ctx, NewEnv(), edge, artifact)
+	if outcome != nil {
+		t.Fatalf("an argv-only call at a mixed-surface target with a fitting argv literal reported an outcome, want none (a clean determination): %+v", outcome)
+	}
+}
+
+// TestCheckArgvCrossing_AnArgvOnlyCallAtAMixedSurfaceTargetStillFiresOnAnUnfittingLiteral
+// pins the "judge the rest normally" half: even though the call always
+// throws at the target's own stdin read, the argv leg's own fit is
+// still a real premise — an argv literal OUTSIDE the target's stated
+// entry[1] still fires 7001, exactly as it would at a pure argv-scalar
+// surface.
+func TestCheckArgvCrossing_AnArgvOnlyCallAtAMixedSurfaceTargetStillFiresOnAnUnfittingLiteral(t *testing.T) {
+	targetPath, contentHash := writeForeignMixedTarget(t)
+	writeForeignArtifact(t, targetPath, foreignMixedArtifactJSON(contentHash, targetPath))
+	artifact, sentence := ReadForeignArtifact(targetPath)
+	if sentence != "" {
+		t.Fatalf("the fixture artifact declined: %s", sentence)
+	}
+	// 9 is outside the target's stated gain window (0 … 4)
+	p := entryEnvTestProgram(t, `function f() { const gain = "9"; gain; }` + "\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	gainDeclaration := statements[0].AsVariableStatement().DeclarationList.
+		AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration()
+	argvValue := gainDeclaration.Initializer
+	var reported []assignability.RefinementDiagnostic
+	ctx := &FlowContext{
+		P:         p,
+		Kernel:    nanWrapperLoadKernel(t),
+		Contracts: map[*ast.Symbol]*FunctionContract{},
+		Aliases:   dataflowfacts.NewAliasClasses(),
+		Declared:  map[string]*annotations.DeclaredRefinement{},
+		Report:    func(d assignability.RefinementDiagnostic) { reported = append(reported, d) },
+	}
+	edge := &ForeignEdge{Call: argvValue, TargetPath: targetPath, ArgvValue: argvValue, StdoutName: "stdout"}
+	outcome := checkOutboundLeg(ctx, NewEnv(), edge, artifact)
+	if outcome == nil {
+		t.Fatalf("an unfitting argv literal at a mixed-surface target passed with no outcome at all")
+	}
+	if outcome.Decline != "" {
+		t.Errorf("Decline = %q, want the fit refutation to fire rather than decline", outcome.Decline)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("expected exactly one fit refutation, got %d", len(reported))
+	}
+	if !strings.Contains(reported[0].MessageText, "not assignable") {
+		t.Errorf("the refutation does not name the fit failure: %q", reported[0].MessageText)
+	}
+}
+
 /* ── the file-carried shape, against a real kernel and real syntax ──── */
 
 // foreignFileFixture builds a file-json artifact (level_from_file.py's own
@@ -1760,12 +1847,16 @@ function f() {
 	}
 }
 
-// TestScriptElementOf_AConcatenatedPathOwesTheLawTwoSentence pins
+// TestScriptElementOf_AConcatenatedPathOfTwoConstsFolds pins
 // c-reference-shapes.ts's pathByConcatenationUndetermined row moving
-// from silence to a recognized-undetermined law-2 sentence: the argv
-// element is a BinaryExpression, neither a literal nor an identifier,
-// so scriptElementOf cannot resolve it and must not stay silent.
-func TestScriptElementOf_AConcatenatedPathOwesTheLawTwoSentence(t *testing.T) {
+// from a law-2 decline to a resolved script path: the argv element is a
+// `+` BinaryExpression, but BOTH sides are constant-foldable — a
+// same-file const string on the left, a written literal on the right —
+// so foldedConstStringOf (called from scriptElementOf, past the plain
+// literal/identifier checks) folds the concatenation exactly, and the
+// call resolves to the SAME target literalPathRecognized's plain
+// literal names.
+func TestScriptElementOf_AConcatenatedPathOfTwoConstsFolds(t *testing.T) {
 	p := entryEnvTestProgram(t, `
 declare function execFileSync(file: string, args: string[], options: unknown): string;
 function f() {
@@ -1778,15 +1869,39 @@ function f() {
 	ctx := relationalAccumulationContext(p)
 	_, call, _ := constBoundCallOf(statements[1])
 	args, _ := callArguments(call)
-	_, _, _, ok, sentence, sentenceNode := runnerAndScriptArgvOf(ctx, args[0], args[1])
-	if ok {
-		t.Fatalf("a concatenated path was read as a resolved script")
+	_, script, _, ok, sentence, _ := runnerAndScriptArgvOf(ctx, args[0], args[1])
+	if sentence != "" {
+		t.Fatalf("a const-concatenated script path declined: %s", sentence)
 	}
-	if sentence != scriptPathLawTwoSentence {
-		t.Errorf("sentence = %q, want %q", sentence, scriptPathLawTwoSentence)
+	if !ok || script != "./targets/level_ok.py" {
+		t.Errorf("script=%q ok=%v, want ./targets/level_ok.py / true", script, ok)
 	}
-	if sentenceNode == nil {
-		t.Errorf("the law-2 sentence carries no node to point at")
+}
+
+// TestScriptElementOf_ATemplateSubstitutionOfAConstFolds pins
+// c-reference-shapes.ts's pathViaTemplateSubstitutionUndetermined row
+// moving from a law-2 decline to a resolved script path: the argv
+// element is a TemplateExpression carrying one substitution, and that
+// substitution names a same-file const string — foldedConstStringOf's
+// TemplateExpression arm folds the head text, the substitution's own
+// folded text, and the trailing literal text in source order.
+func TestScriptElementOf_ATemplateSubstitutionOfAConstFolds(t *testing.T) {
+	p := entryEnvTestProgram(t, "declare function execFileSync(file: string, args: string[], options: unknown): string;\n"+
+		"function f() {\n"+
+		"  const dir = \"./targets\";\n"+
+		"  const stdout = execFileSync(\"python3\", [`${dir}/level_ok.py`], { encoding: \"utf8\" });\n"+
+		"  return stdout;\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	ctx := relationalAccumulationContext(p)
+	_, call, _ := constBoundCallOf(statements[1])
+	args, _ := callArguments(call)
+	_, script, _, ok, sentence, _ := runnerAndScriptArgvOf(ctx, args[0], args[1])
+	if sentence != "" {
+		t.Fatalf("a const-templated script path declined: %s", sentence)
+	}
+	if !ok || script != "./targets/level_ok.py" {
+		t.Errorf("script=%q ok=%v, want ./targets/level_ok.py / true", script, ok)
 	}
 }
 
@@ -1953,7 +2068,16 @@ function f() {
 	}
 }
 
-func TestExecSyncEdgeOf_ATemplateWithASubstitutionOwesTheShellStringSentence(t *testing.T) {
+// TestExecSyncEdgeOf_ATemplateWithASubstitutionRecognizesTheHeredocShape
+// pins the ONE substitution shape execSyncHeredocCommandOf recognizes:
+// a template whose constant prefix is `<runner> <script> <<<` and whose
+// single substitution is JSON.stringify(<payload>) — the stdin-json
+// convention spelled through a shell here-string
+// (a-invocation-functions.ts's own execSyncUndetermined row, now
+// recognized rather than declined). A template substitution that is NOT
+// this narrow shape still owes the ordinary shell-string sentence — see
+// TestExecSyncEdgeOf_ATemplateSubstitutionThatIsNotTheHeredocShapeStillDeclines.
+func TestExecSyncEdgeOf_ATemplateWithASubstitutionRecognizesTheHeredocShape(t *testing.T) {
 	p := entryEnvTestProgram(t, `
 declare function execSync(command: string, options: unknown): string;
 function f(samples: number[]) {
@@ -1966,9 +2090,39 @@ function f(samples: number[]) {
 `)
 	statements := relationalAccumulationBodyOf(t, p, "f")
 	name, call, _ := constBoundCallOf(statements[0])
+	edge, recognized, sentence, _, _ := execSyncEdgeOf(call, name)
+	if sentence != "" {
+		t.Fatalf("the heredoc shape declined: %s", sentence)
+	}
+	if !recognized || edge == nil {
+		t.Fatalf("the heredoc shape was not recognized")
+	}
+	if edge.Payload == nil || !ast.IsIdentifier(edge.Payload) || edge.Payload.Text() != "samples" {
+		t.Errorf("edge.Payload = %v, want the identifier samples", edge.Payload)
+	}
+}
+
+// TestExecSyncEdgeOf_ATemplateSubstitutionThatIsNotTheHeredocShapeStillDeclines
+// pins the boundary: a template substitution that does NOT match the
+// narrow heredoc shape (here, a substitution that is not
+// JSON.stringify(...)) still owes the ordinary shell-string sentence —
+// the recognizer is exactly as narrow as its own doc states.
+func TestExecSyncEdgeOf_ATemplateSubstitutionThatIsNotTheHeredocShapeStillDeclines(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execSync(command: string, options: unknown): string;
+function f(samples: string) {
+	const stdout = execSync(
+		` + "`python3 ./targets/level_ok.py <<< '${samples}'`" + `,
+		{ encoding: "utf8" },
+	);
+	return JSON.parse(stdout);
+}
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	name, call, _ := constBoundCallOf(statements[0])
 	edge, recognized, sentence, sentenceNode, _ := execSyncEdgeOf(call, name)
 	if recognized || edge != nil {
-		t.Fatalf("a template with a substitution was read as a followed command")
+		t.Fatalf("a non-stringify substitution was read as a followed command")
 	}
 	if sentence != execSyncShellStringSentence {
 		t.Errorf("sentence = %q, want %q", sentence, execSyncShellStringSentence)
@@ -2211,7 +2365,14 @@ function f(boosted: number[]) {
 	}
 }
 
-func TestForeignEdgeRecognition_NoParseOfTheStdoutBindingDeclines(t *testing.T) {
+// TestForeignEdgeRecognition_NoParseOfTheStdoutBindingIsVacuouslyFine
+// pins construct 2's own determination: a recognized crossing whose
+// result NO expression consumes needs no fact at all — soleParseConsumerOf
+// answers (nil, -1, "") — a NIL node, an empty sentence — rather than a
+// decline. There is no expression for a fact to attach to, and that is
+// not a defect: the outbound leg's own judgment (a separate premise
+// this function does not touch) still stands unchanged.
+func TestForeignEdgeRecognition_NoParseOfTheStdoutBindingIsVacuouslyFine(t *testing.T) {
 	p := entryEnvTestProgram(t, `
 declare function execFileSync(file: string, args: string[], options: unknown): string;
 function f(boosted: number[]) {
@@ -2223,12 +2384,25 @@ function f(boosted: number[]) {
 }
 `)
 	statements := relationalAccumulationBodyOf(t, p, "f")
-	if _, _, sentence := soleParseConsumerOf(statements, 0, "stdout"); sentence == "" {
-		t.Errorf("a stdout binding nothing parses was served a JSON fact")
+	found, at, sentence := soleParseConsumerOf(statements, 0, "stdout")
+	if sentence != "" {
+		t.Errorf("a stdout binding nothing parses reported a decline %q, want none", sentence)
+	}
+	if found != nil {
+		t.Errorf("soleParseConsumerOf found a parse node %+v where none exists", found)
+	}
+	if at != -1 {
+		t.Errorf("soleParseConsumerOf answered statement index %d for an absent consumer, want -1", at)
 	}
 }
 
-func TestForeignEdgeRecognition_AParseInsideANestedFunctionIsNotTheConsumer(t *testing.T) {
+// TestForeignEdgeRecognition_AParseInsideANestedFunctionIsVacuouslyFine
+// is the nested-function twin of the "no consumer" row above: the arrow
+// runs an unstated number of times, so foreignParseCallsIn's own
+// function-boundary skip never counts it — from soleParseConsumerOf's
+// point of view this body has NO top-level consumer either, and answers
+// the same (nil, -1, "") as a body with no JSON.parse anywhere.
+func TestForeignEdgeRecognition_AParseInsideANestedFunctionIsVacuouslyFine(t *testing.T) {
 	p := entryEnvTestProgram(t, `
 declare function execFileSync(file: string, args: string[], options: unknown): string;
 function f(boosted: number[]) {
@@ -2241,9 +2415,15 @@ function f(boosted: number[]) {
 `)
 	statements := relationalAccumulationBodyOf(t, p, "f")
 	// the arrow runs an unstated number of times, so no fact can be
-	// pinned to one evaluation of that node
-	if _, _, sentence := soleParseConsumerOf(statements, 0, "stdout"); sentence == "" {
-		t.Errorf("a parse inside a nested function was pinned as the sole consumer")
+	// pinned to one evaluation of that node — and, as with the "no
+	// consumer at all" row, that is not a defect: there is simply no
+	// top-level expression for a fact to land on.
+	found, _, sentence := soleParseConsumerOf(statements, 0, "stdout")
+	if sentence != "" {
+		t.Errorf("a parse inside a nested function reported a decline %q, want none", sentence)
+	}
+	if found != nil {
+		t.Errorf("soleParseConsumerOf found a parse node %+v inside a nested function", found)
 	}
 }
 
@@ -2399,6 +2579,76 @@ func TestForeignReturnCornerObstacle_ARefusedQuestionAnswersNoObstacle(t *testin
 	admitsPosInf := refinementsets.MakeRefinedSet(refinementsets.AtLeast(0))
 	if sentence := foreignReturnCornerObstacle(ctx, admitsPosInf); sentence != "" {
 		t.Errorf("a nil kernel answered an obstacle sentence %q, want none (refused, not refuted)", sentence)
+	}
+}
+
+/* ── construct 1: the ±Infinity corner DETERMINES a finite return ── */
+//
+// h-numeric-edges.ts's maybeInfiniteStaticallySilentRuntimeThrows row: a
+// return set admitting +Infinity no longer declines — the corner is
+// DIFFERENCED OUT (foreignFiniteReturnSet) and the finite remainder
+// binds, because a completed JSON.parse call never actually carries the
+// corner value (every concrete run that would have is a thrown
+// SyntaxError, per json.dumps's own bare-Infinity-token behavior).
+
+// TestForeignFiniteReturnSet_APlusInfinityAdmittingSetNarrowsToFinite
+// pins the ray-narrowing case h-numeric-edges.ts's own H3 row derives:
+// atLeast(0) (an unbounded ray admitting +Infinity) narrows to a set
+// that STILL admits every finite value at or above 0, but no longer
+// admits +Infinity itself.
+func TestForeignFiniteReturnSet_APlusInfinityAdmittingSetNarrowsToFinite(t *testing.T) {
+	ctx := &FlowContext{Kernel: foreignReturnCornerKernel(t)}
+	admitsPosInf := refinementsets.MakeRefinedSet(refinementsets.AtLeast(0))
+	narrowed := foreignFiniteReturnSet(ctx, admitsPosInf)
+	if ctx.Kernel.Member(narrowed, []float64{math.Inf(1)}) {
+		t.Errorf("foreignFiniteReturnSet(atLeast(0)) still admits +Infinity, want it differenced out")
+	}
+	if !ctx.Kernel.Member(narrowed, []float64{1000}) {
+		t.Errorf("foreignFiniteReturnSet(atLeast(0)) no longer admits an ordinary finite member (1000)")
+	}
+	if !ctx.Kernel.Member(narrowed, []float64{0}) {
+		t.Errorf("foreignFiniteReturnSet(atLeast(0)) no longer admits its own finite floor (0)")
+	}
+}
+
+// TestForeignFiniteReturnSet_AMinusInfinityAdmittingSetNarrowsToFinite
+// is the mirror for a ray to -∞ (AtMost(0)).
+func TestForeignFiniteReturnSet_AMinusInfinityAdmittingSetNarrowsToFinite(t *testing.T) {
+	ctx := &FlowContext{Kernel: foreignReturnCornerKernel(t)}
+	admitsNegInf := refinementsets.MakeRefinedSet(refinementsets.AtMost(0))
+	narrowed := foreignFiniteReturnSet(ctx, admitsNegInf)
+	if ctx.Kernel.Member(narrowed, []float64{math.Inf(-1)}) {
+		t.Errorf("foreignFiniteReturnSet(atMost(0)) still admits -Infinity, want it differenced out")
+	}
+	if !ctx.Kernel.Member(narrowed, []float64{-1000}) {
+		t.Errorf("foreignFiniteReturnSet(atMost(0)) no longer admits an ordinary finite member (-1000)")
+	}
+}
+
+// TestForeignFiniteReturnSet_AFiniteWindowIsUnchanged pins the no-op
+// case: a set admitting neither corner (audio_level.py's own 0…1 shape)
+// answers unchanged — narrowing a set with nothing to narrow is a no-op,
+// not a spurious difference-with-nothing wrapper.
+func TestForeignFiniteReturnSet_AFiniteWindowIsUnchanged(t *testing.T) {
+	ctx := &FlowContext{Kernel: foreignReturnCornerKernel(t)}
+	finiteWindow := refinementsets.MakeRefinedSet(refinementsets.AtLeast(0), refinementsets.AtMost(1))
+	narrowed := foreignFiniteReturnSet(ctx, finiteWindow)
+	if !reflect.DeepEqual(narrowed, finiteWindow) {
+		t.Errorf("foreignFiniteReturnSet(0…1) = %+v, want unchanged %+v", narrowed, finiteWindow)
+	}
+}
+
+// TestForeignFiniteReturnSet_ARefusedQuestionAnswersUnchanged pins the
+// "no proof, no narrowing" reading a nil kernel gives — the same
+// fallthrough foreignReturnCornerObstacle itself already answers for a
+// refused question, so an untested corner never gets narrowed away on
+// a set the checker simply could not ask about.
+func TestForeignFiniteReturnSet_ARefusedQuestionAnswersUnchanged(t *testing.T) {
+	ctx := &FlowContext{}
+	admitsPosInf := refinementsets.MakeRefinedSet(refinementsets.AtLeast(0))
+	narrowed := foreignFiniteReturnSet(ctx, admitsPosInf)
+	if !reflect.DeepEqual(narrowed, admitsPosInf) {
+		t.Errorf("foreignFiniteReturnSet with a nil kernel = %+v, want unchanged %+v", narrowed, admitsPosInf)
 	}
 }
 
@@ -2594,5 +2844,300 @@ func TestReadForeignArtifact_AnObjectCaseWithNoMembersDeclinesNamingIt(t *testin
 	}
 	if !strings.Contains(sentence, "members") {
 		t.Errorf("the sentence %q does not name the missing \"members\" object", sentence)
+	}
+}
+
+/* ── construct: the no-stdin call against a stdin-reading target DETERMINES ── */
+//
+// d-data-legs.ts's computedInputKeySilentlySkippedUndetermined row (and any
+// other call that reaches execFileSyncEdgeOf with no stdin `input` and no
+// second argv element) recognizes as an edge with Payload/ArgvValue/FilePath
+// all nil — mirroring checkArgvCrossing's ForeignSurfaceMixedStdinArgv case,
+// checkOutboundLeg's own no-channel branch determines rather than declines
+// when the target's surface is stdin-json: the target's harness reads its
+// one value from stdin, this call sends none, so every concrete run throws
+// at the target's own read before any value crosses — nothing here
+// contradicts the target's stated entry.
+
+func TestExecFileSyncEdgeOf_NoInputAndNoSecondArgvElementRecognizesWithNoPayload(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execFileSync(file: string, args: string[], options: unknown): string;
+function f() {
+	const stdout = execFileSync("python3", ["./targets/level_ok.py"], { encoding: "utf8" });
+	return stdout;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	_, call, _ := constBoundCallOf(statements[0])
+	edge, ok, sentence, _, _ := execFileSyncEdgeOf(nil, call, "stdout", statements, 0)
+	if sentence != "" {
+		t.Fatalf("a call with no input and no second argv element declined: %s", sentence)
+	}
+	if !ok || edge == nil {
+		t.Fatalf("a call with no input and no second argv element was not recognized (ok=%v)", ok)
+	}
+	if edge.Payload != nil || edge.ArgvValue != nil || edge.FilePath != nil {
+		t.Errorf("edge = %+v, want Payload/ArgvValue/FilePath all nil", edge)
+	}
+}
+
+func TestCheckOutboundLeg_NoPayloadAgainstAStdinJSONTargetDeterminesRatherThanDeclines(t *testing.T) {
+	fixture := foreignOutboundFixture(t, -2, 2, 1)
+	edge := &ForeignEdge{Call: fixture.edge.Call, TargetPath: fixture.edge.TargetPath, StdoutName: "stdout"}
+	outcome := checkOutboundLeg(fixture.ctx, fixture.env, edge, fixture.artifact)
+	if outcome != nil {
+		t.Fatalf("a no-payload call against a stdin-json target declined/fired: %+v", outcome)
+	}
+	if len(*fixture.reported) != 0 {
+		t.Errorf("a no-payload call against a stdin-json target reported %d diagnostics: %+v", len(*fixture.reported), *fixture.reported)
+	}
+}
+
+/* ── construct: a mixed-element array literal reads as a sequence crossing (KindList) ── */
+//
+// checkSequenceCrossing previously judged only KindValues{PrimitiveArray}
+// (every element an exact literal number, sequenceCrossingOfExactTuple) —
+// a literal with ANY non-exact element (a range, a parameter's declared
+// window) evaluates through EvaluateArrayLiteral's non-flat path to
+// KindList, which SetOfKnown explicitly refuses (lattice_operations.go).
+// sequenceCrossingOfKindList reads each slot the same per-position way
+// array_literal.go's own scalarPositionSet already does and rebuilds the
+// Repetition window checkSequenceCrossing judges every other sequence
+// shape through.
+
+func TestSequenceCrossingOfKindList_EveryScalarSlotUnionsIntoARepetitionWindow(t *testing.T) {
+	items := []abstractdomain.AbstractValue{
+		abstractdomain.KnownSet(
+			refinementsets.MakeRefinedSet(refinementsets.AtLeast(-1), refinementsets.AtMost(1)),
+			nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
+		abstractdomain.KnownValues([]float64{-0.3}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+		abstractdomain.KnownValues([]float64{0.2}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+	}
+	crossing := abstractdomain.KnownList(items, abstractdomain.TrustProved)
+	converted, ok := sequenceCrossingOfKindList(crossing)
+	if !ok {
+		t.Fatalf("sequenceCrossingOfKindList declined a list of scalar-shaped slots")
+	}
+	window, windowOk := refinementsets.AsRepetition(converted.Set)
+	if !windowOk {
+		t.Fatalf("converted.Set is not a Repetition: %+v", converted)
+	}
+	if window.Lo != 3 || window.Hi == nil || *window.Hi != 3 {
+		t.Errorf("window = %+v, want an exact 3-element repetition", window)
+	}
+}
+
+func TestSequenceCrossingOfKindList_AnObjectShapedSlotDeclines(t *testing.T) {
+	items := []abstractdomain.AbstractValue{
+		abstractdomain.KnownObject(nil, nil, true, abstractdomain.TrustProved, false),
+		abstractdomain.KnownValues([]float64{0.2}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+	}
+	crossing := abstractdomain.KnownList(items, abstractdomain.TrustProved)
+	if _, ok := sequenceCrossingOfKindList(crossing); ok {
+		t.Errorf("sequenceCrossingOfKindList converted a list with an object-shaped slot")
+	}
+}
+
+func TestCheckOutboundLeg_AMixedElementArrayLiteralInsideTheStatedEntryPasses(t *testing.T) {
+	fixture := foreignOutboundFixture(t, -2, 2, 1)
+	fixture.env.Set("boosted", abstractdomain.KnownList([]abstractdomain.AbstractValue{
+		abstractdomain.KnownSet(
+			refinementsets.MakeRefinedSet(refinementsets.AtLeast(-1), refinementsets.AtMost(1)),
+			nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
+		abstractdomain.KnownValues([]float64{-0.3}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+		abstractdomain.KnownValues([]float64{0.2}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+	}, abstractdomain.TrustProved))
+	outcome := checkOutboundLeg(fixture.ctx, fixture.env, fixture.edge, fixture.artifact)
+	if outcome != nil {
+		t.Fatalf("a mixed-element literal inside the stated entry did not pass: %+v", outcome)
+	}
+	if len(*fixture.reported) != 0 {
+		t.Errorf("a fitting mixed-element crossing reported %d diagnostics: %+v", len(*fixture.reported), *fixture.reported)
+	}
+}
+
+func TestCheckOutboundLeg_AnObjectShapedSlotInAMixedLiteralStaysUndetermined(t *testing.T) {
+	fixture := foreignOutboundFixture(t, -2, 2, 1)
+	fixture.env.Set("boosted", abstractdomain.KnownList([]abstractdomain.AbstractValue{
+		abstractdomain.KnownObject(nil, nil, true, abstractdomain.TrustProved, false),
+		abstractdomain.KnownValues([]float64{0.2}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved),
+	}, abstractdomain.TrustProved))
+	outcome := checkOutboundLeg(fixture.ctx, fixture.env, fixture.edge, fixture.artifact)
+	if outcome == nil || outcome.Decline == "" {
+		t.Fatalf("a list with an object-shaped slot did not decline: %+v", outcome)
+	}
+	if !strings.Contains(outcome.Decline, "not read as one here") {
+		t.Errorf("Decline = %q, want the ordinary sequence-shape decline", outcome.Decline)
+	}
+}
+
+/* ── construct: the runner word folds through a const binding ── */
+//
+// runnerAndScriptArgvOf's own interpreter test previously read only a
+// written literal (stringLiteralText) — a `const runner = "python3"`
+// binding at argv[0] answered false, so b-runners.ts's own
+// runnerInVariableUndetermined row was never even recognized as a Python
+// edge. runnerWordOf follows the SAME const-identifier and const-composed
+// resolution scriptElementOf already performs for the script position.
+
+func TestRunnerAndScriptArgvOf_AConstBoundRunnerWordResolves(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execFileSync(file: string, args: string[], options: unknown): string;
+function f() {
+	const runner = "python3";
+	const stdout = execFileSync(runner, ["./targets/level_ok.py"], { encoding: "utf8" });
+	return stdout;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	_, call, _ := constBoundCallOf(statements[1])
+	args, _ := callArguments(call)
+	ctx := &FlowContext{P: p}
+	runnerWord, script, _, ok, sentence, _ := runnerAndScriptArgvOf(ctx, args[0], args[1])
+	if sentence != "" {
+		t.Fatalf("a const-bound runner word declined: %s", sentence)
+	}
+	if !ok || runnerWord != "python3" || script != "./targets/level_ok.py" {
+		t.Errorf("runnerWord=%q script=%q ok=%v, want python3 / ./targets/level_ok.py / true", runnerWord, script, ok)
+	}
+}
+
+func TestRunnerAndScriptArgvOf_ALetBoundRunnerWordStaysUnrecognized(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execFileSync(file: string, args: string[], options: unknown): string;
+function f() {
+	let runner = "python3";
+	const stdout = execFileSync(runner, ["./targets/level_ok.py"], { encoding: "utf8" });
+	return stdout;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	_, call, _ := constBoundCallOf(statements[1])
+	args, _ := callArguments(call)
+	ctx := &FlowContext{P: p}
+	if _, _, _, ok, sentence, _ := runnerAndScriptArgvOf(ctx, args[0], args[1]); ok || sentence != "" {
+		t.Errorf("a let-bound runner word was read as resolvable (ok=%v, sentence=%q) — a rewritable binding is not fixed by its declaration", ok, sentence)
+	}
+}
+
+/* ── construct: the execSync shell heredoc recognizer ── */
+//
+// a-invocation-functions.ts's execSyncUndetermined row spells the
+// stdin-json convention through a shell here-string:
+// `python3 ./targets/level_ok.py <<< '${JSON.stringify(samples)}'`.
+// execSyncHeredocCommandOf recognizes EXACTLY this shape — a template
+// whose constant prefix parses as `<runner> <script> <<<` (with an
+// optional matched quote) and whose single substitution is
+// JSON.stringify(<payload>) — and lowers it to the same recognized edge
+// an execFileSync call with an `input` key gets.
+
+func TestExecSyncHeredocCommandOf_TheSingleQuotedHereStringRecognizes(t *testing.T) {
+	p := entryEnvTestProgram(t, "function f() {\n"+
+		"	const samples = [0.5, -0.3, 0.2];\n"+
+		"	const stdout = `python3 ./targets/level_ok.py <<< '${JSON.stringify(samples)}'`;\n"+
+		"	return stdout;\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	template := statements[1].AsVariableStatement().DeclarationList.
+		AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration().Initializer
+	runnerWord, script, payload, ok := execSyncHeredocCommandOf(template)
+	if !ok {
+		t.Fatalf("the single-quoted here-string command was not recognized")
+	}
+	if runnerWord != "python3" || script != "./targets/level_ok.py" {
+		t.Errorf("runnerWord=%q script=%q, want python3 / ./targets/level_ok.py", runnerWord, script)
+	}
+	if payload == nil || !ast.IsIdentifier(payload) || payload.Text() != "samples" {
+		t.Errorf("payload = %v, want the identifier samples", payload)
+	}
+}
+
+func TestExecSyncHeredocCommandOf_AnUnquotedHereStringRecognizes(t *testing.T) {
+	p := entryEnvTestProgram(t, "function f() {\n"+
+		"	const samples = [0.5, -0.3, 0.2];\n"+
+		"	const stdout = `python3 ./targets/level_ok.py <<< ${JSON.stringify(samples)}`;\n"+
+		"	return stdout;\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	template := statements[1].AsVariableStatement().DeclarationList.
+		AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration().Initializer
+	runnerWord, script, payload, ok := execSyncHeredocCommandOf(template)
+	if !ok {
+		t.Fatalf("the unquoted here-string command was not recognized")
+	}
+	if runnerWord != "python3" || script != "./targets/level_ok.py" {
+		t.Errorf("runnerWord=%q script=%q, want python3 / ./targets/level_ok.py", runnerWord, script)
+	}
+	if payload == nil || !ast.IsIdentifier(payload) || payload.Text() != "samples" {
+		t.Errorf("payload = %v, want the identifier samples", payload)
+	}
+}
+
+func TestExecSyncHeredocCommandOf_APipeInThePrefixIsRefused(t *testing.T) {
+	p := entryEnvTestProgram(t, "function f() {\n"+
+		"	const samples = [0.5, -0.3, 0.2];\n"+
+		"	const stdout = `python3 ./targets/level_ok.py | tee out <<< '${JSON.stringify(samples)}'`;\n"+
+		"	return stdout;\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	template := statements[1].AsVariableStatement().DeclarationList.
+		AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration().Initializer
+	if _, _, _, ok := execSyncHeredocCommandOf(template); ok {
+		t.Errorf("a prefix carrying a pipe was recognized as the narrow heredoc shape")
+	}
+}
+
+func TestExecSyncHeredocCommandOf_TwoSubstitutionsAreRefused(t *testing.T) {
+	p := entryEnvTestProgram(t, "function f() {\n"+
+		"	const samples = [0.5, -0.3, 0.2];\n"+
+		"	const extra = \"x\";\n"+
+		"	const stdout = `python3 ./targets/level_ok.py ${extra} <<< '${JSON.stringify(samples)}'`;\n"+
+		"	return stdout;\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	template := statements[2].AsVariableStatement().DeclarationList.
+		AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration().Initializer
+	if _, _, _, ok := execSyncHeredocCommandOf(template); ok {
+		t.Errorf("a template with two substitutions was recognized as the narrow heredoc shape")
+	}
+}
+
+func TestExecSyncHeredocCommandOf_ANonStringifySubstitutionIsRefused(t *testing.T) {
+	p := entryEnvTestProgram(t, "function f() {\n"+
+		"	const samples = \"[0.5, -0.3, 0.2]\";\n"+
+		"	const stdout = `python3 ./targets/level_ok.py <<< '${samples}'`;\n"+
+		"	return stdout;\n"+
+		"}\n")
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	template := statements[1].AsVariableStatement().DeclarationList.
+		AsVariableDeclarationList().Declarations.Nodes[0].AsVariableDeclaration().Initializer
+	if _, _, _, ok := execSyncHeredocCommandOf(template); ok {
+		t.Errorf("a substitution that is not JSON.stringify(...) was recognized as the narrow heredoc shape")
+	}
+}
+
+func TestExecSyncEdgeOf_TheHeredocShapeRecognizesWithThePayload(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execSync(command: string, options: unknown): string;
+function f() {
+	const samples = [0.5, -0.3, 0.2];
+	const stdout = execSync(`+"`python3 ./targets/level_ok.py <<< '${JSON.stringify(samples)}'`"+`, { encoding: "utf8" });
+	return stdout;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	_, call, _ := constBoundCallOf(statements[1])
+	edge, ok, sentence, _, _ := execSyncEdgeOf(call, "stdout")
+	if sentence != "" {
+		t.Fatalf("the heredoc shape declined: %s", sentence)
+	}
+	if !ok || edge == nil {
+		t.Fatalf("the heredoc shape was not recognized (ok=%v)", ok)
+	}
+	if edge.Payload == nil || !ast.IsIdentifier(edge.Payload) || edge.Payload.Text() != "samples" {
+		t.Errorf("edge.Payload = %v, want the identifier samples", edge.Payload)
+	}
+	if !strings.HasSuffix(edge.TargetPath, filepath.Join("targets", "level_ok.py")) {
+		t.Errorf("edge.TargetPath = %q, want it to end in targets/level_ok.py", edge.TargetPath)
 	}
 }
