@@ -14,10 +14,12 @@
 package walk
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 )
 
 /* ── the conversion table, hand-verified against tmp/ecma262/spec.html
@@ -50,15 +52,15 @@ func TestToInt8_WrapsModulo256Signed(t *testing.T) {
 		in, want float64
 	}{
 		{0, 0},
-		{100, 100},    // stays under the signed ceiling (127)
-		{127, 127},    // the signed max, unchanged
-		{128, -128},   // crosses into the negative half
-		{200, -56},    // the fixture's own pinned row
-		{255, -1},     // one below the wrap
-		{256, 0},      // a full wrap
-		{-56, -56},    // already in range
-		{-128, -128},  // the signed min, unchanged
-		{-129, 127},   // wraps from below
+		{100, 100},   // stays under the signed ceiling (127)
+		{127, 127},   // the signed max, unchanged
+		{128, -128},  // crosses into the negative half
+		{200, -56},   // the fixture's own pinned row
+		{255, -1},    // one below the wrap
+		{256, 0},     // a full wrap
+		{-56, -56},   // already in range
+		{-128, -128}, // the signed min, unchanged
+		{-129, 127},  // wraps from below
 	}
 	for _, c := range cases {
 		if got := toInt8(c.in); got != c.want {
@@ -72,10 +74,10 @@ func TestToUint8Clamp_ClampsToZeroTwoFiftyFiveNeverWraps(t *testing.T) {
 		in, want float64
 	}{
 		{0, 0},
-		{200, 200},  // inside the range, unchanged
-		{255, 255},  // the ceiling, unchanged
-		{300, 255},  // the fixture's own pinned row: clamps, does not wrap
-		{-50, 0},    // the fixture's own pinned row: clamps, does not wrap
+		{200, 200}, // inside the range, unchanged
+		{255, 255}, // the ceiling, unchanged
+		{300, 255}, // the fixture's own pinned row: clamps, does not wrap
+		{-50, 0},   // the fixture's own pinned row: clamps, does not wrap
 		{-1, 0},
 		{256, 255},
 	}
@@ -86,15 +88,100 @@ func TestToUint8Clamp_ClampsToZeroTwoFiftyFiveNeverWraps(t *testing.T) {
 	}
 }
 
-func TestTypedArrayConversion_NamesTheThreeModeledConstructorsOnly(t *testing.T) {
-	for _, name := range []string{"Uint8Array", "Int8Array", "Uint8ClampedArray"} {
+func TestTypedArrayConversion_NamesTheEightModeledConstructorsOnly(t *testing.T) {
+	for _, name := range []string{
+		"Uint8Array", "Int8Array", "Uint8ClampedArray",
+		"Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
+		"Float64Array",
+	} {
 		if _, ok := typedArrayConversion(name); !ok {
 			t.Errorf("typedArrayConversion(%q) answered false, want a row", name)
 		}
 	}
-	for _, name := range []string{"Int16Array", "Uint32Array", "Float64Array", "Array", "NotAConstructor"} {
+	for _, name := range []string{"Float32Array", "BigInt64Array", "BigUint64Array", "Array", "NotAConstructor"} {
 		if _, ok := typedArrayConversion(name); ok {
 			t.Errorf("typedArrayConversion(%q) answered a row, want false — not modeled", name)
+		}
+	}
+}
+
+/* ── the wider-width conversions, hand-verified against
+   specifications/javascript/spec.html (#sec-toint16, #sec-touint16,
+   #sec-toint32, #sec-touint32, #sec-tofixedsizeinteger) ────────────── */
+
+func TestToUint16_WrapsModulo65536Unsigned(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{0, 0},
+		{65535, 65535}, // the top of the range, unchanged
+		{65536, 0},     // wraps exactly to 0
+		{70000, 4464},  // the fixture's own pinned wrap: 70000 mod 65536 = 4464
+		{-1, 65535},    // spec's mathematical modulo is non-negative
+	}
+	for _, c := range cases {
+		if got := toUint16(c.in); got != c.want {
+			t.Errorf("toUint16(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestToInt16_WrapsModulo65536Signed(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{0, 0},
+		{32767, 32767},   // the signed max, unchanged
+		{32768, -32768},  // crosses into the negative half
+		{70000, 4464},    // 70000 mod 65536 = 4464; 4464 < 32768, no shift needed
+		{40000, -25536},  // 40000 mod 65536 = 40000; 40000 >= 32768, so 40000 - 65536 = -25536
+		{-32768, -32768}, // the signed min, unchanged
+	}
+	for _, c := range cases {
+		if got := toInt16(c.in); got != c.want {
+			t.Errorf("toInt16(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestToUint32_WrapsModulo4294967296Unsigned(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{0, 0},
+		{4294967295, 4294967295}, // the top of the range, unchanged
+		{4294967296, 0},          // wraps exactly to 0
+		{4294967297, 1},          // wraps to 1
+		{-1, 4294967295},         // spec's mathematical modulo is non-negative
+	}
+	for _, c := range cases {
+		if got := toUint32TypedArrayElement(c.in); got != c.want {
+			t.Errorf("toUint32TypedArrayElement(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestToInt32_WrapsModulo4294967296Signed(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{0, 0},
+		{2147483647, 2147483647},   // the signed max, unchanged
+		{2147483648, -2147483648},  // crosses into the negative half
+		{-2147483648, -2147483648}, // the signed min, unchanged
+	}
+	for _, c := range cases {
+		if got := toInt32(c.in); got != c.want {
+			t.Errorf("toInt32(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestIdentityConversion_Float64ArrayElementCarriesTheValueUnchanged(t *testing.T) {
+	cases := []float64{0, 121, -50, 3.14159, 1e300, -1e-300}
+	for _, v := range cases {
+		if got := identityConversion(v); got != v {
+			t.Errorf("identityConversion(%v) = %v, want %v unchanged", v, got, v)
 		}
 	}
 }
@@ -240,15 +327,48 @@ func TestReadTypedArrayConstruction_ASpreadInsideTheLiteralDeclines(t *testing.T
 	}
 }
 
-// A non-Uint8Array/Int8Array/Uint8ClampedArray constructor (not yet a
-// row in the table) is not modeled — nil, not a wrong answer.
+// A non-modeled constructor (not yet a row in the table) is not
+// modeled — nil, not a wrong answer.
 func TestReadTypedArrayConstruction_AnUnmodeledWidthDeclines(t *testing.T) {
 	p := entryEnvTestProgram(t,
-		"function f(): number { return new Int16Array([1, 2])[0]; }\n")
+		"function f(): number { return new Float32Array([1, 2])[0]; }\n")
 	ctx := superArrayContracts(t, p)
 	built := ReadTypedArrayConstruction(ctx, NewEnv(), superArrayNewIn(t, p, "f"))
 	if built != nil {
-		t.Errorf("`new Int16Array([1, 2])` answered %+v, want nil (Int16Array has no row in this table)", *built)
+		t.Errorf("`new Float32Array([1, 2])` answered %+v, want nil (Float32Array has no row in this table)", *built)
+	}
+}
+
+// A construction on Float32Array/BigInt64Array/BigUint64Array names
+// the family in the recorded decline instead of falling to the
+// generic constructor-name-blind "new builds a value the walk does
+// not model" sentence.
+func TestReadTypedArrayConstruction_UnmodeledFamiliesNameThemselvesInTheDecline(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		family string
+	}{
+		{"function f(): number { return new Float32Array([1, 2])[0]; }\n", "Float32Array"},
+		{"function f(): bigint { return new BigInt64Array([1n, 2n])[0]; }\n", "BigInt64Array"},
+		{"function f(): bigint { return new BigUint64Array([1n, 2n])[0]; }\n", "BigUint64Array"},
+	} {
+		p := entryEnvTestProgram(t, tc.source)
+		ctx := superArrayContracts(t, p)
+		assignability.BeginReasonNotes()
+		built := ReadTypedArrayConstruction(ctx, NewEnv(), superArrayNewIn(t, p, "f"))
+		notes := assignability.EndReasonNotes()
+		if built != nil {
+			t.Errorf("%s: answered %+v, want nil", tc.family, *built)
+		}
+		found := false
+		for _, note := range notes {
+			if note.Unsupported && strings.Contains(note.Said, tc.family) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: no recorded decline named the family; notes = %+v", tc.family, notes)
+		}
 	}
 }
 
@@ -295,6 +415,102 @@ func TestEvaluate_TypedArrayOutOfBoundsElementReadIsUndefined(t *testing.T) {
 	value := evaluateExpression(ctx, env, elementRead)
 	if value.Kind != abstractdomain.KindUndef {
 		t.Errorf("bytes[5] = %+v, want the absent value exactly", value)
+	}
+}
+
+/* ── the new families: one construction+element-read pin each ─────── */
+
+// Float64Array's own conversion is the identity — the element holds
+// the constructed literal's value unchanged, the same shape the
+// corpus's float64ArrayElementUndetermined row pins.
+//
+// Uses positive decimal literals only: a NEGATIVE literal (`-2.5`)
+// parses as a PrefixUnaryExpression wrapping `2.5`, and
+// evaluateExpression does not fold that to a KindValues number in
+// this walk today (confirmed with a plain `[-2.5]` array literal,
+// same KindUnknown result, independent of anything in this file) —
+// out of scope for this table, so this pin stays inside what the
+// evaluator already folds.
+func TestEvaluate_Float64ArrayElementReadIsTheValueUnchanged(t *testing.T) {
+	p := entryEnvTestProgram(t,
+		"function f(): number { const xs = new Float64Array([3.14159, 2.5]); return xs[0]; }\n")
+	ctx := superArrayContracts(t, p)
+	env := NewEnv()
+	construction := superArrayNewIn(t, p, "f")
+	built := evaluateExpression(ctx, env, construction)
+	if built.Kind != abstractdomain.KindValues || built.KindTag != abstractdomain.PrimitiveArray {
+		t.Fatalf("`new Float64Array([3.14159, 2.5])` = %+v, want KindValues{PrimitiveArray}", built)
+	}
+	env.Set("xs", built)
+	elementRead := superArrayFirstNode(t, entryEnvFunctionNamed(t, p, "f").Body(), "the [0] element read", ast.IsElementAccessExpression)
+	value := evaluateExpression(ctx, env, elementRead)
+	if value.Kind != abstractdomain.KindValues || len(value.Values) != 1 || value.Values[0] != 3.14159 {
+		t.Errorf("xs[0] = %+v, want the exact scalar 3.14159 (Float64Array carries it unchanged)", value)
+	}
+}
+
+// Int16Array's ToInt16 wraps modulo 2^16 into the signed range.
+func TestEvaluate_Int16ArrayElementReadIsTheWrappedValue(t *testing.T) {
+	p := entryEnvTestProgram(t,
+		"function f(): number { const xs = new Int16Array([40000]); return xs[0]; }\n")
+	ctx := superArrayContracts(t, p)
+	env := NewEnv()
+	construction := superArrayNewIn(t, p, "f")
+	built := evaluateExpression(ctx, env, construction)
+	env.Set("xs", built)
+	elementRead := superArrayFirstNode(t, entryEnvFunctionNamed(t, p, "f").Body(), "the [0] element read", ast.IsElementAccessExpression)
+	value := evaluateExpression(ctx, env, elementRead)
+	if value.Kind != abstractdomain.KindValues || len(value.Values) != 1 || value.Values[0] != -25536 {
+		t.Errorf("xs[0] = %+v, want -25536 (ToInt16(40000) wraps into the signed range)", value)
+	}
+}
+
+// Uint16Array's ToUint16 wraps modulo 2^16 — the pinned wrap case the
+// brief names: 70000 -> 4464.
+func TestEvaluate_Uint16ArrayElementReadIsTheWrappedValue(t *testing.T) {
+	p := entryEnvTestProgram(t,
+		"function f(): number { const xs = new Uint16Array([70000]); return xs[0]; }\n")
+	ctx := superArrayContracts(t, p)
+	env := NewEnv()
+	construction := superArrayNewIn(t, p, "f")
+	built := evaluateExpression(ctx, env, construction)
+	env.Set("xs", built)
+	elementRead := superArrayFirstNode(t, entryEnvFunctionNamed(t, p, "f").Body(), "the [0] element read", ast.IsElementAccessExpression)
+	value := evaluateExpression(ctx, env, elementRead)
+	if value.Kind != abstractdomain.KindValues || len(value.Values) != 1 || value.Values[0] != 4464 {
+		t.Errorf("xs[0] = %+v, want 4464 (ToUint16(70000) = 70000 mod 65536)", value)
+	}
+}
+
+// Int32Array's ToInt32 wraps modulo 2^32 into the signed range.
+func TestEvaluate_Int32ArrayElementReadIsTheWrappedValue(t *testing.T) {
+	p := entryEnvTestProgram(t,
+		"function f(): number { const xs = new Int32Array([2147483648]); return xs[0]; }\n")
+	ctx := superArrayContracts(t, p)
+	env := NewEnv()
+	construction := superArrayNewIn(t, p, "f")
+	built := evaluateExpression(ctx, env, construction)
+	env.Set("xs", built)
+	elementRead := superArrayFirstNode(t, entryEnvFunctionNamed(t, p, "f").Body(), "the [0] element read", ast.IsElementAccessExpression)
+	value := evaluateExpression(ctx, env, elementRead)
+	if value.Kind != abstractdomain.KindValues || len(value.Values) != 1 || value.Values[0] != -2147483648 {
+		t.Errorf("xs[0] = %+v, want -2147483648 (ToInt32(2147483648) wraps into the signed range)", value)
+	}
+}
+
+// Uint32Array's ToUint32 wraps modulo 2^32.
+func TestEvaluate_Uint32ArrayElementReadIsTheWrappedValue(t *testing.T) {
+	p := entryEnvTestProgram(t,
+		"function f(): number { const xs = new Uint32Array([4294967297]); return xs[0]; }\n")
+	ctx := superArrayContracts(t, p)
+	env := NewEnv()
+	construction := superArrayNewIn(t, p, "f")
+	built := evaluateExpression(ctx, env, construction)
+	env.Set("xs", built)
+	elementRead := superArrayFirstNode(t, entryEnvFunctionNamed(t, p, "f").Body(), "the [0] element read", ast.IsElementAccessExpression)
+	value := evaluateExpression(ctx, env, elementRead)
+	if value.Kind != abstractdomain.KindValues || len(value.Values) != 1 || value.Values[0] != 1 {
+		t.Errorf("xs[0] = %+v, want 1 (ToUint32(4294967297) = 4294967297 mod 4294967296)", value)
 	}
 }
 

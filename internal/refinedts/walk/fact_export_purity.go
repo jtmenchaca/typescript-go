@@ -78,8 +78,20 @@ func bodyIsStdoutPure(
 			return true
 		}
 		if ast.IsCallExpression(node) {
-			callee := node.AsCallExpression().Expression
+			callExpression := node.AsCallExpression()
+			callee := callExpression.Expression
 			switch {
+			case isCapturedStdoutSpawnCall(callee, callExpression.Arguments.Nodes):
+				// checked BEFORE the bare-identifier case below —
+				// execFileSync/spawnSync/execSync are themselves bare
+				// identifiers, and this row must claim them first or
+				// they fall into calledNames and get refused as an
+				// unresolvable same-file name instead. Admitted per
+				// isCapturedStdoutSpawnCall's own comment (each row's
+				// capture-semantics reasoning): the child's stdout is
+				// piped back as this call's own return value, never
+				// written to the PARENT's stdout, so this call writes
+				// nothing to the wire channel on its own account
 			case ast.IsIdentifier(callee):
 				calledNames = append(calledNames, callee.Text())
 			case isPureBuiltinCall(callee):
@@ -272,6 +284,126 @@ func isPureBuiltinName(name string) bool {
 	switch name {
 	case "Number", "String", "Boolean":
 		return true
+	}
+	return false
+}
+
+// capturedStdoutSpawnNames is the child_process member names whose
+// SYNCHRONOUS call captures the child's stdout as this call's own
+// return value rather than writing anything to the parent's stdout —
+// tested by name alone, the same posture foreign_edge.go's own
+// dispatch takes for these three names before it additionally checks
+// symbol resolution (this scan has no *ast.Checker in reach, so it
+// cannot run that additional check; a same-named local helper reads
+// identically here, exactly as foreign_edge.go's writeFileSyncOf
+// banner already accepts for its own by-name reads). `spawn` (async)
+// is deliberately absent: its result is a ChildProcess whose stdout is
+// a readable STREAM, not a captured return value at this call's own
+// site, so this scan cannot admit it here on the same evidence.
+var capturedStdoutSpawnNames = map[string]bool{
+	"execFileSync": true,
+	"spawnSync":    true,
+	"execSync":     true,
+}
+
+// isCapturedStdoutSpawnCall is whether a call spawns a child process
+// through a form whose stdout is CAPTURED rather than written to the
+// parent's own stdout — admitted per Node's own documented `child_process`
+// semantics, cited per row:
+//
+//   - execFileSync: the default `stdio` is `['pipe', 'pipe', 'pipe']`,
+//     and with no `stdio` override the child's stdout is captured and
+//     returned as this call's own return value (a Buffer, or a string
+//     when `encoding` is set) — never written to the parent's stdout.
+//     Admitted UNCONDITIONALLY: every call shape reaches this row,
+//     because the only way to defeat the capture is an explicit
+//     `stdio` override, checked below for every row alike.
+//   - spawnSync: the identical default (`stdio: ['pipe', 'pipe',
+//     'pipe']`), with the captured stdout read back at `result.stdout`
+//     rather than as the bare return value — the capture premise is
+//     the same, only the read site differs (a site this purity scan
+//     does not need to know, since it is asking whether the CALL
+//     writes the parent's stdout, not where the caller reads the
+//     result).
+//   - execSync: the same default stdio, the captured stdout returned
+//     as this call's own return value exactly as execFileSync's is.
+//
+// The one shape that defeats every row above is an options object
+// whose `stdio` property NAMES the parent's own stdout as the child's
+// target — `stdio: "inherit"` (all three streams inherited) or an
+// array whose index 1 (stdout) is `"inherit"` — which is checked
+// against whichever argument position this callee's own options
+// object occupies (execFileSync/spawnSync: argument 2; execSync:
+// argument 1, since it has no argv array). An options object this
+// scan cannot read into (not written as an object literal) refuses
+// the claim rather than assuming the safe default, matching this
+// file's own conservative-only-admits posture; a per-argument
+// `stdio` reading this scan cannot see (a computed property, a
+// non-literal value) also refuses, for the same reason.
+func isCapturedStdoutSpawnCall(callee *ast.Node, arguments []*ast.Node) bool {
+	node := Unwrapped(callee)
+	if node == nil || !ast.IsIdentifier(node) {
+		return false
+	}
+	name := node.Text()
+	if !capturedStdoutSpawnNames[name] {
+		return false
+	}
+	optionsIndex := 2
+	if name == "execSync" {
+		optionsIndex = 1
+	}
+	if optionsIndex >= len(arguments) {
+		// no options argument at all: Node's own default stdio applies,
+		// which captures stdout on every one of these three names
+		return true
+	}
+	return !stdioOptionInheritsStdout(arguments[optionsIndex])
+}
+
+// stdioOptionInheritsStdout reads an options-argument expression's own
+// `stdio` property (mirroring execFileSyncOptionsOf's per-property
+// read of the same object literal) and answers whether it explicitly
+// routes the child's stdout to the parent's own stdout: the bare
+// string `"inherit"` (all three streams), or an array literal whose
+// index 1 (the stdout slot, Node's own `[stdin, stdout, stderr]`
+// order) is the string `"inherit"`. No `stdio` property, or a `stdio`
+// value this scan cannot read as one of those two literal shapes,
+// answers false — the capture default stands, per the same
+// conservative-only-admits posture the rest of this file takes
+// (a shape this scan cannot see through never registers as the
+// dangerous case, but it also never registers as the safe one on
+// invented grounds — it simply is not what defeats the capture).
+func stdioOptionInheritsStdout(argument *ast.Node) bool {
+	options := Unwrapped(argument)
+	if options == nil || !ast.IsObjectLiteralExpression(options) {
+		return false
+	}
+	for _, property := range options.AsObjectLiteralExpression().Properties.Nodes {
+		if !ast.IsPropertyAssignment(property) {
+			continue
+		}
+		assignment := property.AsPropertyAssignment()
+		key := assignment.Name()
+		if key == nil || !ast.IsIdentifier(key) || key.Text() != "stdio" {
+			continue
+		}
+		value := Unwrapped(assignment.Initializer)
+		if value == nil {
+			return false
+		}
+		if word, ok := stringLiteralText(value); ok {
+			return word == "inherit"
+		}
+		if ast.IsArrayLiteralExpression(value) {
+			elements := value.AsArrayLiteralExpression().Elements.Nodes
+			if len(elements) < 2 {
+				return false
+			}
+			word, ok := stringLiteralText(elements[1])
+			return ok && word == "inherit"
+		}
+		return false
 	}
 	return false
 }

@@ -87,3 +87,64 @@ function f(xs: number[]) {
 		t.Errorf("WritesNothingToStdout = true, want false — the .map callback logs to stdout")
 	}
 }
+
+// TestWritesNothingToStdout_ExecFileSyncSpawnIsPure pins the fix for
+// the ledgered conservative-wrong refusal (ISSUES.md, "Go export: the
+// stdout-purity guard refuses any body that spawns a child"): a body
+// whose only "impurity" is an execFileSync call must read as stdout-
+// pure, since execFileSync's default stdio pipes the child's own
+// stdout back as this call's return value rather than writing the
+// parent's stdout — the chain_boost.ts shape, reproduced here as a
+// small inline source rather than the corpus file.
+func TestWritesNothingToStdout_ExecFileSyncSpawnIsPure(t *testing.T) {
+	p, fn := factExportPurityFunction(t, `
+function f(samples: number[]) {
+  const stdout = execFileSync("python3", ["./leaf.py"], {
+    input: JSON.stringify(samples),
+    encoding: "utf8",
+  });
+  return JSON.parse(stdout);
+}
+`, "f")
+	if !WritesNothingToStdout(p.Entry, fn) {
+		t.Errorf("WritesNothingToStdout = false, want true — execFileSync pipes the child's stdout back as this call's own return value, never writing the parent's stdout")
+	}
+}
+
+// TestWritesNothingToStdout_ExecFileSyncWithInheritedStdioRefusesTheClaim
+// pins the one shape that defeats the captured-stdout admission: an
+// explicit `stdio: "inherit"` sends the child's stdout to the SAME
+// stdout the JSON wire channel must carry alone, so this must still
+// refuse.
+func TestWritesNothingToStdout_ExecFileSyncWithInheritedStdioRefusesTheClaim(t *testing.T) {
+	p, fn := factExportPurityFunction(t, `
+function f(samples: number[]) {
+  const stdout = execFileSync("python3", ["./leaf.py"], {
+    input: JSON.stringify(samples),
+    stdio: "inherit",
+  });
+  return stdout;
+}
+`, "f")
+	if WritesNothingToStdout(p.Entry, fn) {
+		t.Errorf("WritesNothingToStdout = true, want false — an explicit stdio: \"inherit\" sends the child's stdout to the parent's own stdout")
+	}
+}
+
+// TestWritesNothingToStdout_SpawnSyncWithInheritedStdioArrayRefusesTheClaim
+// pins the array form of the same defeat: `stdio: [..., "inherit",
+// ...]` names index 1 (the stdout slot) as inherited.
+func TestWritesNothingToStdout_SpawnSyncWithInheritedStdioArrayRefusesTheClaim(t *testing.T) {
+	p, fn := factExportPurityFunction(t, `
+function f(samples: number[]) {
+  const result = spawnSync("python3", ["./leaf.py"], {
+    input: JSON.stringify(samples),
+    stdio: ["pipe", "inherit", "pipe"],
+  });
+  return result.stdout;
+}
+`, "f")
+	if WritesNothingToStdout(p.Entry, fn) {
+		t.Errorf("WritesNothingToStdout = true, want false — stdio[1] (the stdout slot) is \"inherit\"")
+	}
+}

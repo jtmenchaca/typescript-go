@@ -90,6 +90,49 @@ func TestMembershipTheRuntimeCheckOverTheWireRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMembership_PlusAndMinusInfinityAgainstOneSetNeverCollideUnderAWarmCache
+// pins the fix to CanonicalPairOfSetAndTuple's own cache key
+// (kernel_asks.go): asking Member(set, [+∞]) THEN Member(set, [-∞]),
+// against the SAME one-sided ray, with NO ClearQuestionCache between
+// the two asks — the exact sequence a warm process runs under, and the
+// exact sequence that used to answer both questions with the FIRST
+// one's cached result once jsonNumberString collapsed +Inf and -Inf to
+// the one shared token `null`. AtMost(0) admits -∞ and refuses +∞, so
+// a collision reads as "both false" (the second ask silently inherits
+// the first's answer) rather than the true, distinct pair. (NaN never
+// reaches this question at all — EncodeTuple's own WireNumberOf panics
+// on a NaN tuple member before any cache key is built, so NaN carries
+// no collision to pin here; the fix's own cacheNumberString still
+// gives it a distinct sentinel, for injectivity's sake, should a
+// caller ever reach it.)
+func TestMembership_PlusAndMinusInfinityAgainstOneSetNeverCollideUnderAWarmCache(t *testing.T) {
+	kernel := loadRoundTripKernel(t)
+	ClearQuestionCache()
+
+	rayToMinusInf := refinementsets.MakeRefinedSet(refinementsets.AtMost(0))
+	if got := kernel.Member(rayToMinusInf, []float64{math.Inf(1)}); got {
+		t.Errorf("member(AtMost(0), [+∞]) = %v, want false — asked FIRST, warm cache", got)
+	}
+	// no ClearQuestionCache here — this is the collision's own trigger:
+	// the second ask must still see its OWN answer, not the first's
+	if got := kernel.Member(rayToMinusInf, []float64{math.Inf(-1)}); !got {
+		t.Errorf("member(AtMost(0), [-∞]) = %v, want true — a collided cache key answers "+
+			"this the same false the +∞ ask got, which is the defect this test pins", got)
+	}
+
+	// the mirrored order: -∞ asked first must not poison +∞ either —
+	// the fix is a key that distinguishes the two REGARDLESS of order
+	ClearQuestionCache()
+	rayToPlusInf := refinementsets.MakeRefinedSet(refinementsets.AtLeast(0))
+	if got := kernel.Member(rayToPlusInf, []float64{math.Inf(-1)}); got {
+		t.Errorf("member(AtLeast(0), [-∞]) = %v, want false — asked FIRST, warm cache", got)
+	}
+	if got := kernel.Member(rayToPlusInf, []float64{math.Inf(1)}); !got {
+		t.Errorf("member(AtLeast(0), [+∞]) = %v, want true — a collided cache key answers "+
+			"this the same false the -∞ ask got", got)
+	}
+}
+
 func TestEmptinessAndDisjointnessOnTheOneTupleLayer(t *testing.T) {
 	kernel := loadRoundTripKernel(t)
 	if got := kernel.ScalarEmpty(impossibleSet()); !got {

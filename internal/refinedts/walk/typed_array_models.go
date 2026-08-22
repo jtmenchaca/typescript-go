@@ -15,15 +15,30 @@
 // diverges from a plain array's, so they are the only two this file
 // adds.
 //
-// Conversions cite tmp/ecma262/spec.html:
+// Conversions cite specifications/javascript/spec.html:
 //   - ToFixedSizeInteger (#sec-tofixedsizeinteger) — the shared
-//     modulo-2^bitWidth step both ToInt8 and ToUint8 delegate to:
-//     "fixedInt is int modulo 2^bitWidth"; signed additionally
-//     subtracts 2^bitWidth when fixedInt >= 2^(bitWidth-1).
+//     modulo-2^bitWidth step ToInt8/ToUint8/ToInt16/ToUint16/ToInt32/
+//     ToUint32 all delegate to: "fixedInt is int modulo 2^bitWidth";
+//     signed additionally subtracts 2^bitWidth when
+//     fixedInt >= 2^(bitWidth-1).
 //   - ToUint8 (#sec-touint8) — ToFixedSizeInteger(int, unsigned, 8).
 //   - ToInt8 (#sec-toint8) — ToFixedSizeInteger(int, signed, 8).
 //   - ToUint8Clamp (#sec-touint8clamp) — clamps to [0, 255] and rounds
 //     (round-half-to-even); does not wrap.
+//   - ToInt16 (#sec-toint16) — ToFixedSizeInteger(int, signed, 16).
+//   - ToUint16 (#sec-touint16) — ToFixedSizeInteger(int, unsigned, 16).
+//   - ToInt32 (#sec-toint32) — ToFixedSizeInteger(int, signed, 32).
+//   - ToUint32 (#sec-touint32) — ToFixedSizeInteger(int, unsigned, 32).
+//   - Float64Array's element conversion — table-the-typedarray-
+//     constructors lists NO "Conversion Operation" entry for
+//     Element Type ~float64~ (nor ~float32~/~float16~); NumericToRawBytes
+//     (#sec-numerictorawbytes) branches on Element Type BEFORE reaching
+//     the "Conversion Operation" column step, and its ~float64~ branch
+//     is "Let rawBytes be a List whose elements are ... the IEEE
+//     754-2019 binary64 format encoding of value" — value here already
+//     arrived as a Number (TypedArraySetElement's `? ToNumber(value)`,
+//     #sec-typedarraysetelement), so the element holds that Number
+//     unchanged: the identity conversion.
 //
 // Hand-verified against the fixture's own claimed values:
 //   ToUint8(121)      = 121   (121 mod 256, no wrap)
@@ -33,6 +48,24 @@
 //                              200 - 256 = -56)
 //   ToUint8Clamp(300) = 255   (300 > 255, clamps to the ceiling)
 //   ToUint8Clamp(-50) = 0     (-50 < 0, clamps to the floor)
+//   ToUint16(70000)   = 4464  (70000 mod 65536 = 4464)
+//
+// Float32Array and BigInt64Array/BigUint64Array are NOT in this table.
+// Float32Array's own element conversion (NumericToRawBytes's ~float32~
+// branch, same clause as above) is "the result of converting value to
+// IEEE 754-2019 binary32 format using roundTiesToEven mode" — exactly
+// Math.fround (#sec-math.fround: ToNumber, then binary32-round-then-
+// back-to-binary64) — but this table's conversion shape is
+// func(float64) float64 computed in Go's own float64 domain with no
+// binary32-rounding primitive; stating Float32Array here would either
+// approximate (wrong) or require a new rounding primitive this file
+// does not have, so the row is left out rather than stating a lossy
+// value as exact. BigInt64Array/BigUint64Array's own conversions
+// (ToBigInt64/#sec-tobigint64, ToBigUint64/#sec-tobiguint64) take and
+// return BigInt, not Number — this table's whole shape
+// (func(float64) float64) has no BigInt vocabulary to route them
+// through either. Both declines are named at construction time
+// (noteUnmodeledTypedArrayFamily below) rather than left silent.
 
 package walk
 
@@ -41,6 +74,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -53,11 +87,60 @@ var TypedArrayConversions = map[string]func(float64) float64{
 	"Uint8Array":        toUint8,
 	"Int8Array":         toInt8,
 	"Uint8ClampedArray": toUint8Clamp,
+	"Int16Array":        toInt16,
+	"Uint16Array":       toUint16,
+	"Int32Array":        toInt32,
+	"Uint32Array":       toUint32TypedArrayElement,
+	"Float64Array":      identityConversion,
+}
+
+// unmodeledTypedArrayFamilies names every default-lib typed-array
+// constructor this table recognizes but does NOT land — Float32Array
+// and the two BigInt-element families — so a construction on one of
+// them names the family in the decline instead of falling to the
+// generic, constructor-name-blind "new builds a value the walk does
+// not model" sentence (syntax_models.go's ast.KindNewExpression row).
+var unmodeledTypedArrayFamilies = map[string]string{
+	"Float32Array":   "Float32Array's element conversion rounds through IEEE 754 binary32 (Math.fround) — this table's func(float64) float64 conversions have no binary32-rounding primitive to state it exactly",
+	"BigInt64Array":  "BigInt64Array's element conversion (ToBigInt64) takes and returns BigInt — this table's conversions are all func(float64) float64 and have no BigInt vocabulary",
+	"BigUint64Array": "BigUint64Array's element conversion (ToBigUint64) takes and returns BigInt — this table's conversions are all func(float64) float64 and have no BigInt vocabulary",
 }
 
 func typedArrayConversion(name string) (func(float64) float64, bool) {
 	convert, ok := TypedArrayConversions[name]
 	return convert, ok
+}
+
+// noteUnmodeledTypedArrayFamilyIfNamed records, by name, a `new` whose
+// callee is one of unmodeledTypedArrayFamilies (Float32Array,
+// BigInt64Array, BigUint64Array) resolving to the default lib — the
+// named-absence counterpart of builtin_models.go's NoteUnmodeledCall,
+// for constructors rather than calls. A no-op for every other callee
+// (an ordinary unrecognized identifier, a shadowed local, a
+// non-identifier callee), which falls to the generic syntax-kind
+// decline exactly as before.
+func noteUnmodeledTypedArrayFamilyIfNamed(ctx *FlowContext, e *ast.Node) {
+	callee := calleeOf(e)
+	if callee == nil || !ast.IsIdentifier(callee) {
+		return
+	}
+	name := callee.Text()
+	reason, ok := unmodeledTypedArrayFamilies[name]
+	if !ok {
+		return
+	}
+	if !resolvesToDefaultLib(ctx, callee) {
+		return
+	}
+	if !assignability.CollectingReasons() {
+		return
+	}
+	assignability.NoteReason(assignability.ReasonNote{
+		Site:        "expression",
+		Node:        e,
+		Said:        name + " is not modeled: " + reason,
+		Unsupported: true,
+	})
 }
 
 // toFixedSizeInteger is ToFixedSizeInteger (#sec-tofixedsizeinteger):
@@ -112,6 +195,47 @@ func toUint8Clamp(v float64) float64 {
 	if v >= 255 {
 		return 255
 	}
+	return v
+}
+
+// toInt16 is ToInt16 (#sec-toint16): ToFixedSizeInteger(int, signed,
+// 16) — wraps modulo 2^16 into [-32768, 32767].
+func toInt16(v float64) float64 {
+	return toFixedSizeInteger(v, true, 16)
+}
+
+// toUint16 is ToUint16 (#sec-touint16): ToFixedSizeInteger(int,
+// unsigned, 16) — wraps modulo 2^16 into [0, 65535].
+func toUint16(v float64) float64 {
+	return toFixedSizeInteger(v, false, 16)
+}
+
+// toInt32 is ToInt32 (#sec-toint32): ToFixedSizeInteger(int, signed,
+// 32) — wraps modulo 2^32 into [-2147483648, 2147483647].
+func toInt32(v float64) float64 {
+	return toFixedSizeInteger(v, true, 32)
+}
+
+// toUint32TypedArrayElement is ToUint32 (#sec-touint32):
+// ToFixedSizeInteger(int, unsigned, 32) — wraps modulo 2^32 into [0,
+// 4294967295]. Named apart from math_transfer.go's own toUint32
+// (a different signature, func(float64) uint32, for the bitwise
+// operators' ToUint32) — this is the element-conversion shape,
+// func(float64) float64, the table below needs.
+func toUint32TypedArrayElement(v float64) float64 {
+	return toFixedSizeInteger(v, false, 32)
+}
+
+// identityConversion is Float64Array's own element conversion:
+// NumericToRawBytes (#sec-numerictorawbytes) encodes a ~float64~
+// element as "the IEEE 754-2019 binary64 format encoding of value"
+// with no separate "Conversion Operation" column entry (table-the-
+// typedarray-constructors leaves that cell empty for Float64Array) —
+// the value a Float64Array element holds IS the Number that reached
+// it (already ToNumber'd one step up, TypedArraySetElement's own `?
+// ToNumber(value)`, #sec-typedarraysetelement), carried through
+// unchanged.
+func identityConversion(v float64) float64 {
 	return v
 }
 
@@ -171,6 +295,7 @@ func typedArrayConstructorName(ctx *FlowContext, e *ast.Node) (string, bool) {
 //     before encoding the bytes. That conversion-operation table is
 //     the wrap/clamp table this file's toUint8/toInt8/toUint8Clamp
 //     mirror.
+//
 // Every other argument shape (a length the walk has not pinned to one
 // exact non-negative integer, a non-literal array-like, an
 // ArrayBuffer + offset/length triple, another TypedArray) is not
@@ -179,6 +304,7 @@ func typedArrayConstructorName(ctx *FlowContext, e *ast.Node) (string, bool) {
 func ReadTypedArrayConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.AbstractValue {
 	name, ok := typedArrayConstructorName(ctx, e)
 	if !ok {
+		noteUnmodeledTypedArrayFamilyIfNamed(ctx, e)
 		return nil
 	}
 	convert, _ := typedArrayConversion(name)

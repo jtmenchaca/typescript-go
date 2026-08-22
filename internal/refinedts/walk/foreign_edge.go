@@ -63,6 +63,7 @@
 package walk
 
 import (
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -233,6 +234,23 @@ func ForeignEdgeAt(
 	if parseSentence != "" {
 		return &ForeignEdgeOutcome{Decline: parseSentence, DeclineNode: edge.Call, TargetPath: edge.TargetPath}, true
 	}
+	// THE ±INFINITY CORNER (§4): `JSON.stringify` writes a JS number's
+	// ±Infinity as the bare token `null` on the OUTBOUND leg (checked
+	// above, nanFreedomObstacle's own premise); on this INBOUND leg the
+	// hazard is the mirror and worse — the TARGET is Python, and
+	// `json.dumps(float("inf"))` emits the bare token `Infinity`, which
+	// is not legal JSON at all. `JSON.parse` of that text THROWS at
+	// runtime. A return set admitting either corner is a claim this
+	// transport cannot carry, so the fact never binds: it degrades to
+	// the same named-undetermined channel every other undischarged
+	// premise in this file uses.
+	if sentence := foreignReturnCornerObstacle(ctx, artifact.Called.Return.Set); sentence != "" {
+		return &ForeignEdgeOutcome{
+			Decline:     "the target " + artifact.Called.Name + "'s stated return " + sentence,
+			DeclineNode: parse,
+			TargetPath:  edge.TargetPath,
+		}, true
+	}
 	return &ForeignEdgeOutcome{
 		Override: map[*ast.Node]abstractdomain.AbstractValue{
 			parse: foreignReturnValue(artifact),
@@ -240,6 +258,39 @@ func ForeignEdgeAt(
 		OverrideStatement: at,
 		TargetPath:        edge.TargetPath,
 	}, true
+}
+
+// foreignReturnCornerObstacle asks the kernel whether returnSet admits
+// +Infinity or -Infinity as a MEMBER — the real x ∈ A ask
+// (kernelbridge.RefinedTSKernel.Member, proved: memberB_iff), the same
+// idiom effect_math_test.go's own Math.min/max corner checks and
+// kernel_bridge_test.go's ℝ̄∖{0} row already ask of a live kernel,
+// reused here rather than a fresh inspection of the set's forms. A
+// refused or unavailable question (no kernel loaded, a panic inside the
+// ask) recovers to "" — the SAME "no proof, no obstacle" reading
+// foreignScalarSubset and subsetProved already give a refused question,
+// so an untested corner never falsely degrades a set the kernel simply
+// could not answer for.
+func foreignReturnCornerObstacle(ctx *FlowContext, returnSet refinementsets.RefinedSet) (sentence string) {
+	if ctx == nil || ctx.Kernel == nil || ctx.Kernel.Member == nil {
+		return ""
+	}
+	defer func() {
+		if recover() != nil {
+			sentence = ""
+		}
+	}()
+	if ctx.Kernel.Member(returnSet, []float64{math.Inf(1)}) {
+		return "admits Infinity, which the JSON stdout leg cannot carry — " +
+			"json.dumps(float(\"inf\")) writes the bare token Infinity, which is not legal JSON, " +
+			"and JSON.parse throws on it — the crossing cannot be trusted at that corner"
+	}
+	if ctx.Kernel.Member(returnSet, []float64{math.Inf(-1)}) {
+		return "admits -Infinity, which the JSON stdout leg cannot carry — " +
+			"json.dumps(float(\"-inf\")) writes the bare token -Infinity, which is not legal JSON, " +
+			"and JSON.parse throws on it — the crossing cannot be trusted at that corner"
+	}
+	return ""
 }
 
 // foreignReturnValue is the fact the parse result wears: the target's
@@ -253,6 +304,10 @@ func ForeignEdgeAt(
 // runtime band cited from the Python pins. TrustSpec is the tree's
 // existing grade for exactly that boundary — a spec clause read
 // correctly, not a theorem discharged.
+//
+// Called only once foreignReturnCornerObstacle has cleared the set of
+// both infinite corners — a set that reaches here binds exactly as it
+// always did.
 func foreignReturnValue(artifact *ForeignArtifact) abstractdomain.AbstractValue {
 	return abstractdomain.KnownSet(
 		artifact.Called.Return.Set, nil,

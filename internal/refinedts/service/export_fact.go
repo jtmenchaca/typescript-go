@@ -59,10 +59,16 @@ const ExportFactRuntimeBand = "es2023+"
 // export: every OTHER function the file declares states no fact here,
 // mirroring the Python producer's own one-function harness contract.
 //
-// omissions names the one reason nothing was exported: no recognized
-// harness, the harness calling a function this file states no checked
-// contract for, or ExportFunctionFact/WritesNothingToStdout declining
-// that one function. written is "" in every omission case.
+// written is "" ONLY where no surface is recognized at all (no
+// harness call — nothing to name in an envelope). Once a harness IS
+// recognized, the artifact is always written — target/language/
+// runtime/surface stated in full, and "functions" either carrying the
+// one exported fact or left an empty object — matching the Python
+// exporter's own module-level shape (an artifact naming what it saw,
+// omissions listed beside it, never withheld as a file). omissions
+// names the one reason the called function itself carried no fact:
+// the harness calling a function this file states no checked contract
+// for, or ExportFunctionFact/WritesNothingToStdout declining it.
 //
 // err is non-nil only for a read/parse/write failure — a program that
 // would not build, a directory that cannot be created, a file that
@@ -88,22 +94,32 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 
 	calledName, harnessShape, argIndex, harnessOk := walk.HarnessCallOf(p.Entry)
 	if !harnessOk {
+		// no recognized surface at all: there is nothing to name in an
+		// envelope (no "calls", no harness kind), so this is the one
+		// omission that writes no artifact — matching the Python
+		// exporter's own "surface is exported only when a harness shape
+		// matches" rule, extended here to the whole file since the Go
+		// producer states one function's fact per file rather than a
+		// module's many.
 		return "", []string{entryFilePath + ": no recognized stdio harness — " +
 			`a bare top-level console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(0, "utf8"))))), ` +
 			`console.log(JSON.stringify(<fn>(JSON.parse(process.argv[<literal int>])))), ` +
 			`or console.log(JSON.stringify(<fn>(JSON.parse(readFileSync(process.argv[<literal int>], "utf8"))))) is the only shape read`}, nil
 	}
 
+	// From here the surface IS recognized (a named harness call exists),
+	// so the artifact is written regardless of whether the called
+	// function itself exports a fact — matching the Python exporter's
+	// own module-level shape (empty "functions" rather than no file at
+	// all) and the consumer's own remedy: a decline sentence naming the
+	// omission never again points at a command that cannot produce a
+	// file.
 	var calledContract *walk.FunctionContract
 	for symbol, contract := range entryContracts {
 		if symbol.Name == calledName {
 			calledContract = contract
 			break
 		}
-	}
-	if calledContract == nil {
-		return "", []string{entryFilePath + ": '" + calledName + "' is not exported: " +
-			"the harness calls it, and this file states no checked contract for it"}, nil
 	}
 
 	ctx := &walk.FlowContext{
@@ -113,14 +129,36 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 		Aliases:   dataflowfacts.NewAliasClasses(),
 		Declared:  map[string]*annotations.DeclaredRefinement{},
 	}
-	entryRows, returnSet, omission := walk.ExportFunctionFact(ctx, calledContract)
-	if omission != "" {
-		return "", []string{entryFilePath + ": '" + calledName + "' is not exported: " + omission}, nil
+
+	var entryRows []walk.ForeignEntryRow
+	var returnSet refinementsets.RefinedSet
+	var provenanceLine int
+	var provenanceSaid string
+	stdoutPure := false
+	exported := false
+	var functionOmission string
+
+	switch {
+	case calledContract == nil:
+		functionOmission = "the harness calls it, and this file states no checked contract for it"
+	default:
+		var exportOmission string
+		entryRows, returnSet, exportOmission = walk.ExportFunctionFact(ctx, calledContract)
+		switch {
+		case exportOmission != "":
+			functionOmission = exportOmission
+		case !walk.WritesNothingToStdout(p.Entry, calledContract.Declaration):
+			functionOmission = "its body may write to stdout, which the JSON wire channel must carry alone"
+		default:
+			stdoutPure = true
+			provenanceLine = walk.ProvenanceLineOf(p.Entry, calledContract.Declaration)
+			provenanceSaid = walk.ProvenanceSaidOf(entryRows, returnSet)
+			exported = true
+		}
 	}
-	stdoutPure := walk.WritesNothingToStdout(p.Entry, calledContract.Declaration)
-	if !stdoutPure {
-		return "", []string{entryFilePath + ": '" + calledName + "' is not exported: " +
-			"its body may write to stdout, which the JSON wire channel must carry alone"}, nil
+
+	if functionOmission != "" {
+		omissions = []string{entryFilePath + ": '" + calledName + "' is not exported: " + functionOmission}
 	}
 
 	sourceBytes, readErr := os.ReadFile(entryFilePath)
@@ -130,11 +168,9 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 	sum := sha256.Sum256(sourceBytes)
 	contentHash := "sha256:" + hex.EncodeToString(sum[:])
 
-	provenanceLine := walk.ProvenanceLineOf(p.Entry, calledContract.Declaration)
-	provenanceSaid := walk.ProvenanceSaidOf(entryRows, returnSet)
-
 	rendered, marshalErr := json.MarshalIndent(
-		exportFactEnvelope(filepath.Base(entryFilePath), contentHash, calledName, harnessShape, argIndex, entryRows, returnSet, stdoutPure, provenanceLine, provenanceSaid),
+		exportFactEnvelope(filepath.Base(entryFilePath), contentHash, calledName, harnessShape, argIndex,
+			exported, entryRows, returnSet, stdoutPure, provenanceLine, provenanceSaid),
 		"", "  ")
 	if marshalErr != nil {
 		return "", nil, fmt.Errorf("rendering the artifact for %s: %w", entryFilePath, marshalErr)
@@ -147,7 +183,7 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 	if writeErr := atomicWriteArtifact(target, append(rendered, '\n')); writeErr != nil {
 		return "", nil, writeErr
 	}
-	return target, nil, nil
+	return target, omissions, nil
 }
 
 // exportFactEnvelope builds the artifact as raw JSON-serializable maps
@@ -164,28 +200,51 @@ func ExportFact(entryFilePath string, surfacePath string, outPath string) (writt
 // field). Every <set> is kernelbridge.EncodeSet's own wire text,
 // embedded as json.RawMessage so it is never re-encoded through a
 // second string builder.
+//
+// exported is whether the harness-called function itself carried
+// enough to state a fact: false leaves "functions" an EMPTY object —
+// the surface (target/language/runtime/surface) is still stated in
+// full, matching the Python exporter's own module-level shape (an
+// artifact naming every def it saw, with only the exportable ones
+// filled in) — never a missing file the caller's decline sentence
+// then has no way to produce.
 func exportFactEnvelope(
 	targetFile string, contentHash string, harnessCalls string,
 	harnessShape walk.HarnessShape, argIndex float64,
+	exported bool,
 	entryRows []walk.ForeignEntryRow, returnSet refinementsets.RefinedSet, stdoutPure bool,
 	provenanceLine int, provenanceSaid string,
 ) map[string]any {
-	entries := make([]map[string]any, 0, len(entryRows))
-	for _, row := range entryRows {
-		if row.IsSequence {
+	functions := map[string]any{}
+	if exported {
+		entries := make([]map[string]any, 0, len(entryRows))
+		for _, row := range entryRows {
+			if row.IsSequence {
+				entries = append(entries, map[string]any{
+					"name": row.Name,
+					"sequence": map[string]any{
+						"element":       json.RawMessage(kernelbridge.EncodeSet(row.Element)),
+						"lengthAtLeast": row.LengthAtLeast,
+					},
+				})
+				continue
+			}
 			entries = append(entries, map[string]any{
 				"name": row.Name,
-				"sequence": map[string]any{
-					"element":       json.RawMessage(kernelbridge.EncodeSet(row.Element)),
-					"lengthAtLeast": row.LengthAtLeast,
-				},
+				"set":  json.RawMessage(kernelbridge.EncodeSet(row.Set)),
 			})
-			continue
 		}
-		entries = append(entries, map[string]any{
-			"name": row.Name,
-			"set":  json.RawMessage(kernelbridge.EncodeSet(row.Set)),
-		})
+		functions[harnessCalls] = map[string]any{
+			"entry": entries,
+			"return": map[string]any{
+				"set":        json.RawMessage(kernelbridge.EncodeSet(returnSet)),
+				"stdoutPure": stdoutPure,
+			},
+			"provenance": map[string]any{
+				"line": provenanceLine,
+				"said": provenanceSaid,
+			},
+		}
 	}
 	return map[string]any{
 		"refined": map[string]any{
@@ -200,20 +259,8 @@ func exportFactEnvelope(
 		"runtime": map[string]any{
 			"band": ExportFactRuntimeBand,
 		},
-		"surface": exportFactSurface(harnessShape, argIndex, harnessCalls),
-		"functions": map[string]any{
-			harnessCalls: map[string]any{
-				"entry": entries,
-				"return": map[string]any{
-					"set":        json.RawMessage(kernelbridge.EncodeSet(returnSet)),
-					"stdoutPure": stdoutPure,
-				},
-				"provenance": map[string]any{
-					"line": provenanceLine,
-					"said": provenanceSaid,
-				},
-			},
-		},
+		"surface":   exportFactSurface(harnessShape, argIndex, harnessCalls),
+		"functions": functions,
 	}
 }
 

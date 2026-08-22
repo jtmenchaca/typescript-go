@@ -114,15 +114,26 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 	// accumulation consumes the statement AFTER the loop as well, so the
 	// list resumes past it rather than walking it a second time.
 	walked := 0
-	// foreignOverride: the CROSS-LANGUAGE edge's pinned parse result, and
-	// which statement of this list it belongs to (foreign_edge.go). The
-	// edge's call and the JSON.parse that reads its stdout are two
-	// statements, and the fact on the parse comes from another language's
-	// checker — nothing this walk does to that node can reach it. So the
-	// value rides ctx.NodeOverrides for exactly the one statement that
-	// contains the parse, set below and restored by leaving the copy.
-	var foreignOverride map[*ast.Node]abstractdomain.AbstractValue
-	foreignOverrideAt := -1
+	// pendingForeignOverrides: every CROSS-LANGUAGE edge's pinned parse
+	// result recognized so far but not yet consumed, keyed by the index
+	// of the statement it belongs to (foreign_edge.go). The edge's call
+	// and the JSON.parse that reads its stdout are two statements, and
+	// the fact on the parse comes from another language's checker —
+	// nothing this walk does to that node can reach it. So the value
+	// rides ctx.NodeOverrides for exactly the one statement that contains
+	// the parse, set below and restored by leaving the copy.
+	//
+	// THE RULE: an override is keyed PER EDGE (its own OverrideStatement
+	// index), never held in a single scalar slot. A DIAMOND shape — two
+	// execFileSync calls recognized back to back, each naming a LATER
+	// statement as its own parse's home — must not let the second
+	// recognition overwrite the first's still-pending entry: each is
+	// consumed independently, exactly once, at its own index, and an
+	// entry never consumed by the time this list finishes walking simply
+	// expires when the map falls out of scope with the function return —
+	// the same expiry a single scalar slot already had, now per-key
+	// instead of per-call.
+	pendingForeignOverrides := map[int]map[*ast.Node]abstractdomain.AbstractValue{}
 	for index, statement := range statements {
 		if index < walked {
 			continue
@@ -150,7 +161,11 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 				running.Report(assignability.At(outcome.DeclineNode, 7002, outcome.Decline))
 			}
 			if outcome.Override != nil {
-				foreignOverride, foreignOverrideAt = outcome.Override, outcome.OverrideStatement
+				// keyed by ITS OWN statement index — a second recognized
+				// edge earlier in the list (a diamond's own second call)
+				// never touches this entry, and this one never touches
+				// another edge's still-pending entry either
+				pendingForeignOverrides[outcome.OverrideStatement] = outcome.Override
 			}
 			// consumer-index prerequisite (docs/one-checker/lsp-coordinator.md
 			// build plan item 3): every edge this walk recognized — fired,
@@ -160,11 +175,11 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 				*running.ConsumedForeignSink = append(*running.ConsumedForeignSink, outcome.TargetPath)
 			}
 		}
-		if index == foreignOverrideAt && foreignOverride != nil {
+		if override, isPending := pendingForeignOverrides[index]; isPending {
 			pinning := *running
-			pinning.NodeOverrides = foreignOverride
+			pinning.NodeOverrides = override
 			exits := AnalyzeStatement(&pinning, env, statement, result)
-			foreignOverride, foreignOverrideAt = nil, -1
+			delete(pendingForeignOverrides, index)
 			if exits {
 				return true
 			}

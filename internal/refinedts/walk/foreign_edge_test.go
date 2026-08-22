@@ -27,6 +27,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,6 +37,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
@@ -2195,5 +2197,101 @@ func TestAnalyzeStatements_AnOrdinaryStatementPushesNothingToTheForeignSink(t *t
 	AnalyzeStatements(ctx, env, statements, nil)
 	if len(consumed) != 0 {
 		t.Errorf("ConsumedForeignSink = %v, want empty — no edge was ever recognized here", consumed)
+	}
+}
+
+/* ── the return leg's ±Infinity corner (the JSON stdout leg cannot carry it) ── */
+//
+// json.dumps(float("inf")) writes the bare token `Infinity` — not legal
+// JSON — and JSON.parse throws on it at runtime. A return set admitting
+// either infinite corner must not bind as the parse's fact: it degrades
+// to a named undetermined instead. foreignReturnCornerObstacle is the
+// gate; these pin it directly against a real kernel's Member ask
+// (x ∈ A), the same idiom effect_math_test.go's own Math.min/max corner
+// checks and kernel_bridge_test.go's ℝ̄∖{0} row already use.
+
+// foreignReturnCornerKernel loads the same kernel every other
+// kernel-backed test in this file loads — skips (never a faked pass)
+// when the native dylib is absent.
+func foreignReturnCornerKernel(t *testing.T) *kernelbridge.RefinedTSKernel {
+	t.Helper()
+	return nanWrapperLoadKernel(t)
+}
+
+func TestForeignReturnCornerObstacle_APlusInfinityAdmittingSetDegrades(t *testing.T) {
+	ctx := &FlowContext{Kernel: foreignReturnCornerKernel(t)}
+	// ℝ̄ ∖ {0}: the same "admits +∞" set kernel_bridge_test.go's own
+	// TestMembershipTheRuntimeCheckOverTheWireRoundTrip pins Member true
+	// for at +∞ — a derived Python return this wide (e.g. no upper
+	// bound at all) reaches this shape.
+	admitsPosInf := refinementsets.MakeRefinedSet(refinementsets.Difference(
+		refinementsets.Numbers, refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0})),
+	))
+	sentence := foreignReturnCornerObstacle(ctx, admitsPosInf)
+	if sentence == "" {
+		t.Fatalf("a +Infinity-admitting return set answered no obstacle, want the named corner")
+	}
+	if !strings.Contains(sentence, "Infinity") {
+		t.Errorf("sentence %q does not name the Infinity corner", sentence)
+	}
+	if !strings.Contains(sentence, "JSON") {
+		t.Errorf("sentence %q does not name the JSON stdout leg that cannot carry it", sentence)
+	}
+}
+
+func TestForeignReturnCornerObstacle_AMinusInfinityAdmittingSetDegradesIdentically(t *testing.T) {
+	ctx := &FlowContext{Kernel: foreignReturnCornerKernel(t)}
+	// AtMost(0): a one-sided ray to -∞ admits -Infinity as a member
+	// (the same ray shape refinement_forms_test.go's own
+	// TestInfinitiesAreElementsNaNIsRefused pins AtLeast/AtMost's
+	// corners as elements, never excluded members).
+	admitsNegInf := refinementsets.MakeRefinedSet(refinementsets.AtMost(0))
+	sentence := foreignReturnCornerObstacle(ctx, admitsNegInf)
+	if sentence == "" {
+		t.Fatalf("a -Infinity-admitting return set answered no obstacle, want the named corner")
+	}
+	if !strings.Contains(sentence, "-Infinity") {
+		t.Errorf("sentence %q does not name the -Infinity corner", sentence)
+	}
+	if !strings.Contains(sentence, "JSON") {
+		t.Errorf("sentence %q does not name the JSON stdout leg that cannot carry it", sentence)
+	}
+}
+
+// TestForeignReturnCornerObstacle_AFiniteWindowBindsExactlyAsBefore is
+// the regression pin: audio_level.py's own real return window (0 … 1,
+// the exact shape foreignArtifactJSON states and TestCheckOutboundLeg's
+// own fixtures already exercise) admits neither corner, so the gate
+// answers no obstacle and foreignReturnValue serves the same
+// TrustSpec-graded fact it always has.
+func TestForeignReturnCornerObstacle_AFiniteWindowBindsExactlyAsBefore(t *testing.T) {
+	ctx := &FlowContext{Kernel: foreignReturnCornerKernel(t)}
+	finiteWindow := refinementsets.MakeRefinedSet(
+		refinementsets.AtLeast(0), refinementsets.AtMost(1),
+	)
+	if sentence := foreignReturnCornerObstacle(ctx, finiteWindow); sentence != "" {
+		t.Fatalf("a finite 0 … 1 return window reported an obstacle, want none: %q", sentence)
+	}
+	artifact := &ForeignArtifact{Called: ForeignFunctionFact{
+		Name:   "audio_level",
+		Return: ForeignReturn{Set: finiteWindow, StdoutPure: true},
+	}}
+	got := foreignReturnValue(artifact)
+	want := abstractdomain.KnownSet(finiteWindow, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("foreignReturnValue(finite window) = %+v, want %+v — a finite return must bind unchanged", got, want)
+	}
+}
+
+// TestForeignReturnCornerObstacle_ARefusedQuestionAnswersNoObstacle pins
+// the "no proof, no obstacle" reading a nil kernel gives — the same
+// fallthrough foreignScalarSubset and subsetProved already answer for a
+// question the kernel cannot decide, so an untested corner never
+// falsely degrades a set the checker simply could not ask about.
+func TestForeignReturnCornerObstacle_ARefusedQuestionAnswersNoObstacle(t *testing.T) {
+	ctx := &FlowContext{}
+	admitsPosInf := refinementsets.MakeRefinedSet(refinementsets.AtLeast(0))
+	if sentence := foreignReturnCornerObstacle(ctx, admitsPosInf); sentence != "" {
+		t.Errorf("a nil kernel answered an obstacle sentence %q, want none (refused, not refuted)", sentence)
 	}
 }

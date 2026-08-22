@@ -127,6 +127,32 @@ console.log(JSON.stringify(meterLevel(JSON.parse(readFileSync(process.argv[2], "
 	return path
 }
 
+// writeExecFileSyncHarnessFixture writes a temp-dir .ts fixture in the
+// same stdin-json harness shape writeHarnessFixture builds, but with
+// `execFileSync` imported and available to the harness's own called
+// function — the chain_boost.ts shape (a function whose only
+// "impurity" is a captured-stdout spawn), reproduced here as a small
+// inline source rather than the corpus file.
+func writeExecFileSyncHarnessFixture(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	source := `import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import * as z from "` + exportFactSurfacePath + `";
+
+const zSamples = z.array(z.number().min(-2).max(2)).min(1);
+
+` + body + `
+
+console.log(JSON.stringify(meterLevel(JSON.parse(readFileSync(0, "utf8")))));
+`
+	path := filepath.Join(dir, "meter_level.ts")
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+	return path
+}
+
 func requireExportFactKernel(t *testing.T) {
 	t.Helper()
 	if !kernelbridge.KernelArtifactsPresent(kernelbridge.DylibPath) {
@@ -228,6 +254,104 @@ func TestExportFact_AWellFormedHarnessWritesTheFrozenEnvelope(t *testing.T) {
 	}
 	if said, _ := provenance["said"].(string); said == "" {
 		t.Errorf("provenance.said is empty")
+	}
+}
+
+// TestExportFact_AnExecFileSyncSpawningBodyExportsItsFact pins the
+// fix for the ledgered conservative-wrong purity refusal (ISSUES.md,
+// "Go export: the stdout-purity guard refuses any body that spawns a
+// child"): a body whose only "impurity" is an execFileSync call —
+// chain_boost.ts's own shape — must still export, since execFileSync
+// pipes the child's stdout back as this call's own return value
+// rather than writing the parent's stdout. The return is
+// samples.length rather than anything read off the spawn's own
+// result: resolving what execFileSync's return derives to needs the
+// cross-language edge (ForeignEdgeAt), which needs @types/node in
+// reach — a program-construction premise this package's own test
+// programs do not carry (foreign_edge_test.go's banner) — so this
+// test keeps the derived return independent of that gap and stays
+// scoped to the purity gate alone.
+func TestExportFact_AnExecFileSyncSpawningBodyExportsItsFact(t *testing.T) {
+	requireExportFactKernel(t)
+	spawningBody := `function meterLevel(samples: z.infer<typeof zSamples>): number {
+  const stdout = execFileSync("python3", ["./leaf.py"], {
+    input: JSON.stringify(samples),
+    encoding: "utf8",
+  });
+  void stdout;
+  return samples.length;
+}
+`
+	path := writeExecFileSyncHarnessFixture(t, spawningBody)
+	outPath := filepath.Join(filepath.Dir(path), "meter_level.ts.refined.json")
+
+	written, omissions, err := ExportFact(path, exportFactSurfacePath, outPath)
+	if err != nil {
+		t.Fatalf("ExportFact: %v", err)
+	}
+	if len(omissions) != 0 {
+		t.Fatalf("ExportFact reported omissions for a captured-stdout spawning body: %v", omissions)
+	}
+	if written != outPath {
+		t.Fatalf("written = %q, want %q", written, outPath)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading the written artifact: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("the written artifact is not valid JSON: %v", err)
+	}
+	functions, ok := parsed["functions"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact carries no functions: %v", parsed)
+	}
+	row, ok := functions["meterLevel"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact states no fact for meterLevel: %v", functions)
+	}
+	returned, ok := row["return"].(map[string]any)
+	if !ok {
+		t.Fatalf("the row states no return: %v", row)
+	}
+	if pure, _ := returned["stdoutPure"].(bool); !pure {
+		t.Errorf("stdoutPure = %v, want true — execFileSync's captured stdout never writes the parent's own stdout", returned["stdoutPure"])
+	}
+}
+
+// TestExportFact_ExecFileSyncWithInheritedStdioStillRefuses pins the
+// one shape that must still refuse: an explicit `stdio: "inherit"`
+// sends the child's stdout to the SAME stdout the JSON wire channel
+// must carry alone, so the purity-guard fix must not admit this row.
+func TestExportFact_ExecFileSyncWithInheritedStdioStillRefuses(t *testing.T) {
+	requireExportFactKernel(t)
+	inheritedStdioBody := `function meterLevel(samples: z.infer<typeof zSamples>): number {
+  const stdout = execFileSync("python3", ["./leaf.py"], {
+    input: JSON.stringify(samples),
+    stdio: "inherit",
+  });
+  return samples.length;
+}
+`
+	path := writeExecFileSyncHarnessFixture(t, inheritedStdioBody)
+	outPath := filepath.Join(filepath.Dir(path), "meter_level.ts.refined.json")
+
+	written, omissions, err := ExportFact(path, exportFactSurfacePath, outPath)
+	if err != nil {
+		t.Fatalf("ExportFact: %v", err)
+	}
+	if written != outPath {
+		t.Fatalf("written = %q, want %q — a recognized surface still writes the artifact", written, outPath)
+	}
+	if len(omissions) != 1 {
+		t.Fatalf("omissions = %v, want exactly one", omissions)
+	}
+	want := path + ": 'meterLevel' is not exported: " +
+		"its body may write to stdout, which the JSON wire channel must carry alone"
+	if omissions[0] != want {
+		t.Errorf("omissions[0] = %q, want %q", omissions[0], want)
 	}
 }
 
@@ -482,7 +606,13 @@ console.log(JSON.stringify(meterLevel(JSON.parse(process.argv[i]))));
 // harness calls a function taking two parameters — the exporter
 // refuses symmetrically with the consumer's own one-entry rule — and
 // ExportFact's own omission sentence names it by the fixed shape
-// cmd/refinedts-check/main.go prints verbatim.
+// cmd/refinedts-check/main.go prints verbatim. Fixes the ledgered
+// exporter asymmetry (ISSUES.md, "Exporter asymmetry: an all-omitted
+// target yields an artifact from the Python exporter... but NO file
+// from the Go exporter"): the harness surface IS recognized here, so
+// the artifact is still written — target/language/runtime/surface
+// stated in full, "functions" left an empty object — rather than no
+// file at all, matching the Python exporter's own module-level shape.
 func TestExportFact_AnUnexportableFunctionPinsTheOmissionSentence(t *testing.T) {
 	requireExportFactKernel(t)
 	twoParamBody := `function meterLevel(samples: z.infer<typeof zSamples>, gain: number): number {
@@ -496,8 +626,8 @@ func TestExportFact_AnUnexportableFunctionPinsTheOmissionSentence(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ExportFact: %v", err)
 	}
-	if written != "" {
-		t.Fatalf("written = %q, want \"\" alongside an omission", written)
+	if written != outPath {
+		t.Fatalf("written = %q, want %q — a recognized surface still writes the artifact", written, outPath)
 	}
 	if len(omissions) != 1 {
 		t.Fatalf("omissions = %v, want exactly one", omissions)
@@ -507,8 +637,28 @@ func TestExportFact_AnUnexportableFunctionPinsTheOmissionSentence(t *testing.T) 
 	if omissions[0] != want {
 		t.Errorf("omissions[0] = %q, want %q", omissions[0], want)
 	}
-	if _, statErr := os.Stat(outPath); statErr == nil {
-		t.Errorf("an omitted function must not write an artifact file")
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading the written artifact: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("the written artifact is not valid JSON: %v", err)
+	}
+	surface, ok := parsed["surface"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact carries no surface: %v", parsed)
+	}
+	if calls, _ := surface["calls"].(string); calls != "meterLevel" {
+		t.Errorf("surface.calls = %q, want meterLevel — the surface still names the harness's called function", calls)
+	}
+	functions, ok := parsed["functions"].(map[string]any)
+	if !ok {
+		t.Fatalf("the artifact carries no functions: %v", parsed)
+	}
+	if len(functions) != 0 {
+		t.Errorf("functions = %v, want an empty object — meterLevel itself states no fact", functions)
 	}
 }
 

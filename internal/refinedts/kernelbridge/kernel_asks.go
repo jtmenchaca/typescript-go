@@ -446,30 +446,53 @@ func optionalKey(key string, hasKey bool) *string {
 }
 
 // CanonicalPairOfSetAndTuple builds the member() cache key: the TS
-// `canonicalPair(canonicalKeyOf(set), JSON.stringify(tuple))`.
+// `canonicalPair(canonicalKeyOf(set), JSON.stringify(tuple))`, WIDENED
+// past what a literal JSON.stringify would spell.
 //
-// `JSON.stringify` on a JS number serializes ±Infinity/NaN as the bare
-// token `null` (there is no JSON representation of a non-finite
-// number) — unlike Go's `encoding/json`, which refuses to marshal a
-// non-finite float64 at all (json: unsupported value: +Inf). jsonNumberString
-// below mirrors the JS behavior so this cache key never panics on a
-// tuple holding ±∞.
+// `JSON.stringify` on a JS number serializes ±Infinity/NaN all alike,
+// as the bare token `null` (there is no JSON representation of a
+// non-finite number) — unlike Go's `encoding/json`, which refuses to
+// marshal a non-finite float64 at all (json: unsupported value: +Inf).
+// Spelling the CACHE KEY with that same collapse is wrong even though
+// it never reaches the wire (EncodeTuple's own encoding, asked
+// separately, is untouched by this function and already carries the
+// true signed value to the kernel): Member(set, [+Inf]) and
+// Member(set, [-Inf]) are two DIFFERENT questions with two different
+// answers in general (a one-sided ray such as AtMost(0) admits -Inf
+// and refuses +Inf), and a cache keyed on the collapsed spelling
+// answers the SECOND question with the FIRST question's cached
+// result. cacheNumberString below keeps every finite value's ordinary
+// numeral (unchanged from JSON.stringify) and gives +Infinity,
+// -Infinity, and NaN three DISTINCT sentinels instead of the one
+// shared `null` — injective where jsonNumberString was not.
 func CanonicalPairOfSetAndTuple(set refinementsets.RefinedSet, tuple []float64) (string, bool) {
 	setKey := CanonicalKeyOf(wireSet(set))
 	parts := make([]string, len(tuple))
 	for i, x := range tuple {
-		parts[i] = jsonNumberString(x)
+		parts[i] = cacheNumberString(x)
 	}
 	tupleKey := "[" + joinComma(parts) + "]"
 	return CanonicalPair(setKey, &tupleKey)
 }
 
-// jsonNumberString mirrors what `JSON.stringify` does to a single JS
-// number: ±Infinity and NaN serialize as the bare token `null`;
-// every other value prints as its ordinary JSON numeral.
-func jsonNumberString(x float64) string {
-	if isNaN(x) || math.IsInf(x, 0) {
-		return "null"
+// cacheNumberString spells one tuple member for the CACHE KEY only —
+// never for the wire (EncodeTuple owns that, unchanged). Every finite
+// value prints its ordinary JSON numeral, exactly as JSON.stringify
+// would. +Infinity, -Infinity, and NaN each get their OWN sentinel
+// token (not valid JSON, and deliberately not: this string is never
+// parsed, only compared for cache-key equality), so three
+// distinguishable questions never collide onto the one bare `null`
+// every one of them would share under a literal JSON.stringify
+// reading.
+func cacheNumberString(x float64) string {
+	if isNaN(x) {
+		return "$nan"
+	}
+	if math.IsInf(x, 1) {
+		return "$+inf"
+	}
+	if math.IsInf(x, -1) {
+		return "$-inf"
 	}
 	return marshalWireValue(x)
 }

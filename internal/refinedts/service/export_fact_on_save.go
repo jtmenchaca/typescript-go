@@ -133,7 +133,8 @@ func ExportFactOnSave(ctx context.Context, prog *compiler.Program, entryPath str
 	provenanceSaid := walk.ProvenanceSaidOf(entryRows, returnSet)
 
 	rendered, marshalErr := json.MarshalIndent(
-		exportFactEnvelope(filepath.Base(entryPath), contentHash, calledName, harnessShape, argIndex, entryRows, returnSet, true, provenanceLine, provenanceSaid),
+		exportFactEnvelope(filepath.Base(entryPath), contentHash, calledName, harnessShape, argIndex,
+			true, entryRows, returnSet, true, provenanceLine, provenanceSaid),
 		"", "  ")
 	if marshalErr != nil {
 		return "", false, fmt.Errorf("rendering the artifact for %s: %w", entryPath, marshalErr)
