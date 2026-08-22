@@ -66,3 +66,46 @@ func TestCanonicalScalarForms_AnAllVacuousSetKeepsOneForm(t *testing.T) {
 		t.Errorf("Forms = %+v, want exactly one surviving spelling of ℝ̄", canon.Forms)
 	}
 }
+
+// two atLeast conjuncts collapse to the tightest — atLeast(5) alone
+// dominates atLeast(3) beside it (canonical_forms.go's FoldRayForms call).
+func TestCanonicalScalarForms_DominatedAtLeastCollapsesToTightest(t *testing.T) {
+	set := MakeRefinedSet(AtLeast(3), AtLeast(5))
+	canon := CanonicalScalarForms(set)
+	want := MakeRefinedSet(AtLeast(5))
+	if !sameSetJSON(canon, want) {
+		t.Errorf("CanonicalScalarForms(atLeast(3) ∧ atLeast(5)) = %+v, want %+v", canon, want)
+	}
+}
+
+// two atMost conjuncts collapse to the tightest — atMost(2) alone
+// dominates atMost(7) beside it.
+func TestCanonicalScalarForms_DominatedAtMostCollapsesToTightest(t *testing.T) {
+	set := MakeRefinedSet(AtMost(7), AtMost(2))
+	canon := CanonicalScalarForms(set)
+	want := MakeRefinedSet(AtMost(2))
+	if !sameSetJSON(canon, want) {
+		t.Errorf("CanonicalScalarForms(atMost(7) ∧ atMost(2)) = %+v, want %+v", canon, want)
+	}
+}
+
+// a strict bound wins its tie against a non-strict one at the same
+// value — above(3) dominates atLeast(3) (x > 3 is the stronger claim).
+func TestCanonicalScalarForms_StrictBoundWinsTieAgainstNonStrict(t *testing.T) {
+	set := MakeRefinedSet(Above(3), AtLeast(3))
+	canon := CanonicalScalarForms(set)
+	want := MakeRefinedSet(Above(3))
+	if !sameSetJSON(canon, want) {
+		t.Errorf("CanonicalScalarForms(above(3) ∧ atLeast(3)) = %+v, want %+v", canon, want)
+	}
+}
+
+// mixed-direction bounds (a lower ray and an upper ray) are untouched —
+// dominance collapse only applies within the same ray class.
+func TestCanonicalScalarForms_MixedDirectionBoundsUntouched(t *testing.T) {
+	set := MakeRefinedSet(AtLeast(3), AtMost(7), Integer)
+	canon := CanonicalScalarForms(set)
+	if !sameSetJSON(canon, set) {
+		t.Errorf("CanonicalScalarForms(atLeast(3) ∧ atMost(7) ∧ integer) = %+v, want unchanged %+v", canon, set)
+	}
+}

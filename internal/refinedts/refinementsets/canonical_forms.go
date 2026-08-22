@@ -11,7 +11,12 @@
 //   - `atMost +inf` and `atLeast -inf` hold of every member of ℝ̄, so
 //     beside any other conjunct they add nothing;
 //   - a conjunct structurally equal to another conjunct is the same
-//     claim said twice — one copy stays.
+//     claim said twice — one copy stays;
+//   - two same-direction bound conjuncts collapse to the tightest ray
+//     (FoldRayForms): atLeast(3) beside atLeast(5) is atLeast(5) alone,
+//     a strict bound wins its tie against a non-strict one at the same
+//     value (above(3) dominates atLeast(3)), and the dual holds for the
+//     upper class (atMost/below).
 //
 // Why this exists: joins wrap a fresh Union node per round and meets
 // CONCATENATE forms lists, so a loop-fixpoint candidate reached the
@@ -74,6 +79,17 @@ func canonicalFormList(forms []Refinement) []Refinement {
 		}
 		out = append(out, form)
 	}
+	// same-direction bound conjuncts collapse to the tightest ray per
+	// class (FoldRayForms, refinement_forms.go): atLeast(3) beside
+	// atLeast(5) is atLeast(5) alone, and a strict/non-strict tie at the
+	// same bound favors the strict form (above(3) dominates atLeast(3),
+	// since x > 3 is the stronger claim). This is the same fold the
+	// narrowing seam already asks the kernel through
+	// (abstractdomain/intersect_refinements.go) — applied here so the
+	// SPELLING already carries the dominance a later ask would answer,
+	// rather than leaving two live conjuncts that say the same bound
+	// twice at different tightness.
+	out = FoldRayForms(out)
 	// vacuous conjuncts drop beside any other conjunct
 	kept := make([]Refinement, 0, len(out))
 	for _, form := range out {

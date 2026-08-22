@@ -4,8 +4,39 @@
 package walk
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 )
+
+// collectionReceiverPathOf reads a collection call's own RECEIVER
+// position — the `xs` of `xs.m(cb)` — admitting either a bare identifier
+// (`xs`) or a plain property-access chain rooted at an identifier or
+// `this` (`request.samples`, `this.items`), spelled as one dotted string
+// exactly as propertyPathOf/PathSlotIndexOf already spell every other
+// interior-path slot lookup in this package ("request.samples" is the
+// same key arraySlotsOf resolves an array local's "…len"/"…elem" pair
+// under). A computed or optional step declines, same as propertyPathOf's
+// own rule — neither names a fixed leaf this reader can spell.
+//
+// Widening the receiver here is a SYNTAX admission only: whether
+// "request.samples" actually resolves to an allocated array pair is
+// arraySlotsOf's own question at consumption time, decided by whatever
+// the array-parameter/local flattening laid out. A receiver this reader
+// now admits but that flattening never expanded still declines exactly
+// as it does today — this only stops the syntax gate itself from being
+// the reason an interior-path receiver's array pair never gets asked
+// for.
+func collectionReceiverPathOf(node *ast.Node) (string, bool) {
+	if ast.IsIdentifier(node) {
+		return node.Text(), true
+	}
+	root, path, ok := propertyPathOf(node)
+	if !ok {
+		return "", false
+	}
+	return root + "." + strings.Join(path, "."), true
+}
 
 // collectionCall is one recognized `xs.m(cb)` shape: the receiver's
 // spelled name, the method, and the single callback argument.
@@ -16,8 +47,10 @@ type collectionCall struct {
 }
 
 // collectionCallOf reads `xs.m(cb)` with exactly one argument and a
-// plain (non-optional) receiver identifier — the only receiver shape
-// the two-slot flattening resolves.
+// plain (non-optional) receiver — a bare identifier OR an interior
+// property-access chain rooted at one (collectionReceiverPathOf) — the
+// receiver shapes the two-slot flattening's own lookup (arraySlotsOf,
+// spelled by dotted name) can resolve.
 func collectionCallOf(node *ast.Node) (collectionCall, bool) {
 	head := Unwrapped(node)
 	if !ast.IsCallExpression(head) {
@@ -35,7 +68,8 @@ func collectionCallOf(node *ast.Node) (collectionCall, bool) {
 	if property.QuestionDotToken != nil {
 		return collectionCall{}, false
 	}
-	if !ast.IsIdentifier(property.Expression) || !ast.IsIdentifier(property.Name()) {
+	receiver, receiverOk := collectionReceiverPathOf(property.Expression)
+	if !receiverOk || !ast.IsIdentifier(property.Name()) {
 		return collectionCall{}, false
 	}
 	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
@@ -46,19 +80,21 @@ func collectionCallOf(node *ast.Node) (collectionCall, bool) {
 		return collectionCall{}, false
 	}
 	return collectionCall{
-		Receiver: property.Expression.Text(),
+		Receiver: receiver,
 		Method:   property.Name().Text(),
 		Callback: argument,
 	}, true
 }
 
 // reduceCallExpressionOf matches the `xs.reduce(...)` receiver shape
-// every reduce reader needs — a plain non-optional identifier receiver,
-// a non-optional `.reduce` step — and hands back the parsed call plus the
-// receiver's own name, leaving the ARGUMENT COUNT to each caller. Both
-// reduceCallOf (two arguments, a seed) and oneArgumentReduceCallOf (one
-// argument, no seed) start here, since the receiver rule the two share is
-// the whole of collectionCallOf's own rule minus the argument count.
+// every reduce reader needs — a plain non-optional receiver
+// (collectionReceiverPathOf: a bare identifier or an interior path
+// rooted at one), a non-optional `.reduce` step — and hands back the
+// parsed call plus the receiver's own spelling, leaving the ARGUMENT
+// COUNT to each caller. Both reduceCallOf (two arguments, a seed) and
+// oneArgumentReduceCallOf (one argument, no seed) start here, since the
+// receiver rule the two share is the whole of collectionCallOf's own
+// rule minus the argument count.
 func reduceCallExpressionOf(node *ast.Node) (call *ast.CallExpression, receiver string, ok bool) {
 	head := Unwrapped(node)
 	if !ast.IsCallExpression(head) {
@@ -76,13 +112,14 @@ func reduceCallExpressionOf(node *ast.Node) (call *ast.CallExpression, receiver 
 	if property.QuestionDotToken != nil {
 		return nil, "", false
 	}
-	if !ast.IsIdentifier(property.Expression) || !ast.IsIdentifier(property.Name()) {
+	receiverPath, receiverOk := collectionReceiverPathOf(property.Expression)
+	if !receiverOk || !ast.IsIdentifier(property.Name()) {
 		return nil, "", false
 	}
 	if property.Name().Text() != "reduce" {
 		return nil, "", false
 	}
-	return callExpr, property.Expression.Text(), true
+	return callExpr, receiverPath, true
 }
 
 // reduceCallOf reads `xs.reduce(cb, seed)` — the TWO-argument shape
