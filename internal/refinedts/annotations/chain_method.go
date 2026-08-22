@@ -359,7 +359,18 @@ func ChainMethod(params ChainMethodParams) *Compiled {
 		if !compiled.Ok {
 			return unsupportedf(at, ".regex: %s", compiled.Unsupported)
 		}
-		return &Compiled{Annotation: &Annotation{Set: setPtr(refinementsets.MakeRefinedSet(append(append([]refinementsets.Refinement{}, base.Forms...), compiled.Set.Forms...)...))}}
+		// the C* ground drops beside the pattern -- withString's own
+		// rule (above), applied here too: a bare `z.string()` base
+		// compiles to Star(Codepoints) (Strings), and stacking it
+		// alongside the grammar's own concatenation/repeat forms blinds
+		// the kernel's one-shape sequence-subset prover (measured:
+		// alignedSegSubsetB proves the grammar-alone pair but declines
+		// once the redundant ground rides beside it) for a conjunct
+		// that adds nothing -- the pattern is already a language over C.
+		set := refinementsets.MakeRefinedSet(
+			refinementsets.WithoutStringGround(append(append([]refinementsets.Refinement{}, base.Forms...), compiled.Set.Forms...))...,
+		)
+		return &Compiled{Annotation: &Annotation{Set: setPtr(set)}}
 	case "rest":
 		if len(args) != 1 {
 			return unsupportedf(at, ".rest takes one schema")

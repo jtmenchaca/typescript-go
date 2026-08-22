@@ -173,23 +173,34 @@ function wrapperConstructorFieldOk(): number {
 // `number` (no compilable refinement annotation — Sealed's own #age in
 // the e-class-and-function.ts fixture).
 //
-// OLD PREMISE: "AnnotationOfType answers Stated: nil for a bare
-// `number` node, and checkConstructorFieldWrites skips every field its
-// read does not resolve" (asserted zero diagnostics) — now false (JT's
-// ruling, annotations/type_node_sets.go's primitive-keyword arm): the
-// field's own plain `number` type grounds, so the write DOES check.
+// OLD PREMISE (this test's ORIGINAL claim, restored below): "AnnotationOfType
+// answers Stated: nil for a bare `number` node, and
+// checkConstructorFieldWrites skips every field its read does not
+// resolve" (asserted zero diagnostics) — a false premise once a bare
+// `number` node itself grounds (annotations/type_node_sets.go's
+// primitive-keyword arm): the write DOES check.
 //
-// The check now genuinely fires ONE 7002 — not a widening bug, but
-// nan_wrapper.go's own documented rule (CheckPossiblyNaN's
-// AddsNothingSet gate): `age`'s own read is InitialStateOfPlainParameter's
-// PossiblyNaN(Numbers) (typereading's ReadDeclaredType already grounded
-// a bare `number` PARAMETER this way, independent of this fix), and a
-// possibly-NaN value whose real half ADDS NOTHING beyond the plain
-// number ground carries no more information than KindUnknown — the
-// SAME 7002 KindUnknown itself would take (nan_wrapper.go's own
-// comment: "Undetermined stays undetermined: skip straight to the 7002
-// alert below"). The write is genuinely unproven NaN-safe: nothing
-// here excludes NaN on either the parameter's or the field's side.
+// INTERIM PREMISE (measured, not ruled): for one sweep this test
+// asserted exactly ONE 7002, on the theory that CheckPossiblyNaN's
+// AddsNothingSet gate could only ever ask about the SOURCE half — a
+// possibly-NaN value whose real half adds nothing beyond the number
+// sort's own ground carries no more information than KindUnknown, so
+// it fell to the same 7002 KindUnknown itself takes. That recorded
+// what the gate measurably did, not what the question actually asks:
+// the gate had never read the TARGET side at all, so it could not tell
+// "the target excludes NaN, and the source's width is unproven" (a
+// genuine open question) apart from "the target ITSELF admits NaN, so
+// NaN is not an obstacle to begin with" (a decidable question the gate
+// was refusing to ask).
+//
+// RULED (JT): a value PossiblyNaN(X) checked against a declared set D
+// that ITSELF admits NaN (a bare, unrefined number ground — the
+// language's own `number` includes NaN) is sound exactly when X ⊆ D:
+// the NaN arm is admitted by the target, so it adds no failure case,
+// and the check reduces to the plain subset. Here both sides are the
+// bare number ground — the identity case — so the reduction is
+// trivially true and the write is SILENT: nothing about `age`'s value
+// or `#age`'s declared type excludes anything the other admits.
 func TestConstructorFieldWrites_UnrefinedFieldTypeStaysSilent(t *testing.T) {
 	kernel := parseVocabKernel(t)
 	source := constructorFieldWritesHeader + `
@@ -205,10 +216,7 @@ function wrapperPlainNumberField(): number {
 }
 `
 	diagnostics := parseVocabRun(t, kernel, source, "wrapperPlainNumberField")
-	if len(diagnostics) != 1 {
-		t.Fatalf("wrapperPlainNumberField reported %d diagnostic(s), want exactly 1 (the unproven-NaN-safety verdict on `this.#age = age`): %+v", len(diagnostics), diagnostics)
-	}
-	if diagnostics[0].Code != 7002 {
-		t.Errorf("the one diagnostic is code %d, want 7002 (undetermined — a plain number parameter is not proven NaN-free): %+v", diagnostics[0].Code, diagnostics[0])
+	if len(diagnostics) != 0 {
+		t.Errorf("wrapperPlainNumberField reported %d diagnostic(s), want none (a bare `number` parameter into a bare `number` field: both sides admit NaN, so the NaN arm is not an obstacle and the identity subset holds): %+v", len(diagnostics), diagnostics)
 	}
 }

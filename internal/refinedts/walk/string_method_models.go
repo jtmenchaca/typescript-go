@@ -518,6 +518,49 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 				}
 			}
 		}
+		// `.padStart(n, p)` over a repetition-SHAPED set (repeat(S, lo,
+		// hi), not an exact value) with an exact integer targetLength and
+		// a literal padString: StringPad only pads when maxLength exceeds
+		// the receiver's length (sec-stringpad step 2 — "If maxLength <=
+		// stringLength, return string"), so where the window's own lower
+		// bound already meets n, EVERY length the window admits already
+		// clears the threshold and the receiver rides back unchanged. Where
+		// the lower bound falls short, the pad prefix's own length is
+		// exactly maxLength - stringLength (step 4) — a window of [0, n -
+		// lo] over the shorter members and 0 over the ones already at or
+		// past n — so repeat(codepoints-of-p, 0, n-lo) concatenated ahead
+		// of the receiver's own shape is the over-approximation: sound at
+		// every length the receiver's window admits, exact only where lo
+		// alone already decides the outcome (the repeat(Digits,4,4)
+		// through padStart(4, "0") case: lo == hi == n, so the receiver
+		// rides back exactly unchanged).
+		if method == "padStart" && len(argKnowns) >= 1 && len(argKnowns) <= 2 &&
+			receiver.Kind == abstractdomain.KindSet && receiver.SetKindTag == abstractdomain.SetKindTagNone {
+			n, nOk := exactIntOf(argKnowns[0])
+			pad, padOk := " ", true
+			if len(argKnowns) == 2 {
+				pad, padOk = exactStringOf(argKnowns[1])
+			}
+			if nOk && padOk && n >= 0 {
+				if repeated, ok := refinementsets.AsRepetition(receiver.Set); ok {
+					// an empty fillString never pads, whatever the length
+					// (sec-stringpad step 3: "If fillString is the empty
+					// String, return string") — the receiver rides back
+					// unchanged rather than concatenating an unsatisfiable
+					// empty alphabet
+					if repeated.Lo >= n || pad == "" {
+						out := abstractdomain.KnownSet(receiver.Set, nil, oracleGrade, abstractdomain.SetKindTagNone)
+						return &out
+					}
+					padWindowHi := n - repeated.Lo
+					padAlphabet := refinementsets.MakeRefinedSet(refinementsets.OneOf(refinementsets.CodepointsOf(pad)))
+					padPrefix := refinementsets.Repetition(padAlphabet, 0, &padWindowHi)
+					concatenated := refinementsets.MakeRefinedSet(refinementsets.Concatenation(padPrefix, receiver.Set))
+					out := abstractdomain.KnownSet(concatenated, nil, oracleGrade, abstractdomain.SetKindTagNone)
+					return &out
+				}
+			}
+		}
 		if _, ok := stringOutMethods[method]; ok {
 			out := abstractdomain.KnownSet(refinementsets.Strings, nil, oracleGrade, abstractdomain.SetKindTagNone)
 			return &out

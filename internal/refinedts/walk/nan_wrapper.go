@@ -59,6 +59,23 @@ func CheckPossiblyNaN(
 		return
 	}
 	if target.Kind == annotations.DeclaredSet && target.KindTag == "" {
+		// the DECLARED side itself ADDS NOTHING beyond the number sort's
+		// own ground — a bare, unrefined `number` position, which the
+		// language admits NaN into (every refined set EXCLUDES NaN unless
+		// it restates the ground, the same line AddsNothingSet already
+		// draws for the source half below). NaN is then not an obstacle
+		// at all: the target already holds it, so the NaN arm adds no
+		// failure case and the whole question reduces to the plain real-
+		// half subset X ⊆ D — which a bare number ground trivially
+		// answers true for any numeric X, real or otherwise undetermined.
+		// The identity case (bare number source into bare number target)
+		// is the point of the rule: it answers SILENT, not the 7002 the
+		// AddsNothingSet-on-the-SOURCE gate below used to fall through to
+		// for lack of a decidable question — the question was always
+		// decidable once the target side is read too.
+		if AddsNothingSet(*target.Set) {
+			return
+		}
 		var innerSet refinementsets.RefinedSet
 		hasInnerSet := false
 		if known.Inner.Kind == abstractdomain.KindSet && known.Inner.SetKindTag == abstractdomain.SetKindTagNone {
@@ -82,7 +99,9 @@ func CheckPossiblyNaN(
 		// "this value is out of range" about a value the walk never
 		// actually examined. Undetermined stays undetermined: skip
 		// straight to the 7002 alert below, the same verdict KindUnknown
-		// itself takes.
+		// itself takes. (The declared side was already checked above: this
+		// gate is reached only where the TARGET excludes NaN — a genuinely
+		// refined set — so NaN remains a live obstacle here.)
 		if hasInnerSet && refinementsets.OnOneTupleLayer(innerSet) && !AddsNothingSet(innerSet) {
 			if checkPossiblyNaNSubset(ctx, innerSet, target, node, what) {
 				return // reported (either the sort refutation or the NaN refutation)

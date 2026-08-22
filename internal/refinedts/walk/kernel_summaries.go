@@ -439,20 +439,17 @@ func unknownReceiver() abstractdomain.AbstractValue {
 // the kernel decline; the JS inline walk then serves exactly as
 // before.
 //
-// EXACT is the one addition past the whole-body walk's own answer: a
-// REST parameter's entry state is always TOP (summaryEntryStates —
-// the compiled program is reused across every call, so it cannot
-// carry one call's own array length), an ARRAY-TYPED parameter's two
-// entries are always TOP for the same reason, and a body that only
-// reads through one of those therefore serves a TOP ret under the
-// COMPLETE-body rule regardless of what this call passed. EXACT true
-// says this call's own arguments are the real, fully-read positions
-// (no unread spread ate the count) — so when the ret would serve TOP
-// AND the declaration has a rest parameter OR an array parameter, the
-// route declines instead of serving: this call's exact tail or exact
-// array is knowledge only the walk-based recovery can use
-// (ParameterKnown, BoundParameterKnown), and TOP-serving here would
-// discard it for nothing the summary route determined either.
+// EXACT (the exact parameter, and the ExactIn/ExactOn callers that pass
+// true) distinguished a TOP-fed rest/array entry's serve from a
+// genuinely unconstrained body's, back when a TOP ret still served
+// silence conditionally. The serve-only-when-it-determines rule below
+// now declines EVERY TOP/unknown ret unconditionally, whatever produced
+// it — a REST parameter's always-TOP entry, an ARRAY-TYPED parameter's
+// always-TOP pair, or anything else — so EXACT no longer changes this
+// function's answer. It still selects which entry-state reading a
+// caller wants (summaryEntryStates is unaffected), so the parameter and
+// its dedicated callers (SummaryResultExactIn, KernelSummaryDirectExactOn)
+// stay, but nothing here branches on it anymore.
 func applySummary(
 	ctx *FlowContext,
 	declaration *ast.Node,
@@ -494,18 +491,22 @@ func applySummary(
 	}
 	retExit := exits[summary.RetIndex]
 	doneExit := exits[summary.DoneIndex]
-	// THE SERVING RULE: only a COMPLETE body serves, and it serves
-	// unconditionally — TOP ret included. The compile is proved equal
+	// THE SERVING RULE: only a COMPLETE body serves, and only where it
+	// DETERMINES something — a TOP/unknown ret declines instead of
+	// serving silence (the block below). The compile is proved equal
 	// to the kernel walk (summarize_eq), and the lowering that produced
-	// it read every statement, so the answer carries the same knowledge
-	// the inline walk would derive. A POROUS or unrecorded outcome
-	// DECLINES OUTRIGHT, even with a concrete ret: a havocked construct
-	// is precisely a place the walk still reads and the lowering does
-	// not, so a porous answer can be weaker than the inline walk's —
-	// and serving those was measured (recharts, 2026-08-13) to widen
-	// the downstream sets until the call-site join machinery burned 14x
-	// the file's whole former wall. Porous blobs still count coverage;
-	// they no longer answer calls.
+	// it read every statement, so a served answer carries the same
+	// knowledge the inline walk would derive — but "the same knowledge"
+	// is nothing when that knowledge is TOP, and serving nothing ahead
+	// of a walk-based recovery that determines something is a strictly
+	// worse answer, never a cheaper equal one. A POROUS or unrecorded
+	// outcome DECLINES OUTRIGHT, even with a concrete ret: a havocked
+	// construct is precisely a place the walk still reads and the
+	// lowering does not, so a porous answer can be weaker than the
+	// inline walk's — and serving those was measured (recharts,
+	// 2026-08-13) to widen the downstream sets until the call-site join
+	// machinery burned 14x the file's whole former wall. Porous blobs
+	// still count coverage; they no longer answer calls.
 	outcome, _, recorded := SummaryOutcomeOf(declaration)
 	if !recorded || outcome != SummaryComplete {
 		return abstractdomain.AbstractValue{}, false
@@ -524,7 +525,6 @@ func applySummary(
 		}
 		return abstractdomain.AbstractValue{}, false
 	}
-	serveTop := retExit.Top
 	// THE RET ROW SPLIT. The ret slot at the exit stands for every run:
 	// the values the returns wrote, and — on a body that guards with
 	// `if (x) throw` — the thrown exits that never reached a return.
@@ -543,55 +543,35 @@ func applySummary(
 	returned := retExit.Returned()
 	// Top must ride along here: KnownOfState's own gate (`if s.Top:
 	// return silence.Residue()`) is what turns a TOP ret into
-	// KindUnknown, which is what lets the branch below and its
-	// EXACT-gated rest/array decline ever run. Building this wire
-	// with Top left at its zero value (false) made a TOP ret read as
-	// KindSet over an EMPTY RefinedSet instead — FormatForDiagnostics'
-	// own "any value" spelling for zero Forms, RTS7001's "not
-	// assignable" symptom on an in-set leg, and a decline gate that
-	// never got the chance to run because answer.Kind was never
-	// KindUnknown to begin with.
+	// KindUnknown, which is what lets the decline below ever run.
+	// Building this wire with Top left at its zero value (false) made
+	// a TOP ret read as KindSet over an EMPTY RefinedSet instead —
+	// FormatForDiagnostics' own "any value" spelling for zero Forms,
+	// RTS7001's "not assignable" symptom on an in-set leg, and a
+	// decline gate that never got the chance to run because
+	// answer.Kind was never KindUnknown to begin with.
 	answer := KnownOfState(kernelbridge.KnownStateWire{Top: returned.Top, Set: returned.Set, Undef: false, Null: false, Nan: returned.Nan})
 	if answer.Kind == abstractdomain.KindUnknown {
-		// a COMPLETE body serving a TOP ret answers SILENCE, which is what
-		// "the return value is unconstrained" spells — and the route still
-		// says it SERVED, so the caller keeps this answer instead of
-		// re-walking the body to derive the same nothing. Every other
-		// unknown answer declines, exactly as before.
-		//
-		// EXCEPT where EXACT is true and the declaration has a REST
-		// parameter: the TOP that produced this ret is summaryEntryStates'
-		// own always-TOP rest entry, not a genuine "this body's return is
-		// unconstrained" reading — this call's own arguments fill that
-		// rest position exactly, knowledge the compiled program can never
-		// carry (applySummary's own comment). Declining here, rather than
-		// serving silence, is what lets the walk-based recovery
-		// (ParameterKnown's exact rest list) answer instead.
-		if !serveTop {
-			return abstractdomain.AbstractValue{}, false
-		}
-		if exact && (declarationHasRestParameter(declaration) || declarationHasArrayParameter(ctx, declaration)) {
-			return abstractdomain.AbstractValue{}, false
-		}
-		// THE THIRD CARVE-OUT: a body whose return is an array-producing
-		// collection call off a receiver returnedLiteralShape's own
-		// collectionCallOf cannot spell (an interior path — a record
-		// parameter's own array-typed member, `request.samples.map(cb)` —
-		// rather than a flattened local's bare name) never allocated the
-		// "#ret.len"/"#ret.elem" pair, so this scalar #ret is TOP by
-		// construction (declarationReturnsArrayProducingCall's own doc): the
-		// member-shaped result has nowhere a scalar slot could have held it,
-		// which is not the same claim as "this body's return is
-		// unconstrained." Unlike the rest/array-parameter carve-outs above,
-		// this one does not need EXACT to distinguish the limit from a
-		// genuine unconstrained answer — the pair is either allocated or it
-		// is not, independent of what this call's own arguments are — so it
-		// runs unconditionally.
-		if declarationReturnsArrayProducingCall(declaration) {
-			return abstractdomain.AbstractValue{}, false
-		}
-		tracing.Count("summaryServed", 0)
-		return promiseWrappedIfAsync(declaration, silence.Residue()), true
+		// THE SERVE-ONLY-WHEN-IT-DETERMINES RULE. A COMPLETE body whose ret
+		// still comes back TOP/unknown has determined NOTHING about the
+		// call's value — the compile is proved equal to the kernel walk
+		// (summarize_eq), but "equal to a walk that also answers nothing" is
+		// not a claim serving silence with ok=true earns any right to make
+		// ahead of a walk-based recovery that CAN determine a value. The
+		// route declines here exactly as a POROUS or unrecorded outcome
+		// already declines above: an unknown ret is unconditionally not
+		// served, whatever produced it — a TOP-fed rest/array entry
+		// (summaryEntryStates' own always-TOP fill), an array-producing
+		// return with no scalar slot to hold it, or a logical-join
+		// (`??`/`||`/`&&`) over an operand this call's own arguments prove
+		// absent or defined. The distinction is the ANSWER's emptiness, not
+		// the body's syntax — every caller of applySummary (SummaryResult,
+		// SummaryResultIn/ExactIn, SummaryResultOn, KernelSummaryDirectOn,
+		// KernelSummaryDirectExactOn) already treats ok=false as "try the
+		// next route," so a call that used to get a served-but-empty answer
+		// now falls through to InlineContractCall/InlineContractBody's own
+		// walk, which reads this call's OWN argument absence exactly.
+		return abstractdomain.AbstractValue{}, false
 	}
 	// a path may fall off the end (the flag can still be down at exit):
 	// the return is undefined on it
@@ -878,9 +858,14 @@ func constEffectState(effect kernelbridge.LoopEffect) (kernelbridge.KnownStateWi
 
 // declarationHasRestParameter: whether the declaration binds a
 // trailing rest parameter — the one shape summaryEntryStates always
-// feeds TOP, whatever a call passed (its own comment). applySummary's
-// EXACT-serving check reads this to know when a TOP ret came from
-// that always-TOP entry rather than a genuinely unconstrained body.
+// feeds TOP, whatever a call passed (its own comment).
+//
+// UNUSED BY applySummary as of the serve-only-when-it-determines rule:
+// a TOP ret now declines unconditionally, whatever produced it, so the
+// EXACT-gated distinction this once carved out (a TOP-fed rest entry
+// versus a genuinely unconstrained body) is moot — both decline the
+// same way. Kept for a caller that still wants the syntactic fact
+// alone; not consulted by the serving rule anymore.
 func declarationHasRestParameter(declaration *ast.Node) bool {
 	for _, parameter := range declaration.Parameters() {
 		if parameter.AsParameterDeclaration().DotDotDotToken != nil {
@@ -896,12 +881,14 @@ func declarationHasRestParameter(declaration *ast.Node) bool {
 // feeds TOP for BOTH entries, whatever exact array a call passed
 // (summaryEntryStates' own comment: "the direct apply reads an
 // argument's abstract value, which carries no length and no element
-// join this route can spell"). applySummary's EXACT-serving check
-// reads this the same way it reads declarationHasRestParameter: a
-// TOP ret on a call whose own argument WAS an exact array (a
-// literal, a KindList, a KindValues array) is the always-TOP entry
-// talking, not a genuinely unconstrained body, so EXACT declines the
-// serving instead of answering the imprecise TOP-derived claim.
+// join this route can spell").
+//
+// UNUSED BY applySummary as of the serve-only-when-it-determines rule
+// (kernel_summaries.go's applySummary): a TOP ret now declines
+// unconditionally, so the EXACT-gated distinction this once carved
+// out is moot the same way declarationHasRestParameter's is. Kept
+// for array_and_default_parameter_test.go's own direct pin on the
+// syntactic fact; not consulted by the serving rule anymore.
 func declarationHasArrayParameter(ctx *FlowContext, declaration *ast.Node) bool {
 	for _, parameter := range declaration.Parameters() {
 		if _, flattened := arrayParamSlotsIn(ctx, parameter); flattened {
@@ -915,32 +902,19 @@ func declarationHasArrayParameter(ctx *FlowContext, declaration *ast.Node) bool 
 // declaration's body carries an array-producing collection call
 // (`.map`/`.filter`, or a `.reduce` whose accumulator spells an array —
 // isArrayProducingCollectionCall's own reading, ir_summary_returned_shape.go)
-// as its head. The THIRD carve-out applySummary's TOP-ret gate reads,
-// beside declarationHasRestParameter and declarationHasArrayParameter.
-//
-// Those two carve-outs exist because summaryEntryStates feeds an entry TOP
-// for a reason that has nothing to do with the body's own return — the
-// encoding cannot spell one call's exact rest tail or array contents, ever,
-// for any body. This carve-out is the RETURN side of the same idea: a
-// return whose head is `xs.map(cb)` off a receiver returnedLiteralShape's
-// own collectionCallOf cannot spell — because collectionCallOf demands a
-// BARE IDENTIFIER receiver (ir_callback_shapes.go), and this return's
-// receiver is an interior path (`request.samples`, a record-parameter
-// member) rather than a flattened local's own name — never allocates the
-// "#ret.len"/"#ret.elem" pair the SAME construct DOES allocate for a bare-
-// name receiver. The scalar #ret then holds TOP by construction (a
+// as its head — the shape whose scalar #ret holds TOP by construction (a
 // member-shaped result written nowhere a scalar slot can hold it), not
-// because the return value is unconstrained — the same "TOP is the
-// encoding's own limit, not the body's" reasoning the rest/array-parameter
-// carve-outs rest on, one layer over: there, an ENTRY the encoding cannot
-// carry; here, a RETURN the encoding cannot carry.
+// because the return value is unconstrained.
 //
-// Declining lets the caller fall to the walk-based recovery
-// (InlineContractBody's general walk, whose MapOutcome derives the real
-// element-bounded array off the receiver as it is actually bound at the
-// call) instead of the kernel-summary route serving bare silence — the
-// SAME declared-return-star answer wornReturnTypeIfUnknown would have
-// handed back anyway, minus everything the walk could have proven.
+// UNUSED BY applySummary as of the serve-only-when-it-determines rule: a
+// TOP ret now declines unconditionally, whatever produced it, so this
+// distinction (TOP-by-construction versus TOP-because-unconstrained) no
+// longer changes the outcome — both decline the same way, and the
+// walk-based recovery (InlineContractBody's general walk, whose
+// MapOutcome derives the real element-bounded array off the receiver as
+// it is actually bound at the call) answers either way. Kept as a
+// syntactic reader in case a narrower caller wants the distinction back;
+// not consulted by the serving rule anymore.
 //
 // Mirrors returnedExpressionsOf's own body scan (ir_summary_returned_shape.go)
 // rather than a fresh AST walk: the same nested-function-skip, the same

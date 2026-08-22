@@ -50,6 +50,49 @@ func stringOf(values []float64) string {
 	return b.String()
 }
 
+// numericSetText is the string image of a provably-numeric scalar
+// set: today's unbounded star of digit codepoints (refinementsets.
+// Strings), tightened to the exact digit-count window a non-negative
+// integer window forces. A number's decimal spelling (Number::
+// toString, sec-numeric-types-number-tostring) never pads a leading
+// zero, so every integer in [lo, hi] with lo >= 0 spells EXACTLY
+// digitCount(v) digit codepoints, and digitCount is monotonic in v --
+// the window's own digit-count span is [digitCount(lo), digitCount
+// (hi)]. Where lo and hi share a digit count, that count is exact
+// (repeat(Digits, n, n)); where they differ, the derived shape is the
+// repetition window over that span (repeat(Digits, loCount, hiCount)).
+// Anything wider than a plain non-negative integer window (negatives,
+// non-integers, an unbounded side) has no digit-count fact to read
+// off syntactically here, and keeps today's unbounded star.
+func numericSetText(set refinementsets.RefinedSet) refinementsets.RefinedSet {
+	lo, hi, ok := refinementsets.NonNegativeIntegerBounds(set)
+	if !ok {
+		return refinementsets.Strings
+	}
+	loCount := digitCountOf(lo)
+	hiCount := digitCountOf(hi)
+	return refinementsets.Repetition(refinementsets.Digits, loCount, &hiCount)
+}
+
+// digitCountOf is the decimal digit count of a non-negative integer,
+// mirroring Number::toString's radix-10 spelling with no leading
+// zero: 0 spells as "0" (one digit), and every v >= 1 spells as
+// floor(log10(v)) + 1 digits. Walks by repeated division rather than
+// formatting the float, so it stays exact at the double integers this
+// window ever carries (no float64 -> string round-trip to drift on).
+func digitCountOf(v float64) int {
+	n := int64(v)
+	if n == 0 {
+		return 1
+	}
+	count := 0
+	for n > 0 {
+		count++
+		n /= 10
+	}
+	return count
+}
+
 // textIsAlwaysAString reports whether ToString on a value of this kind
 // LANDS a string on every run that completes (sec-tostring). A symbol
 // throws at step 2, and a bare-prototype object reaches ToPrimitive
@@ -168,7 +211,7 @@ func TextOfKnown(decimal func(v float64) (string, bool), known abstractdomain.Ab
 			return TextReading{
 				Exact:    nil,
 				HasExact: false,
-				Set:      refinementsets.Strings,
+				Set:      numericSetText(known.Set),
 				Grade:    abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(known), abstractdomain.TrustSpec),
 			}, true
 		}

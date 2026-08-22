@@ -274,6 +274,51 @@ func FoldRayForms(forms []Refinement) []Refinement {
 	return folded
 }
 
+// NonNegativeIntegerBounds reads a set as a plain non-negative integer
+// window [lo, hi] -- the exact conjunction {AtLeast(lo), AtMost(hi),
+// Integer}, folded through FoldRayForms and no other form beside it,
+// lo >= 0 and hi finite. ok=false on anything wider: an unbounded side
+// (hi == nil in the ray sense, i.e. no AtMost survives the fold), a
+// negative lower edge, a non-integer conjunct missing, or any other
+// form riding alongside (a OneOf, a MultipleOf, a Union) that the two
+// rays alone do not account for. This is the syntactic reading a
+// declared z.number().int().min(lo).max(hi) window leaves in its set
+// -- no kernel round trip, so it only ever answers the shapes built
+// exactly this way.
+func NonNegativeIntegerBounds(set RefinedSet) (lo float64, hi float64, ok bool) {
+	folded := FoldRayForms(set.Forms)
+	var loForm, hiForm *Refinement
+	sawInteger := false
+	for i, f := range folded {
+		switch f.Form {
+		case FormAtLeast:
+			if loForm != nil {
+				return 0, 0, false
+			}
+			loForm = &folded[i]
+		case FormAtMost:
+			if hiForm != nil {
+				return 0, 0, false
+			}
+			hiForm = &folded[i]
+		case FormInteger:
+			sawInteger = true
+		default:
+			return 0, 0, false
+		}
+	}
+	if loForm == nil || hiForm == nil || !sawInteger {
+		return 0, 0, false
+	}
+	if math.IsInf(loForm.A, 0) || math.IsInf(hiForm.A, 0) {
+		return 0, 0, false
+	}
+	if loForm.A < 0 || hiForm.A < loForm.A {
+		return 0, 0, false
+	}
+	return loForm.A, hiForm.A, true
+}
+
 // WordOf is wordOf in the TS source: the tuple a set holds when it
 // holds exactly one -- the canonical singleton shapes (stringTuple,
 // exact tuples): the empty tuple, a one-element oneOf, and

@@ -21,6 +21,13 @@ var Codepoints = MakeRefinedSet(
 // Strings is the set of all strings: C*.
 var Strings = MakeRefinedSet(Star(Codepoints))
 
+// Digits is the ASCII decimal-digit alphabet '0'..'9' -- the element a
+// number's decimal spelling repeats over. Exported so a caller outside
+// this package (the number-to-string text conversion) can build a
+// digit-counted repetition window without reaching into an unexported
+// literal.
+var Digits = MakeRefinedSet(OneOf([]float64{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'}))
+
 // CodepointsOf is a string's codepoint tuple. Iteration is by code
 // point, so a paired surrogate reads as one scalar value.
 //

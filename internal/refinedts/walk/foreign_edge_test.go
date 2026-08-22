@@ -1934,6 +1934,76 @@ function f(scriptPath: string) {
 	}
 }
 
+// TestScriptElementOf_AParameterHeldPathResolvesThroughItsOneCallSite
+// pins the PENDING-ON-PARAMETER design past the no-caller case above:
+// `f`'s `scriptPath` parameter has exactly ONE call site in view (a
+// non-exported function, one direct call, no other use of its name),
+// and that call site's own bound argument is a written string literal —
+// scriptPathFromParameterCallSites folds it and scriptElementOf reads
+// the identifier as that resolved path, exactly as a same-file const
+// would resolve.
+func TestScriptElementOf_AParameterHeldPathResolvesThroughItsOneCallSite(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execFileSync(file: string, args: string[], options: unknown): string;
+function f(scriptPath: string) {
+	const stdout = execFileSync("python3", [scriptPath], { encoding: "utf8" });
+	return stdout;
+}
+function caller() {
+	return f("./targets/level_ok.py");
+}
+void caller;
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	ctx := relationalAccumulationContext(p)
+	_, call, _ := constBoundCallOf(statements[0])
+	args, _ := callArguments(call)
+	_, script, _, ok, sentence, _ := runnerAndScriptArgvOf(ctx, args[0], args[1])
+	if sentence != "" {
+		t.Fatalf("a single-caller parameter path declined: %s", sentence)
+	}
+	if !ok || script != "./targets/level_ok.py" {
+		t.Errorf("script=%q ok=%v, want ./targets/level_ok.py / true", script, ok)
+	}
+}
+
+// TestScriptElementOf_AParameterHeldPathWithDisagreeingCallersStaysUndetermined
+// pins the other side: TWO call sites in view, each folding to a
+// DIFFERENT literal path — no single script name serves both callers,
+// so the identifier stays unresolved and the law-2 sentence still
+// fires, exactly as it would for a genuinely uncomputable path.
+func TestScriptElementOf_AParameterHeldPathWithDisagreeingCallersStaysUndetermined(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execFileSync(file: string, args: string[], options: unknown): string;
+function f(scriptPath: string) {
+	const stdout = execFileSync("python3", [scriptPath], { encoding: "utf8" });
+	return stdout;
+}
+function callerA() {
+	return f("./targets/level_ok.py");
+}
+function callerB() {
+	return f("./targets/level_unclamped.py");
+}
+void callerA;
+void callerB;
+`)
+	statements := relationalAccumulationBodyOf(t, p, "f")
+	ctx := relationalAccumulationContext(p)
+	_, call, _ := constBoundCallOf(statements[0])
+	args, _ := callArguments(call)
+	_, _, _, ok, sentence, sentenceNode := runnerAndScriptArgvOf(ctx, args[0], args[1])
+	if ok {
+		t.Fatalf("two disagreeing callers still resolved a single script path")
+	}
+	if sentence != scriptPathLawTwoSentence {
+		t.Errorf("sentence = %q, want %q", sentence, scriptPathLawTwoSentence)
+	}
+	if sentenceNode == nil {
+		t.Errorf("the law-2 sentence carries no node to point at")
+	}
+}
+
 // TestScriptElementOf_ALetBoundIdentifierDoesNotResolve pins the const-
 // only gate itself: a `let` the following statements could rewrite
 // carries no fixed value, so the follow must not treat it as resolved.
@@ -2938,6 +3008,113 @@ func TestSequenceCrossingOfKindList_AnObjectShapedSlotDeclines(t *testing.T) {
 	}
 }
 
+/* ── the bare-sort declared return, at a recognized crossing ──────── */
+//
+// ISSUES.md's own Python-side finding: "loop blockers unnamed when
+// return annotation unreadable — bare `-> float` never judged". This
+// measures whether the TS/Go side carries the SAME gap: a plain `number`
+// (no zod refinement) declared FUNCTION RETURN TYPE, at a position a
+// recognized crossing feeds.
+//
+// THE MEASURED ANSWER IS NO — the TS side does not carry this gap, and
+// the evidence is the grounding fix type_node_sets.go's own comment
+// documents: a bare `number`/`string`/`boolean` keyword type used to
+// compile to nil-nil ("plain TypeScript", judged nowhere), and now
+// compiles to a Stated DeclaredSet (R-bar for `number`) instead — the
+// same DeclaredSet kind a real zod refinement compiles to. Two real
+// production paths consume that: contract_file_facts.go's
+// positionGrounds treats ANY DeclaredSet (bare or refined) as grounding
+// the contract, so analyze_function.go's `if contract.Grounded { result
+// = contract.Result }` passes the bare sort through as the SAME `result`
+// a refined return would be; and return_statement.go's
+// AnalyzeReturnStatement calls CheckAssignability(ctx, known, *result,
+// ...) unconditionally whenever result != nil, with no separate branch
+// for "the stated set happens to be a bare ground". This test proves it
+// by RUNNING that exact pipeline (CompileContractFileFacts +
+// AnalyzeFunction, the same two calls a real check performs) rather
+// than reading the source: a value shaped exactly as a recognized
+// crossing's return leg would produce it (foreignAbstractValueOfCases,
+// a number case beside a null case — a target whose return states
+// `Optional[float]`) is pinned on the JSON.parse node a crossing's
+// return leg would attach through (ForeignEdgeAt's own NodeOverrides
+// seam, foreign_edge.go's file banner), directly under a bare `: number`
+// return type with NO zod refinement anywhere. If the bare sort judged
+// nothing, this would report no diagnostic (the value simply passes
+// through unwitnessed, the same silent gap ISSUES.md names on the
+// Python side); it reports 7001 instead — the bare `number` return
+// position excludes absence exactly as a refined one would, so the
+// crossing's own possibly-null return leg is judged, not skipped.
+func TestAnalyzeFunction_ABareNumberReturnTypeJudgesARecognizedCrossingsReturnLeg(t *testing.T) {
+	p := entryEnvTestProgram(t, `
+declare function execFileSync(file: string, args: string[], options: unknown): string;
+function f(): number {
+	const stdout = execFileSync("python3", ["./target.py"], { encoding: "utf8" });
+	return JSON.parse(stdout);
+}
+`)
+	registry := annotations.AnnotationRegistry{}
+	objects := annotations.ObjectRegistry{}
+	merged := map[*ast.Symbol]*FunctionContract{}
+	contracts := CompileContractFileFacts(p, p.Entry, registry, objects, merged, false, func(assignability.RefinementDiagnostic) {})
+	fn := entryEnvFunctionNamed(t, p, "f")
+	symbol := p.Checker.GetSymbolAtLocation(fn.Name())
+	contract, ok := contracts[symbol]
+	if !ok {
+		t.Fatalf("CompileContractFileFacts registered no contract for f")
+	}
+	if !contract.Grounded {
+		t.Fatalf("a bare `: number` return type left the contract ungrounded — positionGrounds no longer treats a bare DeclaredSet as grounding")
+	}
+	if contract.Result == nil || contract.Result.Kind != annotations.DeclaredSet {
+		t.Fatalf("contract.Result = %+v, want a DeclaredSet (the bare `number` keyword's own ground)", contract.Result)
+	}
+
+	// find the JSON.parse(stdout) node the return statement holds — the
+	// exact node ForeignEdgeAt's own Override would pin (foreign_edge.go's
+	// file banner: "the fact on JSON.parse(stdout) comes from ANOTHER
+	// LANGUAGE'S checker")
+	returnStatement := fn.AsFunctionDeclaration().Body.AsBlock().Statements.Nodes[1]
+	parseNode := returnStatement.AsReturnStatement().Expression
+
+	// the value a recognized crossing's return leg would derive for a
+	// target stating `Optional[float]` — a number case beside a null
+	// case, folded through the SAME foreignAbstractValueOfCases the real
+	// return leg calls (foreign_edge.go)
+	crossingValue := foreignAbstractValueOfCases([]Case{
+		{Sort: CaseSortNumber, Set: refinementsets.Numbers},
+		{Sort: CaseSortNull},
+	})
+	if crossingValue.Kind != abstractdomain.KindPossiblyUndefined {
+		t.Fatalf("foreignAbstractValueOfCases(number, null) = %+v, want KindPossiblyUndefined", crossingValue)
+	}
+
+	var reported []assignability.RefinementDiagnostic
+	ctx := &FlowContext{
+		P:             p,
+		Contracts:     contracts,
+		Aliases:       dataflowfacts.NewAliasClasses(),
+		Declared:      map[string]*annotations.DeclaredRefinement{},
+		Report:        func(d assignability.RefinementDiagnostic) { reported = append(reported, d) },
+		NodeOverrides: map[*ast.Node]abstractdomain.AbstractValue{parseNode: crossingValue},
+	}
+	AnalyzeFunction(ctx, contract, nil)
+
+	if len(reported) == 0 {
+		t.Fatalf("a bare `: number` return type reported NOTHING against a possibly-null crossed value — " +
+			"the bare-sort declared return is not judged at this recognized crossing, the same gap ISSUES.md " +
+			"names on the Python side")
+	}
+	fired7001 := false
+	for _, d := range reported {
+		if d.Code == 7001 {
+			fired7001 = true
+		}
+	}
+	if !fired7001 {
+		t.Errorf("reported %+v, want a 7001 refutation naming the possibly-absent crossed value against the bare `number` return", reported)
+	}
+}
+
 func TestCheckOutboundLeg_AMixedElementArrayLiteralInsideTheStatedEntryPasses(t *testing.T) {
 	fixture := foreignOutboundFixture(t, -2, 2, 1)
 	fixture.env.Set("boosted", abstractdomain.KnownList([]abstractdomain.AbstractValue{
@@ -2968,6 +3145,39 @@ func TestCheckOutboundLeg_AnObjectShapedSlotInAMixedLiteralStaysUndetermined(t *
 	}
 	if !strings.Contains(outcome.Decline, "not read as one here") {
 		t.Errorf("Decline = %q, want the ordinary sequence-shape decline", outcome.Decline)
+	}
+}
+
+// TestCheckOutboundLeg_AWholeObjectPayloadFiresRatherThanDeclines pins
+// d-data-legs.ts's objectKeysReduceUndetermined row: the WHOLE crossing
+// value (not one slot inside a list, TestCheckOutboundLeg_
+// AnObjectShapedSlotInAMixedLiteralStaysUndetermined's own case) is
+// itself KindObject — `Object.keys(defaults).reduce(...)` building an
+// accumulator object, exactly the shape callback_outcome.go's reduce
+// reading answers. This is a DETERMINED shape mismatch (an object is
+// never a sequence), so checkSequenceCrossing fires 7001 through
+// ctx.Report rather than returning the undetermined "not read as one
+// here" Decline — the same distinction checkScalarCrossing already
+// draws between a decided refutation and an unreadable crossing.
+func TestCheckOutboundLeg_AWholeObjectPayloadFiresRatherThanDeclines(t *testing.T) {
+	fixture := foreignOutboundFixture(t, -2, 2, 1)
+	fixture.env.Set("boosted", abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{
+			{Name: "gain", Value: abstractdomain.KnownValues([]float64{0.5}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)},
+			{Name: "offset", Value: abstractdomain.KnownValues([]float64{-0.3}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)},
+		}, nil, true, abstractdomain.TrustProved, false))
+	outcome := checkOutboundLeg(fixture.ctx, fixture.env, fixture.edge, fixture.artifact)
+	if outcome == nil {
+		t.Fatalf("a whole-object payload answered nil — want a fired outcome")
+	}
+	if outcome.Decline != "" {
+		t.Fatalf("a whole-object payload declined (%q) — want a determined fire, not an undetermined decline", outcome.Decline)
+	}
+	if len(*fixture.reported) != 1 {
+		t.Fatalf("a whole-object payload reported %d diagnostics, want exactly 1: %+v", len(*fixture.reported), *fixture.reported)
+	}
+	if !strings.Contains((*fixture.reported)[0].MessageText, "is of type 'object'") {
+		t.Errorf("MessageText = %q, want it to name the object type explicitly", (*fixture.reported)[0].MessageText)
 	}
 }
 

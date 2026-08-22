@@ -624,14 +624,18 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 			}
 		}
 	}
-	// a declared binding's stated set IS its invariant — every write is
-	// checked against it, so no widening is needed
-	var fixpointed []string
-	for _, name := range touched {
-		if _, declared := ctx.Declared[name]; !declared {
-			fixpointed = append(fixpointed, name)
-		}
-	}
+	// every touched name — declared or not — tracks through the exact
+	// join: a declared binding's stated set is a sound CEILING (every
+	// write is checked against it), but it is not a substitute for the
+	// exact per-trip union the fixpoint would otherwise build. Settling
+	// against the crude declared range up front, before any iteration,
+	// threw away precision the walk could otherwise hold — a do-while's
+	// exact two-trip union {1,2} read as the whole declared {0..120}
+	// instead. SettleLoopCandidate seeds a declared name at its real
+	// entry value and MEETS the settled result with the declared range
+	// at the end, so the ceiling still holds and nothing here needs to
+	// widen for it.
+	fixpointed := append([]string{}, touched...)
 
 	// a do-while runs its body once from the RAW entry before any
 	// test. Unrolling that first pass into the premise lets the kernel
@@ -666,14 +670,16 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 	// what LEAVES the body, landing correctly on the entry to iteration
 	// 2+); iteration 1 enters raw, unconditionally, before the guard is
 	// ever tested — and that holds for a DECLARED name exactly as it
-	// does for a fixpointed one: SettleLoopCandidate sets a declared
-	// name's candidate to the full stated range regardless of what the
-	// raw entry actually is, so narrowing it by the guard here can
-	// still cut away a raw entry-1 value the guard would have refused.
-	// So: narrow every touched name by the guard, then rejoin the raw
-	// entry-1 value — the same entry-1-unrolled ∪ entry-2+-guarded
-	// shape premiseEnv already computes for the kernel premise, applied
-	// here to what the ONE reporting walk sees.
+	// does for any other one: SettleLoopCandidate's candidate is the
+	// exact per-trip union met with the declared ceiling, which still
+	// carries entry-1's raw, unguarded value inside it (the union
+	// always includes the real entry) — so narrowing the WHOLE
+	// candidate by the guard here can still cut entry-1's value away
+	// where the guard would have refused it. So: narrow every touched
+	// name by the guard, then rejoin the raw entry-1 value — the same
+	// entry-1-unrolled ∪ entry-2+-guarded shape premiseEnv already
+	// computes for the kernel premise, applied here to what the ONE
+	// reporting walk sees.
 	checkedEntry := candidate
 	if ast.IsDoStatement(loop) && transfers != nil {
 		checkedEntry = candidate.Clone()

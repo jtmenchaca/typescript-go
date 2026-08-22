@@ -214,14 +214,26 @@ func ForeignEdgeAt(
 		return &ForeignEdgeOutcome{Decline: artifactSentence, DeclineNode: edge.Call, TargetPath: edge.TargetPath}, true
 	}
 	// the OUTBOUND leg: every §4/§5 premise about what crosses out,
-	// discharged against the value the walk holds for it
-	if outcome := checkOutboundLeg(ctx, env, edge, artifact); outcome != nil {
-		outcome.TargetPath = edge.TargetPath
-		return outcome, true
-	}
+	// discharged against the value the walk holds for it. Its outcome is
+	// held, NOT returned yet: an outbound fire or decline says nothing
+	// about whether the artifact ALSO states a return fact — the two legs
+	// are independent truths (the outbound leg judges what this call
+	// SENDS; the return leg judges what the artifact's own harness
+	// STATES it sends back), and a bound `JSON.parse(stdout)` result
+	// still deserves the fact its own artifact carries even where the
+	// outbound leg has nothing left to say. Only the FIRST outcome with
+	// a real Decline is ever carried back (one Decline slot), the same
+	// precedence checkMixedCrossing's own two-leg merge already applies;
+	// the return leg still runs regardless, so its Override is never
+	// lost to an outbound decline or fire.
+	outboundOutcome := checkOutboundLeg(ctx, env, edge, artifact)
 	// CHANNEL PURITY (§5): the wire is stdout, and the claim assumes
 	// stdout carries exactly the serialized result
 	if !artifact.Called.Return.StdoutPure {
+		if outboundOutcome != nil && outboundOutcome.Decline != "" {
+			outboundOutcome.TargetPath = edge.TargetPath
+			return outboundOutcome, true
+		}
 		return &ForeignEdgeOutcome{
 			Decline: "the target " + artifact.Called.Name + " does not state that it writes " +
 				"nothing else to stdout, and this edge reads its result off stdout — " +
@@ -233,19 +245,25 @@ func ForeignEdgeAt(
 	// the RETURN leg: the target's own fact, attached to the parse
 	parse, at, parseSentence := soleParseConsumerOf(statements, index, edge.StdoutName)
 	if parseSentence != "" {
+		if outboundOutcome != nil && outboundOutcome.Decline != "" {
+			outboundOutcome.TargetPath = edge.TargetPath
+			return outboundOutcome, true
+		}
 		return &ForeignEdgeOutcome{Decline: parseSentence, DeclineNode: edge.Call, TargetPath: edge.TargetPath}, true
 	}
 	if parse == nil {
 		// NO expression consumes the target's stdout at all (the "no
 		// JSON.parse consumer" case, distinguished above from every real
 		// decline by carrying no sentence) — a recognized crossing whose
-		// result nothing reads needs NO fact: the outbound leg already
-		// judged (checkOutboundLeg, above), and there is no return-leg
-		// node left for one to attach to. Answering an outcome with
-		// neither Override nor Decline is exactly "nothing more to say" —
-		// ForeignEdgeAt still answers isEdge=true (the call WAS
-		// recognized and consumed), but publishes no fact and reports no
-		// undetermined row.
+		// result nothing reads needs NO fact: there is no return-leg node
+		// left for one to attach to. The outbound leg's own outcome (a
+		// decline, a fire's empty outcome, or nothing at all) is the
+		// whole answer here, unchanged from before this fix — this
+		// branch never had a return-leg fact to lose.
+		if outboundOutcome != nil {
+			outboundOutcome.TargetPath = edge.TargetPath
+			return outboundOutcome, true
+		}
 		return &ForeignEdgeOutcome{TargetPath: edge.TargetPath}, true
 	}
 	// THE ±INFINITY CORNER (§4, sec-json.stringify / the JSON.parse
@@ -289,13 +307,26 @@ func ForeignEdgeAt(
 		}
 		narrowedCases[i].Set = foreignFiniteReturnSet(ctx, c.Set)
 	}
-	return &ForeignEdgeOutcome{
+	returned := &ForeignEdgeOutcome{
 		Override: map[*ast.Node]abstractdomain.AbstractValue{
 			parse: foreignAbstractValueOfCases(narrowedCases),
 		},
 		OverrideStatement: at,
 		TargetPath:        edge.TargetPath,
-	}, true
+	}
+	// the outbound leg's own decline (if any) rides ALONGSIDE this
+	// return-leg fact, never replaced by it: the outbound leg's fire
+	// already reported through ctx.Report as it ran (checkOutboundLeg's
+	// own contract), and a real Decline sentence is still owed to the
+	// caller exactly as it was before this leg ran — the return fact
+	// this artifact states is a SEPARATE truth from whatever the
+	// outbound value's own fit determined, and publishing one is never a
+	// reason to drop the other's report.
+	if outboundOutcome != nil && outboundOutcome.Decline != "" {
+		returned.Decline = outboundOutcome.Decline
+		returned.DeclineNode = outboundOutcome.DeclineNode
+	}
+	return returned, true
 }
 
 // foreignFiniteReturnSet answers returnSet with any ±Infinity corner
@@ -1314,6 +1345,23 @@ func scriptElementOf(ctx *FlowContext, element *ast.Node) (script string, ok boo
 		if text, resolvedOk := resolvedConstStringLiteral(ctx, node); resolvedOk {
 			return text, true, "", nil
 		}
+		// a PARAMETER-held identifier owes no invariant of its own — the
+		// declaration itself does not fix a value — but every call site
+		// that supplies the enclosing function's argument DOES, exactly
+		// as declaredJoinUncached already reads a non-exported function's
+		// callers for its ABSTRACT parameter values. Tried past the const
+		// follow, before falling to the law-2 decline: a parameter whose
+		// callers all pin the SAME literal path resolves here; a
+		// parameter with no callers in view, or callers that disagree,
+		// still declines below.
+		if c := checkerOf(ctx); c != nil {
+			if symbol := symbolAt(c, node); symbol != nil && symbol.ValueDeclaration != nil &&
+				ast.IsParameterDeclaration(symbol.ValueDeclaration) {
+				if text, resolvedOk := scriptPathFromParameterCallSites(ctx, node, symbol.ValueDeclaration); resolvedOk {
+					return text, true, "", nil
+				}
+			}
+		}
 	}
 	if text, foldedOk := foldedConstStringOf(ctx, node); foldedOk {
 		return text, true, "", nil
@@ -1435,6 +1483,104 @@ func resolvedConstStringLiteral(ctx *FlowContext, identifier *ast.Node) (string,
 		return "", false
 	}
 	return stringLiteralText(initializer)
+}
+
+// scriptPathFromParameterCallSites is scriptElementOf's PARAMETER
+// branch: an argv element that is an identifier whose ValueDeclaration
+// is a ParameterDeclaration owes no invariant of its own
+// (resolvedConstStringLiteral's own gate — a parameter's value is not
+// fixed by its declaration the way a const's is) but IS pinned by
+// every call site that supplies it, exactly as declaredJoinUncached
+// (call_site_bindings.go) already reads a non-exported function's
+// callers to join its parameters' ABSTRACT values. This asks the same
+// question one register narrower: does the bound ARGUMENT EXPRESSION
+// at each call site fold to a written string literal — through the
+// same stringLiteralText / resolvedConstStringLiteral / foldedConstStringOf
+// triad scriptElementOf itself already tries on the parameter's OWN
+// identifier, applied instead to the actual value each caller passes.
+//
+// The gate is declaredJoinUncached's, unchanged: the enclosing function
+// must be a non-exported FunctionDeclaration, and every use of its name
+// in the entry file must be a direct call — an escape (a read, a
+// reassignment, an argument to an unmodeled call, a callback argument)
+// means callers are not all in view, so nothing is pinned. Answers
+// ok=false wherever that gate fails, wherever there are zero call
+// sites (nothing pins a parameter no one supplies), or wherever any one
+// call site's own bound argument does not fold to a literal — a MIXED
+// or PARTIALLY-folding caller set is not a script path this function
+// can name a single answer for, so it declines the same as an
+// unresolvable identifier would, rather than guessing from a subset of
+// its callers.
+func scriptPathFromParameterCallSites(ctx *FlowContext, identifier *ast.Node, parameter *ast.Node) (string, bool) {
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil {
+		return "", false
+	}
+	fn := EnclosingBlockBody(parameter)
+	if fn == nil || !ast.IsFunctionDeclaration(fn) {
+		return "", false
+	}
+	name := fn.Name()
+	if name == nil {
+		return "", false
+	}
+	if ast.HasSyntacticModifier(fn, ast.ModifierFlagsExport) {
+		return "", false
+	}
+	// the parameter's own ordinal among the function's parameter list —
+	// the slot each call site's arguments list is read at
+	slot := -1
+	for i, p := range fn.Parameters() {
+		if p == parameter {
+			slot = i
+			break
+		}
+	}
+	if slot < 0 {
+		return "", false
+	}
+	target := symbolAt(ctx.P.Checker, name)
+	if target == nil {
+		return "", false
+	}
+	var directCalls []*ast.Node
+	for _, node := range identifierUsesOf(ctx.P, name.Text()) {
+		if node == name || symbolAt(ctx.P.Checker, node) != target {
+			continue
+		}
+		parent := node.Parent
+		if ast.IsCallExpression(parent) && parent.AsCallExpression().Expression == node {
+			directCalls = append(directCalls, parent)
+			continue
+		}
+		// any other use (a read, a reassignment, a non-call argument) means
+		// callers are not all in view — the same escape declaredJoinUncached
+		// refuses on
+		return "", false
+	}
+	if len(directCalls) == 0 {
+		return "", false
+	}
+	var resolved string
+	for i, call := range directCalls {
+		args, hasArgs := callArguments(call)
+		if !hasArgs || slot >= len(args) {
+			return "", false
+		}
+		text, ok := foldedConstStringLeafOf(ctx, args[slot])
+		if !ok {
+			return "", false
+		}
+		if i == 0 {
+			resolved = text
+			continue
+		}
+		if text != resolved {
+			// two callers pin two different paths — no single script name
+			// serves both, so the identifier stays unresolved
+			return "", false
+		}
+	}
+	return resolved, true
 }
 
 // resolveForeignScriptPath discharges the two premises common to every
@@ -2258,6 +2404,23 @@ func checkSequenceCrossing(
 		if converted, ok := sequenceCrossingOfKindList(crossing); ok {
 			crossing = converted
 		}
+	}
+	// an OBJECT crossing at a sequence entry is a determined shape
+	// mismatch, not an undetermined reading — the value's own KIND is
+	// known (Object.keys(...).reduce(...) into an accumulator object,
+	// the plain-object literal shape callback_outcome.go's reduce
+	// reading answers), and an object is never a sequence whatever its
+	// keys hold. This fires the same crossing-fit refusal
+	// checkScalarCrossing already reports for a determined scalar
+	// mismatch, rather than falling into the "not read as one here"
+	// decline below, which is reserved for a crossing this walk could
+	// not read AT ALL (Opaque, an unconverted list, …).
+	if crossing.Kind == abstractdomain.KindObject {
+		ctx.Report(foreignRefutation(payload,
+			"the value sent to "+artifact.Called.Name+" is of type 'object', which is not "+
+				"assignable to the target's stated sequence entry '"+entry.Name+"'",
+			artifact))
+		return &ForeignEdgeOutcome{}
 	}
 	if crossing.Kind != abstractdomain.KindSet || crossing.SetKindTag != abstractdomain.SetKindTagNone {
 		return &ForeignEdgeOutcome{

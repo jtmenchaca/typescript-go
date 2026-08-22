@@ -50,12 +50,22 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 	env := input.Env
 
 	// ── iterate the effect over the exact join ───────────────────────
+	// candidate starts at the REAL entry state (env.Clone()) for every
+	// touched name, declared or not — a declared name's stated set is a
+	// sound CEILING the settled value is met against below, never a
+	// substitute for the exact entry value the iteration has to start
+	// from. Seeding a declared name at its full stated range here (the
+	// old behavior) skipped the exact-join entirely: the crude range
+	// never changes under JoinKnown, so the loop never saw the real
+	// per-trip union it was built to track.
+	//
+	// a declared binding written by the CONDITION is the one exception:
+	// those writes are unseen, so its invariant is re-armed to the full
+	// stated range rather than an entry value the condition may have
+	// silently moved past.
 	candidate := env.Clone()
 	for _, name := range input.Touched {
-		// a declared binding written by the CONDITION is not re-armed to
-		// its stated set — those writes are unseen, so the invariant is
-		// not re-established here
-		if _, written := input.ConditionWritten[name]; written {
+		if _, written := input.ConditionWritten[name]; !written {
 			continue
 		}
 		if stated, ok := ctx.Declared[name]; ok {
@@ -282,6 +292,26 @@ func SettleLoopCandidate(input SettleLoopCandidateInput) Env {
 				candidate = tightened
 			}
 		}
+	}
+
+	// ── a declared name never leaves its stated ceiling ───────────────
+	// the exact join (or the kernel/widen-certify fallback) settled
+	// every touched name, declared or not, from its real entry value —
+	// so a declared name's candidate may still hold MORE than the
+	// annotation states (an entry value outside it would be a caller
+	// bug WriteBinding already catches, but a widened fallback range
+	// can overshoot). Meeting with the declared set here is the one
+	// place the annotation acts as a ceiling: it only ever tightens,
+	// since every real write already checked against it.
+	for name, stated := range ctx.Declared {
+		if _, ok := candidate.Get(name); !ok {
+			continue
+		}
+		if _, written := input.ConditionWritten[name]; written {
+			continue
+		}
+		met := abstractdomain.MeetKnown(envOrResidue(candidate, name), AbstractValueOfDeclared(*stated))
+		candidate.Set(name, met)
 	}
 
 	// ── the certified facts, said plainly ────────────────────────────

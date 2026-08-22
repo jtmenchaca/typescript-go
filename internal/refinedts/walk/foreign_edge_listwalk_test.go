@@ -265,6 +265,73 @@ function f(a: number[], b: number[]): number {
 	}
 }
 
+/* ── (c0) ordering: an outbound fire still binds the return-leg fact ── */
+
+// TestListWalk_AnOutboundFireStillBindsTheReturnLegFact pins
+// d-data-legs.ts's objectKeysReduceUndetermined row at the ForeignEdgeAt
+// grain (TestCheckOutboundLeg_AWholeObjectPayloadFiresRatherThanDeclines
+// already pins the same shape one layer down, at checkOutboundLeg
+// alone): the payload crossing out is a WHOLE OBJECT against a sequence
+// entry, so checkOutboundLeg fires 7001 through ctx.Report and answers
+// an EMPTY outcome (Decline == "", Override == nil) — before this fix,
+// ForeignEdgeAt returned that empty outcome immediately (foreign_edge.go
+// line ~218's own early return), so the return leg's own machinery
+// (channel purity, soleParseConsumerOf, the ±Infinity corner narrowing)
+// never ran and `level` bound residue rather than the target's stated
+// 0…1 fact — even though the artifact states a return fact and a real
+// JSON.parse(stdout) consumer sits right there. The fix makes the
+// return leg run regardless of the outbound leg's own outcome: `level`
+// must still read the target's 0…1 fact, and the outbound fire must
+// still report (the two legs are independent truths, not a choice
+// between them).
+func TestListWalk_AnOutboundFireStillBindsTheReturnLegFact(t *testing.T) {
+	_, ctx, reported := listWalkForeignEdgeFixture(t, `
+import { execFileSync } from "child_process";
+function f(): number {
+	const merged = { gain: 0.5, offset: -0.3 };
+	const stdout = execFileSync("python3", ["./audio_level.py"], {
+		input: JSON.stringify(merged),
+		encoding: "utf8",
+	});
+	const level: number = JSON.parse(stdout);
+	return level;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, ctx.P, "f")
+	env := NewEnv()
+	// `merged` reads as a whole KnownObject, exactly the shape
+	// Object.keys(defaults).reduce(...) derives in the real fixture row —
+	// seeded directly here since this test's own subject is the ORDERING
+	// fix, not the reduce-callback recognition TestCheckOutboundLeg_
+	// AWholeObjectPayloadFiresRatherThanDeclines already covers.
+	env.Set("merged", abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{
+			{Name: "gain", Value: abstractdomain.KnownValues([]float64{0.5}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)},
+			{Name: "offset", Value: abstractdomain.KnownValues([]float64{-0.3}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)},
+		}, nil, true, abstractdomain.TrustProved, false))
+
+	AnalyzeStatements(ctx, env, statements, nil)
+
+	level, ok := env.Get("level")
+	if !ok {
+		t.Fatalf("env holds no value for level")
+	}
+	words := foreignSetWords(mustSetOfKnown(t, level))
+	if !containsBoth(words, "0", "1") {
+		t.Errorf("level reads %q, want the target's stated 0…1 return fact bound through the parse — "+
+			"an outbound fire must not stop the independent return-leg fact from attaching", words)
+	}
+	sawOutboundFire := false
+	for _, d := range *reported {
+		if d.Code == 7001 && strings.Contains(d.MessageText, "is of type 'object'") {
+			sawOutboundFire = true
+		}
+	}
+	if !sawOutboundFire {
+		t.Errorf("no 7001 fired naming the object-shaped payload — the outbound leg's own fire must still report: %+v", *reported)
+	}
+}
+
 /* ── (c) single-edge regression: the ordinary (non-diamond) shape ── */
 
 // TestListWalk_ASingleForeignEdgeStillBindsItsFact is the plain

@@ -111,12 +111,23 @@ func TestCompileAnnotation_StringChainsCompileRepetitionBoundsAndPatterns(t *tes
 		t.Errorf("min/max chain forms[0] = %v, want repeat", derefSet(bounded.Annotation.Set).Forms[0].Form)
 	}
 
+	// the C* ground (z.string()'s own bare base) drops beside the
+	// grammar's own forms -- chain_method.go's "regex" case now runs
+	// WithoutStringGround exactly as withString's siblings (.startsWith/
+	// .endsWith/.includes/.not) already do: the ground conjunct adds
+	// nothing (the pattern is already a language over C) while stacking
+	// it beside the grammar's own concatenation form blinds the
+	// kernel's one-shape sequence-subset prover -- measured live
+	// (g_timestamp_live_ask_capture_test.go, walk package):
+	// kernel.SeqSubset on the 2-form pair DECLINED; the 1-form pair the
+	// ground-dropped compile now produces proves true, matching
+	// timestamp_operand_probe_test.go's own hand-built single-form B.
 	pattern := compileTopLevel(t, `const X = z.string().regex(/^[0-9]+$/);`+"\n", "X")
 	if IsUnsupported(pattern) {
 		t.Fatalf("unexpected unsupported: %s", pattern.Unsupported.Unsupported)
 	}
-	if got := len(derefSet(pattern.Annotation.Set).Forms); got != 2 {
-		t.Errorf("regex chain forms count = %d, want 2", got)
+	if got := len(derefSet(pattern.Annotation.Set).Forms); got != 1 {
+		t.Errorf("regex chain forms count = %d, want 1 (the redundant C* ground dropped)", got)
 	}
 
 	backrefs := compileTopLevel(t, `const X = z.string().regex(/(a)\1/);`+"\n", "X")

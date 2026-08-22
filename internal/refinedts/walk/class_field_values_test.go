@@ -392,6 +392,45 @@ func TestReadThisFieldInvariant_ANeverConstructedClassWithAVoidDiscardReads(t *t
 	classFieldValuesExactNumber(t, *held, 40)
 }
 
+// TestReadThisFieldInvariant_AGetterBackedPropertyDerivesItsReturn pins
+// e-contract-fit.ts's MeterWithGetter row: `this.level` reads a GET
+// ACCESSOR, not a plain field, so the ordinary field-invariant
+// collection (computeFieldInvariants' candidate loop, PropertyDeclaration
+// members only) has nothing to attach to it — before this fix, the
+// getter fell straight to the opaque floor (readThisFieldInvariant's own
+// "no standing invariant" branch). getterInvariants derives the getter's
+// own return the same way constructed_instance.go's construction-time
+// getter pass already does: the body runs once, `this` bound to the
+// fields already collected, and the return collected through
+// ReturnSink — so `this.level`'s read now answers the exact value
+// `this.#level`'s own invariant (0.5) resolves to, the same fact a
+// plain-field row would carry.
+func TestReadThisFieldInvariant_AGetterBackedPropertyDerivesItsReturn(t *testing.T) {
+	p := classFieldValuesProgram(t,
+		"class MeterWithGetter {\n"+
+			"  #level = 0.5;\n"+
+			"  get level(): number {\n"+
+			"    return this.#level;\n"+
+			"  }\n"+
+			"  renderMeter(): number {\n"+
+			"    return this.level;\n"+
+			"  }\n"+
+			"}\n")
+	thisRead := classFieldValuesFirstNode(t, p, "this.level read", func(node *ast.Node) bool {
+		if !ast.IsPropertyAccessExpression(node) {
+			return false
+		}
+		access := node.AsPropertyAccessExpression()
+		return access.Expression.Kind == ast.KindThisKeyword && access.Name().Text() == "level"
+	})
+	ctx := classFieldValuesContext(p)
+	held := readThisFieldInvariant(ctx, NewEnv(), thisRead, "level")
+	if held == nil {
+		t.Fatalf("this.level read (a getter) answered nil — the getter derivation did not reach it")
+	}
+	classFieldValuesExactNumber(t, *held, 0.5)
+}
+
 // TestFieldInvariants_ABareArgumentReferenceStaysUnsealed is the
 // regression for the escape rule beside the void-discard admission
 // above: a bare `register(C)` hands the constructor to unknown code

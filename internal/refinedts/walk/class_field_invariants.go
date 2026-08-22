@@ -30,7 +30,6 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
-	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
 // invariantMemoMu guards invariantMemo: one answer per class
@@ -247,6 +246,82 @@ func ExportedSymbolConst(c *checker.Checker, key *ast.Node) bool {
 	return false
 }
 
+// constructorUnconditionallyWritesField: does this class's own
+// constructor write `name` on EVERY construction path — a parameter
+// property declaring the field (the runtime's own unconditional
+// prelude fill), or a plain `this.name = value` (or `this.#name =
+// value`) statement sitting directly in the constructor's own
+// top-level statement list, never inside an `if`/`for`/`while`/
+// `switch`/`try`/label or a nested function where some calls could
+// skip it? Straight-line only: a write nested one level inside any of
+// those constructs is not proven to run on every call, so it answers
+// false and the ordinary Undef seed stands.
+func constructorUnconditionallyWritesField(declaration *ast.Node, name string) bool {
+	if declaration == nil || !ast.IsClassLike(declaration) {
+		return false
+	}
+	var constructorDeclaration *ast.Node
+	for _, member := range declaration.ClassLikeData().Members.Nodes {
+		if ast.IsConstructorDeclaration(member) {
+			constructorDeclaration = member
+			break
+		}
+	}
+	if constructorDeclaration == nil {
+		return false
+	}
+	for _, parameter := range constructorDeclaration.Parameters() {
+		if !isParameterPropertyDeclaration(parameter) {
+			continue
+		}
+		pd := parameter.AsParameterDeclaration()
+		if pd.Name() != nil && (ast.IsIdentifier(pd.Name()) || ast.IsPrivateIdentifier(pd.Name())) && pd.Name().Text() == name {
+			return true
+		}
+	}
+	body := constructorDeclaration.Body()
+	if body == nil || !ast.IsBlock(body) {
+		return false
+	}
+	for _, statement := range body.AsBlock().Statements.Nodes {
+		if straightLineThisFieldWrite(statement, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// straightLineThisFieldWrite: is `statement` itself (not something
+// nested inside it) a `this.name = value` (or `this.#name = value`)
+// expression statement? Only the plain assignment form counts — a
+// compound assignment or update reads the field's PRIOR value first,
+// which this walk cannot prove came from anywhere on a fresh instance.
+func straightLineThisFieldWrite(statement *ast.Node, name string) bool {
+	if statement == nil || !ast.IsExpressionStatement(statement) {
+		return false
+	}
+	expression := statement.AsExpressionStatement().Expression
+	if expression == nil || !ast.IsBinaryExpression(expression) {
+		return false
+	}
+	bin := expression.AsBinaryExpression()
+	if bin.OperatorToken.Kind != ast.KindEqualsToken {
+		return false
+	}
+	if !ast.IsPropertyAccessExpression(bin.Left) {
+		return false
+	}
+	pa := bin.Left.AsPropertyAccessExpression()
+	if pa.Expression.Kind != ast.KindThisKeyword {
+		return false
+	}
+	fieldName := pa.Name()
+	if fieldName == nil || !(ast.IsIdentifier(fieldName) || ast.IsPrivateIdentifier(fieldName)) {
+		return false
+	}
+	return fieldName.Text() == name
+}
+
 // FieldInvariantsOf is the invariants of a class's private fields —
 // the `#`-named ones survive a `this` escape, the modifier-private
 // ones do not. Memoized per declaration; the collection walk runs each
@@ -364,6 +439,12 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 	}
 	var candidateOrder []string
 	candidates := map[string]abstractdomain.AbstractValue{}
+	// unconditionalConstructorWrite: a no-initializer field the
+	// constructor's own straight-line body writes on every construction
+	// path. Its candidate takes no Undef seed — the final join below
+	// starts from the constructor's write alone instead of joining an
+	// arm the class's own text never allows.
+	unconditionalConstructorWrite := map[string]struct{}{}
 	// method bodies run at times this scope cannot place, so nothing
 	// walk-ordered survives into the collection walk
 	silent := *ctx
@@ -443,6 +524,7 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 		}
 		env := NewEnv()
 		var value abstractdomain.AbstractValue
+		seedless := false
 		if _, stepped := numericallyStepped[nameText]; stepped {
 			// a numeric step runs an unknown number of times over the
 			// object's life, so the field's own initializer no longer pins
@@ -450,17 +532,34 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 			value = abstractdomain.PossiblyNaN(abstractdomain.KnownSet(
 				refinementsets.RefinedSet{}, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
 		} else if pd.Initializer == nil {
-			value = abstractdomain.Undef
+			// a field with no initializer holds `undefined` until a write
+			// lands — UNLESS the constructor's own straight-line body
+			// (constructorUnconditionallyWritesField below) writes it on
+			// every construction path: then the field is never read before
+			// that write in a way this walk can observe, so the seed takes
+			// no Undef arm and the invariant rests on the constructor's own
+			// write alone (unconditionalConstructorWrite marks it below,
+			// read by the final join loop). A field a constructor only
+			// writes on SOME path (inside an if/try/loop) keeps the Undef
+			// seed — that arm is real.
+			if constructorUnconditionallyWritesField(declaration, nameText) {
+				unconditionalConstructorWrite[nameText] = struct{}{}
+				seedless = true
+			} else {
+				value = abstractdomain.Undef
+			}
 		} else {
 			value = evaluateExpression(&silent, env, pd.Initializer)
 		}
 		if _, seen := candidates[nameText]; !seen {
 			candidateOrder = append(candidateOrder, nameText)
 		}
-		candidates[nameText] = value
+		if !seedless {
+			candidates[nameText] = value
+		}
 	}
 	if len(candidates) == 0 {
-		return map[string]abstractdomain.AbstractValue{}
+		return getterInvariants(ctx, declaration, members, map[string]abstractdomain.AbstractValue{})
 	}
 
 	// the collection walk: each member body once, writes sinking —
@@ -483,7 +582,15 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 			for _, parameter := range member.Parameters() {
 				pname := parameter.AsParameterDeclaration().Name()
 				if ast.IsIdentifier(pname) {
-					env.Set(pname.Text(), silence.Residue())
+					// the class-wide invariant covers every call site, so a
+					// parameter seeds from its DECLARED TYPE (entry_env.go's
+					// InitialStateOfPlainParameter — the same reading a
+					// function body's own entry uses), never blanket Unknown.
+					// `age: number` joins the field's candidate as the number
+					// ground, so `this.#age = age` folds a real set into the
+					// invariant instead of poisoning the whole join to
+					// Unknown (JoinKnown(anything, Unknown) = Unknown).
+					env.Set(pname.Text(), InitialStateOfPlainParameter(ctx.P, parameter))
 				}
 			}
 		}
@@ -492,13 +599,107 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 
 	invariants := map[string]abstractdomain.AbstractValue{}
 	for _, name := range candidateOrder {
+		writes := sink[name]
+		if _, seedless := unconditionalConstructorWrite[name]; seedless {
+			// no Undef seed: the constructor's own unconditional write is
+			// every value this field can ever hold, so the join starts
+			// from the FIRST write rather than from an absent-arm seed
+			// the class's own text never allows. No writes at all here
+			// would mean constructorUnconditionallyWritesField found a
+			// write the collection walk's OWN sink then failed to record —
+			// a bug in that pairing, not a real empty invariant — so this
+			// name is skipped rather than silently answering an empty
+			// join.
+			if len(writes) == 0 {
+				continue
+			}
+			joined := writes[0]
+			for _, written := range writes[1:] {
+				joined = abstractdomain.JoinKnown(joined, written)
+			}
+			joined = widenInvariantCollections(joined)
+			if joined.Kind != abstractdomain.KindUnknown {
+				invariants[name] = joined
+			}
+			continue
+		}
 		joined := candidates[name]
-		for _, written := range sink[name] {
+		for _, written := range writes {
 			joined = abstractdomain.JoinKnown(joined, written)
 		}
 		joined = widenInvariantCollections(joined)
 		if joined.Kind != abstractdomain.KindUnknown {
 			invariants[name] = joined
+		}
+	}
+	return getterInvariants(ctx, declaration, members, invariants)
+}
+
+// getterInvariants adds one entry per non-static GET ACCESSOR to an
+// already-collected field-invariant map: a getter has no write to
+// sink and no initializer, so it takes no invariant from the field
+// loop above at all, and `this.<getter>` reads fell to the opaque
+// floor before this function existed (this file's own header case,
+// `MeterWithGetter`). A getter's body is a pure computed read, so its
+// derivation is the SAME one `constructed_instance.go`'s getter pass
+// already runs at construction time: walk the body once, `this` bound
+// to the fields already collected, and collect the return through
+// ReturnSink. Skips a name the field loop already claimed (fields and
+// accessors never share a name in valid TypeScript), a computed or
+// unnamed accessor, and one with no body (a declaration file, or
+// `abstract get x(): number;`).
+func getterInvariants(
+	ctx *FlowContext,
+	declaration *ast.Node,
+	members []*ast.Node,
+	invariants map[string]abstractdomain.AbstractValue,
+) map[string]abstractdomain.AbstractValue {
+	var thisObject *abstractdomain.AbstractValue
+	for _, member := range members {
+		if !ast.IsGetAccessorDeclaration(member) {
+			continue
+		}
+		ga := member.AsGetAccessorDeclaration()
+		if ast.GetCombinedModifierFlags(member)&ast.ModifierFlagsStatic != 0 {
+			continue
+		}
+		name := ga.Name()
+		if name == nil || (!ast.IsIdentifier(name) && !ast.IsPrivateIdentifier(name)) {
+			continue
+		}
+		nameText := name.Text()
+		if _, already := invariants[nameText]; already {
+			continue
+		}
+		if ga.Body == nil {
+			continue
+		}
+		if thisObject == nil {
+			keys := make([]abstractdomain.ObjectKey, 0, len(invariants))
+			for key, value := range invariants {
+				keys = append(keys, abstractdomain.ObjectKey{Name: key, Value: value})
+			}
+			built := abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false)
+			thisObject = &built
+		}
+		getterEnv := NewEnv()
+		getterEnv.Set("this", *thisObject)
+		var sink []abstractdomain.AbstractValue
+		silent := *ctx
+		silent.Report = func(assignability.RefinementDiagnostic) {}
+		silent.ReturnSink = &sink
+		silent.ThisWriteSink = nil
+		AnalyzeStatements(&silent, getterEnv, ga.Body.AsBlock().Statements.Nodes, nil)
+		if len(sink) == 0 {
+			continue
+		}
+		joined := sink[0]
+		for _, v := range sink[1:] {
+			joined = abstractdomain.JoinKnown(joined, v)
+		}
+		joined = widenInvariantCollections(joined)
+		if joined.Kind != abstractdomain.KindUnknown {
+			invariants[nameText] = joined
 		}
 	}
 	return invariants

@@ -116,15 +116,48 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 				}
 			}
 		}
+		// past the source-literal and static-type reads: the WALK's own
+		// tracked value for the index expression — already evaluated
+		// above as `index` — may pin an EXACT single string even where
+		// the static type does not. `Object.keys(o)`'s own declared
+		// signature answers plain `string[]` (lib.es5.d.ts), never
+		// narrowed to `keyof typeof o`, so a `.reduce` callback's key
+		// parameter carries the un-narrowed `string` type at every
+		// call — but reduceOutcome (callback_outcome.go) still binds
+		// that parameter to the EXACT key string each fold step reads
+		// off Object.keys' own answer (an exact list, since it ran over
+		// a known object literal). A key this certain is at least as
+		// good evidence as a narrowed static type, and strictly better
+		// than "no evidence at all" — so it takes the same single-key
+		// write path, not the union path below (which exists for when
+		// the runtime key is genuinely UNDECIDED, not merely
+		// unnarrowed).
+		if !hasLiteral && index.Kind == abstractdomain.KindValues &&
+			index.KindTag == abstractdomain.PrimitiveString {
+			if lit, ok := stringFromCodepoints(index.Values); ok {
+				literal, hasLiteral = lit, true
+			}
+		}
 		if hasLiteral {
 			keys := setObjectKey(receiver.Keys, literal, value)
 			UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
 			return value, true
 		}
 		// a UNION of candidate keys (`key: "a" | "b"`): which one the
-		// runtime actually wrote is unknown, so a key the receiver does
-		// not already carry cannot be safely invented — only a candidate
-		// ALREADY present can be joined with the new value, same as before.
+		// runtime actually wrote is unknown, so no single key can be
+		// pinned to `value` alone. What IS sound for every candidate,
+		// present or not: whichever key the runtime picks, its value
+		// afterward is either `value` (this write landed there) or
+		// whatever it held before (some OTHER candidate was the real
+		// target) — so each candidate joins its prior value (Undef for
+		// one the receiver does not yet carry — the object's build-up
+		// case, `accumulator[key] = v` inside a reduce whose initial
+		// value is `{}`, unlike a candidate this receiver already has an
+		// invariant for) with `value`. Every candidate becomes present in
+		// the result, each carrying that widened join, rather than the
+		// write refusing (HavocEnv) the moment even one candidate is
+		// still absent — the shape a reduce that BUILDS an object up one
+		// key at a time always starts in.
 		var candidates []*checker.Type
 		if indexType.IsUnion() {
 			candidates = indexType.Types()
@@ -142,22 +175,19 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 			}
 		}
 		if readable {
-			allPresent := true
+			keys := append([]abstractdomain.ObjectKey{}, receiver.Keys...)
 			for _, key := range written {
-				if _, hasKey := objectKeyIndex(receiver, key); !hasKey {
-					allPresent = false
-					break
-				}
-			}
-			if allPresent {
-				keys := append([]abstractdomain.ObjectKey{}, receiver.Keys...)
-				for _, key := range written {
-					idx, _ := objectKeyIndex(receiver, key)
+				if idx, hasKey := objectKeyIndex(receiver, key); hasKey {
 					keys[idx] = abstractdomain.ObjectKey{Name: key, Value: abstractdomain.JoinKnown(keys[idx].Value, value)}
+				} else {
+					keys = append(keys, abstractdomain.ObjectKey{
+						Name:  key,
+						Value: abstractdomain.JoinKnown(abstractdomain.Undef, value),
+					})
 				}
-				UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
-				return value, true
 			}
+			UpdateTrackedEnv(ctx.Aliases, env, name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
+			return value, true
 		}
 	}
 	HavocEnv(ctx.Aliases, env, name)
