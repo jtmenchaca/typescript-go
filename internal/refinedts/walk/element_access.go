@@ -552,13 +552,29 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 				// summary read — is not a KindList at all; it reaches the
 				// set-shaped arm above, which is where the absence is worn.
 				// an OBJECT-STAR slot: every position that exists holds the
-				// element, and the form claims NO count — so no index is
-				// provably in bounds and the read is the element or nothing
-				// (sec-array-exotic-objects: a get past the end answers
-				// undefined). The absence is POSITIVELY derived — the star
-				// states the length is unclaimed, so a run where this index
-				// is past the end is admitted, not merely unproved.
+				// element, and the form states NO COUNT of its own — so a
+				// bare read of an object-star answers the element or
+				// nothing (sec-array-exotic-objects: a get past the end
+				// answers undefined), the absence POSITIVELY derived since
+				// the star's own claim leaves the length unstated.
+				//
+				// A GUARD can still prove this index in bounds despite the
+				// star carrying no floor: `i < arr.length` (or `i <=
+				// arr.length - 1`, or a summed index against arr.length)
+				// is a claim about the PLACE `arr.length` denotes, tracked
+				// by the same DifferenceConstraints ledger a repetition-
+				// shaped receiver's own in-bounds arm reads
+				// (element_in_bounds.go's IndexBelowLengthPlace, factored
+				// out of InBoundsElementOf for exactly this reuse) — the
+				// ledger row does not care what SHAPE the receiver's own
+				// AbstractValue wears, only what the guard proved about
+				// the length place. In bounds, the read is the star's
+				// element with no maybe wrapper at all; out of bounds (or
+				// unproved), the absence stands.
 				if element, ok := abstractdomain.ElementOfObjectStar(receiver); ok {
+					if IndexBelowLengthPlace(ctx, env, elem.Expression, elem.ArgumentExpression) {
+						return &element
+					}
 					// sec-ordinaryget: a get past the end reaches no own
 					// property and returns exactly undefined, never null —
 					// the wrapper's own absent side is UndefOnly.

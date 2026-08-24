@@ -33,10 +33,14 @@ var errKernelRefused = errors.New("kernel refused the question")
 // the set, and an EMPTY meet proves that arm impossible. A set
 // excludes NaN by construction, so an impossible true arm reads
 // "false on every run" and an impossible false arm "true on every
-// run", both exactly. nil where the shape is not one numeric set
-// against one exact number, a claim declines, both arms stay
-// possible, or the kernel refuses (the recover).
-func compareSetAgainstNumber(ctx *FlowContext, op ComparisonOp, a, b abstractdomain.AbstractValue, kernelRow func(bool) abstractdomain.AbstractValue) (out *abstractdomain.AbstractValue) {
+// run", both exactly. out is nil where a claim declines, both arms
+// stay possible, or the kernel refuses (the recover); matched is
+// false where the shape itself is not one numeric set against one
+// exact number, so the caller can tell "wrong shape, keep looking
+// for another row" apart from "right shape, genuinely either
+// truth value" (out nil, matched true) — the latter still
+// determines the boolean ground, never a decline.
+func compareSetAgainstNumber(ctx *FlowContext, op ComparisonOp, a, b abstractdomain.AbstractValue, kernelRow func(bool) abstractdomain.AbstractValue) (out *abstractdomain.AbstractValue, matched bool) {
 	defer func() {
 		if recover() != nil {
 			out = nil
@@ -56,7 +60,7 @@ func compareSetAgainstNumber(ctx *FlowContext, op ComparisonOp, a, b abstractdom
 		number, isNumber = singleNumber(a)
 		mirrored = true
 		if b.Kind != abstractdomain.KindSet || b.SetKindTag != abstractdomain.SetKindTagNone || !isNumber {
-			return nil
+			return nil, false
 		}
 	}
 	mapped := op
@@ -92,13 +96,13 @@ func compareSetAgainstNumber(ctx *FlowContext, op ComparisonOp, a, b abstractdom
 	}
 	if armImpossible(answer.WhenTrue) {
 		v := kernelRow(false)
-		return &v
+		return &v, true
 	}
 	if armImpossible(answer.WhenFalse) {
 		v := kernelRow(true)
-		return &v
+		return &v, true
 	}
-	return nil
+	return nil, true
 }
 
 // kernelRefusedTheQuestionSaid is the sentence every callMember/
@@ -132,6 +136,33 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 	}
 	if a.Kind == abstractdomain.KindNaN || b.Kind == abstractdomain.KindNaN {
 		return boolAt(op == CompareNe)
+	}
+	// a possibly-NaN operand (Date.getTime()/valueOf(), a calendar getter
+	// on an unknown receiver, any other spec window riding NaN beside it
+	// per date_models.go's readDateMethods) decides in two arms: NaN
+	// forces the NaN-corner answer above (op == CompareNe), and the real
+	// half compares as usual — the same unwrap-compute-rewrap arithmetic_
+	// transfer.go's TransferBinary already runs for +/-/etc, joined
+	// instead of rewrapped since a comparison's result is a boolean, not
+	// a number that stays possibly-NaN. Where the two arms agree the join
+	// collapses to one exact boolean (JoinKnown's SameKnown shortcut);
+	// where they disagree the honest answer is "could be either" — the
+	// boolean ground below, not a decline.
+	if a.Kind == abstractdomain.KindPossiblyNaN || b.Kind == abstractdomain.KindPossiblyNaN {
+		innerA := a
+		if a.Kind == abstractdomain.KindPossiblyNaN {
+			innerA = *a.Inner
+		}
+		innerB := b
+		if b.Kind == abstractdomain.KindPossiblyNaN {
+			innerB = *b.Inner
+		}
+		nanArm := boolAt(op == CompareNe)
+		realArm := CompareKnown(ctx, op, strict, innerA, innerB)
+		if realArm.Kind == abstractdomain.KindUnknown {
+			return realArm
+		}
+		return abstractdomain.JoinKnown(nanArm, realArm)
 	}
 	// KindUndef now means exactly-undefined and KindNull exactly-null (the
 	// domain's AbsentMark split); a KindPossiblyUndefined wrapper is the
@@ -187,11 +218,74 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 	// `x > 200` over x ∈ [0, 150] admits NO member (the true arm's
 	// meet is empty, so the test is false on every run), and a set
 	// excludes NaN by construction, so the verdict is exact in both
-	// directions.
-	if verdict := compareSetAgainstNumber(ctx, op, a, b, kernelRow); verdict != nil {
-		return *verdict
+	// directions. Where the shape matches (a real numeric set against
+	// one exact number) but NEITHER arm is impossible — `arr.length >
+	// 0` over length ∈ [0, ∞) admits both outcomes — the comparison is
+	// still a real relational operator over two known operands: it
+	// answers true or false on every run, so the honest determination
+	// is the boolean ground, never a decline (membership_ground_
+	// models.go's own doctrine: "even an undecided test determines the
+	// boolean ground — a value, never nothing").
+	if verdict, matched := compareSetAgainstNumber(ctx, op, a, b, kernelRow); matched {
+		if verdict != nil {
+			return *verdict
+		}
+		return boolGround(operandTrustLevel)
+	}
+	// strict equality/disequality between two REFERENCE-kind operands
+	// (arrays, Maps, Sets, Dates, Promises, plain objects) is an
+	// IDENTITY question, not a value question — sec-isstrictlyequal's
+	// SameType/SameValueNonNumber steps compare Object operands by
+	// reference, never by shape. Two distinct bindings' identity is not
+	// something this walk tracks (no alias graph proves or refutes it),
+	// but the comparison is still a real === that returns true or false
+	// on every run, so the honest determination is the boolean ground —
+	// the same reasoning compareSetAgainstNumber's matched-but-
+	// undecided arm already applies above. A single tracked place
+	// compared with itself (`x === x`) is decided upstream, before
+	// operands ever reach this function (evaluate_operators.go folds a
+	// self-comparison before evaluating either side as a fresh
+	// reference), so this row only ever sees two INDEPENDENT reference
+	// values.
+	if (op == CompareEq || op == CompareNe) && isReferenceKind(a) && isReferenceKind(b) {
+		return boolGround(operandTrustLevel)
 	}
 	if a.Kind != abstractdomain.KindValues || b.Kind != abstractdomain.KindValues {
+		// a same-sort STRING or BOOLEAN pair that isn't fully pinned to
+		// one exact value each (an unbounded `string` parameter, a
+		// boolean read off a call return) still compares as a real ===/
+		// !== on every run — the specific truth value is unprovable
+		// without the operands' exact content, but the comparison itself
+		// is not: the boolean ground, not a decline. Number and boolean
+		// claims are read as the SAME scalar ground here — KindOfClaim's
+		// own doc: a sortless SET's forms "conflate number with
+		// boolean (their words share the ground)" (true ↦ 1, the domain's
+		// one root), so a KindValues boolean (KindOfClaim answers
+		// ClaimSortBoolean exactly, since it reads the KindTag straight)
+		// meets a KindSet scalar (ClaimSortNumber, the set reader's own
+		// best-effort word) as the identical sort.
+		//
+		// ClaimSortString is the tuple layer's OWN conflation, not one
+		// this row adds: a sequence-shaped KindSet reads ClaimSortString
+		// whether it is really a string OR an unread array parameter
+		// (setSortOfForms's own doc — "sequence forms say 'string':
+		// strings and arrays share the tuple layer"). An array's === is
+		// really the reference-identity question isReferenceKind answers
+		// above; this row still gives the SAME boolGround answer for
+		// that shape by coincidence of the one-root domain, never a
+		// falsely-precise one, so the conflation costs no soundness —
+		// only, harmlessly, this comment's own precision.
+		if op == CompareEq || op == CompareNe {
+			sortA, sortB := abstractdomain.KindOfClaim(a), abstractdomain.KindOfClaim(b)
+			scalarGround := func(s abstractdomain.ClaimSort) bool {
+				return s == abstractdomain.ClaimSortNumber || s == abstractdomain.ClaimSortBoolean
+			}
+			sameSort := sortA == sortB || (scalarGround(sortA) && scalarGround(sortB))
+			if sortA != abstractdomain.ClaimSortNone && sameSort &&
+				(sortA == abstractdomain.ClaimSortString || scalarGround(sortA)) {
+				return boolGround(operandTrustLevel)
+			}
+		}
 		return silence.ResidueOf("a side is not a plain known value — an object, wrapper, or unresolved kind has no comparison row here")
 	}
 	// strings: equality is tuple equality; ordering is code-unit
@@ -298,11 +392,43 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 	return silence.Residue()
 }
 
+// isReferenceKind is whether a knowledge state denotes an Object at
+// the spec level — the sorts SameType/IsStrictlyEqual compare by
+// REFERENCE rather than by value (sec-isstrictlyequal, sec-
+// samevaluenonnumber): an array, a Map/Set, a Date, a Promise, or a
+// plain object. KindValues with KindTag == PrimitiveArray is a fully
+// KNOWN array (a literal the walk built), which the pre-existing
+// PrimitiveArray row just above already declines by name — this
+// predicate is for the reference SORTS that never reach KindValues at
+// all (an unread parameter, an opaque return).
+func isReferenceKind(k abstractdomain.AbstractValue) bool {
+	switch k.Kind {
+	case abstractdomain.KindObject, abstractdomain.KindObjectStar, abstractdomain.KindList,
+		abstractdomain.KindArrayHoles, abstractdomain.KindCollection, abstractdomain.KindPromise,
+		abstractdomain.KindDate:
+		return true
+	}
+	return false
+}
+
 func boolValue(v bool, grade abstractdomain.TrustLevel) abstractdomain.AbstractValue {
 	if v {
 		return abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean, grade)
 	}
 	return abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, grade)
+}
+
+// boolGround is the determined-but-either-way boolean: a real
+// relational operator over two known operands returns true or false
+// on every run (ToBoolean of a comparison never yields anything
+// else), so where the specific truth value cannot be pinned the sound
+// answer is BOTH truth values, not a decline — the same reading
+// binary_comparison.go's ReadInstanceOf already gives its own
+// undecided rows (boolPair) and unmodeled_method_havoc.go/
+// membership_ground_models.go already give an unresolved but
+// boolean-typed builtin result.
+func boolGround(grade abstractdomain.TrustLevel) abstractdomain.AbstractValue {
+	return abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, grade)
 }
 
 // callMember mirrors the TS source's try/catch around

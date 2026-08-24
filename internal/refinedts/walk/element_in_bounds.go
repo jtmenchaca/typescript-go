@@ -145,6 +145,50 @@ func OutOfBoundsEvidence(p OutOfBoundsEvidenceParams) (string, bool) {
 		"be out of bounds on the last pass", true
 }
 
+// IndexBelowLengthPlace: does a `.length` ledger row (a guard's `i <
+// xs.length`, or a sum row for `xs[a + b]`) prove the index strictly
+// below the receiver's length, whatever SHAPE the receiver's own
+// AbstractValue carries? Factored out of InBoundsElementOf's
+// repetition-only reading so an OBJECT-STAR receiver (an unread array
+// parameter, which carries no Repetition set to floor against at
+// all) can ask the identical relational question — the length ledger
+// a guard establishes is a claim about the PLACE `xs.length` denotes,
+// independent of whether the walk also proved a counting floor on
+// xs's own shape. Mirrors InBoundsElementOf's own underLength/
+// underSum arms exactly (row lookup, then the kernel's linear
+// composition, then the two-place sum case); the floor arm
+// (window.Hi < rep.Lo) stays there, since only a Repetition receiver
+// carries a floor to compare against.
+func IndexBelowLengthPlace(ctx *FlowContext, env Env, receiverExpression, argumentExpression *ast.Node) bool {
+	receiverPlace := dataflowfacts.PlaceKeyOf(ctx.P.Checker, receiverExpression)
+	indexSide := dataflowfacts.OffsetPlaceOf(ctx.P.Checker, argumentExpression)
+	if receiverPlace == nil || indexSide == nil {
+		return false
+	}
+	lengthPlace := dataflowfacts.PlaceKey{Base: receiverPlace.Base, Path: receiverPlace.Path + ".length", BaseName: receiverPlace.BaseName}
+	var row *dataflowfacts.DifferenceConstraint
+	if dataflowfacts.SamePlace(indexSide.Place, lengthPlace) {
+		// the index rooted at the length ITSELF (`xs[xs.length - 1]`) is
+		// the identity row — length − length ≥ 0 holds of every run
+		row = &dataflowfacts.DifferenceConstraint{Minuend: lengthPlace, Subtrahend: indexSide.Place, Bound: 0, Strict: false}
+	} else {
+		row = dataflowfacts.DifferenceConstraintFor(ctx.DifferenceConstraints, lengthPlace, indexSide.Place)
+	}
+	underLength := false
+	if row != nil {
+		underLength = row.Bound-float64(indexSide.Offset) > 0 ||
+			(row.Strict && row.Bound-float64(indexSide.Offset) >= 0)
+	} else if dataflowfacts.AnyRowMentions(ctx.DifferenceConstraints, lengthPlace) {
+		underLength = dataflowfacts.ConstraintsImply(
+			ctx.Kernel, ctx.DifferenceConstraints, lengthPlace, indexSide.Place, float64(indexSide.Offset), true,
+		)
+	}
+	if underLength {
+		return true
+	}
+	return SumIndexInBounds(ctx, env, argumentExpression, lengthPlace)
+}
+
 // InBoundsElementOfParams is the destructured-parameters struct for
 // InBoundsElementOf.
 type InBoundsElementOfParams struct {
@@ -176,64 +220,14 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 			underFloor := window.Hi < float64(rep.Lo)
 			// the relational bound reads the index as place + offset:
 			// `i - 1` with i < xs.length is below the length too (an
-			// array index sits under 2^32, so the offset arithmetic
-			// is exact)
-			receiverPlace := dataflowfacts.PlaceKeyOf(p.Ctx.P.Checker, elem.Expression)
-			indexSide := dataflowfacts.OffsetPlaceOf(p.Ctx.P.Checker, elem.ArgumentExpression)
-			var lengthPlace *dataflowfacts.PlaceKey
-			if receiverPlace != nil {
-				lp := dataflowfacts.PlaceKey{Base: receiverPlace.Base, Path: receiverPlace.Path + ".length", BaseName: receiverPlace.BaseName}
-				lengthPlace = &lp
-			}
-			// the index rooted at the length ITSELF (`xs[xs.length - 1]`)
-			// is the identity row — length − length ≥ 0 holds of every
-			// run, an array length being a real number by construction
-			var row *dataflowfacts.DifferenceConstraint
-			if lengthPlace != nil && indexSide != nil {
-				if dataflowfacts.SamePlace(indexSide.Place, *lengthPlace) {
-					row = &dataflowfacts.DifferenceConstraint{Minuend: *lengthPlace, Subtrahend: indexSide.Place, Bound: 0, Strict: false}
-				} else {
-					row = dataflowfacts.DifferenceConstraintFor(p.Ctx.DifferenceConstraints, *lengthPlace, indexSide.Place)
-				}
-			}
-			// length − (i + offset) ≥ bound − offset, strict carried:
-			// the read is in bounds when that gap clears zero. Where
-			// no single row says it, the kernel's linear decider
-			// composes the live rows (i < j and j < xs.length reach
-			// the read the one-row lookup cannot).
-			underLength := false
-			if indexSide != nil {
-				if row != nil {
-					underLength = row.Bound-float64(indexSide.Offset) > 0 ||
-						(row.Strict && row.Bound-float64(indexSide.Offset) >= 0)
-				} else if lengthPlace != nil &&
-					// no live row even MENTIONS the length: the system
-					// can imply nothing about it — skip the kernel's
-					// composition, it would answer no at one ask each
-					dataflowfacts.AnyRowMentions(p.Ctx.DifferenceConstraints, *lengthPlace) {
-					// the decider speaks about REALS, so the question is
-					// the strict form — length − place > offset — and
-					// the index's integrality (indexWindow) closes the
-					// gap to the last slot
-					underLength = dataflowfacts.ConstraintsImply(
-						p.Ctx.Kernel, p.Ctx.DifferenceConstraints, *lengthPlace, indexSide.Place, float64(indexSide.Offset), true,
-					)
-				}
-			}
-			// a TWO-PLACE index (`s[offset + length - 1]`): the sum
-			// row speaks about fl(offset + length). Both terms
-			// nonnegative integers and the anchor an array length
-			// (< 2^32, sec-array-exotic-objects) make the computed
-			// sum EQUAL the real one — rounding an integer past 2^53
-			// lands at or past 2^53, which the anchor's bound rules
-			// out — so the row holds of the real sum and the read is
-			// in bounds when the offsets clear the last slot
-			underSum := false
-			if !underFloor && !underLength && receiverPlace != nil {
-				anchorPlace := dataflowfacts.PlaceKey{Base: receiverPlace.Base, Path: receiverPlace.Path + ".length", BaseName: receiverPlace.BaseName}
-				underSum = SumIndexInBounds(p.Ctx, p.Env, elem.ArgumentExpression, anchorPlace)
-			}
-			if underFloor || underLength || underSum {
+			// array index sits under 2^32, so the offset arithmetic is
+			// exact) — IndexBelowLengthPlace carries the length-ledger
+			// row lookup, the kernel's linear composition, and the
+			// two-place sum case; only the FLOOR (this shape's own
+			// counting proof, which no other receiver shape carries)
+			// stays local to this arm.
+			underLengthOrSum := !underFloor && IndexBelowLengthPlace(p.Ctx, p.Env, elem.Expression, elem.ArgumentExpression)
+			if underFloor || underLengthOrSum {
 				// a bare-ground string element states nothing beyond the
 				// sort — the in-bounds read answers unknown, cheaply
 				if isStringGroundElement(rep.Element) {

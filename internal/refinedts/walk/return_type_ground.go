@@ -40,6 +40,40 @@ func typePartsOf(t *checker.Type) []*checker.Type {
 // peeled above, so nil here is the union's own answer, not a decline
 // short of one.
 func AnnotationOfReturnType(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
+	// the callee's own DECLARED return type node first, read the way a
+	// parameter's node already is: resolution can land PAST the alias
+	// (`Age` = z.infer<typeof zAge> resolves to a type whose recorded
+	// alias is z.infer's own, and that alias's declaration spells a
+	// conditional the reader refuses), but the declaration's stated
+	// return node still NAMES the alias the reader spells. A node the
+	// reader cannot spell — a type variable, an unstated shape —
+	// answers nothing here and the resolved-type walk below still
+	// runs, so a generic's instantiated return keeps its existing
+	// route.
+	if ast.IsCallExpression(e) && ctx.P != nil && ctx.P.Checker != nil {
+		if signature := ctx.P.Checker.GetResolvedSignature(e); signature != nil {
+			if declaration := signature.Declaration(); declaration != nil {
+				// only a TYPE REFERENCE (an alias like `Age`, or a stated
+				// z.infer<...>) is read here: a bare keyword (`number`)
+				// names the whole sort, and the resolved-type walk below
+				// is the layer that spells sorts WITH their NaN
+				// admission — reading `number` as the NaN-free number
+				// set here would state a claim the runtime refutes
+				// (fround(NaN) is NaN). A union node falls through the
+				// same way, so `Age | undefined` keeps its absence peel.
+				if returnNode := declaration.Type(); returnNode != nil && ast.IsTypeReferenceNode(returnNode) {
+					read := annotations.AnnotationOfType(ctx.P, returnNode, ctx.Registry, ctx.Objects)
+					if read.Stated != nil && read.Unsupported == "" && read.Stated.Kind == annotations.DeclaredSet {
+						out := abstractdomain.AtTrustLevel(
+							abstractdomain.KnownSet(*read.Stated.Set, read.Stated.Temporal, abstractdomain.TrustProved, setKindTagOf(read.Stated.KindTag)),
+							abstractdomain.TrustLibrary,
+						)
+						return &out
+					}
+				}
+			}
+		}
+	}
 	t := typereading.TypeAtLocation(ctx.P.Checker, e)
 	parts := typePartsOf(t)
 	sawAbsent := false

@@ -17,6 +17,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // HeldPlaceEntry reads the PLACE-VALUE memory for one access: the
@@ -140,6 +141,20 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 					out := abstractdomain.KnownSet(
 						refinementsets.MakeRefinedSet(refinementsets.AtLeast(float64(len(receiver.Entries))), refinementsets.Integer),
 						nil, abstractdomain.TrustLevelOf(receiver), abstractdomain.SetKindTagNone,
+					)
+					return &out
+				}
+				// an UNTRACKED Map/Set (a parameter, an opaque return) never
+				// builds a KindCollection entry list, but its static type
+				// still guarantees `.size`'s spec window: get Map.prototype.size
+				// and get Set.prototype.size both answer the key count, a
+				// non-negative integer — the same "the sort itself
+				// guarantees a bound" reasoning the KindObjectStar `.length`
+				// row below already applies to an array-star receiver.
+				if mapOrSetReceiver(ctx.P.Checker, pa.Expression) {
+					out := abstractdomain.KnownSet(
+						refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(0)),
+						nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone,
 					)
 					return &out
 				}
@@ -302,6 +317,28 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 		return nil
 	}
 	return meetHeldPlaceEntry(ctx.P.Checker, env, e, nil)
+}
+
+// mapOrSetReceiver is whether the expression's STATIC type is Map or
+// Set — `.size` is spec-defined on those two alone (WeakMap and
+// WeakSet carry no size property at all, sec-weakmap-objects/
+// sec-weakset-objects). The receiverTypeName reading itself mirrors
+// collection_models.go's own readCollectionMethods, which runs the
+// identical Symbol().Name check for "a Set or Map method on a
+// receiver the walk no longer pins exactly" (delete/has/add/clear/
+// get's spec-fixed answers) — reused here so `.size` on an UNTRACKED
+// collection (a parameter, an opaque return) answers its own spec
+// window instead of declining outright.
+func mapOrSetReceiver(c *checker.Checker, receiverExpression *ast.Node) bool {
+	receiverType := typereading.TypeAtLocation(c, receiverExpression)
+	if receiverType == nil || receiverType.Symbol() == nil {
+		return false
+	}
+	switch receiverType.Symbol().Name {
+	case "Map", "Set":
+		return true
+	}
+	return false
 }
 
 // unionOfWordValues: every arm of a sort union is a WORD-tagged value

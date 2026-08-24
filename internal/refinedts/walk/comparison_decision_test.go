@@ -186,3 +186,126 @@ func TestCompareKnownStringOrderEmptyOperand(t *testing.T) {
 	wantTrue(t, CompareKnown(ctx, CompareLe, true, empty, empty), `"" <= ""`)
 	wantTrue(t, CompareKnown(ctx, CompareGe, true, empty, empty), `"" >= ""`)
 }
+
+// wantBoolGround reads a decided-but-either-way boolean answer: the
+// {0, 1} set boolGround returns for a real comparison whose specific
+// truth value the operands don't pin — never KindUnknown (a decline)
+// and never a single exact value (over-claiming precision the
+// operands don't carry).
+func wantBoolGround(t *testing.T, got abstractdomain.AbstractValue, label string) {
+	t.Helper()
+	if got.Kind != abstractdomain.KindValues || got.KindTag != abstractdomain.PrimitiveBoolean || len(got.Values) != 2 {
+		t.Fatalf("%s = %+v, want the boolean ground {0, 1}", label, got)
+	}
+}
+
+// nonNegativeIntegerSet builds the KindSet shape `.length`/`.size` read
+// on an object-star or unread-collection receiver (evaluate_property_
+// access.go's own KindObjectStar `.length` row, and this unit's new
+// mapOrSetReceiver `.size` row): integers at least 0, no upper bound.
+func nonNegativeIntegerSet() abstractdomain.AbstractValue {
+	return abstractdomain.KnownSet(
+		refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(0)),
+		nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone,
+	)
+}
+
+// TestCompareKnownSetAgainstNumberBothArmsPossibleIsBoolGround pins
+// this unit's fix: `arr.length > 0` over length ∈ [0, ∞) admits BOTH
+// outcomes (an empty array reads false, a nonempty one true) — the
+// shape matches compareSetAgainstNumber's set-vs-number row, but
+// neither arm is impossible, so the comparison determines the
+// boolean ground rather than declining (A7.guard.lt's own
+// `nonEmpty` row, this unit's fix).
+func TestCompareKnownSetAgainstNumberBothArmsPossibleIsBoolGround(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	ctx := &FlowContext{Kernel: kernel}
+	length := nonNegativeIntegerSet()
+	zero := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	wantBoolGround(t, CompareKnown(ctx, CompareGt, true, length, zero), "length > 0")
+}
+
+// TestCompareKnownSetAgainstNumberImpossibleArmStaysExact pins that
+// the fix above does not touch the ALREADY-EXACT case:
+// `.length` ∈ [0, ∞) compared `< 0` is false on every run (the true
+// arm's meet with the set is empty), so this still decides a single
+// boolean, never the ground.
+func TestCompareKnownSetAgainstNumberImpossibleArmStaysExact(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	ctx := &FlowContext{Kernel: kernel}
+	length := nonNegativeIntegerSet()
+	zero := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	wantFalse(t, CompareKnown(ctx, CompareLt, true, length, zero), "length < 0")
+}
+
+// TestCompareKnownPossiblyNaNUnwrapsAndJoins pins this unit's other
+// fix: Date.getTime() on an unknown receiver reads KindPossiblyNaN
+// (date_models.go's readDateMethods, the spec's [[DateValue]] window
+// riding NaN beside it for an unvalidated date) — CompareKnown now
+// unwraps that wrapper, compares the inner value as usual, and joins
+// with the NaN corner (NaN fails every comparison, passes every
+// disequality) instead of falling to the "not a plain known value"
+// residue A6.guard.eq/lt/ne were hitting before this fix.
+func TestCompareKnownPossiblyNaNUnwrapsAndJoins(t *testing.T) {
+	kernel := kernelDelegationLoadKernel(t)
+	ctx := &FlowContext{Kernel: kernel}
+	// an exact epoch-ms instant, possibly NaN (the getTime() shape)
+	instant := abstractdomain.PossiblyNaN(abstractdomain.KnownValues([]float64{1000}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved))
+	sameInstant := abstractdomain.KnownValues([]float64{1000}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	// === decides in two arms that DISAGREE (real half true, NaN half
+	// false) — the honest answer is the boolean ground, not a decline
+	wantBoolGround(t, CompareKnown(ctx, CompareEq, true, instant, sameInstant), "possiblyNaN(1000) === 1000")
+	// !== decides in two arms that AGREE (real half false, NaN half
+	// true — NaN passes every disequality) — the join collapses to
+	// one exact true
+	wantTrue(t, CompareKnown(ctx, CompareNe, true, instant, sameInstant), "possiblyNaN(1000) !== 1000")
+}
+
+// TestCompareKnownReferenceKindIdentityIsBoolGround pins this unit's
+// identity-comparison row: two INDEPENDENT object-star receivers (an
+// array of RECORDS the tuple layer cannot hold — recipes.go's
+// StarOfElementAtLeast routes an object-shaped element here, e.g. a
+// bare `Point[]` parameter) compare by REFERENCE, which no alias
+// graph here proves or refutes — but the comparison is still a real
+// === that returns true or false on every run, so the determination
+// is the boolean ground, never the "arrays compare by reference"
+// decline this row replaces.
+func TestCompareKnownReferenceKindIdentityIsBoolGround(t *testing.T) {
+	ctx := &FlowContext{}
+	element := abstractdomain.KnownObject(nil, nil, false, abstractdomain.TrustSpec, false)
+	star, ok := abstractdomain.KnownObjectStar(element, abstractdomain.TrustSpec)
+	if !ok {
+		t.Fatalf("KnownObjectStar(object) = _, false, want a built object-star")
+	}
+	wantBoolGround(t, CompareKnown(ctx, CompareEq, true, star, star), "a === b (two object-star parameters)")
+	wantBoolGround(t, CompareKnown(ctx, CompareNe, true, star, star), "a !== b (two object-star parameters)")
+}
+
+// TestCompareKnownMapIdentityIsBoolGround pins the SAME row for the
+// shape A8.guard.eq/A8.guard.ne actually carry: a bare `m: Map<string,
+// number>` parameter reads as an INCOMPLETE KindObject (Map's own
+// prototype method keys — Map itself is a default-lib interface no
+// declared-type reader recognizes by name, confirmed by tracing
+// entry_env.go's InitialStateOfPlainParameter through typereading's
+// syntax/host adapters), which is a reference-compared sort exactly
+// like a plain object literal's type would be.
+func TestCompareKnownMapIdentityIsBoolGround(t *testing.T) {
+	ctx := &FlowContext{}
+	m := abstractdomain.KnownObject(nil, nil, false, abstractdomain.TrustSpec, false)
+	n := abstractdomain.KnownObject(nil, nil, false, abstractdomain.TrustSpec, false)
+	wantBoolGround(t, CompareKnown(ctx, CompareEq, true, m, n), "m === n (two Map parameters)")
+	wantBoolGround(t, CompareKnown(ctx, CompareNe, true, m, n), "m !== n (two Map parameters)")
+}
+
+// TestCompareKnownUnboundedStringPairIsBoolGround pins the string/
+// boolean same-sort row: two unbounded `string` parameters (E1.sink's
+// `secret === guess`, both read as KindSet over refinementsets.
+// Strings) compare as a real === on every run, but neither side is
+// pinned to one exact word — the boolean ground, not the "not a
+// plain known value" decline this row replaces.
+func TestCompareKnownUnboundedStringPairIsBoolGround(t *testing.T) {
+	ctx := &FlowContext{}
+	secret := abstractdomain.KnownSet(refinementsets.Strings, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+	guess := abstractdomain.KnownSet(refinementsets.Strings, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+	wantBoolGround(t, CompareKnown(ctx, CompareEq, true, secret, guess), "secret === guess")
+}

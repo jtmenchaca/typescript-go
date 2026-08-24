@@ -36,6 +36,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -121,18 +122,26 @@ func CheckFile(entryFilePath string, surfacePath string) (CheckResult, error) {
 
 // CheckFiles is checkFiles in the TS source: batch mode — many
 // entries over ONE program per covering tsconfig, so program
-// construction is paid once per project and each entry still gets
-// exactly its own diagnostics. Two things ride tsgo's own machinery
-// rather than the per-entry path:
+// construction (parsing, module resolution) is paid once per project
+// and each entry still gets exactly its own diagnostics. Two things
+// ride tsgo's own machinery rather than the per-entry path:
 //
 //   - shape diagnostics for the WHOLE group come from one
 //     GetSemanticDiagnostics(ctx, nil) call — the same grouped
 //     checker-pool parallel path the tsgo CLI's own --noEmit check
 //     takes — bucketed per file afterward;
-//   - the refinement walk holds ONE checker lease across every entry
-//     (types from different checkers must never mix — the pool's own
-//     rule), with per-file facts compiled once per sweep through
-//     programFactsCached's shared store.
+//   - EVERY entry's refinement walk gets its OWN freshly built
+//     checker.Checker (checker.NewChecker(p, nil), same constructor
+//     the program's internal pool uses) — never a checker another
+//     entry has already questioned. A file's verdict is a pure
+//     function of the file, its imports, and the kernel; it must never
+//     depend on which other files happened to share a checker's
+//     accumulated caches first (issue #35). Per-file facts still
+//     compile once per sweep through programFactsCached's shared
+//     store, keyed by (checker, file) — with a fresh checker per
+//     entry, a shared support file's facts now recompile once per
+//     entry that reaches it, which is intended: correctness over
+//     cross-entry reuse.
 //
 // The result map is keyed by the caller's own entryPaths spellings; a
 // path whose file did not parse into its group's program has no row.
@@ -202,13 +211,13 @@ func CheckFiles(entryPaths []string, surfacePath string) map[string]CheckResult 
 			factsStore = nil
 		}
 		// walk scheduling: heaviest entries first off ONE shared list,
-		// each worker holding one checker exclusively until the list
-		// drains — longest-processing-time packing. The old file→checker
-		// affinity left ~800 ms of measured imbalance on the recharts
-		// corpus (entries queued behind their assigned checker while
-		// other checkers sat idle). Types from different checkers never
-		// mix: an entry walks WHOLLY on its worker's checker, and any
-		// checker answers any file's questions.
+		// each goroutine claiming the next row and building its OWN
+		// fresh checker for it — longest-processing-time packing. The
+		// old file→checker affinity left ~800 ms of measured imbalance
+		// on the recharts corpus (entries queued behind their assigned
+		// checker while other checkers sat idle); this scheme keeps that
+		// packing while giving every entry a checker no other entry ever
+		// touches (see the fresh-checker note below).
 		type walkRow struct {
 			given     string
 			entryFile *ast.SourceFile
@@ -224,34 +233,74 @@ func CheckFiles(entryPaths []string, surfacePath string) map[string]CheckResult 
 		sort.SliceStable(rows, func(i, j int) bool {
 			return len(rows[i].entryFile.Text()) > len(rows[j].entryFile.Text())
 		})
+		// a file's verdict is a pure function of the file, its imports,
+		// and the kernel — never of which OTHER files a checker happened
+		// to answer questions about first. compiler.Program's own
+		// checker pool cannot give that: its checkers are built ONCE
+		// (checkerpool.go's createCheckersOnce) and statically striped
+		// across every file by size, so ForEachCheckerParallel's workers
+		// each held one checker across MANY entries — every cache the
+		// checker accumulates (cachedTypes, narrowedTypes,
+		// subtypeReductionCache, and the rest of checker.NewChecker's
+		// per-instance maps) carried from one file's walk into the
+		// next's (issue #35: a three-entry batch missed a designated
+		// error the same entry reported alone). checker.NewChecker(p,
+		// nil) is the same constructor the pool calls internally
+		// (checkerpool.go:109) and is safe to call any number of times
+		// against one already-built *compiler.Program — it only reads
+		// the program's parse trees and module resolution (already paid
+		// for by ProgramFromDiskMany above) and mints entirely new maps
+		// and symbols on the returned *checker.Checker. Calling it here,
+		// once per entry, is what makes each entry's checker actually
+		// fresh rather than a lease on a recycled one.
+		//
+		// Parallelism stays bounded at the same width the old pool used
+		// (GOMAXPROCS capped at 8, program_disk_host.go's BuiltProgram
+		// comment): a fixed number of goroutines, each pulling the next
+		// row off nextRow in longest-first order until the list drains —
+		// the same packing ForEachCheckerParallel's workers gave, minus
+		// the shared checker.
+		checkerWidth := min(runtime.GOMAXPROCS(0), 8, len(rows))
+		if checkerWidth < 1 {
+			checkerWidth = 1
+		}
 		var nextRow atomic.Int64
 		var resultsMu sync.Mutex
-		p.ForEachCheckerParallel(func(idx int, c *checker.Checker) {
-			for {
-				i := int(nextRow.Add(1)) - 1
-				if i >= len(rows) {
-					return
+		var wg sync.WaitGroup
+		for range checkerWidth {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					i := int(nextRow.Add(1)) - 1
+					if i >= len(rows) {
+						return
+					}
+					row := rows[i]
+					// this entry's OWN checker: built fresh, questioned
+					// only by this goroutine, and never handed to
+					// another entry — no lease, no release, nothing to
+					// return to a pool.
+					c, _ := checker.NewChecker(p, nil)
+					view := &program.CheckerProgram{
+						Program:      p,
+						Checker:      c,
+						Entry:        row.entryFile,
+						SurfacePaths: map[string]bool{surfacePath: true},
+						Done:         nil,
+					}
+					entryStarted := time.Now()
+					result := tracing.TraceFile(row.given, func() CheckResult {
+						return runRefinements(view, shapeByFile[row.entryFile], kernel, factsStore)
+					})
+					result.WallMs = float64(time.Since(entryStarted)) / float64(time.Millisecond)
+					resultsMu.Lock()
+					results[row.given] = result
+					resultsMu.Unlock()
 				}
-				row := rows[i]
-				view := &program.CheckerProgram{
-					Program:      p,
-					Checker:      c,
-					Entry:        row.entryFile,
-					SurfacePaths: map[string]bool{surfacePath: true},
-					// the pool's own iteration holds the checker lock;
-					// the view never owns it
-					Done: nil,
-				}
-				entryStarted := time.Now()
-				result := tracing.TraceFile(row.given, func() CheckResult {
-					return runRefinements(view, shapeByFile[row.entryFile], kernel, factsStore)
-				})
-				result.WallMs = float64(time.Since(entryStarted)) / float64(time.Millisecond)
-				resultsMu.Lock()
-				results[row.given] = result
-				resultsMu.Unlock()
-			}
-		})
+			}()
+		}
+		wg.Wait()
 	}
 	return results
 }
@@ -548,7 +597,12 @@ func setupKernel() *kernelbridge.RefinedTSKernel {
 // worker's entry let one file's presence silently change another
 // file's judgment (measured: a three-entry batch missed a designated
 // error the same entry reported alone). The checker in the key is the
-// same discipline every walk memo now keeps.
+// same discipline every walk memo now keeps. Now that CheckFiles hands
+// every entry its own freshly built checker (never shared with another
+// entry), this key naturally holds exactly one row per (fresh checker,
+// its file) — a shared support file's facts recompile once per entry
+// that reaches it rather than once per sweep. That is intended:
+// correctness over cross-entry reuse.
 type sweepFactsKey struct {
 	checker *checker.Checker
 	file    *ast.SourceFile
