@@ -130,12 +130,26 @@ func CheckKindUnion(
 		}
 	}
 	if refuted != nil {
-		ctx.Report(*refuted)
+		out := *refuted
+		// the whole union traces to ONE reader worth naming (JSON.parse
+		// of unknown text, and kin) — an individual arm's own refutation
+		// sentence is about that arm's internal shape (e.g. "an object
+		// is not allowed here"), which is true but hides which call
+		// produced the claim in the first place. Prefer the union's own
+		// sentence when the reader that built it left one.
+		if known.ResidueReason != "" {
+			out.MessageText = known.ResidueReason
+		}
+		ctx.Report(out)
 		return
 	}
 	if len(captured) > 0 {
 		fix, hasFix := GuardFix(node, target)
-		base := assignability.At(node, 7002, assignability.AlertText)
+		messageText := assignability.AlertText
+		if known.ResidueReason != "" {
+			messageText = known.ResidueReason
+		}
+		base := assignability.At(node, 7002, messageText)
 		if hasFix {
 			base.Fix = &assignability.RefinementFix{Title: fix.Title, NewText: fix.NewText, InsertAt: fix.InsertAt}
 		}

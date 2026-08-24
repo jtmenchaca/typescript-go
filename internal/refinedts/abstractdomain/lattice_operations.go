@@ -1396,6 +1396,58 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 			)
 		}
 	}
+	// the syntactic run-collapse above declined — a shape it does not
+	// read (an Above/Below ray, a conjunction the local reader cannot
+	// prove contiguous) — so the KERNEL's own Bounds question
+	// (kernelBounds, refined_bounds) gets asked before this join settles
+	// for stacking a raw Union term. An EMPTY side is the join identity
+	// (∅ ∪ B = B exactly — sound with no approximation: whatever forms
+	// an empty side wears, they admit nothing, so the join is the other
+	// side's own hull alone) — this is what repairs a scalar conjunction
+	// that turned out self-contradictory (a place-value narrowing met
+	// against a value's own tighter bound, e.g. `Above(5)` met with
+	// `[0,3]`): the meet had no spelling for "no such value," so the
+	// contradiction rides as a live-looking KindSet until this join
+	// finally asks whether it holds anything at all. A NONEMPTY pair
+	// whose kernel-stated hulls touch or overlap collapses the same way
+	// the syntactic runs above do — the hull CONTAINS the union (every
+	// member either side admits sits inside its own kernel-proved
+	// enclosure), and integer is kept only where BOTH sides' hulls are
+	// integral, so the collapse is weaker-true, never a wrong answer.
+	if leftBounds, leftBoundsOK := kernelBounds(left); leftBoundsOK {
+		if leftBounds.Empty {
+			return KnownWithMeasures(KnownSet(right, nil, grade, SetKindTagNone), sharedMeasures)
+		}
+		if rightBounds, rightBoundsOK := kernelBounds(right); rightBoundsOK {
+			if rightBounds.Empty {
+				return KnownWithMeasures(KnownSet(left, nil, grade, SetKindTagNone), sharedMeasures)
+			}
+			// a hull replaces the UNION's spelling with a window — sound
+			// (the hull contains every member either side admits) but a
+			// widened SPELLING, not merely a widened claim, and several
+			// readers depend on the exact-points spelling surviving a join
+			// untouched (hover text, diagnostic sentences that list
+			// members, and TestAnalyzeTryStatement_TheCatchEnvJoinsEveryTryPrefixSnapshot's
+			// own {0, 1, 2} pin — three plain writes joined pairwise, each
+			// side a bare oneOf singleton the whole way through, denoting
+			// the SAME set a window would, but wearing the wrong shape for
+			// a caller that lists members rather than reads bounds).
+			// Collapsing only earns its keep where the syntactic
+			// integerRunOf path above declined on a GENUINE window shape
+			// (an Above/Below ray, a conjunction) — a would-be union where
+			// BOTH sides are already exact points (a bare oneOf, the shape
+			// integerRunOf's own fromValues arm already reads and the line
+			// above already skips when BOTH sides are fromValues) has
+			// nothing for the hull to repair, so the gate below declines
+			// there and lets the plain Union fallback keep the flat
+			// point-set spelling every enumerating reader needs.
+			if !(exactPointsOnly(left) && exactPointsOnly(right)) {
+				if collapsed, ok := collapseTouchingHulls(leftBounds.Hull, rightBounds.Hull); ok {
+					return KnownWithMeasures(KnownSet(collapsed, nil, grade, SetKindTagNone), sharedMeasures)
+				}
+			}
+		}
+	}
 	return KnownWithMeasures(
 		KnownSet(
 			refinementsets.CanonicalScalarForms(
@@ -1403,6 +1455,94 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 			nil, grade, SetKindTagNone),
 		sharedMeasures,
 	)
+}
+
+// collapseTouchingHulls folds two kernel-proved integral hulls into
+// their own hull EXACTLY, when they touch or overlap — the Bounds-driven
+// twin of the syntactic integerRunOf collapse above, reached only where
+// that syntactic reading declined. Both hulls must be INTEGER windows
+// with finite edges (kernelBounds's own scalar-set contract: a
+// non-integral or unbounded enclosure rides back unchanged, which this
+// function does not try to read); anything else declines rather than
+// guess at a bound the kernel did not state as integral.
+func collapseTouchingHulls(a, b refinementsets.RefinedSet) (refinementsets.RefinedSet, bool) {
+	aLo, aHi, aOK := integralClosedWindow(a)
+	bLo, bHi, bOK := integralClosedWindow(b)
+	if !aOK || !bOK {
+		return refinementsets.RefinedSet{}, false
+	}
+	touches := func(loA, hiA, loB float64) bool {
+		if loB <= hiA {
+			return true
+		}
+		return isSafeInteger(hiA) && loB <= hiA+1
+	}
+	if !touches(aLo, aHi, bLo) || !touches(bLo, bHi, aLo) {
+		return refinementsets.RefinedSet{}, false
+	}
+	lo := math.Min(aLo, bLo)
+	hi := math.Max(aHi, bHi)
+	return refinementsets.MakeRefinedSet(
+		refinementsets.AtLeast(lo), refinementsets.AtMost(hi), refinementsets.Integer,
+	), true
+}
+
+// exactPointsOnly is whether a set spells NOTHING but exact points —
+// a bare oneOf leaf, or a union tree whose every leaf is one. This is
+// the shape three plain writes joined pairwise keep producing (`{0}`
+// join `{1}` is `Union(oneOf[0], oneOf[1])`, itself join `{2}` is
+// `Union(oneOf[2], Union(oneOf[0], oneOf[1]))` — CanonicalScalarForms
+// dedupes and reorders arms but never flattens distinct oneOf leaves
+// into one, so the tree stays points-only all the way down) — the gate
+// the Bounds-driven hull collapse checks before it runs: collapsing
+// TWO such sides into a window would replace an enumerable point-set
+// spelling that costs the caller nothing to widen back to a window
+// later with one that has already thrown the exact membership list
+// away, and callers that list members (hover text, a diagnostic
+// sentence, a test reading the join back through SetOfKnown) need that
+// list, not a bound. A set carrying ANY other form (a window, a
+// pattern, the Integer/MultipleOf marks) is not points-only, and the
+// collapse is free to run wherever at least one side isn't.
+func exactPointsOnly(set refinementsets.RefinedSet) bool {
+	if len(set.Forms) != 1 {
+		return false
+	}
+	form := set.Forms[0]
+	switch form.Form {
+	case refinementsets.FormOneOf:
+		return true
+	case refinementsets.FormUnion:
+		return form.A_ != nil && form.B != nil && exactPointsOnly(*form.A_) && exactPointsOnly(*form.B)
+	default:
+		return false
+	}
+}
+
+// integralClosedWindow reads a kernel-stated hull back as a closed
+// [lo, hi] integer window — the shape kernelBounds answers for a
+// nonempty integral scalar set with finite edges (its own doc: "for a
+// nonempty integral set with finite edges, the least and greatest
+// members"). Declines on anything else (an unbounded enclosure, a
+// non-integral one) rather than misread a wider claim as this narrow
+// shape.
+func integralClosedWindow(hull refinementsets.RefinedSet) (lo, hi float64, ok bool) {
+	hasLo, hasHi, isInt := false, false, false
+	for _, form := range hull.Forms {
+		switch form.Form {
+		case refinementsets.FormAtLeast:
+			lo, hasLo = form.A, true
+		case refinementsets.FormAtMost:
+			hi, hasHi = form.A, true
+		case refinementsets.FormInteger:
+			isInt = true
+		default:
+			return 0, 0, false
+		}
+	}
+	if !hasLo || !hasHi || !isInt || !isSafeInteger(lo) || !isSafeInteger(hi) {
+		return 0, 0, false
+	}
+	return lo, hi, true
 }
 
 // joinObjectStarWithList joins an object-star with an exact list: the

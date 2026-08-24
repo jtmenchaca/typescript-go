@@ -308,11 +308,36 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 			for _, n := range dataflowfacts.LengthGuardNarrowings(into.Get, condition, isStringKindAt, false) {
 				into.Set(n.Binding, n.Known)
 			}
+			// a held Map presence guard (`m.has("k")`) proves the key an
+			// entry — read from the target state, which the test just
+			// passed
+			for _, n := range dataflowfacts.MapPresenceNarrowings(into.Get, condition, false) {
+				into.Set(n.Binding, n.Known)
+			}
+			// a held zero-exclusion guard (`x !== 0`) retreats the tested
+			// place's own window/list endpoint at zero
+			for _, n := range dataflowfacts.ZeroExclusionNarrowings(into.Get, condition, false) {
+				into.Set(n.Binding, n.Known)
+			}
 		},
 		ApplyWhenFalse: func(into Env) {
 			applySide(into, branches.WhenFalse)
 			// refuted, the length guard caps the floor instead
 			for _, n := range dataflowfacts.LengthGuardNarrowings(into.Get, condition, isStringKindAt, true) {
+				into.Set(n.Binding, n.Known)
+			}
+			// kept symmetric with the held side above — a refuted `.has`
+			// proves absence, not presence, so this reads zero rows for a
+			// bare `.has` leaf today; a future OR-composed leaf can still
+			// reach it through the same shared conjunctive-leaf channel
+			for _, n := range dataflowfacts.MapPresenceNarrowings(into.Get, condition, true) {
+				into.Set(n.Binding, n.Known)
+			}
+			// refuted, a zero-exclusion guard reads the leaf's OWN negated
+			// polarity: `!(x !== 0)` proves x could be 0, and excludes
+			// nothing — the exit-guard shape below is where the refuted
+			// `=== 0` form actually excludes
+			for _, n := range dataflowfacts.ZeroExclusionNarrowings(into.Get, condition, true) {
 				into.Set(n.Binding, n.Known)
 			}
 		},
@@ -530,6 +555,16 @@ func assumeCondition(
 				dataflowfacts.NoteSumExitConstraints(statement, exitSumConstraints)
 			}
 			for _, n := range dataflowfacts.LengthGuardNarrowings(env.Get, condition, func(e *ast.Node) bool { return primitives.IsStringKind(ctx.P.Checker, e) }, true) {
+				continuation.Set(n.Binding, n.Known)
+			}
+			// refuted, a Map presence guard proves the SAME key present
+			// past the exit — the `if (!m.has(k)) return;` shape
+			for _, n := range dataflowfacts.MapPresenceNarrowings(env.Get, condition, true) {
+				continuation.Set(n.Binding, n.Known)
+			}
+			// refuted, a zero-exclusion guard retreats the SAME endpoint
+			// past the exit — `if (x === 0) return; …after: x !== 0`
+			for _, n := range dataflowfacts.ZeroExclusionNarrowings(env.Get, condition, true) {
 				continuation.Set(n.Binding, n.Known)
 			}
 		},

@@ -199,11 +199,15 @@ func wantBoolGround(t *testing.T, got abstractdomain.AbstractValue, label string
 	}
 }
 
-// nonNegativeIntegerSet builds the KindSet shape `.length`/`.size` read
-// on an object-star or unread-collection receiver (evaluate_property_
-// access.go's own KindObjectStar `.length` row, and this unit's new
-// mapOrSetReceiver `.size` row): integers at least 0, no upper bound.
-func nonNegativeIntegerSet() abstractdomain.AbstractValue {
+// nonNegativeIntegerSetOfCompareKnown builds the KindSet shape
+// `.length`/`.size` read on an object-star or unread-collection receiver
+// (evaluate_property_access.go's own KindObjectStar `.length` row, and this
+// unit's new mapOrSetReceiver `.size` row): integers at least 0, no upper
+// bound. Named distinctly from ir_callback_array_statements.go's own
+// nonNegativeIntegerSet (package walk, returns a bare refinementsets.RefinedSet
+// for a LoopEffect.Set) — this one wraps the same set as a KindSet
+// AbstractValue, the shape CompareKnown's operands need.
+func nonNegativeIntegerSetOfCompareKnown() abstractdomain.AbstractValue {
 	return abstractdomain.KnownSet(
 		refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(0)),
 		nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone,
@@ -220,7 +224,7 @@ func nonNegativeIntegerSet() abstractdomain.AbstractValue {
 func TestCompareKnownSetAgainstNumberBothArmsPossibleIsBoolGround(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	ctx := &FlowContext{Kernel: kernel}
-	length := nonNegativeIntegerSet()
+	length := nonNegativeIntegerSetOfCompareKnown()
 	zero := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 	wantBoolGround(t, CompareKnown(ctx, CompareGt, true, length, zero), "length > 0")
 }
@@ -233,7 +237,7 @@ func TestCompareKnownSetAgainstNumberBothArmsPossibleIsBoolGround(t *testing.T) 
 func TestCompareKnownSetAgainstNumberImpossibleArmStaysExact(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	ctx := &FlowContext{Kernel: kernel}
-	length := nonNegativeIntegerSet()
+	length := nonNegativeIntegerSetOfCompareKnown()
 	zero := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 	wantFalse(t, CompareKnown(ctx, CompareLt, true, length, zero), "length < 0")
 }
@@ -246,19 +250,22 @@ func TestCompareKnownSetAgainstNumberImpossibleArmStaysExact(t *testing.T) {
 // with the NaN corner (NaN fails every comparison, passes every
 // disequality) instead of falling to the "not a plain known value"
 // residue A6.guard.eq/lt/ne were hitting before this fix.
+//
+// Both === and !== decide in two arms that DISAGREE here: the operand
+// is {1000} ∪ NaN, so 1000 === 1000 is true while NaN === 1000 is
+// false (=== fails whenever either side is NaN), and symmetrically
+// 1000 !== 1000 is false while NaN !== 1000 is true (NaN passes every
+// disequality). Neither comparison is pinned to one outcome by the
+// operands — both are the honest boolean ground, not a decline and
+// not a single exact value.
 func TestCompareKnownPossiblyNaNUnwrapsAndJoins(t *testing.T) {
 	kernel := kernelDelegationLoadKernel(t)
 	ctx := &FlowContext{Kernel: kernel}
 	// an exact epoch-ms instant, possibly NaN (the getTime() shape)
 	instant := abstractdomain.PossiblyNaN(abstractdomain.KnownValues([]float64{1000}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved))
 	sameInstant := abstractdomain.KnownValues([]float64{1000}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
-	// === decides in two arms that DISAGREE (real half true, NaN half
-	// false) — the honest answer is the boolean ground, not a decline
 	wantBoolGround(t, CompareKnown(ctx, CompareEq, true, instant, sameInstant), "possiblyNaN(1000) === 1000")
-	// !== decides in two arms that AGREE (real half false, NaN half
-	// true — NaN passes every disequality) — the join collapses to
-	// one exact true
-	wantTrue(t, CompareKnown(ctx, CompareNe, true, instant, sameInstant), "possiblyNaN(1000) !== 1000")
+	wantBoolGround(t, CompareKnown(ctx, CompareNe, true, instant, sameInstant), "possiblyNaN(1000) !== 1000")
 }
 
 // TestCompareKnownReferenceKindIdentityIsBoolGround pins this unit's

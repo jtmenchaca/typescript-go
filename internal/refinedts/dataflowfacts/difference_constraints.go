@@ -161,12 +161,58 @@ func constraintsOfCondition(
 		return &side{Place: *place, Offset: 0, Slack: 0}
 	}
 
+	// equalityRow records the two non-strict order rows an equality
+	// between two places pins: a === b (or its negation's negation —
+	// ¬(a !== b)) holds only of a real pair (NaN !== NaN always, so a
+	// held === already proves both sides real; a refuted !== needs
+	// the same `real` gate the order rows use), so both a − b ≥ 0 and
+	// b − a ≥ 0 stand: the kernel composes them with any other live
+	// row exactly the way two ordinary order rows would (i !== n
+	// alone proves no order, but i <= n together with the refuted
+	// i === n found here reaches i < n through DecideComparison's
+	// kernel fallback, never through a single row).
+	equalityRow := func(a, b *ast.Node) bool {
+		aPlace := PlaceKeyOf(c, a)
+		if aPlace == nil {
+			return false
+		}
+		bPlace := PlaceKeyOf(c, b)
+		if bPlace == nil {
+			return false
+		}
+		if !StableIn(*aPlace, []*ast.Node{scope}, fn) || !StableIn(*bPlace, []*ast.Node{scope}, fn) {
+			return false
+		}
+		rows = append(rows,
+			DifferenceConstraint{Minuend: *aPlace, Subtrahend: *bPlace, Bound: 0, Strict: false},
+			DifferenceConstraint{Minuend: *bPlace, Subtrahend: *aPlace, Bound: 0, Strict: false},
+		)
+		return true
+	}
+
 	readLeaf := func(e *ast.Node, negated bool) {
 		if !ast.IsBinaryExpression(e) {
 			return
 		}
 		bin := e.AsBinaryExpression()
 		kind := bin.OperatorToken.Kind
+		// equality/inequality: a held === (or a refuted !==, sound only
+		// of a real pair — NaN !== NaN always) pins the two places
+		// equal, which the kernel's linear decider can compose with
+		// any other live row. A held !== (or a refuted ===) proves no
+		// order alone, so neither emits a row here.
+		switch kind {
+		case ast.KindEqualsEqualsEqualsToken, ast.KindEqualsEqualsToken:
+			if !negated {
+				equalityRow(bin.Left, bin.Right)
+			}
+			return
+		case ast.KindExclamationEqualsEqualsToken, ast.KindExclamationEqualsToken:
+			if negated && real != nil && real(bin.Left) && real(bin.Right) {
+				equalityRow(bin.Left, bin.Right)
+			}
+			return
+		}
 		var held shape
 		switch kind {
 		case ast.KindLessThanToken:

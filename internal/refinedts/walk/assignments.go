@@ -40,6 +40,28 @@ func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.A
 			declared := abstractdomain.KnownSet(*stated.Set, nil, abstractdomain.TrustLevelOf(value), abstractdomain.SetKindTagNone)
 			value = abstractdomain.MeetKnown(value, declared)
 		}
+		// The same law for a possibly-NaN write (CheckPossiblyNaN's own
+		// path, nan_wrapper.go): a genuinely refined target (not
+		// AddsNothingSet — a bare `number` position admits NaN and stays
+		// silent there, never reaching 7001) excludes NaN outright, so a
+		// refused write here has NaN proven not a member of the target.
+		// Keeping the wrapper would let the following read (`return u;`)
+		// re-carry the same possibly-NaN claim against the same target
+		// and re-fire — the second error TESTING-TENETS rules against.
+		// The binding keeps the declared set's real half met with the
+		// write's own real half, unwrapped, exactly the KindSet arm
+		// above's meet. Gated on the SAME condition CheckPossiblyNaN
+		// itself uses to decide NaN is a live obstacle at all (target's
+		// KindTag empty, not AddsNothingSet) — a bare `number` target
+		// still admits NaN, so THAT write is genuinely admitted and must
+		// keep its own PossiblyNaN wrapper unstripped.
+		if stated.Kind == annotations.DeclaredSet && stated.Set != nil && stated.KindTag == "" &&
+			!AddsNothingSet(*stated.Set) &&
+			value.Kind == abstractdomain.KindPossiblyNaN && value.Inner != nil &&
+			value.Inner.Kind == abstractdomain.KindSet && value.Inner.SetKindTag == abstractdomain.SetKindTagNone {
+			declared := abstractdomain.KnownSet(*stated.Set, nil, abstractdomain.TrustLevelOf(value), abstractdomain.SetKindTagNone)
+			value = abstractdomain.MeetKnown(*value.Inner, declared)
+		}
 	}
 	// the write invalidates every difference row rooted at this name —
 	// the row spoke about the value that just moved

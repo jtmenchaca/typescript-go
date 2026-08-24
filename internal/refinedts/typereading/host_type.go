@@ -183,6 +183,38 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 		}
 		return PresentUnion(arms, sawAbsent)
 	}
+	// a BRANDED scalar (`number & { readonly unit: "m" }`) is a NOMINAL-
+	// typing idiom, not a real object: the brand member REFINES the one
+	// runtime value the scalar part already names, rather than adding a
+	// second value the object branch below would have to reconcile.
+	// Read straight through to that scalar part's OWN reading when the
+	// intersection carries exactly one — GetPropertiesOfType below would
+	// otherwise see the brand's own member (`unit`) and the scalar's
+	// prototype members (`number`'s `toFixed`/`toString`/…) and build an
+	// object reading that never reaches the value at all
+	// (primitives.PrimitiveKindOf carries the identical one-scalar-part
+	// rule for the cast/assertion sort comparison; this is the value-
+	// reading side of the same fact). Two DISAGREEING scalar parts, or
+	// none, states no one value to read through, and falls to the
+	// object branch below exactly as before.
+	if (flags & checker.TypeFlagsIntersection) != 0 {
+		var scalarPart *checker.Type
+		ambiguous := false
+		for _, part := range t.Types() {
+			partFlags := part.Flags()
+			if (partFlags & (checker.TypeFlagsStringLike | checker.TypeFlagsNumberLike | checker.TypeFlagsBooleanLike)) == 0 {
+				continue
+			}
+			if scalarPart != nil {
+				ambiguous = true
+				break
+			}
+			scalarPart = part
+		}
+		if scalarPart != nil && !ambiguous {
+			return readHostTypeMemoized(c, scalarPart, at, depth+1, usedAt)
+		}
+	}
 	// hostTypeDepthLimit is the union branch's own limit too: a record
 	// inside a union inside a record used to be cut by the tighter of
 	// the two, so the same value read nothing depending on which

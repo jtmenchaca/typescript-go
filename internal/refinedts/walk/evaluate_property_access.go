@@ -62,8 +62,8 @@ func HeldPlaceEntry(c *checker.Checker, env Env, e *ast.Node) (abstractdomain.Ab
 // entry's is what the flow narrowed or grew in place — so they MEET
 // rather than shadow each other. With no entry held, the reader's
 // answer stands untouched.
-func meetHeldPlaceEntry(c *checker.Checker, env Env, e *ast.Node, answer *abstractdomain.AbstractValue) *abstractdomain.AbstractValue {
-	held, ok := HeldPlaceEntry(c, env, e)
+func meetHeldPlaceEntry(ctx *FlowContext, env Env, e *ast.Node, answer *abstractdomain.AbstractValue) *abstractdomain.AbstractValue {
+	held, ok := HeldPlaceEntry(ctx.P.Checker, env, e)
 	if !ok {
 		return answer
 	}
@@ -71,7 +71,44 @@ func meetHeldPlaceEntry(c *checker.Checker, env Env, e *ast.Node, answer *abstra
 		return &held
 	}
 	out := abstractdomain.MeetKnown(*answer, held)
+	// a place-value entry is built from the CONDITION alone (comparison_leaf.go's
+	// place-shaped narrowing tree) with no knowledge of the receiver's own
+	// natural bound — `xs.length > 5` proposes `(5, +inf)` for `xs.length`
+	// whether or not `xs` itself is bounded to `[0,3]` (a `.max(3)` array). The
+	// meet above can therefore land on a scalar conjunction no value satisfies —
+	// a contradiction MeetKnown's own plain scalar arm has no spelling for and
+	// rides onward as a live-looking KindSet (repetition_panic_repro_test.go's
+	// own "declining a narrowing row is not the same claim as proving the
+	// branch unreachable": the walk still runs this arm, so it needs a real
+	// answer here, not a set that silently denotes nothing). Ask the kernel
+	// whether the MET set is empty; where it is, the entry's claim did not
+	// actually apply to this receiver, and the reader's own answer — the
+	// shape the receiver ITSELF proves, with no narrowing riding on it —
+	// is what still holds. A refused question (no kernel, or the shape is
+	// not scalar) keeps the meet unchanged, exactly as before this check.
+	if out.Kind == abstractdomain.KindSet && out.SetKindTag == abstractdomain.SetKindTagNone {
+		if empty, refused := kernelScalarEmpty(ctx, out.Set); !refused && empty {
+			return answer
+		}
+	}
 	return &out
+}
+
+// kernelScalarEmpty asks the kernel's ScalarEmpty question, turning a
+// refusal (no kernel seated, or the set is not scalar-shaped) into a
+// (false, refused=true) pair — the same recover-wrapped idiom
+// compareSetAgainstNumber's own armImpossible already uses
+// (comparison_decision.go).
+func kernelScalarEmpty(ctx *FlowContext, set refinementsets.RefinedSet) (empty bool, refused bool) {
+	if ctx.Kernel == nil || ctx.Kernel.ScalarEmpty == nil {
+		return false, true
+	}
+	defer func() {
+		if recover() != nil {
+			empty, refused = false, true
+		}
+	}()
+	return ctx.Kernel.ScalarEmpty(set), false
 }
 
 // ReadPropertyAccess is readPropertyAccess in the TS source.
@@ -94,7 +131,7 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 	// name a class declaration answers nil here and falls through
 	// unchanged.
 	if staticField := ReadStaticFieldAccess(ctx, env, e); staticField != nil {
-		return meetHeldPlaceEntry(ctx.P.Checker, env, e, staticField)
+		return meetHeldPlaceEntry(ctx, env, e, staticField)
 	}
 	// `this.key` and a known object's key each answer off the receiver,
 	// and the dotted entry speaks about the same value — so the two
@@ -102,20 +139,52 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 	// An enum member and a global constant name no tracked place, so
 	// they answer above this point untouched.
 	if thisProperty := ReadThisPropertyAccess(ctx, env, e); thisProperty != nil {
-		return meetHeldPlaceEntry(ctx.P.Checker, env, e, thisProperty)
+		return meetHeldPlaceEntry(ctx, env, e, thisProperty)
 	}
 	if objectKey := ReadObjectKeyAccess(ctx, env, e); objectKey != nil {
-		return meetHeldPlaceEntry(ctx.P.Checker, env, e, objectKey)
+		return meetHeldPlaceEntry(ctx, env, e, objectKey)
 	}
 	// reading a sequence's length: a tracked name reads its held value,
 	// and ANY OTHER receiver expression evaluates once right here — a
 	// literal, a call result, a nested read — so `"abc".length` and
-	// `Object.keys(o).length` answer exactly like a named binding's
+	// `Object.keys(o).length` answer exactly like a named binding's.
+	// The receiver's OWN shape only floors what the read can prove — a
+	// guard the receiver's root cannot absorb (`id.length <= 150` on an
+	// untracked string) lands under the dotted place-value key instead
+	// (assume_condition's applySide), so the fresh computation below
+	// MEETS the place-value memory the same way every other reader in
+	// this file does, rather than answering the receiver's own
+	// (possibly wider) shape unmet.
 	if ast.IsPropertyAccessExpression(e) {
 		pa := e.AsPropertyAccessExpression()
 		if pa.Name().Text() == "length" || pa.Name().Text() == "size" {
-			// the receiver's held value comes from the PLACE it spells —
-			// a tracked name reads its own entry, and a longer path
+			return meetHeldPlaceEntry(ctx, env, e, readLengthOrSizeAccess(ctx, env, e, pa))
+		}
+	}
+	// no arm above answered: a dotted entry for this very access still
+	// speaks — a guard's narrowing on `o.total` where the root holds no
+	// object shape to absorb it, or the sequence a push loop grew under
+	// `this.items`. Only a PROPERTY access answers here; an element
+	// access falls through to readElementAccess, whose own readers run
+	// before its dotted entry is asked for.
+	if !ast.IsPropertyAccessExpression(e) {
+		return nil
+	}
+	return meetHeldPlaceEntry(ctx, env, e, nil)
+}
+
+// readLengthOrSizeAccess computes `.length`/`.size` off the receiver's
+// OWN evaluated shape — split out of ReadPropertyAccess so its answer
+// can be MET with the place-value memory once, uniformly, at every one
+// of this function's several early returns, rather than only at the
+// one this file used to fall through to when nothing above matched
+// (A15.seed.boundary: a guard's `id.length <= 150` on an untracked
+// string receiver used to be discarded outright, because the string-
+// window arm below always answered first and returned before
+// HeldPlaceEntry was ever consulted).
+func readLengthOrSizeAccess(ctx *FlowContext, env Env, e *ast.Node, pa *ast.PropertyAccessExpression) *abstractdomain.AbstractValue {
+	// the receiver's held value comes from the PLACE it spells —
+	// a tracked name reads its own entry, and a longer path
 			// (`this.items.length`, `o.rows.length`) reads the dotted
 			// entry the place-value memory holds for that path. Any other
 			// receiver expression evaluates.
@@ -293,30 +362,13 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 					return &out
 				}
 			}
-			// the PLACE-VALUE memory: a dotted entry a guard recorded
-			// (assume_condition) answers where the receiver's own shape
-			// could not — `Array.isArray(u)` grounded u.length, and the
-			// branch's comparisons narrowed it in place. The place reading
-			// spells the key, so a `this`-rooted receiver
-			// (`this.items.length`) reads its entry the same way a plain
-			// name's does.
-			if held, ok := HeldPlaceEntry(ctx.P.Checker, env, e); ok {
-				return &held
-			}
-			out := silence.Residue()
-			return &out
-		}
-	}
-	// no arm above answered: a dotted entry for this very access still
-	// speaks — a guard's narrowing on `o.total` where the root holds no
-	// object shape to absorb it, or the sequence a push loop grew under
-	// `this.items`. Only a PROPERTY access answers here; an element
-	// access falls through to readElementAccess, whose own readers run
-	// before its dotted entry is asked for.
-	if !ast.IsPropertyAccessExpression(e) {
-		return nil
-	}
-	return meetHeldPlaceEntry(ctx.P.Checker, env, e, nil)
+	// the caller (ReadPropertyAccess) meets whatever this function
+	// answers with the place-value memory (HeldPlaceEntry) once,
+	// uniformly — a bare residue here still gives that meet something
+	// to narrow when a guard recorded one (A15.seed.boundary's
+	// `id.length <= 150` on an otherwise-unbounded string receiver).
+	out := silence.Residue()
+	return &out
 }
 
 // mapOrSetReceiver is whether the expression's STATIC type is Map or
@@ -367,5 +419,5 @@ func ReadElementAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.A
 	if !ast.IsElementAccessExpression(e) {
 		return answer
 	}
-	return meetHeldPlaceEntry(ctx.P.Checker, env, e, answer)
+	return meetHeldPlaceEntry(ctx, env, e, answer)
 }

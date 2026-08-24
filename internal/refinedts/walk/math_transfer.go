@@ -264,9 +264,44 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 		}
 		return silence.Residue(), true
 	}
+	// Every op past this point is NaN-in, NaN-out (sec-math.hypot step
+	// 3's per-element NaN check; sec-math.atan2 step 3; sec-math.sign
+	// step 2; every UnaryMathImage row's own NaN-in/NaN-out clause —
+	// e.g. sec-math.sin step 2, sec-math.cos step 2's "not finite").
+	// A bare `number` operand arrives already wrapped
+	// abstractdomain.PossiblyNaN(realGround) (declared_value.go's
+	// AbstractValueOfDeclared, InitialStateOfPlainParameter): the
+	// wrapper is peeled here ONCE, exactly as TransferBinary
+	// (arithmetic_transfer.go) and TransferBitwise (bitwise_transfer.go)
+	// already do for the same shape, so every reader below (the
+	// explicit `a.Kind == KindNaN` checks, UnaryMathImage,
+	// SetOfKnownForTransfer) sees the plain real enclosure it already
+	// knows how to pose — including a ±∞ endpoint, which the kernel's
+	// own window arms (jsSin's global [−1,1] range) already read
+	// soundly as a real value, never as a NaN corner in enclosure form.
+	// The final answer re-wraps PossiblyNaN when any operand carried it,
+	// mirroring the same two functions' own rewrap.
+	anyPossiblyNaN := false
 	args := make([]abstractdomain.AbstractValue, len(rawArgs))
 	for i, a := range rawArgs {
-		args[i] = NumericOperand(a)
+		numeric := NumericOperand(a)
+		if numeric.Kind == abstractdomain.KindPossiblyNaN && numeric.Inner != nil {
+			anyPossiblyNaN = true
+			numeric = *numeric.Inner
+		}
+		args[i] = numeric
+	}
+	rewrapMaybeNaN := func(result abstractdomain.AbstractValue, ok bool) (abstractdomain.AbstractValue, bool) {
+		if !ok || !anyPossiblyNaN || result.Kind == abstractdomain.KindUnknown {
+			return result, ok
+		}
+		if result.Kind == abstractdomain.KindNaN {
+			return result, ok
+		}
+		// PossiblyNaN reads its own grade off result's TrustLevelOf, so no
+		// separate AtTrustLevel wrap is needed here (declared_value.go's
+		// AbstractValueOfDeclared does the identical thing).
+		return abstractdomain.PossiblyNaN(result), ok
 	}
 	// hypot precedes the NaN gate: an infinite coordinate makes +∞
 	// even beside a NaN (sec-math.hypot checks infinities first)
@@ -274,6 +309,9 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 		for _, a := range args {
 			if a.Kind == abstractdomain.KindValues && a.KindTag == abstractdomain.PrimitiveNumber &&
 				len(a.Values) == 1 && !isFinite(a.Values[0]) {
+				// an exact ±∞ coordinate wins over NaN regardless of order
+				// (sec-math.hypot step 3 precedes step 4) — a PossiblyNaN
+				// operand elsewhere never overrides this exact corner
 				return abstractdomain.KnownValues([]float64{math.Inf(1)}, abstractdomain.PrimitiveNumber, abstractdomain.MinTrustLevel(operandTrustLevel, abstractdomain.TrustSpec)), true
 			}
 		}
@@ -305,10 +343,10 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 				// of a sum of squares (vendored spec, sec-math.hypot), so
 				// the window's floor is 0 whatever slack the fold carried
 				forms := append(append([]refinementsets.Refinement{}, held.Forms...), refinementsets.AtLeast(0))
-				return abstractdomain.AtTrustLevel(
+				return rewrapMaybeNaN(abstractdomain.AtTrustLevel(
 					abstractdomain.KnownSet(refinementsets.MakeRefinedSet(forms...), nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
 					abstractdomain.TrustSpec,
-				), true
+				), true)
 			}
 		}
 		return silence.ResidueOf("Math.hypot folds √(Σxᵢ²) pairwise through the kernel — the fold needs a kernel and a readable set for every argument, and either was missing here"), true
@@ -325,10 +363,10 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 			A, aOk := SetOfKnownForTransfer(args[0])
 			B, bOk := SetOfKnownForTransfer(args[1])
 			if aOk && bOk {
-				return abstractdomain.AtTrustLevel(
+				return rewrapMaybeNaN(abstractdomain.AtTrustLevel(
 					KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: kernelbridge.TransferOpAtan2, A: A, B: B})),
 					abstractdomain.TrustSpec,
-				), true
+				), true)
 			}
 		}
 		return silence.ResidueOf("Math.atan2's kernel window needs a readable set for both y and x — one operand did not carry one, or no kernel was loaded"), true
@@ -340,7 +378,7 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 		}
 	}
 	if unary, matched := UnaryMathImage(name, args, operandTrustLevel); matched {
-		return unary, true
+		return rewrapMaybeNaN(unary, true)
 	}
 	switch name {
 	case "min", "max":
@@ -362,10 +400,10 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 			// a single argument still collapses to its range, as the old
 			// fold did — posed as a pick against itself
 			if len(args) == 1 {
-				return abstractdomain.AtTrustLevel(
+				return rewrapMaybeNaN(abstractdomain.AtTrustLevel(
 					minMaxKnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: op, A: held, B: held}), operandTrustLevel),
 					operandTrustLevel,
-				), true
+				), true)
 			}
 			result := silence.Residue()
 			foldOk := true
@@ -377,13 +415,13 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 				}
 				answer := kernel.Transfer(kernelbridge.TransferQuestion{Op: op, A: held, B: next})
 				if answer.Kind != kernelbridge.TransferAnswerSet {
-					return abstractdomain.AtTrustLevel(KnownOfAnswer(answer), operandTrustLevel), true
+					return rewrapMaybeNaN(abstractdomain.AtTrustLevel(KnownOfAnswer(answer), operandTrustLevel), true)
 				}
 				held = answer.Set
 				result = minMaxKnownOfAnswer(answer, operandTrustLevel)
 			}
 			if foldOk {
-				return result, true
+				return rewrapMaybeNaN(result, true)
 			}
 		}
 		// the fold could not be posed for every argument (an operand
@@ -424,12 +462,17 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 		}
 		return silence.Residue(), true
 	case "sign":
+		// sec-math.sign step 3/4: a real ±∞ operand is not NaN/±0, so it
+		// reaches the sign comparison the same as any other real value
+		// (−∞ < −0 gives −1; +∞ gives 1) — transferSign's own disjointness
+		// questions against the three rays already answer this correctly
+		// once fed the unwrapped real part, no separate ±∞ arm needed.
 		var arg0 abstractdomain.AbstractValue
 		hasArg0 := len(args) > 0
 		if hasArg0 {
 			arg0 = args[0]
 		}
-		return abstractdomain.AtTrustLevel(transferSign(arg0, hasArg0), operandTrustLevel), true
+		return rewrapMaybeNaN(abstractdomain.AtTrustLevel(transferSign(arg0, hasArg0), operandTrustLevel), true)
 	default:
 		// corner tables are TS-transcribed spec rows
 		var arg0 abstractdomain.AbstractValue
@@ -441,6 +484,6 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 		if !matched {
 			return abstractdomain.AbstractValue{}, false
 		}
-		return abstractdomain.AtTrustLevel(approximated, abstractdomain.MinTrustLevel(operandTrustLevel, abstractdomain.TrustSpec)), true
+		return rewrapMaybeNaN(abstractdomain.AtTrustLevel(approximated, abstractdomain.MinTrustLevel(operandTrustLevel, abstractdomain.TrustSpec)), true)
 	}
 }

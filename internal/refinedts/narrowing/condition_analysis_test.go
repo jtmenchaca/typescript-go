@@ -191,22 +191,38 @@ func TestNumberIsIntegerAndedWithABandNarrowsToTheIntegerAndBoundForms(t *testin
 	if len(test.WhenTrue) == 0 {
 		t.Fatalf("test.WhenTrue is empty for the compound integer-and-band guard")
 	}
+	// x carries TWO WhenTrue rows here, not one merged row: the leading
+	// `typeof x === "number"` leaf answers through TypeofLeaf
+	// (typeof_ground.go), which states a Shape (HasShape) fact, no
+	// Forms — that is StructuralRaw's own row, appended to WhenTrue
+	// BEFORE the kernel-answer loop's row (condition_analysis.go:
+	// structural.WhenTrue is prepended, the kernel's Forms-carrying
+	// answer for `Number.isInteger(x) && x >= 0 && x <= 150` is
+	// appended after). Real consumers already read WhenTrue this way —
+	// callback_element_outcome.go and loop_effect.go both range over
+	// every row and filter by Binding, never index [0] alone — so this
+	// pin follows the same reading rather than assuming one merged row.
 	var sawInteger, sawAtLeast, sawAtMost bool
-	for _, form := range test.WhenTrue[0].Forms {
-		switch form.Form {
-		case "integer":
-			sawInteger = true
-		case "atLeast":
-			sawAtLeast = true
-		case "atMost":
-			sawAtMost = true
+	for _, n := range test.WhenTrue {
+		if n.Binding != "x" || len(n.Path) != 0 {
+			continue
+		}
+		for _, form := range n.Forms {
+			switch form.Form {
+			case "integer":
+				sawInteger = true
+			case "atLeast":
+				sawAtLeast = true
+			case "atMost":
+				sawAtMost = true
+			}
 		}
 	}
 	if !sawInteger {
-		t.Errorf("test.WhenTrue[0].Forms = %+v, want an integer form", test.WhenTrue[0].Forms)
+		t.Errorf("test.WhenTrue = %+v, want a row for x with an integer form", test.WhenTrue)
 	}
 	if !sawAtLeast || !sawAtMost {
-		t.Errorf("test.WhenTrue[0].Forms = %+v, want atLeast and atMost forms", test.WhenTrue[0].Forms)
+		t.Errorf("test.WhenTrue = %+v, want a row for x with atLeast and atMost forms", test.WhenTrue)
 	}
 }
 

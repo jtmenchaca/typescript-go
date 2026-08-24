@@ -15,6 +15,71 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
+// conditionalOnBoundPrimitive answers the branch (cond.TrueType or
+// cond.FalseType) a bare `T extends <primitive keyword> ? A : B`
+// selects, where T is a BARE type-parameter reference (a
+// TypeReferenceNode with no arguments of its own — the AST shape a
+// naked `T` always wears in a type position, never a raw Identifier
+// node) bound in `bindings` to a concrete DeclaredSet whose own sort
+// the bound keyword names — (ok=false, nil) for every shape this
+// narrow reading does not cover (a non-bare check type, an unbound or
+// non-scalar T, an extends clause that is not one of the three
+// primitive keywords): those keep the caller's existing behavior
+// unchanged.
+//
+// Deciding "does T's bound satisfy the keyword" by SORT alone (never
+// the set's WINDOW) is sound both ways: a narrower-than-ground bound
+// (Age's own [0,150], read as T here) is still number-sorted, so the
+// TRUE branch is exactly as reachable as it is for the bare `number`
+// keyword — the conditional's OWN clause never asked for more than
+// the sort. A string- or boolean-sorted bound provably fails a
+// `extends number` clause the identical way tsc's own distributive
+// conditional does; this is not a new subtyping rule, only reading
+// the one fact (T's sort) this function already has in hand.
+func conditionalOnBoundPrimitive(p *program.CheckerProgram, cond *ast.ConditionalTypeNode, bindings map[*ast.Symbol]*DeclaredRefinement) (*ast.Node, bool) {
+	if !ast.IsTypeReferenceNode(cond.CheckType) {
+		return nil, false
+	}
+	checkRef := cond.CheckType.AsTypeReferenceNode()
+	if checkRef.TypeArguments != nil || !ast.IsIdentifier(checkRef.TypeName) {
+		return nil, false
+	}
+	var keyword ast.Kind
+	switch cond.ExtendsType.Kind {
+	case ast.KindNumberKeyword, ast.KindStringKeyword, ast.KindBooleanKeyword:
+		keyword = cond.ExtendsType.Kind
+	default:
+		return nil, false
+	}
+	checkSymbol := symbolAt(p.Checker, checkRef.TypeName)
+	if checkSymbol == nil {
+		return nil, false
+	}
+	bound, isBound := bindings[checkSymbol]
+	if !isBound || bound == nil || bound.Kind != DeclaredSet || bound.Set == nil {
+		return nil, false
+	}
+	// the bound's own sort: string-shaped (a sequence form anywhere in
+	// its set) reads as string; KindTag "boolean" reads as boolean
+	// (a plain `true`/`false`-valued set carries no sequence form of
+	// its own, so the string test alone would not exclude it); every
+	// other DeclaredSet at this position is number-sorted — the tuple
+	// layer's only remaining ground.
+	var boundSort ast.Kind
+	switch {
+	case refinementsets.StatesSequence(*bound.Set):
+		boundSort = ast.KindStringKeyword
+	case bound.KindTag == "boolean":
+		boundSort = ast.KindBooleanKeyword
+	default:
+		boundSort = ast.KindNumberKeyword
+	}
+	if boundSort == keyword {
+		return cond.TrueType, true
+	}
+	return cond.FalseType, true
+}
+
 // annotationOfTypeAliases is annotationOfTypeAliases in the TS
 // source. matched=false means "not an alias-shaped node".
 func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, registry AnnotationRegistry, objects ObjectRegistry, bindings map[*ast.Symbol]*DeclaredRefinement) (AnnotationOfTypeResult, bool) {
@@ -26,6 +91,27 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 	// conditional stays plain TypeScript -- never guessed at.
 	if ast.IsConditionalTypeNode(typeNode) {
 		cond := typeNode.AsConditionalTypeNode()
+		// `T extends <primitive keyword> ? A : B` at a CONCRETE
+		// instantiation (T bound in `bindings` to the caller's own
+		// resolved argument, per this function's alias-substitution
+		// arm below): the checker's own resolved TYPE of the
+		// instantiated position answers only the primitive's bare
+		// sort (`number`, unrefined) — Age's own window lives in the
+		// registry this function already reads, not in the TS type
+		// system, so asking the host for x's resolved type can never
+		// recover it (typereading/host_type.go's TypeFlagsNumber arm
+		// answers the honest, unrefined ground). This arm decides the
+		// ONE case a stated set can settle soundly with no new
+		// subtype machinery: a BARE bound type parameter's own sort
+		// against a bare primitive keyword — SORT match/mismatch is
+		// exactly what a scalar `extends` clause tests when both
+		// sides are already scalar-grounded, and the bound's own read
+		// (through this same function, recursively) is the identical
+		// claim `annotationOfType` would state for T at any other
+		// position.
+		if selected, ok := conditionalOnBoundPrimitive(p, cond, bindings); ok {
+			return annotationOfType(p, selected, registry, objects, bindings), true
+		}
 		if !ast.IsTypeLiteralNode(cond.ExtendsType) {
 			return AnnotationOfTypeResult{}, true
 		}

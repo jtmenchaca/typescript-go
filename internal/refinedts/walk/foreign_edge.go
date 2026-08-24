@@ -272,6 +272,43 @@ func readForeignEdgeArtifact(edge *ForeignEdge) (*ForeignArtifact, string) {
 	return artifact, ""
 }
 
+// foreignArtifactStatesNothing tells apart the two shapes an artifact
+// read's decline sentence can take: the artifact was READ successfully
+// and its CONTENT states nothing usable (no callable surface at all,
+// or a surface naming a function the artifact carries no row for) —
+// answers true, and ForeignEdgeAt lets the ordinary evaluation of
+// stdout/JSON.parse(stdout) proceed rather than reporting 7002 — versus
+// every other decline, which means the artifact could not be TRUSTED
+// at all (missing file, unparseable JSON, an unrecognized or
+// superseded envelope, a target-integrity/runtime-band mismatch, a
+// malformed surface field, a malformed cases/entries shape, a set the
+// kernel grammar cannot decode) and keeps refusing the call exactly as
+// before.
+//
+// STRING-MATCHED AGAINST THE SENTENCE, not a typed signal
+// (foreign_edge_artifact.go's own three-rung compiled-binary ladder
+// docs this same distinction and explicitly prefers a disk-existence
+// flag over sentence-sniffing) — this file does not own
+// foreign_edge_artifact.go this unit, so the two sentences' FIXED
+// (non-interpolated) wording is matched here instead: surfaceOf's "
+// states no callable surface for its __main__ block" (the artifact
+// carries no "surface" key at all) and functionFactOf's "as the
+// surface's called function and then states no fact for it" (the
+// artifact's "functions" map has no row for the named function). Both
+// literals must stay byte-identical to foreign_edge_artifact.go's own
+// two sentences (surfaceOf's no-surface-key branch, functionFactOf's
+// row-missing branch) — a wording change on either side without the
+// matching change here silently stops this classification from firing
+// (the decline would then wrongly keep reporting 7002) rather than
+// misclassifying a genuinely-unreadable artifact as content-states-
+// nothing, since the match is a Contains, never a prefix/suffix of the
+// WHOLE message — every other decline in that file uses different
+// fixed wording and cannot accidentally match either literal.
+func foreignArtifactStatesNothing(sentence string) bool {
+	return strings.Contains(sentence, "states no callable surface for its __main__ block") ||
+		strings.Contains(sentence, "as the surface's called function and then states no fact for it")
+}
+
 // ForeignEdgeAt recognizes a cross-language call at statements[index]
 // and, on all premises green, answers the override the CALLER walks the
 // following statements under.
@@ -296,6 +333,35 @@ func ForeignEdgeAt(
 	}
 	artifact, artifactSentence := readForeignEdgeArtifact(edge)
 	if artifactSentence != "" {
+		if foreignArtifactStatesNothing(artifactSentence) {
+			// the artifact was READ successfully and names no additional
+			// fact for this call (no callable surface at all, or a surface
+			// naming a function the artifact carries no row for) — this is
+			// NOT a reason to refuse the call the way a genuinely unreadable
+			// artifact is (missing file, unparseable JSON, a wrong/
+			// superseded envelope, a target-integrity/runtime-band
+			// mismatch, a malformed surface or cases shape): the crossing
+			// is recognized, but nothing more is known about it than an
+			// ORDINARY unrecognized call already carries (execFileSync's
+			// own declared `string | Buffer`, JSON.parse's own `any`). So
+			// Decline/DeclineNode/Override/CallOverride all stay nil/empty
+			// — no 7002 reports, no NodeOverrides pin rides ctx, and the
+			// walk falls through to the SAME ordinary evaluation an
+			// unrecognized call gets — a downstream consumer-side guard
+			// (or its absence, refused normally at Age/whatever declared
+			// type consumes the parsed value) is what determines the
+			// outcome, exactly as D5.count/D5.grade/D5.guard/D5.label/
+			// D5.propagate/D5.raise/D5.set's own docstrings state the
+			// crossing is designed to work: "the consumer-side bounding
+			// guard is the path to a determination — the edge itself
+			// would otherwise be the named blocker." TargetPath still
+			// rides the outcome (isEdge stays true) so
+			// analyze_statement.go's ConsumedForeignSink still records
+			// this file as consumed — a recognized-and-read edge that
+			// simply has nothing more to say is still a target this check
+			// looked at, exactly as a fired or served edge is.
+			return &ForeignEdgeOutcome{TargetPath: edge.TargetPath}, true
+		}
 		return &ForeignEdgeOutcome{Decline: artifactSentence, DeclineNode: edge.Call, TargetPath: edge.TargetPath}, true
 	}
 	// the OUTBOUND leg: every §4/§5 premise about what crosses out,

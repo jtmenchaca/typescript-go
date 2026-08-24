@@ -888,11 +888,23 @@ func TestKernelIssuedNarrowingTheConditionsSetsBothSidesStrengths(t *testing.T) 
 		t.Errorf("either.WhenFalse.Set mismatch")
 	}
 
-	// Number.isNaN: truth claims no set; falsity claims ℝ̄ STRONGLY —
-	// the one falsity that itself proves the value real
+	// Number.isNaN: truth claims the WEAK empty set (refined-lean's
+	// set_functions/narrow.lean leafClaims .isNaN: "no REAL value
+	// answers true, so the weak empty claim holds vacuously of NaN and
+	// rules every real value out" — proved sound in
+	// theories/binary64/is_nan_sound.lean/narrowIsNan_sound). This is
+	// NOT "no narrowing known": a bare nil here would make an isNaN
+	// disjunct silently vanish under orClaim's composition (`x === 0 ||
+	// Number.isNaN(x)` needs the weak empty set to union correctly into
+	// weak {0}, per the same comment) -- the empty-set answer is more
+	// precise than nil, not less. Falsity claims ℝ̄ STRONGLY — the one
+	// falsity that itself proves the value real.
 	nanAnswer := kernel.Narrow(NarrowTree{Kind: NarrowKindIsNaN})
-	if nanAnswer.WhenTrue != nil {
-		t.Errorf("nan.WhenTrue = %+v, want nil", nanAnswer.WhenTrue)
+	if nanAnswer.WhenTrue == nil || nanAnswer.WhenTrue.Strong {
+		t.Fatalf("nan.WhenTrue = %+v, want the weak empty set", nanAnswer.WhenTrue)
+	}
+	if !sameSet(nanAnswer.WhenTrue.Set, refinementsets.MakeRefinedSet(refinementsets.OneOf(nil))) {
+		t.Errorf("nan.WhenTrue.Set mismatch, want the empty set")
 	}
 	if !nanAnswer.WhenFalse.Strong {
 		t.Errorf("nan.WhenFalse.Strong = false, want true")

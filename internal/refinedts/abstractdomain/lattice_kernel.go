@@ -72,6 +72,30 @@ func kernelNoScalarReread(set refinementsets.RefinedSet) (safe bool, ok bool) {
 	return false, false
 }
 
+// kernelBounds asks the kernel's Bounds question — the integral hull of
+// a scalar set (refined_bounds, boundary/exports_bounds.lean): the
+// set's own EMPTY verdict, or its least/greatest members for a
+// nonempty integral set with finite edges, else its proved enclosure
+// unchanged. (result, ok=true) is the kernel's answer; ok=false is a
+// refusal (no kernel, or the set is not scalar-shaped — kernelBounds's
+// own "bounds are decided for scalar sets today"), and the caller keeps
+// its own syntactic reading there, never a guess.
+//
+// A refused question panics through the bridge, exactly as every other
+// kernel ask does; recover() turns that back into ok=false.
+func kernelBounds(set refinementsets.RefinedSet) (result kernelbridge.BoundsResult, ok bool) {
+	kernel := LatticeKernel()
+	if kernel == nil || kernel.Bounds == nil {
+		return kernelbridge.BoundsResult{}, false
+	}
+	defer func() {
+		if recover() != nil {
+			result, ok = kernelbridge.BoundsResult{}, false
+		}
+	}()
+	return kernel.Bounds(set), true
+}
+
 // kernelSeqSubset asks the kernel whether a ⊆ b over recognized
 // sequence shapes — JoinKnown's string-ground absorption arm
 // (`"xxx"` ⊆ Strings, so the join answers Strings rather than

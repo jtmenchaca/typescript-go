@@ -43,6 +43,10 @@ var modeledKinds = []ast.Kind{
 	ast.KindElementAccessExpression,
 	ast.KindTaggedTemplateExpression,
 	ast.KindSuperKeyword,
+	ast.KindJsxElement,
+	ast.KindJsxSelfClosingElement,
+	ast.KindJsxFragment,
+	ast.KindJsxExpression,
 }
 
 var declinedRows = []struct {

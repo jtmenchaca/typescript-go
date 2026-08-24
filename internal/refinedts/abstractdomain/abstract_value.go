@@ -307,17 +307,22 @@ type AbstractValue struct {
 	// determination.
 	Opaque bool
 
-	// "unknown" ONLY: the plain sentence naming the reader that
-	// produced this unknown — set only where a call site has already
-	// composed one (silence.ResidueOf), empty everywhere else,
-	// including every other unknown built through silence.Residue().
-	// Read only by the diagnostic/hover path that reports RTS7002 at a
-	// checked position; NEVER consulted by a structural comparison.
-	// SameKnown's KindUnknown case (lattice_operations.go) compares
-	// only Opaque — this field is deliberately excluded there, because
-	// two unknowns that carry different provenance sentences for the
-	// same lattice position are still the SAME lattice value: the
-	// sentence is bookkeeping for the report, not part of what the
+	// "unknown", and "kindUnion" as its one other carrier: the plain
+	// sentence naming the reader that produced this value — set only
+	// where a call site has already composed one (silence.ResidueOf
+	// for an "unknown"; a reader like anyJSONValue that hands back a
+	// DETERMINED union whose every arm still traces to one call site
+	// worth naming), empty everywhere else, including every other
+	// unknown built through silence.Residue(). Read only by the
+	// diagnostic/hover path that reports RTS7001/7002 at a checked
+	// position (check_assignability.go's KindUnknown branch, and
+	// CheckKindUnion's own generic-alert fallback when no arm
+	// refutes); NEVER consulted by a structural comparison. SameKnown's
+	// KindUnknown case (lattice_operations.go) compares only Opaque,
+	// and its KindKindUnion case compares only Arms — this field is
+	// deliberately excluded from both, because two values that differ
+	// only in provenance sentence are still the SAME lattice value:
+	// the sentence is bookkeeping for the report, not part of what the
 	// value denotes.
 	ResidueReason string
 

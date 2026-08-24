@@ -51,6 +51,36 @@ func PrimitiveKindOf(c *checker.Checker, t *checker.Type) Sort {
 	if c.IsArrayLikeType(t) {
 		return SortArray
 	}
+	// a BRANDED scalar (`number & { readonly unit: "m" }`, the nominal-
+	// typing idiom TypeFlagsNumberLike/StringLike/BooleanLike never sets
+	// on the intersection itself) still wears its scalar part's sort at
+	// runtime — the brand member is a structural REFINEMENT of that one
+	// value, never a second value the sort has to reconcile. Read the
+	// intersection's own parts the same way walk/web_api_models.go and
+	// walk/node_digest_models.go already do for "an intersection is
+	// still the class" (t.Types()); exactly one part landing in a
+	// scalar sort above carries that sort here too. Two DISAGREEING
+	// scalar parts (`number & string`, uninhabited but not this
+	// reader's call to notice) or zero scalar parts (every part itself
+	// SortOther) states no one sort to wear, and stays SortOther.
+	if t.IsIntersection() {
+		seen := SortOther
+		sawOne := false
+		for _, part := range t.Types() {
+			partSort := PrimitiveKindOf(c, part)
+			if partSort != SortString && partSort != SortNumber && partSort != SortBool {
+				continue
+			}
+			if sawOne && partSort != seen {
+				return SortOther
+			}
+			seen = partSort
+			sawOne = true
+		}
+		if sawOne {
+			return seen
+		}
+	}
 	return SortOther
 }
 

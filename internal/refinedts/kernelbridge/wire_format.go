@@ -52,6 +52,20 @@ func (w WireNumber) MarshalJSON() ([]byte, error) {
 	}{Num: w.Dyadic.Num, Exp: w.Dyadic.Exp})
 }
 
+// wireWordCodepoint is a Word leaf's own number encoding — the FIXED
+// wire contract (TestWordEncodesToTheFixedWireContract,
+// wire_format_test.go) pins the PLAIN spelling {"num":<codepoint>,
+// "exp":0} for every element of a literal word's "w" array, never
+// DyadicOfNumber's canonical (num-odd) reduction that FormOneOf's own
+// "w" array uses (0.5 → {"num":1,"exp":-1}). Both spellings decode to
+// the identical float (DecodeWireNumber reads num*2^exp either way),
+// so this is a wire-contract choice, not a correctness one: a
+// codepoint is already an exact non-negative integer, so num=x, exp=0
+// is its own plain dyadic pair — no reduction needed or wanted here.
+func wireWordCodepoint(x float64) WireNumber {
+	return WireNumber{Dyadic: primitives.Dyadic{Num: int64(x), Exp: 0}}
+}
+
 // WireNumberOf is wireNumber in the TS source.
 func WireNumberOf(x float64) WireNumber {
 	if math.IsInf(x, 1) {
@@ -142,10 +156,17 @@ func wireFormJSON(r refinementsets.Refinement) string {
 			panic(fmt.Sprintf("wireFormJSON: multipleOf: %v", err))
 		}
 		return fmt.Sprintf(`{"form":"%s","d":{"num":%d,"exp":%d}}`, r.Form, d.Num, d.Exp)
-	case refinementsets.FormOneOf, refinementsets.FormWord:
+	case refinementsets.FormOneOf:
 		w := make([]string, len(r.W))
 		for i, x := range r.W {
 			w[i] = marshalWireValue(WireNumberOf(x))
+		}
+		return fmt.Sprintf(`{"form":"%s","w":[%s]}`, r.Form, joinComma(w))
+	case refinementsets.FormWord:
+		// the plain (unreduced) codepoint spelling — see wireWordCodepoint
+		w := make([]string, len(r.W))
+		for i, x := range r.W {
+			w[i] = marshalWireValue(wireWordCodepoint(x))
 		}
 		return fmt.Sprintf(`{"form":"%s","w":[%s]}`, r.Form, joinComma(w))
 	case refinementsets.FormStar:
@@ -209,10 +230,17 @@ func wireFormValue(r refinementsets.Refinement) map[string]any {
 			panic(fmt.Sprintf("wireFormValue: multipleOf: %v", err))
 		}
 		return map[string]any{"form": string(r.Form), "d": map[string]any{"num": d.Num, "exp": d.Exp}}
-	case refinementsets.FormOneOf, refinementsets.FormWord:
+	case refinementsets.FormOneOf:
 		w := make([]any, len(r.W))
 		for i, x := range r.W {
 			w[i] = WireNumberOf(x)
+		}
+		return map[string]any{"form": string(r.Form), "w": w}
+	case refinementsets.FormWord:
+		// the plain (unreduced) codepoint spelling — see wireWordCodepoint
+		w := make([]any, len(r.W))
+		for i, x := range r.W {
+			w[i] = wireWordCodepoint(x)
 		}
 		return map[string]any{"form": string(r.Form), "w": w}
 	case refinementsets.FormStar:
