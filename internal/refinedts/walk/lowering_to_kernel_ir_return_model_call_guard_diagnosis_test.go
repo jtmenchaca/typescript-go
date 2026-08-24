@@ -54,7 +54,7 @@ func TestLoweringToKernelIR_ModelCallInGuardPositionBothArmsReturnDiagnosis(t *t
 	`)
 	declaration := entryEnvFunctionNamed(t, p, "isSvgElementPropKey")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -79,7 +79,7 @@ func TestLoweringToKernelIR_ModelCallInGuardPositionRealGuardNarrowingDiagnosis(
 	`)
 	declaration := entryEnvFunctionNamed(t, p, "firstMatch")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

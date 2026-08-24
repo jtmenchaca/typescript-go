@@ -40,7 +40,7 @@ func TestOnceAssignedMapFieldIteratorReadEffect_KeysNextValueCompletes(t *testin
 	`)
 	declaration := fieldMapMethodOf(t, p, "peekOldest")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -79,7 +79,7 @@ func TestOnceAssignedMapFieldIteratorReadEffect_FullLRUCacheSetMethodCompletes(t
 	`)
 	declaration := fieldMapMethodOf(t, p, "set")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -107,7 +107,7 @@ func TestOnceAssignedMapFieldIteratorReadEffect_ValuesAndEntriesAlsoServe(t *tes
 	`)
 	declaration := fieldMapMethodOf(t, p, "firstValue")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -138,7 +138,7 @@ func TestOnceAssignedMapFieldIteratorReadEffect_ReassignedFieldDoesNotServe(t *t
 	`)
 	declaration := fieldMapMethodOf(t, p, "peekOldest")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

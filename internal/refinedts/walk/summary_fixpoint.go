@@ -36,6 +36,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -215,7 +216,7 @@ func compileWithSelfConst(
 func relowerWithSelfConst(
 	ctx *FlowContext, declaration *ast.Node, selfBlob kernelbridge.SummaryBlob,
 ) (kernelbridge.SummaryBlob, LoweredSummary, bool) {
-	release := holdSelfBlob(declaration, selfBlob)
+	release := holdSelfBlob(checkerOf(ctx), declaration, selfBlob)
 	lowered, ok := RelowerSummaryBody(ctx, declaration)
 	release()
 	if !ok {
@@ -563,7 +564,7 @@ func upgradeRecursiveSummary(
 	if !lowered {
 		return "", false
 	}
-	floorBlob, hasFloor := storedBlobOf(declaration)
+	floorBlob, hasFloor := storedBlobOf(checkerOf(ctx), declaration)
 	if !hasFloor {
 		return "", false
 	}
@@ -577,13 +578,13 @@ func upgradeRecursiveSummary(
 	return constSummaryBlobFor(ctx, declaration, candidate)
 }
 
-// storedBlobOf reads the declaration's stored answer — the havoc floor
-// the outer build just wrote — without going through SummaryBlobFor,
-// which would re-enter the upgrade.
-func storedBlobOf(declaration *ast.Node) (kernelbridge.SummaryBlob, bool) {
+// storedBlobOf reads the declaration's stored answer on ONE checker —
+// the havoc floor the outer build just wrote — without going through
+// SummaryBlobFor, which would re-enter the upgrade.
+func storedBlobOf(c *checker.Checker, declaration *ast.Node) (kernelbridge.SummaryBlob, bool) {
 	summaryBlobsMu.Lock()
 	defer summaryBlobsMu.Unlock()
-	held, has := summaryBlobs[declaration]
+	held, has := summaryBlobs[summaryKey{checker: c, declaration: declaration}]
 	if !has || !held.Ok {
 		return "", false
 	}

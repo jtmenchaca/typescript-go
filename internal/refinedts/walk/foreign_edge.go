@@ -34,6 +34,16 @@
 //     what the target states it admits.
 //  4. DISCHARGE channel purity (§5) and ATTACH the return fact to the
 //     JSON.parse node that reads the captured stdout.
+//  5. ALSO attach a fact to the CALL node itself, ALWAYS — the
+//     intermediate `stdout` binding reads at least the plain-string
+//     ground the call's own written `encoding` option already
+//     established at recognition time, whether the outbound leg fired,
+//     declined, or discharged clean. On a DISCHARGED crossing (no
+//     outbound fire) that ground UPGRADES to the serialized form of the
+//     target's stated return fact — the intermediate binding reads as
+//     the tighter string set the harness's own JSON encoder can spell
+//     (foreignStdoutSerializedValue) rather than the plain ground, not
+//     bare residue, between the call and the parse.
 //
 // The attach rides ctx.NodeOverrides, the seam the relational
 // accumulation already uses for a value no re-walk can reach: the fact
@@ -41,7 +51,9 @@
 // nothing in this file's walk can derive it. Today that node evaluates
 // to residue (coercion_models.go's readJsonMethods: "whatever JSON
 // value the text spells"), and the override supersedes it —
-// evaluateExpression reads NodeOverrides before it walks.
+// evaluateExpression reads NodeOverrides before it walks. Step 5's
+// attach rides the identical seam, one statement earlier and keyed on
+// the call expression rather than the parse.
 //
 // TRUST GRADE. The attached fact is stamped TrustSpec, not TrustProved.
 // Every premise above is discharged by a real check, but the crossing
@@ -131,6 +143,14 @@ type ForeignEdge struct {
 	// StdoutName: the name the call's result binds, whose sole
 	// JSON.parse consumer receives the return fact.
 	StdoutName string
+	// IsCompiledBinary: true when TargetPath names a COMPILED BINARY
+	// (argv[0] itself is the target, no interpreter word) rather than
+	// Python source — set by compiledBinaryArgvOf's own recognition.
+	// ForeignEdgeAt reads this to route the artifact lookup to
+	// ReadCompiledBinaryArtifact's sibling-fact-file ladder instead of
+	// ReadForeignArtifact's project-cache path, mirroring the Rust
+	// consumer's own Runner::CompiledBinary branch (foreign_edge.rs:483).
+	IsCompiledBinary bool
 }
 
 // SpawnReturnLeg is a RECOGNIZED spawn (async) return leg: the
@@ -174,6 +194,39 @@ type ForeignEdgeOutcome struct {
 	// flow_context.go's scoping obligation, kept as tight as the shape
 	// allows rather than left live for the whole list.
 	OverrideStatement int
+	// CallOverride: a SECOND, EARLIER pin — the intermediate captured-
+	// stdout binding's own value (`const stdout = execFileSync(...)`
+	// or `execSync(...)`, whose bound name IS the stdout string
+	// itself), keyed on edge.Call rather than the parse node.
+	// CallOverride carries ONE OF TWO claims, at two different grades:
+	//
+	//   - the PLAIN-STRING ground (TrustProved, `refinementsets.Strings`
+	//     unconstrained) on ANY recognized bare-string-binding edge — the
+	//     call's own written `encoding` option already established this
+	//     at recognition time (execFileSyncEdgeOf's own decline for a
+	//     missing/non-string encoding), so it holds regardless of the
+	//     outbound leg's own fit, fire, or decline.
+	//   - the SERIALIZED-SET upgrade (foreignStdoutSerializedValue,
+	//     TrustSpec) — the target's own stated return shape narrowed to
+	//     the JSON grammar plus the trailing newline every stdout capture
+	//     ends with — ONLY where the crossing is FULLY DISCHARGED.
+	//     checkOutboundLeg's outbound outcome must be the LITERAL nil
+	//     pointer, never merely Decline == "": a fired fit refutation
+	//     (checkScalarCrossing et al.) reports 7001 through ctx.Report
+	//     and answers a non-nil &ForeignEdgeOutcome{} with Decline == ""
+	//     too, and that shape is NOT discharged — a fired crossing's
+	//     stdout binding stays at the plain-string ground, because the
+	//     unvalidated-parse reading is load-bearing for the generic-union
+	//     return model's own None-arm fire.
+	//
+	// Nil only for spawnSync (whose bound name is an OBJECT carrying
+	// `.stdout`, not the string itself — foreignCallBindsBareStdoutString's
+	// own gate).
+	CallOverride map[*ast.Node]abstractdomain.AbstractValue
+	// CallOverrideStatement: the statement index CallOverride pins —
+	// always edge.Call's own statement (the caller's current index),
+	// never OverrideStatement's later one.
+	CallOverrideStatement int
 	// Decline: the sentence naming the premise that stopped the edge,
 	// or "" where the edge was never recognized at all (no sentence is
 	// owed for an ordinary call).
@@ -185,6 +238,38 @@ type ForeignEdgeOutcome struct {
 	// means the check looked at that file, not that it approved of what
 	// it found. Read back through FlowContext.ConsumedForeignSink.
 	TargetPath string
+}
+
+// readForeignEdgeArtifact routes to the artifact reader whose premises
+// fit edge's own shape: a COMPILED BINARY reads its fact from a
+// SIBLING file (ReadCompiledBinaryArtifact's `<path>.facts.json`),
+// never the Python reader's project-cache path (ReadForeignArtifact) —
+// a compiled binary has no `.refined/cache/` entry any producer in
+// this checker writes. Mirrors the Rust consumer's own
+// `edge.runner == Runner::CompiledBinary` branch (foreign_edge.rs:483)
+// exactly, including its own three-rung ladder: no sibling file at all
+// (the generic compiled-binary no-fact sentence,
+// CompiledBinaryNoFactSentence), a sibling that exists but failed to
+// parse (ReadCompiledBinaryArtifact's own sentence, naming the
+// unreadable file), or a sibling that parses and serves. The two
+// rungs are told apart by a DISK EXISTENCE CHECK
+// (ReadCompiledBinaryArtifact's own `exists` flag) — never by
+// string-sniffing the sentence text.
+func readForeignEdgeArtifact(edge *ForeignEdge) (*ForeignArtifact, string) {
+	if !edge.IsCompiledBinary {
+		return ReadForeignArtifact(edge.TargetPath)
+	}
+	artifact, exists, sentence := ReadCompiledBinaryArtifact(edge.TargetPath)
+	if sentence != "" {
+		// the sibling file EXISTS but failed to read as a fact — name the
+		// unreadable file, not the generic no-fact sentence, which is only
+		// true when there is no fact file at all
+		return nil, sentence
+	}
+	if !exists {
+		return nil, CompiledBinaryNoFactSentence(edge.TargetPath)
+	}
+	return artifact, ""
 }
 
 // ForeignEdgeAt recognizes a cross-language call at statements[index]
@@ -209,7 +294,7 @@ func ForeignEdgeAt(
 		// about its spelling stopped the resolution — say which
 		return &ForeignEdgeOutcome{Decline: declineSentence, DeclineNode: declineNode, TargetPath: targetPath}, true
 	}
-	artifact, artifactSentence := ReadForeignArtifact(edge.TargetPath)
+	artifact, artifactSentence := readForeignEdgeArtifact(edge)
 	if artifactSentence != "" {
 		return &ForeignEdgeOutcome{Decline: artifactSentence, DeclineNode: edge.Call, TargetPath: edge.TargetPath}, true
 	}
@@ -313,6 +398,85 @@ func ForeignEdgeAt(
 		},
 		OverrideStatement: at,
 		TargetPath:        edge.TargetPath,
+	}
+	// the intermediate captured-stdout binding (`const stdout =
+	// execFileSync(...)`) itself. Two SEPARATE claims apply here, at two
+	// different grades, and only one of them needs the outbound leg
+	// discharged:
+	//
+	//   - THE PLAIN-STRING GROUND: execFileSyncOptionsOf already refused
+	//     to recognize this edge at all unless the call's own `encoding`
+	//     option names a string encoding (execFileSyncEdgeOf's own
+	//     "without a string encoding... the return leg has no text to
+	//     parse" decline) — so a RECOGNIZED bare-string-binding edge has
+	//     already established, from the call's own written syntax alone,
+	//     that the value is a string, never the declared type's other
+	//     arm (execFileSync/execSync answer `string | Buffer`, and the
+	//     Buffer arm is exactly what the encoding option rules out here).
+	//     This claim cites nothing about the target artifact — it holds
+	//     whether the outbound leg is clean, fired, or declined — so it
+	//     binds UNCONDITIONALLY on every recognized bare-string edge.
+	//     Without this pin, `stdout` falls to the ordinary (unoverridden)
+	//     evaluation of the call's declared `string | Buffer` return,
+	//     which the general return-type reader cannot narrow the same
+	//     way (it has no access to the encoding option's own syntax) and
+	//     so answers residue there — never the unsound direction, but a
+	//     needless one this narrower, always-true fact avoids.
+	//   - THE SERIALIZED-SET UPGRADE (foreignStdoutSerializedValue): the
+	//     TARGET's own stated return shape, trustworthy only once the
+	//     outbound leg is FULLY DISCHARGED — outboundOutcome == nil, and
+	//     nothing else. checkOutboundLeg's own doc states the three
+	//     shapes an outbound outcome takes, and only the first is safe to
+	//     upgrade on:
+	//
+	//       - nil: the leg is CLEAN — nothing to check, or the fit
+	//         passed. This is the only DISCHARGED case.
+	//       - non-nil with Decline == "": a FIT FAILURE FIRED 7001
+	//         already, through ctx.Report, inside checkScalarCrossing/
+	//         checkSequenceCrossing/checkMixedCrossing/stdinFitAgainst —
+	//         the empty &ForeignEdgeOutcome{} these functions return
+	//         after Report is the FIRE signal, not a "nothing wrong"
+	//         signal. A first pass here read this shape as clean
+	//         (Decline == "" reads the same as the truly-clean nil case
+	//         unless the POINTER itself is also checked) and wrongly
+	//         narrowed `stdout` to the target's serialized-JSON-grammar
+	//         claim on a fired crossing — the plain-string reading above
+	//         is load-bearing for the generic-union return model's own
+	//         None-arm fire on that path, so the UPGRADE must never touch
+	//         it, though the plain-string ground still does.
+	//       - non-nil with Decline != "": a real channel-mismatch/
+	//         RTS7002 decline (merged in just below) — also not
+	//         discharged.
+	//
+	//     foreignStdoutSerializedValue itself further answers ok=false
+	//     wherever the return cases are not a shape it can compose, so an
+	//     unrecognized return shape leaves the plain-string ground as
+	//     `stdout`'s whole claim, unchanged.
+	//
+	// GATED TO THE BARE-STRING SHAPE (execFileSync/execSync): the call
+	// expression edge.Call is what the bound name's INITIALIZER
+	// evaluates to (AnalyzeVariableStatement's `evaluateExpression(ctx,
+	// env, decl.Initializer)`), so pinning NodeOverrides[edge.Call]
+	// binds the WHOLE initializer value. execFileSync/execSync answer
+	// the stdout string directly — the pin is exactly the bound name's
+	// own value there. spawnSync answers an OBJECT
+	// (`{stdout, stderr, ...}`, StdoutName riding at `.stdout`,
+	// isForeignParseOf's own dual reading) — pinning edge.Call there
+	// would wrongly force the whole result object to a bare string set.
+	// foreignCallBindsBareStdoutString reads the callee name to tell
+	// the two apart the same way foreignEdgeOf's own dispatch does.
+	if foreignCallBindsBareStdoutString(ctx, edge.Call) {
+		stdoutValue := abstractdomain.KnownSet(
+			refinementsets.Strings, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
+		if outboundOutcome == nil {
+			if serialized, ok := foreignStdoutSerializedValue(artifact.Called.Return.Cases); ok {
+				stdoutValue = serialized
+			}
+		}
+		returned.CallOverride = map[*ast.Node]abstractdomain.AbstractValue{
+			edge.Call: stdoutValue,
+		}
+		returned.CallOverrideStatement = index
 	}
 	// the outbound leg's own decline (if any) rides ALONGSIDE this
 	// return-leg fact, never replaced by it: the outbound leg's fire
@@ -423,6 +587,187 @@ func foreignReturnCornerObstacle(ctx *FlowContext, returnSet refinementsets.Refi
 // exactly as it always did.
 func foreignReturnValue(artifact *ForeignArtifact) abstractdomain.AbstractValue {
 	return foreignAbstractValueOfCases(artifact.Called.Return.Cases)
+}
+
+/* ── the intermediate captured-stdout binding ────────────────────── */
+
+// jsonNumberGrammarPattern is the JSON number production (RFC 8259 §6 /
+// json.org's number diagram, the same grammar sec-json.parse's
+// JSONNumber cites): an optional sign, an integer part that is either
+// the single digit 0 or a nonzero digit followed by any run of digits
+// (no leading zero — json.dumps never writes one), an optional
+// fractional part, an optional exponent. Anchored ^...$ by
+// FormatGrammar's own convention (AGENT-BRIEF.md's kernel-bridge-facts
+// row) and followed by the ONE trailing newline execFileSync's
+// captured stdout always carries (the harness's own print/stdout.write
+// terminates its line) — the harness never writes a SECOND line for a
+// scalar return, so exactly one \n, not a star of them.
+const jsonNumberGrammarPattern = `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?\n`
+
+// jsonNumberGrammarSet compiles jsonNumberGrammarPattern through the
+// SAME FormatGrammar door z.string().regex compiles through
+// (chain_method.go's ".regex" case) — the pattern vocabulary this
+// binding reuses rather than hand-building the concatenation/union
+// forms a regex source already denotes. A compile failure here is an
+// impossible state (the pattern is fixed and already exercised by this
+// file's own vocabulary: \d, character classes, ?, alternation, and
+// the {lo,hi} quantifier all read as supported forms in
+// regex_compiler_test.go) — panics rather than silently widening to
+// Strings, so a future change to the supported regex subset that
+// actually broke this pattern would fail loudly at the first call
+// instead of quietly degrading every stdout binding to residue.
+func jsonNumberGrammarSet() refinementsets.RefinedSet {
+	// anchored ^...$ ourselves (AGENT-BRIEF.md's kernel-bridge-facts
+	// row: "anchor sub-patterns yourself; FormatGrammar alone pads
+	// substring-anywhere") — an unanchored compile would pad both sides
+	// with C*, admitting text BEFORE or AFTER the number/newline that
+	// json.dumps never writes, which would unsoundly widen the set.
+	compiled := refinementsets.FormatGrammar("^"+jsonNumberGrammarPattern+"$", "")
+	if !compiled.Ok {
+		panic("jsonNumberGrammarPattern does not compile: " + compiled.Unsupported)
+	}
+	return compiled.Set
+}
+
+// foreignStdoutSerializedValue answers the SERIALIZED form of a
+// discharged crossing's return cases — the string-sorted set the
+// captured-stdout binding (`const stdout = execFileSync(...)`, or
+// spawnSync's `<name>.stdout`) actually holds, read structurally off
+// what the harness's own JSON encoder can spell for that return. The
+// checker already knows the crossed value's full semantic type (the
+// cases list itself), so it already knows the JSON serialization
+// grammar of that type — this derives COMPOSITIONALLY over every case
+// kind the RULED schema carries (number, string, boolean, null,
+// object — walk/foreign_edge_artifact.go's casesOf), not number cases
+// alone.
+//
+// A return whose every PRESENT case is number-sorted keeps its
+// existing EXACT behavior: the cases' own Set HULL (their union) is
+// tightened as one window (refinementsets.TightenedJSONNumberGrammar,
+// json_number_grammar.go), never tightened per-case-then-unioned —
+// tightening the combined hull can find a single sharper window a
+// per-case tightening followed by union would miss (e.g. two adjacent
+// number cases whose UNION is a plain [0, 1] window but whose
+// INDIVIDUAL windows each fall to a wider case), so the existing
+// hull-first reading is preserved exactly rather than folded into the
+// general per-case composition below.
+//
+// Every other shape (a string, boolean, null, or object case present
+// anywhere, alone or beside a number case) composes through
+// refinementsets.JSONValueGrammar, arm by arm — see json_case_grammar.
+// go's own per-kind soundness citations. ok=false only where the
+// composition could not derive ANY arm at all (an empty cases list,
+// or every case kind unrecognized) — the caller then leaves the
+// intermediate stdout binding unbound rather than guess.
+func foreignStdoutSerializedValue(cases []Case) (abstractdomain.AbstractValue, bool) {
+	if len(cases) == 0 {
+		return abstractdomain.AbstractValue{}, false
+	}
+	if foreignCasesAreAllNumber(cases) {
+		grammar := jsonNumberGrammarSet()
+		if tightened, ok := refinementsets.TightenedJSONNumberGrammar(foreignNumberCasesHull(cases)); ok {
+			grammar = tightened
+		}
+		return abstractdomain.KnownSet(grammar, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone), true
+	}
+	jsonCases := foreignJSONCasesOf(cases)
+	grammar, ok := refinementsets.JSONValueGrammar(jsonCases)
+	if !ok {
+		return abstractdomain.AbstractValue{}, false
+	}
+	known := abstractdomain.KnownSet(grammar, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+	// an OBJECT case anywhere composes into a brace/colon/comma pattern
+	// chain FormatForHover's own recognizers (format_for_hover.go's
+	// starts/ends/includes trio) do not read back apart — the compiled
+	// text would show as an unreadable raw pattern. Every other
+	// composed shape (string/boolean/null alone or unioned) already
+	// renders through FormatForHover's existing vocabulary (an exact
+	// literal, a quoted-string window, a two-word alternation), so the
+	// override applies only where an object case is actually present.
+	if foreignCasesContainObject(cases) {
+		if hoverWord, hoverOk := refinementsets.JSONValueHover(jsonCases); hoverOk {
+			known = abstractdomain.KnownSetWithHoverWord(known, hoverWord)
+		}
+	}
+	return known, true
+}
+
+// foreignCasesContainObject is whether cases carries an object case at
+// THIS level. Checking only the top level is enough for the WHOLE
+// tree: Members only exists on a case whose own Sort is
+// CaseSortObject, so a nested object (a member's own cases list
+// carrying a further object case) can only be reached by first passing
+// through an object case at every level above it — a cases list with
+// an object case buried inside a member necessarily has an object case
+// at ITS OWN top level too, by the same construction.
+func foreignCasesContainObject(cases []Case) bool {
+	for _, c := range cases {
+		if c.Sort == CaseSortObject {
+			return true
+		}
+	}
+	return false
+}
+
+// foreignCasesAreAllNumber is whether every present case is
+// number-sorted — the gate foreignStdoutSerializedValue keeps ahead of
+// the general composition so the pure-number shape stays on its
+// existing hull-first tightening rather than the general per-case
+// path (see that function's own doc for why the two are not the same
+// derivation).
+func foreignCasesAreAllNumber(cases []Case) bool {
+	for _, c := range cases {
+		if c.Sort != CaseSortNumber {
+			return false
+		}
+	}
+	return true
+}
+
+// foreignJSONCasesOf converts a RULED cases list into
+// refinementsets.JSONCase — the package-neutral mirror JSONValueGrammar
+// reads (refinementsets cannot import walk's own Case/CaseSort; see
+// json_case_grammar.go's file banner), recursing into an object case's
+// own Members so a nested object's member lowers through the identical
+// conversion.
+func foreignJSONCasesOf(cases []Case) []refinementsets.JSONCase {
+	out := make([]refinementsets.JSONCase, len(cases))
+	for i, c := range cases {
+		out[i] = refinementsets.JSONCase{
+			Kind:    refinementsets.JSONCaseKind(c.Sort),
+			Set:     c.Set,
+			Members: foreignJSONMembersOf(c.Members),
+			Closed:  c.Closed,
+		}
+	}
+	return out
+}
+
+// foreignJSONMembersOf converts an object case's Members map — each
+// member's own []Case union through foreignJSONCasesOf, recursively.
+func foreignJSONMembersOf(members map[string][]Case) map[string][]refinementsets.JSONCase {
+	if len(members) == 0 {
+		return nil
+	}
+	out := make(map[string][]refinementsets.JSONCase, len(members))
+	for name, memberCases := range members {
+		out[name] = foreignJSONCasesOf(memberCases)
+	}
+	return out
+}
+
+// foreignNumberCasesHull is the union of every number case's own Set —
+// the syntactic hull TightenedJSONNumberGrammar reads its window off.
+// A single-case return (the ordinary shape) hands its Set straight
+// through unchanged; more than one number case (a union of numeric
+// ranges) widens to their union first, exactly as any other hull over
+// several sets in this tree is built.
+func foreignNumberCasesHull(cases []Case) refinementsets.RefinedSet {
+	hull := cases[0].Set
+	for _, c := range cases[1:] {
+		hull = refinementsets.MakeRefinedSet(refinementsets.Union(hull, c.Set))
+	}
+	return hull
 }
 
 // foreignAbstractValueOfCases lowers a RULED cases list into one
@@ -580,6 +925,37 @@ func execFileSyncEdgeOf(
 	args, _ := callArguments(call)
 	if len(args) < 3 {
 		return nil, false, "", nil, ""
+	}
+	// the COMPILED-BINARY row: argv[0] itself is the target, no
+	// interpreter word — tried AHEAD of the python/uv runner read, since
+	// a compiled-binary path is never also a recognized runner word (the
+	// two shapes are mutually exclusive by construction, and this order
+	// mirrors the Rust twin's own argv-length dispatch: the one-element
+	// runner rows are tried before the bare-binary fallback).
+	if binaryPath, isBinary := compiledBinaryArgvOf(ctx, args[0]); isBinary {
+		resolvedPath, pathSentence := resolveCompiledBinaryPath(call, binaryPath)
+		if pathSentence != "" {
+			return nil, false, pathSentence, call, resolvedPath
+		}
+		if resolvedPath == "" {
+			return nil, false, "", nil, ""
+		}
+		payload, encodingOk, optionsSentence := execFileSyncOptionsOf(args[2])
+		if optionsSentence != "" {
+			return nil, false, optionsSentence, args[2], resolvedPath
+		}
+		if !encodingOk {
+			return nil, false, "this call runs the compiled binary " + binaryPath + " without a string encoding, " +
+				"so its result is a Buffer rather than the target's JSON text — " +
+				"the return leg has no text to parse", args[2], resolvedPath
+		}
+		return &ForeignEdge{
+			Call:             call,
+			TargetPath:       resolvedPath,
+			Payload:          payload,
+			StdoutName:       name,
+			IsCompiledBinary: true,
+		}, true, "", nil, resolvedPath
 	}
 	runnerWord, script, dataElement, scriptOk, sentence, sentenceNode := runnerAndScriptArgvOf(ctx, args[0], args[1])
 	if sentence != "" {
@@ -1196,6 +1572,24 @@ func isChildProcessDeclarationPath(fileName string) bool {
 		base == "child_process.d.cts"
 }
 
+// foreignCallBindsBareStdoutString is whether call's own BOUND NAME —
+// the identifier a `const <name> = call(...)` declaration's initializer
+// evaluates to — is the captured stdout string itself, rather than an
+// object CARRYING a `.stdout` property. execFileSync and execSync both
+// answer the string (or Buffer) directly; spawnSync answers
+// `{stdout, stderr, status, ...}`, and StdoutName rides at `<name>.stdout`
+// (spawnSyncEdgeOf's own doc, isForeignParseOf's dual bare/`.stdout`
+// reading). The intermediate binding this file pins
+// (foreignStdoutSerializedValue's CallOverride) keys on the call
+// expression itself — the exact node AnalyzeVariableStatement evaluates
+// for the bound name's own value — so it is sound ONLY for the shapes
+// where that value IS the string, never spawnSync's object.
+func foreignCallBindsBareStdoutString(ctx *FlowContext, call *ast.Node) bool {
+	callee := calleeOf(call)
+	return resolvesToChildProcessMember(ctx, callee, "execFileSync") ||
+		resolvesToChildProcessMember(ctx, callee, "execSync")
+}
+
 // scriptPathLawTwoSentence is the one sentence a script-path element
 // that is not a written string literal, and does not resolve to one
 // through a const binding, owes — law 2: name exactly what would make
@@ -1228,6 +1622,11 @@ const scriptPathLawTwoSentence = "the script path is computed; spell it as a wri
 // not resolve to one, owes the law-2 sentence rather than silence —
 // the runner word itself is already known by that point, so the call
 // IS this edge, only unfollowable.
+//
+// A COMPILED BINARY (argv[0] itself IS the target — no interpreter
+// word at all) is a SEPARATE shape this function does not read:
+// compiledBinaryArgvOf, below, is its own recognizer, tried by
+// execFileSyncEdgeOf ahead of this one — see that function's own doc.
 func runnerAndScriptArgvOf(ctx *FlowContext, runnerArgument *ast.Node, argvArgument *ast.Node) (runnerWord string, script string, dataElement *ast.Node, ok bool, sentence string, sentenceNode *ast.Node) {
 	interpreter, interpreterOk := runnerWordOf(ctx, runnerArgument)
 	if !interpreterOk {
@@ -1581,6 +1980,72 @@ func scriptPathFromParameterCallSites(ctx *FlowContext, identifier *ast.Node, pa
 		}
 	}
 	return resolved, true
+}
+
+// compiledBinaryArgvOf reads argv[0] as a COMPILED BINARY's own path —
+// the shape `execFileSync("./targets/cpp_level", [], {...})` takes,
+// where the first call argument IS the target rather than an
+// interpreter word. Recognized when the element resolves to a written
+// (or const-resolved) string whose text is PATH-SHAPED — a leading
+// "./", "../", or "/" — mirroring the Rust twin's own
+// compiled_binary_path_of (foreign_edge.rs): a bare word with no
+// leading path marker is not a recognized runner word either at this
+// position, so it stays a plain non-match rather than a guess.
+//
+// Answers (path, true) on a match. Answers ("", false) where the
+// element does not even resolve to a string, resolves to a recognized
+// python/uv runner word instead, or resolves to a string that is not
+// path-shaped — nothing owed: the call may be a plain runner-word row
+// runnerAndScriptArgvOf already models (e.g. "python3"), and a bare
+// word with no path marker is not distinguishable from an unmodeled
+// interpreter spelling, so it stays a plain non-match rather than a
+// guess.
+func compiledBinaryArgvOf(ctx *FlowContext, element *ast.Node) (path string, ok bool) {
+	text, resolvedOk := runnerWordOf(ctx, element)
+	if !resolvedOk {
+		return "", false
+	}
+	if pythonSpellings[text] || text == "uv" {
+		// a recognized interpreter word is never also read as a compiled
+		// binary's own path — the two shapes are mutually exclusive
+		return "", false
+	}
+	if !isCompiledBinaryPathShaped(text) {
+		return "", false
+	}
+	return text, true
+}
+
+// isCompiledBinaryPathShaped is whether text carries one of the three
+// path markers a compiled-binary invocation's own argv[0] states — a
+// leading "./", "../", or "/" — the same three prefixes the Rust
+// twin's compiled_binary_path_of checks. A bare word with none of
+// these (an unrecognized runner word, e.g. a typo'd interpreter) is
+// NOT read as a binary path: the checker cannot tell "an interpreter
+// this edge does not model" from "a compiled binary" by spelling
+// alone once the path markers are absent, so it stays unrecognized
+// rather than guessing.
+func isCompiledBinaryPathShaped(text string) bool {
+	return strings.HasPrefix(text, "./") || strings.HasPrefix(text, "../") || strings.HasPrefix(text, "/")
+}
+
+// resolveCompiledBinaryPath is resolveForeignScriptPath's own twin for
+// a compiled binary: no extension premise (a compiled binary carries
+// no ".py"/".ts" suffix this edge could check), only the relative-path
+// resolution against the SOURCE FILE's own directory — the same
+// reading every other recognized argv element in this file applies,
+// so a binary path spelled relative to the checked file resolves the
+// same way a script path does.
+func resolveCompiledBinaryPath(call *ast.Node, binaryPath string) (resolvedPath string, sentence string) {
+	sourceFile := ast.GetSourceFileOfNode(call)
+	if sourceFile == nil {
+		return "", ""
+	}
+	resolvedPath = binaryPath
+	if !filepath.IsAbs(resolvedPath) {
+		resolvedPath = filepath.Join(filepath.Dir(sourceFile.FileName()), binaryPath)
+	}
+	return resolvedPath, ""
 }
 
 // resolveForeignScriptPath discharges the two premises common to every

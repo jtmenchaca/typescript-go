@@ -331,7 +331,28 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 			continue
 		}
 		if _, ok := keys[name]; !ok {
-			setKey(name, silence.Residue())
+			// a METHOD's own value, whatever it does, is always a
+			// function (sec-runtime-semantics-propertydefinitionevaluation)
+			// — its SORT is proved by the syntax right here, without
+			// evaluating the body, so the slot is entered at
+			// TrustProved rather than the shared abstractdomain.
+			// HostFunction constant's TrustSpec: that constant's grade
+			// answers a DIFFERENT question — an externally-sourced
+			// function of unknown provenance (a host call's return, a
+			// parameter's declared type) — and stamping it here would
+			// wrongly cap every SIBLING key's own read through
+			// KnownObject's floor-by-minimum (this object's other
+			// keys are proved outright; a method row sitting beside
+			// them names no uncertainty about THEM). A getter's or
+			// setter's read value is not fixed by its declaration
+			// alone (the getter body decides it), so those two keep
+			// the plain residue; a getter returning one literal earns
+			// its exact value below.
+			if ast.IsMethodDeclaration(property) {
+				setKey(name, abstractdomain.AbstractValue{Kind: abstractdomain.KindHostFunction})
+			} else {
+				setKey(name, silence.Residue())
+			}
 		}
 		if ast.IsGetAccessorDeclaration(property) {
 			ga := property.AsGetAccessorDeclaration()
@@ -344,6 +365,46 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 						if rs.Expression != nil && ast.IsNumericLiteral(rs.Expression) {
 							n := float64(jsnum.FromString(rs.Expression.Text()))
 							setKey(name, abstractdomain.KnownValues([]float64{n}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved))
+						} else {
+							// a body past the single-literal-return shape
+							// still reads through `this` — the same walk
+							// the spread-source route already runs
+							// (below, for a getter copied in through
+							// `{...source}`), applied here to the getter
+							// sitting directly in THIS literal. `this`
+							// binds to the object as built so far: every
+							// key a PRIOR property in this same literal
+							// wrote is exactly what a runtime `this` read
+							// inside the getter would see (object
+							// literals build their own keys in source
+							// order, sec-runtime-semantics-
+							// propertydefinitionevaluation), and a key
+							// this getter's own read reaches that has not
+							// been written yet is the walk's own honest
+							// gap, not a fact to invent.
+							soFar := make([]abstractdomain.ObjectKey, len(keyOrder))
+							for i, heldName := range keyOrder {
+								soFar[i] = abstractdomain.ObjectKey{Name: heldName, Value: keys[heldName]}
+							}
+							thisValue := abstractdomain.KnownObject(soFar, nil, false, abstractdomain.TrustProved, false)
+							priorThis, hadThis := env.Get("this")
+							env.Set("this", thisValue)
+							var sink []abstractdomain.AbstractValue
+							inner := *ctx
+							inner.ReturnSink = &sink
+							AnalyzeStatements(&inner, env, ga.Body.AsBlock().Statements.Nodes, nil)
+							if hadThis {
+								env.Set("this", priorThis)
+							} else {
+								env.Delete("this")
+							}
+							if len(sink) > 0 {
+								joined := sink[0]
+								for _, v := range sink[1:] {
+									joined = abstractdomain.JoinKnown(joined, v)
+								}
+								setKey(name, joined)
+							}
 						}
 					}
 				}

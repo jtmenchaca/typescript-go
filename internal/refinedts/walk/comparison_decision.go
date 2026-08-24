@@ -28,6 +28,85 @@ import (
 
 var errKernelRefused = errors.New("kernel refused the question")
 
+// compareSetAgainstNumber decides `<set> op <one number>` (either
+// order) through the kernel's narrow claims: each arm's claim meets
+// the set, and an EMPTY meet proves that arm impossible. A set
+// excludes NaN by construction, so an impossible true arm reads
+// "false on every run" and an impossible false arm "true on every
+// run", both exactly. nil where the shape is not one numeric set
+// against one exact number, a claim declines, both arms stay
+// possible, or the kernel refuses (the recover).
+func compareSetAgainstNumber(ctx *FlowContext, op ComparisonOp, a, b abstractdomain.AbstractValue, kernelRow func(bool) abstractdomain.AbstractValue) (out *abstractdomain.AbstractValue) {
+	defer func() {
+		if recover() != nil {
+			out = nil
+		}
+	}()
+	singleNumber := func(v abstractdomain.AbstractValue) (float64, bool) {
+		if v.Kind == abstractdomain.KindValues && v.KindTag == abstractdomain.PrimitiveNumber && len(v.Values) == 1 {
+			return v.Values[0], true
+		}
+		return 0, false
+	}
+	set := a
+	number, isNumber := singleNumber(b)
+	mirrored := false
+	if a.Kind != abstractdomain.KindSet || a.SetKindTag != abstractdomain.SetKindTagNone || !isNumber {
+		set = b
+		number, isNumber = singleNumber(a)
+		mirrored = true
+		if b.Kind != abstractdomain.KindSet || b.SetKindTag != abstractdomain.SetKindTagNone || !isNumber {
+			return nil
+		}
+	}
+	mapped := op
+	if mirrored {
+		switch op {
+		case CompareLt:
+			mapped = CompareGt
+		case CompareGt:
+			mapped = CompareLt
+		case CompareLe:
+			mapped = CompareGe
+		case CompareGe:
+			mapped = CompareLe
+		}
+	}
+	var tree kernelbridge.NarrowTree
+	switch mapped {
+	case CompareEq:
+		tree = kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindEq, K: number}
+	case CompareNe:
+		eq := kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindEq, K: number}
+		tree = kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindNot, A: &eq}
+	default:
+		tree = kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindCmp, Op: kernelbridge.NarrowCmpOp(mapped), K: number}
+	}
+	answer := ctx.Kernel.Narrow(tree)
+	armImpossible := func(claim *kernelbridge.NarrowClaim) bool {
+		if claim == nil {
+			return false
+		}
+		met := refinementsets.RefinedSet{Forms: append(append([]refinementsets.Refinement{}, set.Set.Forms...), claim.Set.Forms...)}
+		return ctx.Kernel.ScalarEmpty(met)
+	}
+	if armImpossible(answer.WhenTrue) {
+		v := kernelRow(false)
+		return &v
+	}
+	if armImpossible(answer.WhenFalse) {
+		v := kernelRow(true)
+		return &v
+	}
+	return nil
+}
+
+// kernelRefusedTheQuestionSaid is the sentence every callMember/
+// callSeqLexLt recovery site attaches: the membership or ordering
+// question was well-formed enough to ask, but the kernel declined to
+// answer it.
+const kernelRefusedTheQuestionSaid = "the kernel refused this membership or ordering question"
+
 // ComparisonOp is the "lt" | "gt" | "le" | "ge" | "eq" | "ne" union.
 type ComparisonOp string
 
@@ -65,7 +144,7 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 	bExactAbsent := b.Kind == abstractdomain.KindUndef || b.Kind == abstractdomain.KindNull
 	if aExactAbsent || bExactAbsent {
 		if op != CompareEq && op != CompareNe {
-			return silence.Residue()
+			return silence.ResidueOf("an ordering comparison against null or undefined has no row — absence only compares under == or !=")
 		}
 		if aExactAbsent && bExactAbsent {
 			// sec-isstrictlyequal step 1: SameType false -> false;
@@ -101,10 +180,19 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 			// the loose reading agrees with the strict one here too
 			return boolAt(op == CompareNe)
 		}
-		return silence.Residue()
+		return silence.ResidueOf("the non-absent side is not a plain value, object, list, or array — a wrapper or unresolved kind has no equality row against null or undefined here")
+	}
+	// a SET side against one exact number: the kernel's narrow claims
+	// meet the set, and an EMPTY arm decides the comparison outright —
+	// `x > 200` over x ∈ [0, 150] admits NO member (the true arm's
+	// meet is empty, so the test is false on every run), and a set
+	// excludes NaN by construction, so the verdict is exact in both
+	// directions.
+	if verdict := compareSetAgainstNumber(ctx, op, a, b, kernelRow); verdict != nil {
+		return *verdict
 	}
 	if a.Kind != abstractdomain.KindValues || b.Kind != abstractdomain.KindValues {
-		return silence.Residue()
+		return silence.ResidueOf("a side is not a plain known value — an object, wrapper, or unresolved kind has no comparison row here")
 	}
 	// strings: equality is tuple equality; ordering is code-unit
 	// lexicographic (cmp.7)
@@ -116,11 +204,11 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 		case CompareEq, CompareNe:
 			target, ok := abstractdomain.SetOfKnown(b)
 			if !ok {
-				return silence.Residue()
+				return silence.ResidueOf("the other string's exact codepoints don't form a set the kernel can be asked about")
 			}
 			equal, err := callMember(ctx.Kernel, target, a.Values)
 			if err != nil {
-				return silence.Residue()
+				return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 			}
 			if op == CompareEq {
 				return kernelRow(equal)
@@ -142,14 +230,14 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 		if op == CompareNe {
 			return boolAt(true)
 		}
-		return silence.Residue()
+		return silence.ResidueOf("a strict ordering comparison across two different sorts has no row — SameType-false only decides equality, not order")
 	}
 	// arrays compare by REFERENCE — identity is not value knowledge
 	if a.KindTag == abstractdomain.PrimitiveArray || b.KindTag == abstractdomain.PrimitiveArray {
-		return silence.Residue()
+		return silence.ResidueOf("arrays compare by reference, which is not value knowledge this reader holds")
 	}
 	if len(a.Values) != 1 || len(b.Values) != 1 {
-		return silence.Residue()
+		return silence.ResidueOf("a side is a known value that isn't pinned to one exact number or boolean — a set of values, not a single one")
 	}
 	x := a.Values[0]
 	y := b.Values[0]
@@ -173,37 +261,37 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 	case CompareLt:
 		v, err := callMember(ctx.Kernel, refinementsets.MakeRefinedSet(refinementsets.Below(y)), []float64{x})
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(v)
 	case CompareGt:
 		v, err := callMember(ctx.Kernel, refinementsets.MakeRefinedSet(refinementsets.Above(y)), []float64{x})
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(v)
 	case CompareLe:
 		v, err := callMember(ctx.Kernel, refinementsets.MakeRefinedSet(refinementsets.AtMost(y)), []float64{x})
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(v)
 	case CompareGe:
 		v, err := callMember(ctx.Kernel, refinementsets.MakeRefinedSet(refinementsets.AtLeast(y)), []float64{x})
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(v)
 	case CompareEq:
 		v, err := callMember(ctx.Kernel, refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{y})), []float64{x})
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(v)
 	case CompareNe:
 		v, err := callMember(ctx.Kernel, refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{y})), []float64{x})
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(!v)
 	}
@@ -276,31 +364,31 @@ func compareKnownStringOrder(ctx *FlowContext, op ComparisonOp, kernelRow func(b
 	setA, okA := abstractdomain.SetOfKnown(a)
 	setB, okB := abstractdomain.SetOfKnown(b)
 	if !okA || !okB {
-		return silence.Residue()
+		return silence.ResidueOf("one string's exact codepoints don't form a set the kernel can be asked about")
 	}
 	switch op {
 	case CompareLt:
 		v, err := callSeqLexLt(ctx.Kernel, setA, setB)
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(v)
 	case CompareGt:
 		v, err := callSeqLexLt(ctx.Kernel, setB, setA)
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(v)
 	case CompareLe:
 		v, err := callSeqLexLt(ctx.Kernel, setB, setA)
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(!v)
 	case CompareGe:
 		v, err := callSeqLexLt(ctx.Kernel, setA, setB)
 		if err != nil {
-			return silence.Residue()
+			return silence.ResidueOf(kernelRefusedTheQuestionSaid)
 		}
 		return kernelRow(!v)
 	}

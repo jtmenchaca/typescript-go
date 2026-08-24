@@ -33,10 +33,10 @@ func TestLoopStmts_AWhileWhoseBodyTheFoldDeclinesLowersAndRecordsComplete(t *tes
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	lowered, loweredOk := RelowerSummaryBody(ctx, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("the body declined at %q — the statement-bodied loop reads it", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -119,10 +119,10 @@ func TestLoopStmts_AForOfOverAnUntrackedIterableLowersWithItsBindingUnknown(t *t
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	lowered, loweredOk := RelowerSummaryBody(ctx, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("the body declined at %q — an untracked iterable is still a readable loop", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -179,10 +179,10 @@ func TestLoopStmts_ACallingHeadStillFallsToTheFloor(t *testing.T) {
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	lowered, loweredOk := RelowerSummaryBody(ctx, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("the body declined at %q — the floor havocs, it does not refuse", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

@@ -19,14 +19,30 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
+	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
 var calleeWordsWhitespace = regexp.MustCompile(`\s+`)
 
 // CalleeWords is calleeWords in the TS source: the callee as the
-// source spells it, one line.
+// source spells it, one line. Node.Text() only reads leaf kinds
+// (identifiers, literals) and PANICS on a compound expression — a
+// property access (`addon.compute`) or a nested call
+// (`require("bindings")(...)`), both real unmodeled-callee shapes
+// UnmodeledCallResult reaches — so this reads the callee's own SOURCE
+// SPAN instead (scanner.GetSourceTextOfNodeFromSourceFile, the same
+// reader every other "spell this node's own source text" site in the
+// tree already uses), which handles every node kind uniformly. A
+// callee whose enclosing source file cannot be found (a synthesized
+// node, never real parsed source) falls back to the empty string
+// rather than panic.
 func CalleeWords(callee *ast.Node) string {
-	return calleeWordsWhitespace.ReplaceAllString(callee.Text(), " ")
+	sourceFile := ast.GetSourceFileOfNode(callee)
+	if sourceFile == nil {
+		return ""
+	}
+	text := scanner.GetSourceTextOfNodeFromSourceFile(sourceFile, callee, false)
+	return calleeWordsWhitespace.ReplaceAllString(text, " ")
 }
 
 // NarrowedSinceDeclaration is narrowedSinceDeclaration in the TS

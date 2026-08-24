@@ -109,5 +109,7 @@ func AnswerHeldRow(
 		}
 		return NoAnswer(p, token, declaration, hostType, notes)
 	}
-	return Claim(shown, abstractdomain.TrustLevelOf(plain), shownByHost)
+	answer := Claim(shown, abstractdomain.TrustLevelOf(plain), shownByHost)
+	answer.SortWord = abstractdomain.ScalarSortWordOfKnown(plain)
+	return answer
 }

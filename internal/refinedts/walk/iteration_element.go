@@ -72,7 +72,7 @@ func ElementOf(iterable abstractdomain.AbstractValue) abstractdomain.AbstractVal
 			}
 		}
 		if element == nil {
-			return silence.Residue()
+			return silence.ResidueOf("the values set is empty, so no element position exists to join")
 		}
 		return *element
 	}
@@ -96,9 +96,22 @@ func ElementOf(iterable abstractdomain.AbstractValue) abstractdomain.AbstractVal
 			}
 		}
 		if element == nil {
-			return silence.Residue()
+			return silence.ResidueOf("the iteration element reader holds no model for this iterable's shape")
 		}
 		return *element
 	}
-	return silence.Residue()
+	// a GRADED scalar — a checked declaration's return read through a
+	// cast the iterated position's own shape does not match
+	// (`unreadNumber() as unknown as number[]`) — is not opaque and not
+	// a plain residue either: an element read off it is exactly as
+	// unconstrained as the whole value already was, so the source's own
+	// ground and grade carry forward. The same propagation
+	// darkSlotOf (destructuring.go) applies to a member read, mirrored
+	// here for an element read — without it CheckPossiblyNaN cannot
+	// tell this claim apart from AfterReaders' own ungraded fallback
+	// seed (nan_wrapper.go's two-case split).
+	if iterable.Kind != abstractdomain.KindUnknown && iterable.Grade != "" {
+		return iterable
+	}
+	return silence.ResidueOf("the iteration element reader holds no model for this iterable's shape")
 }

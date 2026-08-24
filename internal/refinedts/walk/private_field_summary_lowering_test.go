@@ -110,10 +110,10 @@ func TestLowerSummaryBody_APrivateFieldReadMethodLowersComplete(t *testing.T) {
 	`, "years")
 	summary, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("years() declined to lower at %q — want it to lower", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for years()")
 	}
@@ -169,7 +169,7 @@ func TestApplySummary_APrivateFieldThroughConstructorServesTheExactWrite(t *test
 
 	goodAnswer, goodOk := KernelSummaryDirectOn(ctx, nil, &FunctionContract{Declaration: yearsMethod}, forArg(40))
 	if !goodOk {
-		_, construct, _ := SummaryOutcomeOf(yearsMethod)
+		_, construct, _ := SummaryOutcomeOf(p.Checker, yearsMethod)
 		t.Fatalf("KernelSummaryDirectOn declined for the 40 receiver at %q — want it to serve", construct)
 	}
 	superArrayExactScalar(t, kernel, goodAnswer, 40, "Sealed(40).years() via applySummary")

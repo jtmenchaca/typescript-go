@@ -159,11 +159,16 @@ func readCoercionGlobals(ctx *FlowContext, env Env, e *ast.Node, spreadArguments
 				out := abstractdomain.KnownValues([]float64{coerced}, abstractdomain.PrimitiveNumber, grade)
 				return &out
 			}
-			inner := abstractdomain.KnownSet(refinementsets.MakeRefinedSet(), nil, grade, abstractdomain.SetKindTagNone)
+			// the widest answer's real half is the number GROUND spelled
+			// with its one vacuous conjunct (CanonicalScalarForms' own
+			// rule: an empty form list is a set the kernel's questions
+			// do not accept), so the NaN-wrapper judge's subset ask can
+			// actually run against a refined sink.
+			inner := abstractdomain.KnownSet(refinementsets.MakeRefinedSet(refinementsets.AtLeast(math.Inf(-1))), nil, grade, abstractdomain.SetKindTagNone)
 			out := abstractdomain.PossiblyNaN(inner)
 			return &out
 		}
-		inner := abstractdomain.KnownSet(refinementsets.MakeRefinedSet(), nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+		inner := abstractdomain.KnownSet(refinementsets.MakeRefinedSet(refinementsets.AtLeast(math.Inf(-1))), nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
 		out := abstractdomain.PossiblyNaN(inner)
 		return &out
 	}
@@ -640,17 +645,18 @@ func readJsonMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 		// spells — sec-json.parse admits no more, and the set language
 		// says no less than that, so this is everything the file
 		// determines here
+		const jsonParseOfUnknownTextSaid = "JSON.parse of unknown text yields whatever JSON " +
+			"value the text spells — the type is everything this " +
+			"file determines"
 		if assignability.CollectingReasons() {
 			assignability.NoteReason(assignability.ReasonNote{
-				Site: "expression",
-				Node: e,
-				Said: "JSON.parse of unknown text yields whatever JSON " +
-					"value the text spells — the type is everything this " +
-					"file determines",
+				Site:        "expression",
+				Node:        e,
+				Said:        jsonParseOfUnknownTextSaid,
 				Unsupported: false,
 			})
 		}
-		out := silence.Residue()
+		out := silence.ResidueOf(jsonParseOfUnknownTextSaid)
 		return &out
 	}
 	// JSON.stringify on exactly known structure: the serialization is

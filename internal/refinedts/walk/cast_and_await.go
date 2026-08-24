@@ -250,6 +250,12 @@ func CannotBeThenable(value abstractdomain.AbstractValue) bool {
 		abstractdomain.KindUndef, abstractdomain.KindNaN:
 		// primitives: not Objects, so step 4 fulfils them unchanged
 		return true
+	case abstractdomain.KindPossiblyNaN:
+		// a number that may also be NaN is still always a NUMBER — the
+		// wrapper never widens the runtime type past the primitive
+		// abstractdomain.KindNaN already answers yes for, so it fulfils
+		// unchanged the same way
+		return true
 	case abstractdomain.KindDate, abstractdomain.KindRegex,
 		abstractdomain.KindCollection, abstractdomain.KindList:
 		// Objects whose prototypes carry no `then`, so step 7 fulfils
@@ -327,7 +333,7 @@ func EvaluateCast(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	// survives the `!` — the assertion is the developer's claim, not
 	// a proof
 	from := primitives.SortOfPresent(ctx.P.Checker, typereading.TypeAtLocation(ctx.P.Checker, innermost))
-	to := primitives.SortOfPresent(ctx.P.Checker, typereading.TypeAtLocation(ctx.P.Checker, e))
+	to := primitives.SortOfPresent(ctx.P.Checker, castTargetType(ctx.P.Checker, e))
 	value := evaluateExpression(ctx, env, innermost)
 	// a cast to a BARE type parameter states no sort at all, so there
 	// is no crossing to demote for. `x as T` with T unconstrained does
@@ -352,6 +358,14 @@ func EvaluateCast(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		if value.Kind == abstractdomain.KindUnknown {
 			if value.Opaque {
 				return abstractdomain.Opaque
+			}
+			// the cast changes the host-type story, not why the operand
+			// was unknown — the incoming reason (if the operand's own
+			// evaluation left one) names the position's real first
+			// blocker and survives the crossing; only a reasonless
+			// operand builds a bare residue here
+			if value.ResidueReason != "" {
+				return silence.ResidueOf(value.ResidueReason)
 			}
 			return silence.Residue()
 		}
@@ -411,5 +425,31 @@ func castExpressionOf(e *ast.Node) *ast.Node {
 		return e.AsTypeAssertion().Expression
 	default:
 		return e
+	}
+}
+
+// castTargetType is what the crossing test's TO side reads: `as
+// Age` / `<Age>x` state Age directly, through the type node — never
+// through the whole expression's own resolved type. tsc's `any`
+// contagion makes `x as T`'s OWN type read back as `any` whenever x
+// itself is `any` (a with-scoped read, a caught `unknown` widened by
+// an earlier `as unknown`) — GetTypeAtLocation(e) on the cast
+// expression answers that contagious `any`, not the stated T, and the
+// crossing test that reads it that way never sees the real target
+// sort. Reading the TYPE NODE the cast spells (GetTypeFromTypeNode,
+// the same authority ir_summary_instantiated_members.go and
+// ir_array_parameters.go already trust for a type node) answers T
+// itself, contagion-free. `x!` states no type node of its own — its
+// crossing is never a sort change (SortOfPresent already peels the
+// maybe wrapper the same way on both sides), so the expression's own
+// resolved type stands for it, exactly as before.
+func castTargetType(c *checker.Checker, e *ast.Node) *checker.Type {
+	switch {
+	case ast.IsAsExpression(e):
+		return c.GetTypeFromTypeNode(e.AsAsExpression().Type)
+	case ast.IsTypeAssertion(e):
+		return c.GetTypeFromTypeNode(e.AsTypeAssertion().Type)
+	default:
+		return typereading.TypeAtLocation(c, e)
 	}
 }

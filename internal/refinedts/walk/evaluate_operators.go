@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
@@ -319,6 +320,17 @@ func ReadBinary(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractV
 	}
 	left := evaluateExpression(ctx, env, bin.Left)
 	right := evaluateExpression(ctx, env, bin.Right)
+	// `x ^ x` over one stable place is exactly {0}: ToInt32 maps both
+	// reads to the SAME int32 — NaN and every non-number word included —
+	// and any int32 XORed with itself is 0
+	// (sec-binary-bitwise-operators, sec-toint32).
+	if bin.OperatorToken.Kind == ast.KindCaretToken {
+		if leftPlace := dataflowfacts.PlaceKeyOf(ctx.P.Checker, bin.Left); leftPlace != nil {
+			if rightPlace := dataflowfacts.PlaceKeyOf(ctx.P.Checker, bin.Right); rightPlace != nil && *leftPlace == *rightPlace {
+				return abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustSpec)
+			}
+		}
+	}
 	if bitwise, ok := ReadBitwise(left, right, bin.OperatorToken.Kind); ok {
 		return bitwise
 	}

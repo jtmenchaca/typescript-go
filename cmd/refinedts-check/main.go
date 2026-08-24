@@ -2,15 +2,15 @@
 //
 // The command line: refinedts-check <file.ts> [...] — tsc's own shape
 // diagnostics first, then the refinement judgments, each at
-// file:line:col. Exit 1 when anything fired; 0 on silence.
+// file:line:col. Exit 1 when anything was reported; 0 when nothing was.
 //
 // @refinedts-expect-error markers are honored through
 // service.ExpectationsOf and matched with Expectation.Covers
-// (service/expect_error.go) — a matched fire is SILENT and does not
-// fail the run; an expectation nothing fired on is itself an error, so
-// stale declarations stay visible. Covers never matches RTS7002 (the
-// undetermined channel), so a marker over a 7002-only line reports
-// stale rather than swallowing it.
+// (service/expect_error.go) — a matched expected error is not printed
+// and does not fail the run; an expectation no error landed on is
+// itself an error, so stale declarations stay visible. Covers never
+// matches RTS7002 (the undetermined channel), so a marker over a
+// 7002-only line reports stale rather than swallowing it.
 
 package main
 
@@ -76,6 +76,8 @@ func main() {
 		"record per-entry mechanism timers only (honest wall, no trace inflation) and print the decomposition")
 	kernelTraceFlag := flag.Bool("kernel-trace", false,
 		"stream every kernel question and answer wire to stderr LIVE — the diagnosis line for a hang is the last Q with no A")
+	noFactsCacheFlag := flag.Bool("no-facts-cache", false,
+		"compile every entry's reachable files itself instead of sharing a facts store across workers (a determinism diagnostic)")
 	exportFactFlag := flag.String("export-fact", "",
 		"write this file's fact artifact instead of checking it (the cross-language edge's producer mode)")
 	outFlag := flag.String("o", "",
@@ -127,6 +129,7 @@ func main() {
 	if *producerPyFlag != "" {
 		walk.SetPythonProducerPath(*producerPyFlag)
 	}
+	service.SetFactsCacheDisabled(*noFactsCacheFlag)
 	if *projectRootFlag != "" {
 		walk.SetProjectRootOverride(*projectRootFlag)
 	}
@@ -176,7 +179,7 @@ func main() {
 		stopProfile = pprof.StopCPUProfile
 	}
 
-	fired := false
+	reported := false
 	// every run is batch mode — service.CheckFiles builds ONE program
 	// per covering tsconfig and shares every read-once store across
 	// the entries; one file is a batch of one
@@ -185,11 +188,11 @@ func main() {
 		result, held := results[file]
 		if !held {
 			fmt.Fprintf(os.Stderr, "%s: the entry file did not parse\n", file)
-			fired = true
+			reported = true
 			continue
 		}
 		for _, d := range result.Shape {
-			fired = true
+			reported = true
 			position := file
 			if d.File() != nil {
 				line, character := scanner.GetECMALineAndUTF16CharacterOfPosition(d.File(), d.Pos())
@@ -201,7 +204,7 @@ func main() {
 		text, err := os.ReadFile(file)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", file, err)
-			fired = true
+			reported = true
 			continue
 		}
 		lineStarts := lineStartsOf(string(text))
@@ -221,7 +224,7 @@ func main() {
 				expected.Used = true
 				continue
 			}
-			fired = true
+			reported = true
 			fmt.Fprintln(os.Stderr, spelled)
 			// a finding's related steps print under it, one per line,
 			// each at its own file and position — the terminal's form of
@@ -234,13 +237,13 @@ func main() {
 			if e.Used {
 				continue
 			}
-			fired = true
+			reported = true
 			codeSuffix := ""
 			if e.HasCode {
 				codeSuffix = fmt.Sprintf(" RTS%d", e.Code)
 			}
-			fmt.Fprintf(os.Stderr, "%s:%d @refinedts-expect-error: line %d was expected to fire%s, and nothing did\n",
-				file, e.MarkerLine, e.Line, codeSuffix)
+			fmt.Fprintf(os.Stderr, "%s:%d @refinedts-expect-error: an error%s was expected on line %d, and none was reported\n",
+				file, e.MarkerLine, codeSuffix, e.Line)
 		}
 	}
 	if *wallFlag {
@@ -286,7 +289,7 @@ func main() {
 			_ = profileFile.Close()
 		}
 	}
-	if fired {
+	if reported {
 		os.Exit(1)
 	}
 	os.Exit(0)

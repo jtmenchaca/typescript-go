@@ -287,7 +287,7 @@ func sequenceEffectOf(context *LoweringContext, e *ast.Node, inSequence bool) (k
 	// `String(x)` called AS A FUNCTION (never `new String(x)`, which this
 	// syntax cannot spell — a `new` node never reaches this reader) is
 	// exactly ToString(x) (sec-string-constructor-string-value,
-	// tmp/ecma262/spec.html: "Let string be ? ToString(value)." with
+	// specifications/javascript/spec.html: "Let string be ? ToString(value)." with
 	// NewTarget undefined). ToString is TOTAL — no throw completion — over
 	// every operand sort this walk can name a slot for: a Number
 	// (Number::toString), a String (identity, ToString step 1), and the
@@ -476,7 +476,7 @@ func templateSpanEffect(context *LoweringContext, span *ast.Node) (kernelbridge.
 //
 //   - the SORT is read before anything allocates: only a call whose
 //     resolved return type spells string or number rides. ToString is
-//     total on both (sec-tostring, tmp/ecma262/spec.html); an
+//     total on both (sec-tostring, specifications/javascript/spec.html); an
 //     unknown-sorted result could be a Symbol, whose ToString throws,
 //     and keeps the decline the span always had.
 //   - a RESOLVABLE callee's blob writes PRECISE values, and running it

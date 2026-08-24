@@ -46,7 +46,7 @@ func TestOnceAssignedMapFieldSizeEffect_LRUCacheSizeMethodCompletes(t *testing.T
 	`)
 	declaration := fieldMapMethodOf(t, p, "size")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -79,7 +79,7 @@ func TestOnceAssignedMapFieldSizeEffect_UsedInComparisonCompletes(t *testing.T) 
 	`)
 	declaration := fieldMapMethodOf(t, p, "isFull")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -111,7 +111,7 @@ func TestOnceAssignedMapFieldSizeEffect_ReassignedFieldDoesNotServe(t *testing.T
 	`)
 	declaration := fieldMapMethodOf(t, p, "size")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

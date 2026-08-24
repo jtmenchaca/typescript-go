@@ -103,6 +103,13 @@ func NarrowingsOf(
 			return b
 		}
 	}
+	// `P === undefined || <numeric tests on P>` (either order): the
+	// held disjunction admits the absent value OR a value the numeric
+	// side proves — the present part narrows to the numeric side's own
+	// whenTrue while absence stays admitted. Absence is the structural
+	// channel's fact and the set is the kernel's; neither channel alone
+	// can state the union, so the composition is read here.
+	var crossChannel []Narrowed
 	{
 		cond := Peeled(condition)
 		if ast.IsPrefixUnaryExpression(cond) && cond.AsPrefixUnaryExpression().Operator == ast.KindExclamationToken {
@@ -175,6 +182,29 @@ func NarrowingsOf(
 				}
 			}
 		}
+		if ast.IsBinaryExpression(cond) &&
+			cond.AsBinaryExpression().OperatorToken.Kind == ast.KindBarBarToken &&
+			NarrowKernel() != nil {
+			bin := cond.AsBinaryExpression()
+			place, hasAbsence := AbsenceTestPlace(c, bin.Left, isTracked)
+			numericSide := bin.Right
+			if !hasAbsence {
+				place, hasAbsence = AbsenceTestPlace(c, bin.Right, isTracked)
+				numericSide = bin.Left
+			}
+			if hasAbsence {
+				tree := TreeOf(c, numericSide, *place, isTracked, sideBounds, 0)
+				if SaysAnything(tree) {
+					if answer, refused := narrowRefusable(tree); !refused && answer.WhenTrue != nil {
+						crossChannel = append(crossChannel, Narrowed{
+							Binding: place.Binding, Path: place.Path,
+							Forms: answer.WhenTrue.Set.Forms, Refuting: !answer.WhenTrue.Strong,
+							KeepAbsent: true,
+						})
+					}
+				}
+			}
+		}
 		if ast.IsBinaryExpression(cond) {
 			op := cond.AsBinaryExpression().OperatorToken.Kind
 			if op == ast.KindAmpersandAmpersandToken || op == ast.KindBarBarToken {
@@ -221,7 +251,7 @@ func NarrowingsOf(
 		}
 	}
 	structural := StructuralRaw(c, condition, isTracked)
-	whenTrue := append([]Narrowed{}, structural.WhenTrue...)
+	whenTrue := append(append([]Narrowed{}, structural.WhenTrue...), crossChannel...)
 	whenFalse := append([]Narrowed{}, structural.WhenFalse...)
 	// whether any place's tree posed a question at all — a condition
 	// that tests a tracked binding and poses none is an UNREAD guard,

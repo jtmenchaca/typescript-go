@@ -178,6 +178,38 @@ func TestNumberIsIntegerNarrowsToTheIntegerForm(t *testing.T) {
 	}
 }
 
+// TestNumberIsIntegerAndedWithABandNarrowsToTheIntegerAndBoundForms
+// pins the compound guard the D5/D6 provenance fixtures rely on:
+// `Number.isInteger(x) && x >= lo && x <= hi`, ANDed with a typeof
+// test the way a parsed-external-value guard writes it. Each ANDed
+// leaf contributes its own form to the true branch — integer alongside
+// the two bound forms — so a value guarded this way carries an
+// integer window a bare range guard alone never states.
+func TestNumberIsIntegerAndedWithABandNarrowsToTheIntegerAndBoundForms(t *testing.T) {
+	loadNarrowKernel(t)
+	test := ofCondition(t, `typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 150`)
+	if len(test.WhenTrue) == 0 {
+		t.Fatalf("test.WhenTrue is empty for the compound integer-and-band guard")
+	}
+	var sawInteger, sawAtLeast, sawAtMost bool
+	for _, form := range test.WhenTrue[0].Forms {
+		switch form.Form {
+		case "integer":
+			sawInteger = true
+		case "atLeast":
+			sawAtLeast = true
+		case "atMost":
+			sawAtMost = true
+		}
+	}
+	if !sawInteger {
+		t.Errorf("test.WhenTrue[0].Forms = %+v, want an integer form", test.WhenTrue[0].Forms)
+	}
+	if !sawAtLeast || !sawAtMost {
+		t.Errorf("test.WhenTrue[0].Forms = %+v, want atLeast and atMost forms", test.WhenTrue[0].Forms)
+	}
+}
+
 func TestAGuardOnAPropertyNarrowsThatKeyByPath(t *testing.T) {
 	loadNarrowKernel(t)
 	c, file := checkerFor(t, "function f(o: { total: number }) { if (o.total >= 5) { return o; } return o; }")

@@ -29,6 +29,17 @@ func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.A
 	stated, hasStated := ctx.Declared[name]
 	if hasStated {
 		CheckAssignability(ctx, value, *stated, at, what, nil)
+		// THE REFUSED-WRITE LAW (one fire per defect): the binding keeps
+		// the MEET of the written claim and its declared set, so a later
+		// read judges silently against the declaration rather than
+		// restating the write's own fire one line later. An admitted
+		// write is unchanged by the meet (it was already inside), so no
+		// exactness is lost on the silent path.
+		if stated.Kind == annotations.DeclaredSet && stated.Set != nil &&
+			value.Kind == abstractdomain.KindSet && value.SetKindTag == abstractdomain.SetKindTagNone {
+			declared := abstractdomain.KnownSet(*stated.Set, nil, abstractdomain.TrustLevelOf(value), abstractdomain.SetKindTagNone)
+			value = abstractdomain.MeetKnown(value, declared)
+		}
 	}
 	// the write invalidates every difference row rooted at this name —
 	// the row spoke about the value that just moved

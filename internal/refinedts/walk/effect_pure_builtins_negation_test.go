@@ -5,7 +5,7 @@
 // writeAndCallFree gate — the operand IS a call — and fall to the
 // opaque return, porous naming "return (! call Number.isFinite)".
 // `!e` over an operand whose evaluation moves nothing is exactly true
-// or false (sec-logical-not-operator, tmp/ecma262/spec.html), and a
+// or false (sec-logical-not-operator, specifications/javascript/spec.html), and a
 // pure-builtin read's own gates already prove the operand moves
 // nothing, so the negation carries the same two-value set the
 // unnegated call does.
@@ -35,14 +35,14 @@ func TestNegatedPureBuiltinReturn_LowersLikeTheUnnegatedForm(t *testing.T) {
 	if _, ok := RelowerSummaryBody(ctx, keeps); !ok {
 		t.Fatalf("the unnegated form declined — the premise (unnegated lowers) is gone")
 	}
-	if outcome, construct, _ := SummaryOutcomeOf(keeps); outcome != SummaryComplete {
+	if outcome, construct, _ := SummaryOutcomeOf(p.Checker, keeps); outcome != SummaryComplete {
 		t.Fatalf("unnegated: outcome=%q construct=%q, want complete", outcome, construct)
 	}
 	flips := entryEnvFunctionNamed(t, p, "flips")
 	if _, ok := RelowerSummaryBody(ctx, flips); !ok {
 		t.Fatalf("the negated form declined whole")
 	}
-	if outcome, construct, _ := SummaryOutcomeOf(flips); outcome != SummaryComplete {
+	if outcome, construct, _ := SummaryOutcomeOf(p.Checker, flips); outcome != SummaryComplete {
 		t.Errorf("negated: outcome=%q construct=%q, want complete — `!` over a pure-builtin read is still exactly the two-value set", outcome, construct)
 	}
 }

@@ -46,7 +46,10 @@ import (
 func TestJoinSinkSummarized_AMarkerJoinsAsUnknownRatherThanBeingExcluded(t *testing.T) {
 	symbol := &ast.Symbol{Name: "countdownTestSymbol"}
 	base := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
-	marker := RecursionMarker(symbol)
+	// no ctx/declaration: this unit level pin needs no program in reach,
+	// so RecursionMarker falls back to the bare unknown — its own doc on
+	// that fallback (function_summaries.go)
+	marker := RecursionMarker(nil, symbol, nil)
 	dropsBefore := MarkerDropCount()
 
 	joined := JoinSinkSummarized([]abstractdomain.AbstractValue{base, marker})
@@ -66,7 +69,7 @@ func TestJoinSinkSummarized_AMarkerJoinsAsUnknownRatherThanBeingExcluded(t *test
 // new unknown-join line ever runs) and must keep doing so.
 func TestJoinSinkSummarized_AllMarkersStillAnswerResidue(t *testing.T) {
 	symbol := &ast.Symbol{Name: "onlyMarkersTestSymbol"}
-	marker := RecursionMarker(symbol)
+	marker := RecursionMarker(nil, symbol, nil)
 
 	joined := JoinSinkSummarized([]abstractdomain.AbstractValue{marker, marker})
 

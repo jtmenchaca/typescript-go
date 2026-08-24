@@ -86,7 +86,7 @@ const combine = ({ chartData, dataStartIndex, dataEndIndex }: ChartDataState): C
 	arrow := arrowConstNamed(t, p.Entry.Statements.Nodes, "combine")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, arrow)
-	outcome, construct, recorded := SummaryOutcomeOf(arrow)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, arrow)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -171,7 +171,7 @@ export const getAngleOfPoint = ({ x, y }: Coordinate, { cx, cy }: PolarViewBoxRe
 	arrow := arrowConstNamed(t, p.Entry.Statements.Nodes, "getAngleOfPoint")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, arrow)
-	outcome, construct, recorded := SummaryOutcomeOf(arrow)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, arrow)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -213,7 +213,7 @@ func TestSummaryParameterEntries_NestedMemberElementBindsTopEntry(t *testing.T) 
 		t.Errorf("entries[0] = %+v, want numericAxis as an unknown-sorted TOP entry", entries[0])
 	}
 	RelowerSummaryBody(ctx, arrow)
-	outcome, construct, recorded := SummaryOutcomeOf(arrow)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, arrow)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -257,7 +257,7 @@ func TestSummaryParameterEntries_WholeParamDefaultedRecordBindsTopEntries(t *tes
 		}
 	}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}

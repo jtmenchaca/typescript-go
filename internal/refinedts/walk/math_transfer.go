@@ -36,7 +36,7 @@ func transferSign(raw abstractdomain.AbstractValue, hasRaw bool) abstractdomain.
 	disjointZero, disOk2 := callScalarDisjoint(kernel, A, refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0})))
 	disjointAbove, disOk3 := callScalarDisjoint(kernel, A, refinementsets.MakeRefinedSet(refinementsets.Above(0)))
 	if !disOk1 || !disOk2 || !disOk3 {
-		return silence.Residue()
+		return silence.ResidueOf("Math.sign asks the kernel whether the operand's set is disjoint from each of the three rays below/at/above zero — one of those three disjointness questions was declined")
 	}
 	if !disjointBelow {
 		pieces = append(pieces, -1)
@@ -205,6 +205,30 @@ func TransferMathCall(name string, rawArgs []abstractdomain.AbstractValue) (abst
 	return transferred, true
 }
 
+// minMaxKnownOfAnswer reads a TransferOpMin/TransferOpMax answer back:
+// a CLOSED SINGLETON window (lo == hi, neither strict — the same
+// RangeOfSet-plus-equality-check idiom element_access.go's repetition
+// element read already uses) collapses to the exact KnownValues the
+// old all-exact host row served, rather than the KnownSet a wider
+// window needs. KnownOfAnswer's own TransferAnswerSet case always
+// builds a set — this is min/max's own tighter readback, so the
+// kernel-first fold serves exactness at least as well as the host row
+// it replaced, never more loosely.
+func minMaxKnownOfAnswer(answer kernelbridge.TransferAnswer, operandTrustLevel abstractdomain.TrustLevel) abstractdomain.AbstractValue {
+	if answer.Kind == kernelbridge.TransferAnswerSet {
+		if window := RangeOfSet(answer.Set); window != nil && window.Lo == window.Hi &&
+			!window.LoStrict && !window.HiStrict {
+			return abstractdomain.KnownValues(
+				[]float64{window.Lo},
+				abstractdomain.PrimitiveNumber,
+				operandTrustLevel,
+			)
+		}
+		return abstractdomain.KnownSet(answer.Set, nil, operandTrustLevel, abstractdomain.SetKindTagNone)
+	}
+	return KnownOfAnswer(answer)
+}
+
 func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdomain.AbstractValue, bool) {
 	// the LEDGER floor for this call: the weakest operand, further
 	// lowered to "spec" by any host-evaluated or TS-table row below
@@ -287,7 +311,7 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 				), true
 			}
 		}
-		return silence.Residue(), true
+		return silence.ResidueOf("Math.hypot folds √(Σxᵢ²) pairwise through the kernel — the fold needs a kernel and a readable set for every argument, and either was missing here"), true
 	}
 	// atan2(y, x) in the right half-plane through the kernel window
 	if name == "atan2" && len(args) == 2 {
@@ -307,7 +331,7 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 				), true
 			}
 		}
-		return silence.Residue(), true
+		return silence.ResidueOf("Math.atan2's kernel window needs a readable set for both y and x — one operand did not carry one, or no kernel was loaded"), true
 	}
 	// every transferred built-in below is specified NaN-in, NaN-out
 	for _, a := range args {
@@ -324,8 +348,49 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 		if len(args) == 0 || kernel == nil {
 			return silence.Residue(), true
 		}
-		// all-exact operands: the spec's own min/max on the values
-		// (NaN handled by the gate above; -0 by the host's spec rows)
+		// the KERNEL answers first (TransferOpMin/TransferOpMax fold
+		// pairwise, the same fact the all-exact host row below computes
+		// by hand): only where the fold cannot even be POSED — an
+		// operand SetOfKnownForTransfer cannot read — does the local
+		// spec computation on all-exact operands stand in.
+		op := kernelbridge.TransferOpMax
+		if name == "min" {
+			op = kernelbridge.TransferOpMin
+		}
+		held, heldOk := SetOfKnownForTransfer(args[0])
+		if heldOk {
+			// a single argument still collapses to its range, as the old
+			// fold did — posed as a pick against itself
+			if len(args) == 1 {
+				return abstractdomain.AtTrustLevel(
+					minMaxKnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: op, A: held, B: held}), operandTrustLevel),
+					operandTrustLevel,
+				), true
+			}
+			result := silence.Residue()
+			foldOk := true
+			for i := 1; i < len(args); i++ {
+				next, nextOk := SetOfKnownForTransfer(args[i])
+				if !nextOk {
+					foldOk = false
+					break
+				}
+				answer := kernel.Transfer(kernelbridge.TransferQuestion{Op: op, A: held, B: next})
+				if answer.Kind != kernelbridge.TransferAnswerSet {
+					return abstractdomain.AtTrustLevel(KnownOfAnswer(answer), operandTrustLevel), true
+				}
+				held = answer.Set
+				result = minMaxKnownOfAnswer(answer, operandTrustLevel)
+			}
+			if foldOk {
+				return result, true
+			}
+		}
+		// the fold could not be posed for every argument (an operand
+		// SetOfKnownForTransfer cannot read): the REFUSAL fallback —
+		// all-exact operands still answer the spec's own min/max on the
+		// values (NaN handled by the gate above; -0 by the host's spec
+		// rows)
 		allExact := true
 		for _, a := range args {
 			if !(a.Kind == abstractdomain.KindValues && len(a.Values) == 1 &&
@@ -357,36 +422,7 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 				abstractdomain.MinTrustLevel(operandTrustLevel, abstractdomain.TrustSpec), // the host row
 			), true
 		}
-		op := kernelbridge.TransferOpMax
-		if name == "min" {
-			op = kernelbridge.TransferOpMin
-		}
-		held, heldOk := SetOfKnownForTransfer(args[0])
-		if !heldOk {
-			return silence.Residue(), true
-		}
-		// a single argument still collapses to its range, as the old
-		// fold did — posed as a pick against itself
-		if len(args) == 1 {
-			return abstractdomain.AtTrustLevel(
-				KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: op, A: held, B: held})),
-				operandTrustLevel,
-			), true
-		}
-		result := silence.Residue()
-		for i := 1; i < len(args); i++ {
-			next, nextOk := SetOfKnownForTransfer(args[i])
-			if !nextOk {
-				return silence.Residue(), true
-			}
-			answer := kernel.Transfer(kernelbridge.TransferQuestion{Op: op, A: held, B: next})
-			if answer.Kind != kernelbridge.TransferAnswerSet {
-				return abstractdomain.AtTrustLevel(KnownOfAnswer(answer), operandTrustLevel), true
-			}
-			held = answer.Set
-			result = abstractdomain.KnownSet(answer.Set, nil, operandTrustLevel, abstractdomain.SetKindTagNone)
-		}
-		return result, true
+		return silence.Residue(), true
 	case "sign":
 		var arg0 abstractdomain.AbstractValue
 		hasArg0 := len(args) > 0

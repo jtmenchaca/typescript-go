@@ -135,7 +135,7 @@ function getValue(entry: LinkDataItem | undefined): number { return (entry && en
 	declaration := entryEnvFunctionNamed(t, p, "getValue")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 	if !ok {
 		t.Fatalf("getValue declined: outcome=%q construct=%q", outcome, construct)
 	}

@@ -12,7 +12,7 @@ import (
 // when the call left the entry EXACTLY undefined. A parameter's default
 // initializer runs through IteratorBindingInitialization's
 // SingleNameBinding case ("If |Initializer| is present and _v_ is
-// *undefined*, then…" — tmp/ecma262/spec.html:10111), which is the
+// *undefined*, then…" — specifications/javascript/spec.html:10146), which is the
 // exactly-undefined shape, not the either-absent one: a `null` argument
 // must NOT take the default. The branch therefore tests the slot's
 // eqUndef (the kernel's flavored IrTest.eqUndef), and the THEN arm
@@ -129,7 +129,7 @@ func summaryDefaultPrelude(
 			}
 		}
 		// the entry is EXACTLY undefined (IteratorBindingInitialization's
-		// SingleNameBinding case, tmp/ecma262/spec.html:10111) — eqUndef's
+		// SingleNameBinding case, specifications/javascript/spec.html:10146) — eqUndef's
 		// Then arm IS "the value is undefined", so the default sits there;
 		// a null argument falls to the (empty, implicit) else arm untouched,
 		// unlike the old IrTestDefined lowering, which would have wrongly

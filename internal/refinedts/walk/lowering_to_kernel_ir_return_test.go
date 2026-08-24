@@ -283,7 +283,7 @@ func TestLoweringToKernelIR_SankeyGetValueTaskDiagnosis(t *testing.T) {
 // (recordParameterUseOf's wholeRecordUseAt, ir_summary_record_parameter_uses.go).
 // `entry`'s declared type excludes undefined/null, so `entry && X` is
 // always exactly `X` (ToBoolean answers true for every Object,
-// sec-toboolean, tmp/ecma262/spec.html) — the fold lives at
+// sec-toboolean, specifications/javascript/spec.html) — the fold lives at
 // effect_expression.go's `&&` composition (truthyRecordParameterName,
 // ir_guard_truthy_record.go) plus LowerGuard's own constant-fold
 // (ir_guard.go) for the `if`/ternary condition position. See
@@ -298,7 +298,7 @@ func TestLoweringToKernelIR_GetValueWithADefinedHolderTaskDiagnosis(t *testing.T
 		"function h(entry: { value: number }) { return (entry && entry.value) || 0; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	if !ok {
 		t.Fatalf("h's body declined: outcome=%q construct=%q", outcome, construct)
 	}

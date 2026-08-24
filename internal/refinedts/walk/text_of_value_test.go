@@ -1,5 +1,5 @@
 // TextOfKnown's own word-set behavior for the absent kinds, pinned
-// against sec-tostring (tmp/ecma262/spec.html): ToString(undefined) is
+// against sec-tostring (specifications/javascript/spec.html): ToString(undefined) is
 // exactly "undefined" (step 3), ToString(null) is exactly "null" (step
 // 4) — two DIFFERENT exact words, not one two-word set, now that
 // KindUndef and KindNull are split. A KindPossiblyUndefined wrapper's

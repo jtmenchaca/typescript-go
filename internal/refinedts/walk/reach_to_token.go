@@ -165,14 +165,105 @@ func AnalyzeToToken(ctx *FlowContext, env Env, statements []*ast.Node, token *as
 			prefix = append(prefix, s)
 		}
 	}
-	AnalyzeStatements(ctx, env, prefix, nil)
-	ctxHere := ContextAfterStatements(ctx, prefix)
 	holder := statements[index]
 	if writes && holder == StatementOf(token) {
-		AnalyzeStatements(ctxHere, env, []*ast.Node{holder}, nil)
+		// a WRITE position runs its own statement too — walked in the
+		// SAME AnalyzeStatements call as the prefix, not a second one.
+		// A cross-language edge recognized in the prefix (foreign_edge.go's
+		// pendingForeignOverrides) pins its published fact on a LATER
+		// statement in the same list; splitting the walk in two would
+		// start a fresh, empty override map for holder's own walk, and
+		// the fact the prefix just recognized could never reach it — the
+		// exact gap a declaration-name hover (`const level = JSON.parse(stdout)`)
+		// sat behind while `return level` two statements later, walked
+		// under the one shared list, read the fact correctly.
+		//
+		// A name this SAME list still writes AFTER holder (an
+		// accumulator a later loop rewrites, e.g. `let total = 0` ahead
+		// of `for (...) { total += ... }`) makes holder's own value the
+		// wrong answer: the declaration position must serve what a read
+		// placed right after the name's LAST write would serve, not the
+		// initializer alone — the same claim `total`'s post-loop comment
+		// states. So the walk runs the REST of the list too whenever a
+		// later statement still writes this name, and the caller reads
+		// the name's FINAL value back off the resulting env.
+		rest := statements[index+1:]
+		if writesNameLater(rest, token.Text()) {
+			AnalyzeStatements(ctx, env, append(append([]*ast.Node{}, prefix...), statements[index:]...), nil)
+			return true
+		}
+		AnalyzeStatements(ctx, env, append(append([]*ast.Node{}, prefix...), holder), nil)
 		return true
 	}
+	// a READ inside `holder` still needs the SAME loop-and-division
+	// pairing a write position gets: RelationalAccumulationOf
+	// (relational_accumulation.go) only fires when the loop and its
+	// division sit together in the SAME statements slice a list walk
+	// sees (listWalk's own call, analyze_statement.go), because the
+	// relation the kernel carries between them dies at the boundary
+	// between two separate AnalyzeStatements calls. `prefix` above ends
+	// at the loop and excludes holder, so a plain
+	// `AnalyzeStatements(ctx, env, prefix, nil)` walks the loop without
+	// its pairing partner ever joining the same slice — the pairing's
+	// own index+1 bound then never fires, and `total` inside
+	// `holder` (a read of the accumulator sitting in the division
+	// statement itself) is served the loop's OWN, unrelated,
+	// interval-arithmetic answer instead of the kernel's tighter one.
+	//
+	// The fix asks the SAME recognizer listWalk asks, over the SAME
+	// prefix-relative slice, to learn whether holder is the pairing
+	// partner of the statement right before it — never a special-cased
+	// recomputation of what pairs. A yes routes holder into the list
+	// walk (one AnalyzeStatements call, exactly the write branch's own
+	// shape above) so the pairing fires and the token's read comes back
+	// off the resulting env; a no leaves the existing node-level descent
+	// (enterToToken) untouched for every other read.
+	if index > 0 && pairsWithPrecedingLoop(ctx, env, prefix, holder) {
+		AnalyzeStatements(ctx, env, append(append([]*ast.Node{}, prefix...), holder), nil)
+		return true
+	}
+	AnalyzeStatements(ctx, env, prefix, nil)
+	ctxHere := ContextAfterStatements(ctx, prefix)
 	return enterToToken(ctxHere, env, holder, token, writes)
+}
+
+// pairsWithPrecedingLoop is whether `prefix`'s LAST statement and
+// `holder` are the two halves of a recognized accumulate-then-divide
+// pair — the exact test listWalk's own RelationalAccumulationOf call
+// runs at the loop's index, over the SAME entry state: a CLONE of
+// `env` walked through everything in `prefix` before the loop, since
+// RelationalAccumulationOf reads the accumulator's value as it stands
+// right before the loop runs (its EXACT-start gate), not the site's
+// raw entry state. The probe changes nothing the caller has not
+// already decided to walk for real via the routed AnalyzeStatements
+// call above — it runs on the clone alone.
+func pairsWithPrecedingLoop(ctx *FlowContext, env Env, prefix []*ast.Node, holder *ast.Node) bool {
+	if len(prefix) == 0 {
+		return false
+	}
+	probeEnv := env.Clone()
+	loopIndex := len(prefix) - 1
+	AnalyzeStatements(ctx, probeEnv, prefix[:loopIndex], nil)
+	pair := append(append([]*ast.Node{}, prefix...), holder)
+	_, ok := RelationalAccumulationOf(ctx, probeEnv, pair, loopIndex)
+	return ok
+}
+
+// writesNameLater is whether any statement in the list writes `name`
+// directly — a plain text scan, the same one enterCatchClause uses to
+// decide what a try's own text could still have been mid-write on.
+// Over-inclusion (a name a callee writes through a reference this
+// scan cannot see) only costs an extra walk of statements already
+// being walked for other reasons; it never serves a wrong answer.
+func writesNameLater(statements []*ast.Node, name string) bool {
+	written := map[string]struct{}{}
+	for _, statement := range statements {
+		AssignedNamesDirect(statement, written)
+		if _, ok := written[name]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func isLoop(node *ast.Node) bool {

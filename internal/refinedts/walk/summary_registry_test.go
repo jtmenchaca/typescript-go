@@ -28,10 +28,10 @@ func withSummaryBuilder(t *testing.T, builder func(ctx *FlowContext, declaration
 
 func clearSummaryStore() {
 	summaryBlobsMu.Lock()
-	summaryBlobs = map[*ast.Node]summaryBlobEntry{}
-	summaryBuilding = map[*ast.Node]struct{}{}
-	summaryCycled = map[*ast.Node]struct{}{}
-	summarySelfBlobs = map[*ast.Node]kernelbridge.SummaryBlob{}
+	summaryBlobs = map[summaryKey]summaryBlobEntry{}
+	summaryBuilding = map[summaryKey]struct{}{}
+	summaryCycled = map[summaryKey]struct{}{}
+	summarySelfBlobs = map[summaryKey]kernelbridge.SummaryBlob{}
 	summaryBlobsMu.Unlock()
 }
 
@@ -45,8 +45,9 @@ func TestSummaryBlobFor_OneDeclarationBuildsOnceAndIsSharedAcrossAsks(t *testing
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 
 	first, firstOk := SummaryBlobFor(ctx, declaration)
-	// a SECOND check's context asking the same declaration: the store
-	// is keyed by declaration alone, so it must not build again
+	// a SECOND check's context asking the same declaration on the SAME
+	// (nil) checker: the store is keyed by (checker, declaration), so
+	// it must not build again
 	other := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	second, secondOk := SummaryBlobFor(other, declaration)
 

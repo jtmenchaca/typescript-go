@@ -250,7 +250,7 @@ func receiverProvedUntouched(ctx *FlowContext, declaration *ast.Node) bool {
 	// summarized from underneath itself: the memo stores only when the
 	// build finishes, so asking here would lower it a second time
 	// inside itself. The recursive case forgets.
-	if SummaryCycleInFlight(declaration) {
+	if SummaryCycleInFlight(checkerOf(ctx), declaration) {
 		return false
 	}
 	// SummaryReceiverEffects answers a bare false BOTH when the summary
@@ -264,7 +264,7 @@ func receiverProvedUntouched(ctx *FlowContext, declaration *ast.Node) bool {
 	if _, lowered := LowerSummaryBody(ctx, declaration); !lowered {
 		return false
 	}
-	if outcome, _, recorded := SummaryOutcomeOf(declaration); !recorded || outcome != SummaryComplete {
+	if outcome, _, recorded := SummaryOutcomeOf(checkerOf(ctx), declaration); !recorded || outcome != SummaryComplete {
 		return false
 	}
 	// receiverTouched folds both rows the proof needs: a written
@@ -329,7 +329,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		// claim about a with-scoped identifier (not even Infinity/NaN/
 		// undefined, all shadowable properties) survives from here
 		if e.Flags&ast.NodeFlagsInWithStatement != 0 {
-			return silence.Residue()
+			return silence.ResidueOf("a with-scoped read resolves against the scope object at runtime, not the name written here")
 		}
 		if e.Text() == "Infinity" {
 			return abstractdomain.KnownValues([]float64{math.Inf(1)}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
@@ -476,6 +476,19 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	if e.Kind == ast.KindMetaProperty && e.AsMetaProperty().KeywordToken == ast.KindNewKeyword {
 		return abstractdomain.PossiblyUndefined(abstractdomain.HostFunction, abstractdomain.TrustSpec, true, false)
 	}
+	// `import.meta` — the host's own value (ImportMeta: `{ url: string,
+	// … }`), never the program's. Its RESOLVED type is a claim tsc
+	// already states, the same standing a property access or call
+	// result reads through AfterReaders; seeding it here lets a bare
+	// `import.meta` used as a plain value refute at a scalar sink (a
+	// constructed object is never a number) instead of sitting
+	// undetermined for lack of any seed at all.
+	if e.Kind == ast.KindMetaProperty && e.AsMetaProperty().KeywordToken == ast.KindImportKeyword {
+		seeded := silence.AfterReaders(abstractdomain.Unknown, ctx.P.Checker, e, silence.RoleModel)
+		if seeded.Kind != abstractdomain.KindUnknown {
+			return seeded
+		}
+	}
 	if ast.IsVoidExpression(e) {
 		evaluateExpression(ctx, env, e.AsVoidExpression().Expression)
 		return abstractdomain.Undef
@@ -550,7 +563,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 			}
 		}
 		// the delete itself answers a boolean (sec-delete-operator,
-		// tmp/ecma262/spec.html:20533-20550): every completing path
+		// specifications/javascript/spec.html:20569-20590): every completing path
 		// returns true or deleteStatus, and in strict code a false
 		// deleteStatus THROWS instead of returning — so in a module
 		// (always strict) the completed value is exactly true; in a
@@ -565,6 +578,22 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	}
 	if ast.IsObjectLiteralExpression(e) {
 		return EvaluateObjectLiteral(ctx, env, e)
+	}
+	// a JSX element / self-closing element / fragment is never a scalar
+	// (SYNTAX-COVERAGE.md §C) — jsx_expression.go states the one proved
+	// fact (an object, unstated keys) and walks every attribute and
+	// child so their own sinks still fire
+	if e.Kind == ast.KindJsxElement {
+		return EvaluateJsxElement(ctx, env, e)
+	}
+	if e.Kind == ast.KindJsxSelfClosingElement {
+		return EvaluateJsxSelfClosingElement(ctx, env, e)
+	}
+	if e.Kind == ast.KindJsxFragment {
+		return EvaluateJsxFragment(ctx, env, e)
+	}
+	if e.Kind == ast.KindJsxExpression {
+		return EvaluateJsxExpressionContainer(ctx, env, e)
 	}
 	if ast.IsConditionalExpression(e) {
 		return ReadConditional(ctx, env, e)
@@ -595,12 +624,25 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		return EvaluateTaggedTemplate(ctx, env, e)
 	}
 	// `super` in expression position — the receiver of `super.m()`, the
-	// callee of `super(...)`. The base class it names is entered from
-	// outside this walk's own reading, so it holds what any value from
-	// outside holds; the effects of the call it sits under fire at the
-	// call itself, which is why this answers rather than falling
-	// through to a silence that skips them.
+	// callee of `super(...)`, or (rarer) a BARE value read: `super.years
+	// as unknown as Age` names the base method itself, never a call.
+	// The base class it names is entered from outside this walk's own
+	// reading, so a CALLED super still holds what any value from
+	// outside holds — Opaque, so the call's own effects fire at the
+	// call site rather than being skipped. A bare read is not a call:
+	// the base instance's own RESOLVED type at this position is a claim
+	// tsc already checked (the extends clause fixes it exactly),
+	// exactly the same "the type is everything this file determines"
+	// standing AfterReaders already gives a property access or a call
+	// result. Reading it through here (rather than Opaque outright)
+	// lets a bare `super` used as a plain value — never a function, an
+	// object, a number — refute at a scalar sink the way ThisBare's
+	// bare `this` already does through env's held object shape.
 	if e.Kind == ast.KindSuperKeyword {
+		seeded := silence.AfterReaders(abstractdomain.Unknown, ctx.P.Checker, e, silence.RoleModel)
+		if seeded.Kind != abstractdomain.KindUnknown {
+			return seeded
+		}
 		return abstractdomain.Opaque
 	}
 	if read := ReadPropertyAccess(ctx, env, e); read != nil {
@@ -622,9 +664,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 	// as nothing), so the walk's silence becomes the type's statement
 	if ast.IsPropertyAccessExpression(e) || ast.IsElementAccessExpression(e) ||
 		ast.IsNewExpression(e) || ast.IsCallExpression(e) ||
-		ast.IsAwaitExpression(e) || ast.IsTaggedTemplateExpression(e) ||
-		e.Kind == ast.KindJsxElement || e.Kind == ast.KindJsxSelfClosingElement ||
-		e.Kind == ast.KindJsxFragment {
+		ast.IsAwaitExpression(e) || ast.IsTaggedTemplateExpression(e) {
 		seeded := silence.AfterReaders(silence.Residue(), ctx.P.Checker, e, silence.RoleModel)
 		if seeded.Kind != abstractdomain.KindUnknown || seeded.Opaque {
 			return seeded

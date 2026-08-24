@@ -33,7 +33,7 @@ func TestReceiverCalleeCallStatement_DocumentGetElementByIdCompletes(t *testing.
 	`)
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -55,7 +55,7 @@ func TestReceiverCalleeCallStatement_WindowAddEventListenerCompletes(t *testing.
 	`)
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -87,7 +87,7 @@ func TestReceiverCalleeCallStatement_ParameterMethodCallCompletes(t *testing.T) 
 	`)
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -111,7 +111,7 @@ func TestReceiverCalleeCallStatement_ChildrenForEachCompletes(t *testing.T) {
 	`)
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -139,7 +139,7 @@ func TestReceiverCalleeCallStatement_AWritingArgumentDeclines(t *testing.T) {
 	`)
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

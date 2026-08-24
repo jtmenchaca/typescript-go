@@ -1,12 +1,15 @@
 // The runtime depth probe ISSUES.md's wall-crash entry left open: the
 // Lean deciders' recursion was audited structural (no elaboration
 // depth pressure exists in the sequence family), but whether the
-// COMPILED dylib answers at the bridge's own 64-node admission cap
-// (kernelbridge's wireNestingCap) was never measured. This test feeds
-// a genuinely 64-deep right-nested concatenation through the native
-// kernel and pins that the ask ANSWERS — no native stack overflow, no
-// refusal — at exactly the deepest wire the bridge admits. Skipped,
-// never faked, when the dylib is absent.
+// COMPILED dylib answers correctly at real depth was never measured.
+// This test feeds a genuinely 64-deep right-nested concatenation
+// through the native kernel and pins that the ask ANSWERS — no native
+// stack overflow, no refusal — at a depth the bridge used to refuse
+// outright before mkUnion's own canonicalization
+// (refined_sets/automata.lean) made the derivative walk terminate on
+// shapes like this without a wire-nesting admission cap
+// (kernelbridge/wire_nesting_guard.go, removed). Skipped, never
+// faked, when the dylib is absent.
 package walk
 
 import (

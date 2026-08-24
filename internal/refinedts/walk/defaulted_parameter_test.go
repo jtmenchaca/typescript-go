@@ -2,7 +2,7 @@
 // applies it — on an EXACTLY UNDEFINED entry and nowhere else — through
 // an eqUndef branch in the summary's prelude
 // (IteratorBindingInitialization's SingleNameBinding case,
-// tmp/ecma262/spec.html:10111). These bodies previously declined whole
+// specifications/javascript/spec.html:10146). These bodies previously declined whole
 // and determined nothing.
 package walk
 

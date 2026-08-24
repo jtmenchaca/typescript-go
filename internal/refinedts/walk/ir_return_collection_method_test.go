@@ -27,7 +27,7 @@ func TestReturnCollectionMethod_ArrayMapReturnCompletes(t *testing.T) {
 	`)
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -49,7 +49,7 @@ func TestReturnCollectionMethod_ArrayReduceReturnCompletes(t *testing.T) {
 	`)
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -74,7 +74,7 @@ func TestReturnCollectionMethod_MapGetReturnCompletes(t *testing.T) {
 	`)
 	declaration := fieldMapMethodOf(t, p, "get")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

@@ -106,7 +106,7 @@ func TestDestructuredCallDeclaration_SameKeyBindingReadsTheReturnedMember(t *tes
 		t.Fatalf("f's lowering carries no IrStatementCall — the destructured declaration did not even reach the summary call route (stmts=%+v)", lowered.Stmts)
 	}
 	threaded := circleTangencyIndex < len(call.Rets) && call.Rets[circleTangencyIndex] >= 0
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(checkerOf(ctx), fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

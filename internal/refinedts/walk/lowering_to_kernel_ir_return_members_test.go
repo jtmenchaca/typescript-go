@@ -36,7 +36,7 @@ func TestReturnObjectLiteral_UnspellableMemberValueStaysPorous(t *testing.T) {
 	`)
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -68,7 +68,7 @@ func TestReturnObjectLiteral_EveryMemberSpellableStaysComplete(t *testing.T) {
 	`)
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -94,7 +94,7 @@ func TestReturnArrayLiteral_UnspellableElementStaysPorous(t *testing.T) {
 	`)
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -140,7 +140,7 @@ func TestReturnObjectLiteral_UnresolvableCallMemberStaysPorous(t *testing.T) {
 	`)
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -197,12 +197,12 @@ func TestReturnObjectLiteral_ResolvableCallMemberDeterminesAndStaysComplete(t *t
 	if _, blobOk := LowerSummaryBody(ctx, g); !blobOk {
 		t.Fatalf("g's body did not compile a blob — the premise (a servable callee) is gone")
 	}
-	if outcome, construct, _ := SummaryOutcomeOf(g); outcome != SummaryComplete {
+	if outcome, construct, _ := SummaryOutcomeOf(p.Checker, g); outcome != SummaryComplete {
 		t.Fatalf("g: outcome=%q construct=%q, want complete", outcome, construct)
 	}
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(ctx, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

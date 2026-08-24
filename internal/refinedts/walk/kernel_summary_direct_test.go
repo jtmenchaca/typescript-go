@@ -448,10 +448,10 @@ func TestKernelSummaryDirect_ACallArgumentHandOverLowersWithWrittenHavockedLeave
 	ClearSummaryOutcomes()
 	summary, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
-		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("a handed-over record no longer lowers at all (%q / %q) — the hand-over serving is the point", outcome, construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded || outcome != SummaryPorous {
 		t.Errorf("outcome = %q / construct = %q, want porous — g is unresolvable, so the interior call is the honest hole", outcome, construct)
 	}
@@ -476,10 +476,10 @@ func TestKernelSummaryDirect_ADeclaredLeafWriteLowersComplete(t *testing.T) {
 	ClearSummaryOutcomes()
 	summary, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
-		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("a declared-leaf write declined (%q / %q)", outcome, construct)
 	}
-	if outcome, _, recorded := SummaryOutcomeOf(declaration); !recorded || outcome != SummaryComplete {
+	if outcome, _, recorded := SummaryOutcomeOf(nil, declaration); !recorded || outcome != SummaryComplete {
 		t.Errorf("outcome = %q, want complete — every statement lowered", outcome)
 	}
 	row, has := bundleEntryNamed(summary, "p.lo")
@@ -503,7 +503,7 @@ func TestKernelSummaryDirect_AnUndeclaredMemberWriteStillDeclines(t *testing.T) 
 	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); ok {
 		t.Fatalf("an undeclared-member write lowered")
 	}
-	if outcome, construct, _ := SummaryOutcomeOf(declaration); outcome != SummaryDeclined || construct != "a whole-record parameter use" {
+	if outcome, construct, _ := SummaryOutcomeOf(nil, declaration); outcome != SummaryDeclined || construct != "a whole-record parameter use" {
 		t.Errorf("outcome = %q / construct = %q, want the standing refusal", outcome, construct)
 	}
 }
@@ -519,7 +519,7 @@ func TestKernelSummaryDirect_ASpreadOfARecordParameterLowersTheBody(t *testing.T
 	declaration := summaryDeclarationOf(t,
 		"function f(p: { lo: number, hi: number }) { const q = { ...p, lo: 1 }; return p.hi; }")
 	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
-		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("a spread of a record parameter declined (%q / %q) — a spread reads, it does not store", outcome, construct)
 	}
 }
@@ -534,7 +534,7 @@ func TestKernelSummaryDirect_AReturnOfARecordParameterLowersTheBody(t *testing.T
 	declaration := summaryDeclarationOf(t,
 		"function f(p: { lo: number }) { if (p.lo > 0) { return p; } return p; }")
 	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
-		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("a return of a record parameter declined (%q / %q)", outcome, construct)
 	}
 }
@@ -933,7 +933,7 @@ func TestKernelSummaryDirect_ACompleteBodyRecordsComplete(t *testing.T) {
 	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
 		t.Fatalf("a plain arithmetic body declined")
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering is the one place the fate is known")
 	}
@@ -955,7 +955,7 @@ func TestKernelSummaryDirect_ADecliningBodyRecordsTheConstructItRefused(t *testi
 	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); ok {
 		t.Fatalf("a generator body lowered")
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for a declined body")
 	}
@@ -978,7 +978,7 @@ func TestKernelSummaryDirect_ARestParameterLowersAsOneUnknownEntry(t *testing.T)
 	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
 		t.Fatalf("a rest-parameter body declined — one unknown entry spells it")
 	}
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	if outcome != SummaryComplete {
 		t.Errorf("outcome = %q (construct %q), want complete", outcome, construct)
 	}
@@ -995,7 +995,7 @@ func TestKernelSummaryDirect_ABindingPatternParameterLowersAsItsBoundNames(t *te
 	declaration := summaryDeclarationOf(t, "function f({ lo }: { lo: number }) { return lo; }")
 	lowered, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
-		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("a binding-pattern parameter declined (%q / %q) — its bound names are ordinary entries", outcome, construct)
 	}
 	if lowered.ParamCount != 1 {
@@ -1008,7 +1008,7 @@ func TestKernelSummaryDirect_ABindingPatternParameterLowersAsItsBoundNames(t *te
 	if entries[0].Name != "lo" || entries[0].Key != "lo" {
 		t.Errorf("entry = %+v, want name lo filled from member lo", entries[0])
 	}
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	if outcome != SummaryComplete {
 		t.Errorf("outcome = %q (construct %q), want complete", outcome, construct)
 	}
@@ -1023,7 +1023,7 @@ func TestKernelSummaryDirect_ARenamedBindingPatternElementFillsFromItsOwnMember(
 	// BOUND name and the Key names the member the call sites read
 	declaration := summaryDeclarationOf(t, "function f({ lo: low }: { lo: number, hi: number }) { return low; }")
 	if _, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
-		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("a renamed binding-pattern element declined (%q / %q)", outcome, construct)
 	}
 	entries, entriesOk := SummaryParameterEntries(declaration.Parameters()[0])
@@ -1052,7 +1052,7 @@ func TestKernelSummaryDirect_ABindingPatternOverAnArrayMemberTakesATopEntry(t *t
 	declaration := summaryDeclarationOf(t, "function f({ lo }: { lo: number[] }) { return 1; }")
 	lowered, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
-		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("a binding pattern over an array-typed member declined (%q / %q)", outcome, construct)
 	}
 	if lowered.ParamCount != 1 {
@@ -1065,7 +1065,7 @@ func TestKernelSummaryDirect_ABindingPatternOverAnArrayMemberTakesATopEntry(t *t
 	if entries[0].Name != "lo" || entries[0].Key != "" || entries[0].Sort != BindingKindUnknown || entries[0].TypeofTag != TypeofTagNone || !entries[0].TopEntry {
 		t.Errorf("entry = %+v, want name lo, no Key, sort unknown, typeof none, TopEntry true — lo's member expanded to nested leaves with no depth-1 row", entries[0])
 	}
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("array-member binding pattern: outcome=%q construct=%q", outcome, construct)
 }
 
@@ -1197,7 +1197,7 @@ func TestKernelSummaryDirect_TheBundleRowsRideOutOnTheSummaryWithTheirSlotIndice
 	`, "load")
 	summary, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("the body declined at %q", construct)
 	}
 	// one declared parameter, then BOTH this-fields: a is read, and the
@@ -1258,13 +1258,13 @@ func TestKernelSummaryDirect_AnEscapingReceiverDeclinesTheExpansionAndGoesPorous
 	// and the BODY still lowers, porous, naming the escape
 	summary, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("an escaping receiver DECLINED the body at %q — the expansion declines, the body still lowers", construct)
 	}
 	if len(summary.BundleEntries) != 0 {
 		t.Errorf("BundleEntries = %+v, want none — an escaped bundle does not expand", summary.BundleEntries)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -1309,7 +1309,7 @@ func thisEntryProbe(
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	summary, ok := RelowerSummaryBody(ctx, declaration)
 	if !ok {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("the body declined at %q", construct)
 	}
 	states, statesOk := summaryEntryStates(ctx, declaration, summary, argKnowns, receiver)
@@ -1438,7 +1438,7 @@ func TestKernelSummaryDirect_ACompleteBlobDeclinesOnATopRet(t *testing.T) {
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
 		t.Fatalf("the body declined — it should lower whole")
 	}
-	outcome, _, _ := SummaryOutcomeOf(declaration)
+	outcome, _, _ := SummaryOutcomeOf(nil, declaration)
 	if outcome != SummaryComplete {
 		t.Fatalf("outcome = %q, want complete — this case is about what a COMPLETE body does", outcome)
 	}
@@ -1502,7 +1502,7 @@ func TestKernelSummaryDirect_APorousBodyIsNeverCompiledAndNeverServes(t *testing
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
 		t.Fatalf("the body declined — an opaque call havocs, it does not decline")
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded || outcome != SummaryPorous {
 		t.Fatalf("outcome = %q (recorded %v), want porous — the lowering still runs and reports", outcome, recorded)
 	}
@@ -1572,7 +1572,7 @@ func summaryRetExit(
 	t.Helper()
 	summary, ok := LowerSummaryBody(ctx, declaration)
 	if !ok {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("the body declined at %q", construct)
 	}
 	blob, hasBlob := SummaryBlobFor(ctx, declaration)
@@ -1640,10 +1640,10 @@ func TestKernelSummaryDirect_ABodyDeclaringANestedArrowLowersPorouslyAndKeepsIts
 		"function f(n: number) { let s = n + 1; const cb = (x: number) => x + 1; s = s + 1; return s; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("a body declaring a nested arrow declined at %q — the arrow is skipped, not declined", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -1700,10 +1700,10 @@ func TestKernelSummaryDirect_AnArrayBindingPatternLowersWithItsNamesUnknown(t *t
 	}
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("an array binding pattern DECLINED the body at %q — its names are collected, the pattern lowers", construct)
 	}
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	if outcome != SummaryComplete {
 		t.Errorf("outcome = %q (construct %q), want complete — unknown names are what is true of them, not a hole", outcome, construct)
 	}

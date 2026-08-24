@@ -74,7 +74,7 @@ func TestSummaryParameterEntries_AnnotatedBindingPatternArrowArgumentCompletes(t
 	`)
 	arrow := arrowConstNamed(t, p.Entry.Statements.Nodes, "combine")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, arrow)
-	outcome, construct, recorded := SummaryOutcomeOf(arrow)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, arrow)
 	if !ok {
 		t.Fatalf("combine declined to lower (outcome %q, construct %q, recorded %v)", outcome, construct, recorded)
 	}
@@ -115,7 +115,7 @@ func TestSummaryParameterEntries_DefaultedMemberInsideAnnotatedPatternCompletes(
 	`)
 	arrow := arrowConstNamed(t, p.Entry.Statements.Nodes, "combine")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, arrow)
-	outcome, construct, recorded := SummaryOutcomeOf(arrow)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, arrow)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -150,7 +150,7 @@ func TestSummaryParameterEntries_ReduceElementPatternEndToEndCompletes(t *testin
 	`)
 	arrow := arrowConstNamed(t, p.Entry.Statements.Nodes, "calculate")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, arrow)
-	outcome, construct, recorded := SummaryOutcomeOf(arrow)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, arrow)
 	if !ok {
 		t.Fatalf("calculate declined to lower (outcome %q, construct %q, recorded %v)", outcome, construct, recorded)
 	}

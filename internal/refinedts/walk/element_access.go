@@ -8,11 +8,14 @@
 package walk
 
 import (
+	"math"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
@@ -61,6 +64,44 @@ func OpenMapAt(c *checker.Checker, at *ast.Node) bool {
 		return false
 	}
 	return len(c.GetIndexInfosOfType(atType)) > 0
+}
+
+// IndexSignatureValueTypeAt reads the DECLARED value type an index
+// signature on at's type states — `number` in `{ [k: string]: number }`
+// — as an AbstractValue, for a receiver OpenMapAt already found open.
+// This answers a different question than OpenMapAt's own gate: whether
+// a KEY is present is unproven for an open-map type (OpenMapAt's own
+// doctrine, above), but the value an index signature states for
+// WHICHEVER key is present is a fixed fact of the type itself, present
+// or not. false when the type carries no index signature, or the host
+// reader cannot resolve its value type.
+func IndexSignatureValueTypeAt(ctx *FlowContext, at *ast.Node) (abstractdomain.AbstractValue, bool) {
+	if at == nil {
+		return abstractdomain.AbstractValue{}, false
+	}
+	atType := typereading.TypeAtLocation(ctx.P.Checker, at)
+	if atType == nil {
+		return abstractdomain.AbstractValue{}, false
+	}
+	infos := ctx.P.Checker.GetIndexInfosOfType(atType)
+	if len(infos) == 0 {
+		return abstractdomain.AbstractValue{}, false
+	}
+	held, ok := typereading.ReadHostType(ctx.P.Checker, infos[0].ValueType(), at, 0)
+	if !ok {
+		return held, false
+	}
+	// the same TRUST GRADE a plain parameter's own annotation wears
+	// (entry_env.go's InitialStateOfPlainParameter doc): an index
+	// signature's stated value type is READ off the receiver's own
+	// declaration, not proved by any execution or cross-call check —
+	// TrustSpec, never the TrustProved a fresh host-type read
+	// otherwise defaults to. Without this, a bare-ground value type
+	// (`number` in `{ [k: string]: number }`) wraps as an UNGRADED
+	// PossiblyNaN, which CheckPossiblyNaN reads as an unexamined
+	// fallback seed and declines instead of asking the real subset
+	// question against the target set.
+	return abstractdomain.AtTrustLevel(held, abstractdomain.TrustSpec), true
 }
 
 // openMapReceiver reads OpenMapAt for a receiver expression. The parameter
@@ -163,16 +204,26 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 			exactIndex, hasExactIndex = index.Values[0], true
 		}
 		// an array-holes receiver (new Array(n) past the materialization
-		// ceiling): the PRESENT-element set is ∅, so no index — in range
-		// or past it — ever names a present value; the same Undef
-		// machinery the identifier-receiver arm below wears for a
-		// tracked KindArrayHoles (this file's own comment there)
+		// ceiling): the PRESENT-element set is ∅, so no OWN numeric
+		// property is ever found (sec-ordinaryget: [[GetOwnProperty]]
+		// misses, and the read falls to the prototype chain) — this holds
+		// for ANY index whose window is a provably nonnegative integer,
+		// not only a single exact one, so the answer generalizes past the
+		// exact-index case to the whole IndexWindow. A NON-numeric-sorted
+		// index (KindUnknown, a string-shaped set, or anything ToPropertyKey
+		// could stringify to a name like "toString"/"constructor") is a
+		// real collision risk against the inherited Array.prototype/
+		// Object.prototype members — sec-ordinaryget's prototype-chain
+		// step answers THAT member, not undefined — so that case still
+		// declines, naming the hazard rather than assuming Undef.
 		if called.Kind == abstractdomain.KindArrayHoles {
-			if index.Kind == abstractdomain.KindValues && len(index.Values) == 1 {
+			if IndexWindow(index) != nil {
 				out := abstractdomain.Undef
 				return &out
 			}
-			out := silence.Residue()
+			out := silence.ResidueOf("the index into an array-holes receiver isn't provably a " +
+				"nonnegative integer, so it may spell an inherited Array.prototype/Object.prototype " +
+				"member name instead of missing every own property")
 			return &out
 		}
 		if called.Kind == abstractdomain.KindList && hasExactIndex {
@@ -243,7 +294,8 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 				if inner.Kind == abstractdomain.KindList && exactIndex >= 0 && int(exactIndex) < len(inner.Items) {
 					return inner.Items[int(exactIndex)]
 				}
-				return silence.Residue()
+				return silence.ResidueOf("re.exec(s)?.[1] threads the maybe wrapper, " +
+					"but the present side isn't a tracked list, so which element the index names isn't pinned")
 			})
 			if threaded != nil {
 				return threaded
@@ -253,6 +305,32 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 	if ast.IsElementAccessExpression(e) {
 		elem := e.AsElementAccessExpression()
 		if ast.IsIdentifier(elem.Expression) {
+			if _, ok := env.Get(elem.Expression.Text()); !ok {
+				// an identifier receiver env NEVER bound at all — not even
+				// to a reasonless residue — is the ordinary shape a bare
+				// walk-route test gives a function PARAMETER (this package's
+				// helpers that call AnalyzeStatements straight on a
+				// function's body statements, e.g.
+				// compoundAssignFunctionStatements, never call
+				// BindEntryEnv first; the live checker path does bind every
+				// parameter, so this arm is defense in depth there too —
+				// any other route that reaches an element read before its
+				// receiver's own binding statement ran). Every arm below
+				// this whole block assumes SOME tracked value, so none of
+				// them can answer; the one thing still readable off the
+				// unbound name is its OWN declared type, and an open-map
+				// declared type (Record<K, V>, an index signature) is
+				// exactly the same fact the tracked-KindObject arm below
+				// already names — a missing key is not a definite absence,
+				// because the key set is not fixed. Named here so an
+				// untracked open-map parameter gets that reason too,
+				// instead of falling to the terminal unknown with none.
+				if openMapReceiver(ctx, elem.Expression) {
+					out := silence.ResidueOf("the receiver names no fixed key set — an index signature or an " +
+						"incomplete record admits any key at runtime, and the checker never witnessed which")
+					return &out
+				}
+			}
 			if _, ok := env.Get(elem.Expression.Text()); ok {
 				receiver, hasReceiver := env.Get(elem.Expression.Text())
 				if !hasReceiver {
@@ -292,7 +370,8 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 						if hasAt && inner.Kind == abstractdomain.KindList && at >= 0 && int(at) < len(inner.Items) {
 							return inner.Items[int(at)]
 						}
-						return silence.Residue()
+						return silence.ResidueOf("o?.[i] threads the maybe wrapper, but the present " +
+							"side isn't a tracked list at a known index, so which element i names isn't pinned")
 					})
 					if threaded != nil {
 						return threaded
@@ -311,6 +390,15 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 				// and `b[k]` with an exact k ARE the dotted read — both evaluate
 				// to the same Reference (sec-property-accessors)
 				if receiver.Kind == abstractdomain.KindObject {
+					// every member this arm reads off `receiver` below
+					// threads through memberValueGraded (object_key_access.go):
+					// a receiver whose OWN Grade names a checked declaration
+					// (typeGroundOf's AtTrustLevel stamp on a call's return,
+					// e.g.) hands that same floor to the member it reads off
+					// it — `handle["value"]` is the bracketed spelling of the
+					// same read `handle.value` makes, and must carry the
+					// identical grade.
+					//
 					// a STABLE SYMBOL key reads the slot the literal wrote
 					// under the derived #sym: name (object_literal.go /
 					// keyed_slot_reads.go). A missed slot claims NOTHING —
@@ -321,10 +409,11 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 					if elem.QuestionDotToken == nil {
 						if slot, _, stable := stableSymbolSlotOf(ctx.P.Checker, elem.ArgumentExpression); stable {
 							if idx, found := objectKeyIndex(receiver, slot); found {
-								out := receiver.Keys[idx].Value
+								out := memberValueGraded(receiver, receiver.Keys[idx].Value)
 								return &out
 							}
-							out := silence.Residue()
+							out := silence.ResidueOf("the stable symbol slot doesn't match a written key, but " +
+								"two different consts can spell the same registry symbol, so a missed slot doesn't witness a missing key")
 							return &out
 						}
 					}
@@ -347,12 +436,13 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 					// vocabulary owns that spelling, so the read claims
 					// nothing
 					if hasKey && symbolSlotKey(key) {
-						out := silence.Residue()
+						out := silence.ResidueOf("the key spells the #sym: prefix, which names a symbol slot, " +
+							"not a string key — the slot vocabulary owns that spelling, so the read claims nothing")
 						return &out
 					}
 					if hasKey {
 						if idx, ok := objectKeyIndex(receiver, key); ok {
-							out := receiver.Keys[idx].Value
+							out := memberValueGraded(receiver, receiver.Keys[idx].Value)
 							return &out
 						}
 						if receiver.Complete && !openMapReceiver(ctx, elem.Expression) {
@@ -372,7 +462,22 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 							out := abstractdomain.Undef
 							return &out
 						}
-						out := silence.Residue()
+						// the key is absent from the tracked keys AND the
+						// receiver's type carries an index signature: whether
+						// the key is PRESENT at runtime is unproven
+						// (OpenMapAt's own doctrine), but the VALUE the
+						// signature states for whichever key answers is a
+						// fixed fact of the type either way — `number` in
+						// `{ [k: string]: number }`. Reading it here answers
+						// the read with that fact instead of an absence
+						// claim; the assignability layer downstream decides
+						// whether the signature's stated value fits the
+						// target refined set.
+						if valueType, ok := IndexSignatureValueTypeAt(ctx, elem.Expression); ok && valueType.Kind != abstractdomain.KindUnknown {
+							return &valueType
+						}
+						out := silence.ResidueOf("the receiver names no fixed key set — an index signature or an " +
+							"incomplete record admits any key at runtime, and the checker never witnessed which")
 						return &out
 					}
 					// a key that is ONE OF several exact strings reads the
@@ -400,7 +505,7 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 									break
 								}
 								if idx, found := objectKeyIndex(receiver, name); found {
-									member = receiver.Keys[idx].Value
+									member = memberValueGraded(receiver, receiver.Keys[idx].Value)
 								} else if receiver.Complete && !openMapReceiver(ctx, elem.Expression) {
 									switch {
 									case receiver.BareProto:
@@ -425,7 +530,8 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 									abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(joined), abstractdomain.TrustLevelOf(index)))
 								return &out
 							}
-							out := silence.Residue()
+							out := silence.ResidueOf("one of the exact key-set members names a symbol slot or an " +
+								"unnamed key on a receiver with no fixed key set, so the join over the whole set can't be pinned")
 							return &out
 						}
 					}
@@ -466,7 +572,18 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 						out := receiver.Items[int(i)]
 						return &out
 					}
-					out := silence.Residue()
+					// an out-of-bounds (negative or >= length) integer index
+					// into a hole-free KindList reads exactly undefined, the
+					// same answer the KindValues/PrimitiveArray twin below
+					// gives (sec-array-exotic-objects: OrdinaryGet finds no
+					// own property past the end and falls to the prototype
+					// chain). ToPropertyKey of any float64 here is a plain
+					// decimal numeral, never a name that could collide with
+					// an inherited Array.prototype/Object.prototype member —
+					// unlike KindArrayHoles's own non-numeric-index arm, this
+					// index is ALREADY known to be one exact number, so there
+					// is no residual key shape left to be unsure about.
+					out := abstractdomain.Undef
 					return &out
 				}
 				// a RANGED (set-shaped) numeric index into a KindList: the
@@ -523,54 +640,131 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 					}
 				}
 				// an array-holes receiver's element read: the PRESENT-element
-				// set (receiver.ElementSet) is ∅ — nothing is a member of
-				// it, so there is no present value any index could name, in
-				// range or past it, whatever the index's own shape. The read
-				// answers undefined not because the index missed a bound but
-				// because the empty set never has a member to hand back —
-				// the same Undef machinery a plain absent value wears.
+				// set (receiver.ElementSet) is ∅ — no OWN numeric property is
+				// ever found (sec-ordinaryget: [[GetOwnProperty]] misses, and
+				// the read falls to the prototype chain), for ANY index whose
+				// window is a provably nonnegative integer — not only a
+				// single exact one, so the answer generalizes past the
+				// exact-index case to the whole IndexWindow. A NON-numeric-
+				// sorted index (KindUnknown, a string-shaped set, or
+				// anything ToPropertyKey could stringify to a name like
+				// "toString"/"constructor") is a real collision risk against
+				// the inherited Array.prototype/Object.prototype members —
+				// sec-ordinaryget's prototype-chain step answers THAT
+				// member, not undefined — so that case still declines,
+				// naming the hazard rather than assuming Undef.
 				if receiver.Kind == abstractdomain.KindArrayHoles {
-					if index.Kind == abstractdomain.KindValues && len(index.Values) == 1 {
+					if IndexWindow(index) != nil {
 						out := abstractdomain.Undef
 						return &out
 					}
-					out := silence.Residue()
+					out := silence.ResidueOf("the index into an array-holes receiver isn't provably a " +
+						"nonnegative integer, so it may spell an inherited Array.prototype/Object.prototype " +
+						"member name instead of missing every own property")
 					return &out
 				}
-				if receiver.Kind == abstractdomain.KindValues && index.Kind == abstractdomain.KindValues && len(index.Values) == 1 {
+				if receiver.Kind == abstractdomain.KindValues {
 					receiverStringy := primitives.IsStringKind(ctx.P.Checker, elem.Expression) || receiver.KindTag == abstractdomain.PrimitiveString
 					// a string index is a UTF-16 unit position: it names a scalar
-					// only where units and scalars coincide — astral-free tuples
+					// only where units and scalars coincide — astral-free tuples.
+					// This is the receiver's OWN property — true or false before
+					// the index is even looked at — so it is checked ahead of
+					// the exact-index gate below: a SYMBOLIC index (`s[i]` with
+					// i an unconstrained number) into an astral string is exactly
+					// as unsound to determine as an exact one, and naming the
+					// astral hazard is the position's real first blocker, not
+					// the weaker "index isn't exact" the generic fallthrough
+					// would otherwise report.
 					if receiverStringy && !refinementsets.AstralFree(receiver.Values) {
-						out := silence.Residue()
+						out := silence.ResidueOf("the string carries an astral (surrogate-pair) character, " +
+							"so a UTF-16 unit index doesn't name one scalar code point")
 						return &out
 					}
-					i := index.Values[0]
-					if isInteger(i) && i >= 0 && int(i) < len(receiver.Values) {
-						// a string's element is a 1-character STRING
-						kindTag := abstractdomain.PrimitiveNumber
-						if receiverStringy {
-							kindTag = abstractdomain.PrimitiveString
+					if index.Kind == abstractdomain.KindValues && len(index.Values) == 1 {
+						i := index.Values[0]
+						if isInteger(i) && i >= 0 && int(i) < len(receiver.Values) {
+							// a string's element is a 1-character STRING
+							kindTag := abstractdomain.PrimitiveNumber
+							if receiverStringy {
+								kindTag = abstractdomain.PrimitiveString
+							}
+							out := abstractdomain.KnownValues(
+								[]float64{receiver.Values[int(i)]},
+								kindTag,
+								abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(receiver), abstractdomain.TrustLevelOf(index)),
+							)
+							return &out
 						}
-						out := abstractdomain.KnownValues(
-							[]float64{receiver.Values[int(i)]},
-							kindTag,
-							abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(receiver), abstractdomain.TrustLevelOf(index)),
-						)
-						return &out
+						// an integer index past the tuple — negative or beyond
+						// the length — reads exactly undefined: an array's get
+						// past the end (sec-array-exotic-objects), a
+						// TypedArray's invalid integer index
+						// (TypedArrayGetElement), and a string's out-of-range
+						// unit position all answer absence, never a value
+						if isInteger(i) && (receiver.KindTag == abstractdomain.PrimitiveArray || receiverStringy) {
+							out := abstractdomain.Undef
+							return &out
+						}
 					}
-					// an integer index past the tuple — negative or beyond
-					// the length — reads exactly undefined: an array's get
-					// past the end (sec-array-exotic-objects), a
-					// TypedArray's invalid integer index
-					// (TypedArrayGetElement), and a string's out-of-range
-					// unit position all answer absence, never a value
-					if isInteger(i) && (receiver.KindTag == abstractdomain.PrimitiveArray || receiverStringy) {
-						out := abstractdomain.Undef
-						return &out
+					// a WINDOWED index PROVABLY AN INTEGER inside the
+					// tuple's own bounds reads the JOIN of the covered
+					// positions — sec-array-exotic-objects reads one
+					// position per admitted index, so the covered
+					// members' own list is every value the read can
+					// answer. The integrality form is required: a real
+					// index between positions reads absence, which this
+					// answer must not hide.
+					if index.Kind == abstractdomain.KindSet {
+						integerRequired := false
+						for _, f := range index.Set.Forms {
+							if f.Form == refinementsets.FormInteger {
+								integerRequired = true
+								break
+							}
+						}
+						if integerRequired {
+							if bounds, boundsOk := narrowing.BoundsOfKnown(index); boundsOk {
+								lo := int(math.Ceil(bounds.Lo))
+								hi := int(math.Floor(bounds.Hi))
+								if lo >= 0 && hi >= lo && hi < len(receiver.Values) {
+									kindTag := abstractdomain.PrimitiveNumber
+									if receiverStringy {
+										kindTag = abstractdomain.PrimitiveString
+									}
+									out := abstractdomain.KnownValues(
+										append([]float64{}, receiver.Values[lo:hi+1]...),
+										kindTag,
+										abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(receiver), abstractdomain.TrustLevelOf(index)),
+									)
+									return &out
+								}
+							}
+						}
 					}
 				}
-				out := silence.Residue()
+				// an OPEN-MAP receiver that never became a tracked KindObject
+				// at all — the ordinary shape for a plain `Record<K, V>`-typed
+				// parameter with no refinement annotation and no object
+				// literal ever bound to it: ReadDeclaredType's own syntax and
+				// host readers both decline an index-signature type (neither
+				// GetPropertiesOfType nor the type-node reader names any
+				// PROPERTY for an index signature to iterate — read_type.go /
+				// host_type.go), so InitialStateOfPlainParameter falls to
+				// silence.Residue() and the receiver never reaches the
+				// KindObject arm above, which is the only place this file's
+				// OTHER open-map reason already lives. This is that same
+				// fact — a Record's key set is not fixed, so a missing key is
+				// not a definite absence — named for the receiver shape that
+				// arm cannot see, ahead of the generic index-shaped fallback
+				// below, which would otherwise blame the index for a gap that
+				// is really about the receiver's own type.
+				if receiver.Kind == abstractdomain.KindUnknown && !receiver.Opaque && openMapReceiver(ctx, elem.Expression) {
+					out := silence.ResidueOf("the receiver names no fixed key set — an index signature or an " +
+						"incomplete record admits any key at runtime, and the checker never witnessed which")
+					return &out
+				}
+				out := silence.ResidueOf("the index isn't a single exact value against a tracked value set, " +
+					"so which element position it names isn't pinned")
 				return &out
 			}
 		}

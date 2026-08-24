@@ -38,7 +38,7 @@ import (
 // A TAGGED TEMPLATE's are the template object first and the `${…}`
 // substitutions after it, in source order — the tag call's argument
 // list is the list-concatenation of « siteObj » and the substitution
-// values (tmp/ecma262/spec.html
+// values (specifications/javascript/spec.html
 // sec-runtime-semantics-argumentlistevaluation, the
 // `TemplateLiteral : SubstitutionTemplate` and
 // `TemplateLiteral : NoSubstitutionTemplate` alternatives; the note at
@@ -94,7 +94,7 @@ func CalleeExpressionOf(call *ast.Node) *ast.Node {
 // argument for that position, or — for a trailing REST parameter —
 // the exact LIST of the remaining arguments' knowns (the rest
 // parameter is bound to an array of the leftover arguments in order —
-// tmp/ecma262/spec.html sec-functiondeclarationinstantiation).
+// specifications/javascript/spec.html sec-functiondeclarationinstantiation).
 //
 // The positions are the EFFECTIVE ones, so a call spreading an exact
 // source places its parameters and states its rest list the way a call
@@ -108,7 +108,7 @@ func ParameterKnown(parameter *ast.Node, index int, effective EffectiveArguments
 			return effective.Knowns[index]
 		}
 		// a position the call passes no argument for binds exactly
-		// `undefined` (tmp/ecma262/spec.html
+		// `undefined` (specifications/javascript/spec.html
 		// sec-functiondeclarationinstantiation: the argument list is
 		// shorter than the parameter list, and IteratorBindingInitialization
 		// binds the missing positions to undefined). A parameter with a
@@ -246,7 +246,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, effective Ef
 	// a const bound to `f.bind(...)` runs the TARGET function with the
 	// prebound arguments prepended — the bound [[Call]]'s argument list
 	// is the list-concatenation of the prebound arguments and this
-	// call's own (tmp/ecma262/spec.html sec-function.prototype.bind,
+	// call's own (specifications/javascript/spec.html sec-function.prototype.bind,
 	// sec-bound-function-exotic-objects-call-thisargument-argumentslist)
 	var preboundArguments []*ast.Node
 	direct := calleeExpression

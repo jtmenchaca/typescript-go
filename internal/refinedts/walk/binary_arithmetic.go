@@ -8,6 +8,8 @@
 package walk
 
 import (
+	"math"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
@@ -172,6 +174,42 @@ func ReadBinaryArithmetic(ctx *FlowContext, env Env, e *ast.Node, left, right ab
 			})
 		}
 		return silence.Residue()
+	}
+	// BigInt arithmetic is EXACT integer arithmetic — no float
+	// rounding (sec-numeric-types-bigint-add and its ±/× siblings) —
+	// so two exact bigint words answer their exact element-wise
+	// results here, int64 per the port convention; a fold past int64
+	// declines to unknown. `/` and `%` are not read (BigInt::divide
+	// throws on 0n and truncates), so they fall through to the
+	// numeric reading's honest unknown.
+	if left.Kind == abstractdomain.KindBigints && right.Kind == abstractdomain.KindBigints &&
+		(op == OpAdd || op == OpSub || op == OpMul) {
+		values := make([]int64, 0, len(left.BigintValues)*len(right.BigintValues))
+		for _, a := range left.BigintValues {
+			for _, b := range right.BigintValues {
+				var v int64
+				overflowed := false
+				switch op {
+				case OpAdd:
+					v = a + b
+					overflowed = (b > 0 && v < a) || (b < 0 && v > a)
+				case OpSub:
+					v = a - b
+					overflowed = (b < 0 && v < a) || (b > 0 && v > a)
+				case OpMul:
+					v = a * b
+					overflowed = a != 0 && (v/a != b || (a == -1 && b == math.MinInt64))
+				}
+				if overflowed {
+					return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{left, right})
+				}
+				values = append(values, v)
+			}
+		}
+		return abstractdomain.AtTrustLevel(
+			abstractdomain.AbstractValue{Kind: abstractdomain.KindBigints, BigintValues: values},
+			abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(left), abstractdomain.TrustLevelOf(right)),
+		)
 	}
 	// `a - b` under a dominating difference row (same stable places,
 	// by symbol and path): the ordered subtraction — the kernel

@@ -277,7 +277,7 @@ func isSequenceShaped(base refinementsets.RefinedSet) bool {
 	for _, f := range base.Forms {
 		switch f.Form {
 		case refinementsets.FormConcatenation, refinementsets.FormStar,
-			refinementsets.FormRepeat, refinementsets.FormEmptyTuple:
+			refinementsets.FormRepeat, refinementsets.FormEmptyTuple, refinementsets.FormWord:
 			return true
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // approximatedMath is APPROXIMATED_MATH in the TS source: the Math
@@ -43,6 +44,34 @@ func readMathBuiltin(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 	transferred, transferredOk := TransferMathCall(name, spread)
 	if transferredOk && transferred.Kind != abstractdomain.KindUnknown {
 		return &transferred
+	}
+	// Math.min/max(...values) over an UNBOUNDED numeric array: the
+	// spread could not expand (EffectiveArgumentsOf has no count to
+	// place positions at, so `spread` above is one Residue and the
+	// ordinary fold just declined) — even though the call's own answer
+	// IS determined. min/max over any nonempty set of reals, or the
+	// empty-array -Infinity (sec-math.max/min), both lie inside the
+	// whole number ground: the answer is bounded above and below by
+	// nothing tighter than R-bar itself. The claim rests on the
+	// spread's SOURCE array's own declared element type — a checked
+	// `number[]`/`Array<number>`/… — the same GetElementTypeOfArrayType
+	// identity test loop_fixpoint.go's for-of element reading already
+	// uses for the identical claim, so the ground carries the same
+	// TrustLibrary provenance. An EXPANDABLE spread (a literal array,
+	// e.g.) never reaches here: TransferMathCall's own fold above
+	// already answered it exactly, tighter than this ground would.
+	if (name == "min" || name == "max") && len(arguments) == 1 && ast.IsSpreadElement(arguments[0]) {
+		source := arguments[0].AsSpreadElement().Expression
+		if t := typereading.TypeAtLocation(ctx.P.Checker, source); t != nil {
+			if element := ctx.P.Checker.GetElementTypeOfArrayType(t); element != nil &&
+				element == ctx.P.Checker.GetNumberType() {
+				out := abstractdomain.AtTrustLevel(
+					abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.Numbers, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)),
+					abstractdomain.TrustLibrary,
+				)
+				return &out
+			}
+		}
 	}
 	// sqrt over exact values admitting both signs: the nonnegative
 	// roots are spec-exact and the negatives are NaN — the answer is

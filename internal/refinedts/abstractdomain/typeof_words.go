@@ -80,7 +80,7 @@ func setSortOfForms(forms []refinementsets.Refinement) ClaimSort {
 		switch f.Form {
 		case refinementsets.FormConcatenation, refinementsets.FormStar,
 			refinementsets.FormRepeat, refinementsets.FormRepeatWord,
-			refinementsets.FormEmptyTuple:
+			refinementsets.FormEmptyTuple, refinementsets.FormWord:
 			if !meet(ClaimSortString) {
 				return ClaimSortNone
 			}
@@ -168,11 +168,26 @@ func TypeofWordOfKnown(k AbstractValue) string {
 			switch f.Form {
 			case refinementsets.FormConcatenation, refinementsets.FormStar,
 				refinementsets.FormRepeat, refinementsets.FormRepeatWord,
-				refinementsets.FormEmptyTuple:
+				refinementsets.FormEmptyTuple, refinementsets.FormWord:
 				return "string"
 			}
 		}
 		return ""
+	default:
+		return ""
+	}
+}
+
+// ScalarSortWordOfKnown is the plain sort word of a walked value,
+// restricted to the four scalar sorts a hover replaces a no-claim
+// host type with: "number", "string", "boolean", "bigint". ""
+// (TypeofWordOfKnown's own answer for every non-scalar sort, and for
+// a sort it cannot pin) covers object, function, symbol, undefined,
+// and the ambiguous cases TypeofWordOfKnown already refuses.
+func ScalarSortWordOfKnown(k AbstractValue) string {
+	switch TypeofWordOfKnown(k) {
+	case "number", "string", "boolean", "bigint":
+		return TypeofWordOfKnown(k)
 	default:
 		return ""
 	}

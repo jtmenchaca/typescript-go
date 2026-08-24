@@ -222,6 +222,34 @@ func ReturnTypeGround(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractVal
 	return typeGroundOf(ctx, typereading.TypeAtLocation(ctx.P.Checker, e), e)
 }
 
+// DeclaredReturnTypeGround reads the SAME ground ReturnTypeGround does,
+// but off a callee's own DECLARATION rather than a call's resolved
+// type at one call site — the reading RecursionMarker needs: an
+// in-flight recursive call has no settled call-site type yet (the
+// call it names is the very one still being walked), but the callee's
+// own signature is fixed the moment the declaration exists. tsc
+// already checked the body against this signature, so the ground
+// carries the same LIBRARY provenance typeGroundOf stamps on every
+// other reading. Nil wherever the declaration carries no resolvable
+// signature (a destructuring parameter list the checker cannot place,
+// e.g.) or the return type names nothing typeGroundOf can spell —
+// the same "nothing sound to say" nil every other caller of
+// typeGroundOf already answers.
+func DeclaredReturnTypeGround(ctx *FlowContext, declaration *ast.Node) *abstractdomain.AbstractValue {
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil || declaration == nil {
+		return nil
+	}
+	signature := ctx.P.Checker.GetSignatureFromDeclaration(declaration)
+	if signature == nil {
+		return nil
+	}
+	returnType := ctx.P.Checker.GetReturnTypeOfSignature(signature)
+	if returnType == nil {
+		return nil
+	}
+	return typeGroundOf(ctx, returnType, declaration)
+}
+
 // typeGroundOf is ReturnTypeGround's part-walk over an ALREADY-HELD
 // type — the same reading, callable where the type comes from
 // somewhere other than a call's own location (a checked position's
@@ -311,7 +339,13 @@ func typeGroundOf(ctx *FlowContext, t *checker.Type, e *ast.Node) *abstractdomai
 		arms = append(arms, abstractdomain.KnownSet(set, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
 	}
 	if generals["number"] {
-		arms = append(arms, abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.RefinedSet{}, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)))
+		// the whole number ground is R-bar (refinementsets.Numbers, the
+		// -infinity ray) -- never the bare RefinedSet{} zero value, which
+		// is the untyped root that "holds every tuple" of every sort
+		// (refinement_forms.go's OnOneTupleLayer doc) and so cannot answer
+		// a scalar kernel question at all. A `number` return type states a
+		// real, 1-tuple-shaped ground the same way z.number() does.
+		arms = append(arms, abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.Numbers, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)))
 	} else if len(numberWords) > 0 {
 		arms = append(arms, abstractdomain.KnownValues(numberWords, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved))
 	}
@@ -332,7 +366,20 @@ func typeGroundOf(ctx *FlowContext, t *checker.Type, e *ast.Node) *abstractdomai
 	if united.Kind == abstractdomain.KindUnknown {
 		return nil
 	}
-	ground := &united
+	// every ground this function hands back is read from a DECLARATION
+	// tsc already checked — a resolved call/tag return type, or (through
+	// typeGroundOf's other caller, static_type_within.go) a checked
+	// position's static type. That is a claim with provenance, the same
+	// standing unmodeled_call_result.go's opaqueWorn already stamped by
+	// hand at ONE of its call sites (`AtTrustLevel(*ground,
+	// TrustLibrary)`) — moved here so EVERY caller carries it, not only
+	// the one that remembered to ask. Library grade, never proved: the
+	// claim rests on tsc's own checking of the declaration, not on a
+	// kernel-proved derivation from a value this walk actually held.
+	// AtTrustLevel only ever lowers (MinTrustLevel), so a part that
+	// somehow already carried a weaker grade keeps it.
+	graded := abstractdomain.AtTrustLevel(united, abstractdomain.TrustLibrary)
+	ground := &graded
 	if sawAbsent {
 		out := abstractdomain.PossiblyUndefined(*ground, "", false, false)
 		return &out

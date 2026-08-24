@@ -316,7 +316,7 @@ func summaryCycleHavocNamed(context *LoweringContext, call *ast.Node, target int
 	// the in-flight bit is asked FIRST: it is a mutex read of the
 	// registry's building set, where SummaryBlobFor would start a build
 	// for any callee that has none yet
-	if !SummaryCycleInFlight(callee) {
+	if !SummaryCycleInFlight(checkerOf(context.Flow), callee) {
 		return nil, false
 	}
 	// a callee already holding a blob took the call statement above; if

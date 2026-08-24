@@ -260,7 +260,7 @@ func TestAccessorCalls_AnAccessorBodyTouchingThisStillDeclinesAtTheLayout(t *tes
 	if _, lowered := LowerSummaryBody(ctx, getter); lowered {
 		t.Skipf("the layout now admits an accessor's `this` bundle — re-read the weave list's accessor-layout note")
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(getter)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, getter)
 	if !recorded || outcome != SummaryDeclined {
 		t.Fatalf("outcome = %q (recorded %v), want declined — the this-read finds no slot", outcome, recorded)
 	}

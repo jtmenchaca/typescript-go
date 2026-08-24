@@ -293,7 +293,14 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 				if debugInlineEnabled() {
 					debugPrintMeetInputs(call, "RecoverPure", recovered, statedResult)
 				}
-				if statedResult != nil {
+				// a recursion marker is a live sentinel, not an ordinary
+				// unknown: MeetKnown's own KindUnknown arm returns the OTHER
+				// side whole, which would swap the marker for the declared
+				// return ground here — before wornReturnTypeIfUnknown ever
+				// gets to apply its own identity-checked exemption
+				// (this file's doc on that function). The marker rides
+				// through the meet untouched.
+				if statedResult != nil && MarkerKey(recovered) == nil {
 					recovered = abstractdomain.MeetKnown(recovered, *statedResult)
 				}
 				if debugInlineEnabled() {
@@ -320,7 +327,13 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 		if debugInlineEnabled() {
 			debugPrintMeetInputs(call, "InlineContractCall", recovered, statedResult)
 		}
-		if statedResult != nil {
+		// a recursion marker is a live sentinel, not an ordinary unknown:
+		// MeetKnown's own KindUnknown arm returns the OTHER side whole,
+		// which would swap the marker for the declared return ground here
+		// — before wornReturnTypeIfUnknown ever gets to apply its own
+		// identity-checked exemption (this file's doc on that function).
+		// The marker rides through the meet untouched.
+		if statedResult != nil && MarkerKey(recovered) == nil {
 			recovered = abstractdomain.MeetKnown(recovered, *statedResult)
 		}
 		if debugInlineEnabled() {
@@ -403,12 +416,45 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 // instantiation (recharts' useAppSelector<T> handing back
 // `PolarLayout | undefined` at one site and `LayoutType | undefined`
 // at another), so the ground outranks the variable.
+//
+// ResidueReason's lifecycle across this replacement: an incoming
+// unknown may carry a reason (silence.ResidueOf's provenance
+// sentence), and that reason is dropped, not threaded, when a worn
+// ground replaces the value. This is sound rather than lossy because
+// AnnotationOfReturnType and ReturnTypeGround (return_type_ground.go)
+// only ever return nil or an already-determined value built through
+// KnownSet/KnownValues/KindUnionOf/PossiblyUndefined — never
+// KindUnknown or KindVariable (KindUnionOf's own unknown-collapse is
+// caught and turned back to nil by typeGroundOf before it reaches
+// here). So a replacement here never leaves the result at KindUnknown
+// or KindVariable, and check_assignability.go's `known.Kind ==
+// KindUnknown` branch — the only reader of ResidueReason
+// (CheckAssignabilityOfArm, check_assignability.go) — is never
+// reached by a worn value: the reason dies WITH the unknown it
+// described, because that unknown is gone. A result this function
+// leaves untouched (worn stays nil) returns `result` verbatim,
+// carrying its original ResidueReason forward unchanged.
 func wornReturnTypeIfUnknown(ctx *FlowContext, e *ast.Node, result abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	bare := result
 	if bare.Kind == abstractdomain.KindPossiblyUndefined {
 		bare = *bare.Inner
 	}
 	if bare.Kind != abstractdomain.KindUnknown && bare.Kind != abstractdomain.KindVariable {
+		return result
+	}
+	// a RECURSION MARKER is a live sentinel, not an ordinary residue: the
+	// enclosing InlineContractBody's own JoinSinkSummarized recognizes it
+	// by identity (MarkerKey) to name the induction case honestly rather
+	// than joining a determined base case with a stray unknown. Regrounding
+	// it here at the callee's declared return type — the same replacement
+	// this function's own doc reasons is sound for an ordinary residue —
+	// would swap the marker for an indistinguishable ground value BEFORE
+	// the enclosing walk ever sees it, so the recursive branch of
+	// `function loopForever(n) { return loopForever(n); }` silently reads
+	// as a determined `number` rather than the "leans on induction" answer
+	// the outer call is built to give. The marker rides through untouched;
+	// only its NON-marker siblings in the same sink ever needed the ground.
+	if MarkerKey(bare) != nil {
 		return result
 	}
 	if worn := AnnotationOfReturnType(ctx, e); worn != nil {

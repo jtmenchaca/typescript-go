@@ -140,7 +140,8 @@ func readWeakEntrySet(site MethodCallSite, collectionReceiver abstractdomain.Abs
 			evaluateExpression(ctx, env, arguments[1])
 		}
 		refresh(nil, false)
-		out := silence.Residue()
+		out := silence.ResidueOf("the WeakMap/WeakSet key isn't a plain, never-reassigned identifier, " +
+			"so its reference identity can't be tracked")
 		return &out
 	}
 	key := weakEntrySymbol(symbol)
@@ -202,7 +203,8 @@ func readWeakEntryGet(site MethodCallSite, collectionReceiver abstractdomain.Abs
 			out := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, grade)
 			return &out
 		}
-		out := silence.Residue()
+		out := silence.ResidueOf("this key was never seen set, but the record isn't complete — " +
+			"an untracked call could have set this exact key too")
 		return &out
 	}
 	if collectionReceiver.CollectionFlavor != abstractdomain.FlavorMap {
@@ -222,7 +224,8 @@ func readWeakEntryGet(site MethodCallSite, collectionReceiver abstractdomain.Abs
 		out := abstractdomain.AtTrustLevel(abstractdomain.Undef, grade)
 		return &out
 	}
-	out := silence.Residue()
+	out := silence.ResidueOf("this key was never seen set, but the record isn't complete — " +
+		"an untracked call could have set this exact key too")
 	return &out
 }
 
@@ -378,7 +381,8 @@ func readCollectionGetHas(site MethodCallSite) *abstractdomain.AbstractValue {
 					out := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, grade)
 					return &out
 				}
-				out := silence.Residue()
+				out := silence.ResidueOf("this key was never seen set, but the record isn't complete — " +
+					"a miss only answers when every entry is named")
 				return &out
 			}
 			if collectionReceiver.CollectionFlavor == abstractdomain.FlavorMap {
@@ -390,9 +394,17 @@ func readCollectionGetHas(site MethodCallSite) *abstractdomain.AbstractValue {
 					out := abstractdomain.AtTrustLevel(abstractdomain.Undef, grade)
 					return &out
 				}
+				// a `.get` miss on a Map the walk cannot prove complete: an
+				// untracked call could have set this exact key too, the same
+				// incomplete-record reason the `.has` arm above and
+				// readWeakEntryGet's own `.get` arm already name
+				out := silence.ResidueOf("this key was never seen set, but the record isn't complete — " +
+					"a miss only answers when every entry is named")
+				return &out
 			}
 		}
-		out := silence.Residue()
+		out := silence.ResidueOf("the key isn't one primitive exact value, so it isn't a key " +
+			"collectionKey's value-equality reading can compare")
 		return &out
 	}
 	return nil
@@ -476,13 +488,15 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 				// or v, and the old value is not named — the entry stays
 				// unstated and the answer with it
 				refresh(c.Entries, false)
-				out := silence.Residue()
+				out := silence.ResidueOf("getOrInsert's key may already be present, but the old value " +
+					"isn't named, so the entry stays unstated")
 				return &out
 			}
 			// an unreadable key still writes the COLLECTION, not the walk's
 			// knowledge of its class — the entries drop, the record stays
 			refresh(nil, false)
-			out := silence.Residue()
+			out := silence.ResidueOf("getOrInsert's key isn't one primitive exact value, so the " +
+				"collection writes but the inserted-or-held value isn't named")
 			return &out
 		}
 	}
@@ -570,7 +584,8 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 					out := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, grade)
 					return &out
 				}
-				out := silence.Residue()
+				out := silence.ResidueOf("this key was never seen set, but the record isn't complete — " +
+					"an untracked call could have deleted or set this exact key too")
 				return &out
 			}
 		}
@@ -586,7 +601,8 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 		if method == "add" || method == "set" {
 			return &dropped
 		}
-		out := silence.Residue()
+		out := silence.ResidueOf("clear/set/add/delete matched with an argument count the model " +
+			"doesn't recognize, so no write shape applies")
 		return &out
 	}
 	// a Set or Map method on a receiver the walk no longer pins exactly
@@ -617,7 +633,8 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 			// the spec grade riding on the wrapper itself
 			if (receiverTypeName == "Map" || receiverTypeName == "WeakMap") && method == "get" && len(arguments) == 1 {
 				evaluateExpression(ctx, env, arguments[0])
-				out := abstractdomain.PossiblyUndefined(silence.Residue(), abstractdomain.TrustSpec, true, false)
+				out := abstractdomain.PossiblyUndefined(silence.ResidueOf("the receiver's entries aren't pinned "+
+					"(a loop rejoined it), so the held value at this key isn't named"), abstractdomain.TrustSpec, true, false)
 				return &out
 			}
 			if method == "clear" && len(arguments) == 0 {

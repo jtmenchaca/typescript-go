@@ -27,7 +27,7 @@ func TestArrayElementMemberRead_ReturnsTheJoinedMemberAcrossCalls(t *testing.T) 
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -50,7 +50,7 @@ func TestArrayElementMemberRead_TwoMemberBodyBothServe(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -120,7 +120,7 @@ func TestArrayElementMemberRead_ConstFromIndexAliasesTheElement(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -146,7 +146,7 @@ func TestArrayElementMemberRead_ConstFromIndexBothMembersAlias(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -176,7 +176,7 @@ func TestArrayElementMemberRead_HandedOverAliasDeclines(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -202,7 +202,7 @@ func TestArrayElementMemberRead_ReassignedAliasDeclines(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -232,7 +232,7 @@ func TestArrayElementMemberRead_WriteThroughAliasJoinsNeverReplaces(t *testing.T
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	summary, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -272,7 +272,7 @@ func TestArrayElementMemberRead_UndeclaredMemberDeclines(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

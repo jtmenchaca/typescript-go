@@ -74,6 +74,35 @@ func CheckListOrStructured(
 			// item has no contextual position of its own
 			undecided := false
 			for _, item := range known.Items {
+				// a HOLE (Array(n)'s own slot, an elision) reads exactly
+				// undefined (sec-array's own claim, array_construction.go) —
+				// never a member of ANY element window this loop judges
+				// (a numeric, string, or boolean refined set never admits
+				// the absent value). A window that ADDS NOTHING beyond
+				// the element's own host-type ground (plain_sort.go's
+				// AddsNothingSet — `number[]`'s star(Numbers), the same
+				// "restates the sort, narrows nothing" reading
+				// check_assignability.go's KindUnknown arm already gives
+				// unknown knowledge) is tsc's own shape check already
+				// covering this element, and tsc treats a hole as an
+				// element of `number[]` on every run — so a hole against
+				// such a window states nothing NEW here, honestly silent
+				// like the ground-restating check_assignability.go arm.
+				// A window that narrows FURTHER (Age's bounded window,
+				// Label's length-bounded window) states a real bound a
+				// hole never meets — refuted.
+				if item.Kind == abstractdomain.KindUndef {
+					if AddsNothingSet(window.Element) {
+						continue
+					}
+					ctx.Report(assignability.At(
+						node,
+						7001,
+						what+" holds a hole, which reads as undefined — not assignable to type '"+
+							refinementsets.FormatForDiagnostics(window.Element)+"'",
+					))
+					return true
+				}
 				var tuple []float64
 				hasTuple := false
 				if item.Kind == abstractdomain.KindValues &&
@@ -102,6 +131,23 @@ func CheckListOrStructured(
 	if known.Kind == abstractdomain.KindList || known.Kind == abstractdomain.KindCollection ||
 		known.Kind == abstractdomain.KindPromise || known.Kind == abstractdomain.KindDate ||
 		known.Kind == abstractdomain.KindRegex {
+		// a purely SCALAR-stated position (number or boolean words, no
+		// string/array shape among its forms — the same StatesSequence
+		// test checkExactValues runs above) holds no structured value on
+		// any run, the same law CheckHostFunction already states for a
+		// function: no refined set built from scalar words admits a
+		// list, a Map/Set, a promise, a date, or a regex, so the
+		// mismatch is a definite rejection, not an unproven position.
+		if target.Kind == annotations.DeclaredSet && target.KindTag == "" && !StatesSequence(*target.Set) {
+			ctx.Report(assignability.At(
+				node,
+				7001,
+				what+" of type '"+returnKindWords(known)+"' is not assignable to type '"+
+					StatedSetWords(*target.Set, target.Word)+"' — no refined set built from scalar words holds "+
+					returnKindWords(known),
+			))
+			return true
+		}
 		// a nested sequence (or a Map/Set, or a promise) carries
 		// structure the tuple layer cannot formatAt — unproven at a
 		// set-stated position, honestly

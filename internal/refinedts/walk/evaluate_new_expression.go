@@ -101,12 +101,23 @@ func EvaluateNewExpression(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 		return web
 	}
 	// `new` over a constructor with no body in reach builds a value
-	// from outside the file's determination — opaque, like the calls
+	// from outside the file's determination — the same opaque-or-worn
+	// reading unmodeled_call_result.go's opaqueWorn gives an unmodeled
+	// CALL: the constructed instance's own RESOLVED type is a claim tsc
+	// already checked the (bodiless) constructor's signature against,
+	// so a `new UnknownPerson(40).age` read carries that shape (LIBRARY
+	// grade) rather than falling to the bare, structure-blind opaque
+	// that would let `.age` read as unknown instead of the number
+	// ground its declared signature states.
 	if BodilessCallee(ctx, newExpr.Expression) && !CalleeInDefaultLib(ctx, newExpr.Expression) {
 		if newExpr.Arguments != nil {
 			for _, argument := range newExpr.Arguments.Nodes {
 				evaluateExpression(ctx, env, argument)
 			}
+		}
+		if ground := ReturnTypeGround(ctx, e); ground != nil {
+			out := abstractdomain.AtTrustLevel(*ground, abstractdomain.TrustLibrary)
+			return &out
 		}
 		out := abstractdomain.Opaque
 		return &out

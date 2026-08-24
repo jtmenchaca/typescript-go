@@ -22,7 +22,7 @@ func outcomeOf(t *testing.T, declaration *ast.Node) (SummaryOutcome, string) {
 	t.Helper()
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}

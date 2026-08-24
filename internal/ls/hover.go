@@ -50,7 +50,7 @@ func (l *LanguageService) ProvideHover(ctx context.Context, params *lsproto.Hove
 	// lease (acquired and released inside the service seam), so it
 	// never overlaps the quickInfo lease below on the same pool
 	// (hover_refinedts.go)
-	refinementSpelling := l.refinementSpellingAt(ctx, program, file, position)
+	refinementSpelling, refinementSortWord := l.refinementSpellingAt(ctx, program, file, position)
 	c, done := program.GetTypeCheckerForFile(ctx, file)
 	defer done()
 	rangeNode := getNodeForQuickInfo(node)
@@ -75,18 +75,29 @@ func (l *LanguageService) ProvideHover(ctx context.Context, params *lsproto.Hove
 	}
 	// the refinement rides INSIDE the type line — appended after the
 	// host type, or replacing the right-hand side; which one is the
-	// rendering vocabulary's own decision (ReplacesHostType), never
-	// this file's (hover_refinedts.go)
-	quickInfo = spliceRefinementSpelling(quickInfo, refinementSpelling)
+	// rendering vocabulary's own decision (ReplacesHostType), UNLESS
+	// the host states no claim of its own ("any"/"unknown"), the one
+	// case the splice itself decides (hover_refinedts.go). That case
+	// also returns a note: the host's ORIGINAL quickInfo, carried
+	// because the replaced line no longer states it.
+	quickInfo, hostDisagreementNote := spliceRefinementSpelling(quickInfo, refinementSpelling, refinementSortWord)
 	rangeFile := ast.GetSourceFileOfNode(rangeNode)
 	textRange := getRangeOfNode(rangeNode, rangeFile, nil /*endNode*/)
 	hoverRange, hoverFidelity := l.converters.ToLSPRangeForFeature(rangeFile, textRange, spanmap.FeatureHover)
 
 	var content string
 	if contentFormat == lsproto.MarkupKindMarkdown {
-		content = formatQuickInfo(quickInfo) + documentation
+		content = formatQuickInfo(quickInfo)
+		if hostDisagreementNote != "" {
+			content += "*(Note: tsc type is '" + hostDisagreementNote + "')*\n"
+		}
+		content += documentation
 	} else {
-		content = quickInfo + documentation
+		content = quickInfo
+		if hostDisagreementNote != "" {
+			content += "\n(Note: tsc type is '" + hostDisagreementNote + "')"
+		}
+		content += documentation
 	}
 
 	hover := &lsproto.Hover{

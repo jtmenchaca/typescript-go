@@ -19,6 +19,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
@@ -28,6 +29,48 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
+
+// structuralIterableNames: the two structural supertypes an array
+// ALSO satisfies (`Iterable<T>`, `AsyncIterable<T>`), each carrying
+// its element as its one type argument (lib.es2015.iterable.d.ts,
+// lib.es2018.asyncgenerator.d.ts). generatorDeclaredElement
+// (generator_element.go) deliberately excludes these two names from
+// its own set — a function DECLARED to return one may hand back a
+// plain array, and reading that call as an iterator object would
+// discard what the sequence routes already say. Here there is no such
+// risk: this arm runs only after every sequence and iterator-object
+// reading above has already answered nothing, so a bare structural
+// name is read for its element the same way builtinIteratorElementOf
+// (iterator_protocol_models.go) reads MapIterator<T> and kin — first
+// type argument, default-library symbol only.
+var structuralIterableNames = map[string]bool{
+	"Iterable": true, "AsyncIterable": true,
+}
+
+// structuralIterableElementType: the *checker.Type a host type names
+// as its element where the type's own symbol spells Iterable or
+// AsyncIterable — nil where the type is not one of those two
+// structural shapes. A user's own type named Iterable answers
+// nothing: the symbol has to be the default library's, the same
+// standing builtinIteratorElementOf and generatorDeclaredElement both
+// rest on.
+func structuralIterableElementType(c *checker.Checker, t *checker.Type) *checker.Type {
+	symbol := t.Symbol()
+	if symbol == nil || !structuralIterableNames[symbol.Name] {
+		return nil
+	}
+	if !c.SymbolInDefaultLib(symbol) {
+		return nil
+	}
+	if (t.ObjectFlags() & checker.ObjectFlagsReference) == 0 {
+		return nil
+	}
+	arguments := c.GetTypeArguments(t)
+	if len(arguments) == 0 {
+		return nil
+	}
+	return arguments[0]
+}
 
 // LoopAnalyzers mirrors the TS LoopAnalyzers interface — the three
 // callbacks solveLoop needs from its caller (analyze_statement.go)
@@ -408,7 +451,52 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 			if t != nil {
 				if element := ctx.P.Checker.GetElementTypeOfArrayType(t); element != nil &&
 					element == ctx.P.Checker.GetNumberType() {
-					elementKnown = abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.RefinedSet{}, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+					// the ARRAY's own static type is a claim tsc already
+					// checked (a declared/inferred `number[]`, whatever
+					// declaration produced it) — the same standing
+					// return_type_ground.go's typeGroundOf stamps on every
+					// ground it reads from a checked position, so this
+					// ground carries LIBRARY grade too. Without the stamp
+					// CheckPossiblyNaN cannot tell this claim apart from
+					// AfterReaders' own ungraded fallback seed (nan_wrapper.go's
+					// two-case split), and declines a value this walk
+					// determined for real.
+					//
+					// The ground itself is R-bar (refinementsets.Numbers, the
+					// -infinity ray) — never the bare RefinedSet{} zero value,
+					// which is the untyped root that "holds every tuple" of
+					// every sort and so cannot answer a scalar kernel
+					// question at all (return_type_ground.go's number arm
+					// carries the identical fix and doc).
+					elementKnown = abstractdomain.AtTrustLevel(
+						abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.Numbers, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)),
+						abstractdomain.TrustLibrary,
+					)
+				}
+				// the same claim, extended past arrays: a host type whose
+				// own symbol spells `Iterable<T>` or `AsyncIterable<T>` —
+				// the two structural shapes a `for await` stream
+				// annotation states — carries T as its first type
+				// argument, and T is read through the same resolved-type
+				// door every other element read in this tree goes
+				// through. `for await` binds the AWAITED element, and T
+				// here already IS the awaited type (`AsyncIterable<number>`
+				// states its element as `number`, not `Promise<number>`),
+				// so the read needs no further unwrap. A generator's OWN
+				// declared return type is excluded from this reading the
+				// same way generatorDeclaredElement excludes it from its
+				// own set — that route (IterationElement above) already
+				// answered those where it could.
+				if elementKnown.Kind == abstractdomain.KindUnknown {
+					if structural := structuralIterableElementType(ctx.P.Checker, t); structural != nil {
+						if read, ok := typereading.ReadHostType(ctx.P.Checker, structural, forInOf.Expression, 0); ok {
+							// the iterable's own declared type argument is a
+							// claim tsc already checked — library grade, the
+							// same reasoning the array-of-number arm above
+							// now carries
+							elementKnown = abstractdomain.AtTrustLevel(read, abstractdomain.TrustLibrary)
+						}
+					}
 				}
 			}
 		}

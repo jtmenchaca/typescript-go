@@ -7,10 +7,15 @@
 //
 // Two canonical special cases keep their classical shapes: the
 // unconstrained window (0, null) is the star, and the single position
-// (1, 1) is the element itself (a 1-element sequence IS the scalar
-// layer -- this keeps z.string().length(1) a SCALAR set). AsRepetition
-// reads back the shapes Repetition emits -- past and present -- so
-// chained bounds re-derive the element and tighten, never stack.
+// (1, 1) over a CODEPOINT element is the element itself (a
+// 1-character string IS the scalar layer -- this keeps
+// z.string().length(1) a SCALAR set). Every other element at (1, 1)
+// -- a number, an object, any non-codepoint sort -- keeps its
+// Repeat/RepeatWord wrapper: a 1-element ARRAY is [T], never bare T,
+// so z.array(T).min(1).max(1) still carries its element for
+// AsRepetition's readers. AsRepetition reads back the shapes
+// Repetition emits -- past and present -- so chained bounds re-derive
+// the element and tighten, never stack.
 
 package refinementsets
 
@@ -98,7 +103,7 @@ func TightenRepetition(
 	sequenceShaped := false
 	for _, f := range base.Forms {
 		if f.Form == FormStar || f.Form == FormConcatenation || f.Form == FormRepeat ||
-			f.Form == FormRepeatWord || f.Form == FormEmptyTuple {
+			f.Form == FormRepeatWord || f.Form == FormEmptyTuple || f.Form == FormWord {
 			sequenceShaped = true
 			break
 		}
@@ -152,7 +157,18 @@ func Repetition(element RefinedSet, lo int, hi *int) RefinedSet {
 	if lo == 0 && hi == nil {
 		return MakeRefinedSet(Star(element))
 	}
-	if lo == 1 && hi != nil && *hi == 1 {
+	// the (1,1) collapse to the bare element is sound only when the
+	// element IS the codepoint alphabet: a 1-character STRING is
+	// itself a scalar (z.string().length(1) stays the Codepoints set,
+	// unread by AsRepetition -- sequence_measures.go's own
+	// WithinCodepointDoor reads it back). An ARRAY of any other
+	// element (z.array(z.number()).min(1).max(1), a numeric list, an
+	// object array, ...) is never confusable with its bare element --
+	// [T] is a 1-element SEQUENCE, not T -- so it must keep the
+	// Repeat/RepeatWord wrapper every element-consuming route
+	// (destructuring, relational accumulation, AsRepetition callers)
+	// reads back.
+	if lo == 1 && hi != nil && *hi == 1 && IsCharacter(element) {
 		return element
 	}
 	// the counted REPEAT form counts SCALAR elements -- the kernel's

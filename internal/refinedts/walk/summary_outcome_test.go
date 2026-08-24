@@ -33,8 +33,8 @@ func TestSummaryOutcomeRecordsOnce(t *testing.T) {
 	body := outcomeFixture(t)
 	declaration := body()
 
-	RecordSummaryOutcome(declaration, "load", SummaryPorous, "this.httpAdapter")
-	outcome, construct, had := SummaryOutcomeOf(declaration)
+	RecordSummaryOutcome(nil, declaration, "load", SummaryPorous, "this.httpAdapter")
+	outcome, construct, had := SummaryOutcomeOf(nil, declaration)
 	if !had {
 		t.Fatalf("SummaryOutcomeOf answered no record")
 	}
@@ -57,31 +57,31 @@ func TestSummaryOutcomeUpgradesNeverDowngrade(t *testing.T) {
 	// declined → porous → complete: each record says more than the one
 	// before, so each one lands
 	upward := body()
-	RecordSummaryOutcome(upward, "resolve", SummaryDeclined, "for await")
-	RecordSummaryOutcome(upward, "resolve", SummaryPorous, "obj[key]")
-	if outcome, construct, _ := SummaryOutcomeOf(upward); outcome != SummaryPorous || construct != "obj[key]" {
+	RecordSummaryOutcome(nil, upward, "resolve", SummaryDeclined, "for await")
+	RecordSummaryOutcome(nil, upward, "resolve", SummaryPorous, "obj[key]")
+	if outcome, construct, _ := SummaryOutcomeOf(nil, upward); outcome != SummaryPorous || construct != "obj[key]" {
 		t.Errorf("after the porous record: (%q, %q), want (porous, obj[key])", outcome, construct)
 	}
-	RecordSummaryOutcome(upward, "resolve", SummaryComplete, "")
-	if outcome, construct, _ := SummaryOutcomeOf(upward); outcome != SummaryComplete || construct != "" {
+	RecordSummaryOutcome(nil, upward, "resolve", SummaryComplete, "")
+	if outcome, construct, _ := SummaryOutcomeOf(nil, upward); outcome != SummaryComplete || construct != "" {
 		t.Errorf("after the complete record: (%q, %q), want (complete, \"\")", outcome, construct)
 	}
 
 	// complete → porous → declined: each record says LESS, so the
 	// settled answer stands
 	downward := body()
-	RecordSummaryOutcome(downward, "create", SummaryComplete, "")
-	RecordSummaryOutcome(downward, "create", SummaryPorous, "opaque call")
-	RecordSummaryOutcome(downward, "create", SummaryDeclined, "eval")
-	if outcome, construct, _ := SummaryOutcomeOf(downward); outcome != SummaryComplete || construct != "" {
+	RecordSummaryOutcome(nil, downward, "create", SummaryComplete, "")
+	RecordSummaryOutcome(nil, downward, "create", SummaryPorous, "opaque call")
+	RecordSummaryOutcome(nil, downward, "create", SummaryDeclined, "eval")
+	if outcome, construct, _ := SummaryOutcomeOf(nil, downward); outcome != SummaryComplete || construct != "" {
 		t.Errorf("after the downgrade attempts: (%q, %q), want (complete, \"\")", outcome, construct)
 	}
 
 	// a record equal to the one held is not a change either
 	same := body()
-	RecordSummaryOutcome(same, "scan", SummaryPorous, "first")
-	RecordSummaryOutcome(same, "scan", SummaryPorous, "second")
-	if _, construct, _ := SummaryOutcomeOf(same); construct != "first" {
+	RecordSummaryOutcome(nil, same, "scan", SummaryPorous, "first")
+	RecordSummaryOutcome(nil, same, "scan", SummaryPorous, "second")
+	if _, construct, _ := SummaryOutcomeOf(nil, same); construct != "first" {
 		t.Errorf("construct = %q, want the FIRST one recorded", construct)
 	}
 }
@@ -90,13 +90,13 @@ func TestSummaryOutcomeTalliesCountBodies(t *testing.T) {
 	body := outcomeFixture(t)
 
 	first, second, third := body(), body(), body()
-	RecordSummaryOutcome(first, "a", SummaryComplete, "")
-	RecordSummaryOutcome(second, "b", SummaryPorous, "this.container")
-	RecordSummaryOutcome(third, "c", SummaryPorous, "this.container")
-	RecordSummaryOutcome(body(), "d", SummaryDeclined, "for await")
+	RecordSummaryOutcome(nil, first, "a", SummaryComplete, "")
+	RecordSummaryOutcome(nil, second, "b", SummaryPorous, "this.container")
+	RecordSummaryOutcome(nil, third, "c", SummaryPorous, "this.container")
+	RecordSummaryOutcome(nil, body(), "d", SummaryDeclined, "for await")
 
 	// an upgrade moves a body rather than adding one
-	RecordSummaryOutcome(second, "b", SummaryComplete, "")
+	RecordSummaryOutcome(nil, second, "b", SummaryComplete, "")
 
 	complete, porous, declined, constructs := SummaryOutcomeTallies()
 	if complete != 2 || porous != 1 || declined != 1 {
@@ -128,12 +128,12 @@ func TestSummaryOutcomeTalliesCountBodies(t *testing.T) {
 func TestSummaryOutcomeHistogramRanks(t *testing.T) {
 	body := outcomeFixture(t)
 	for range 3 {
-		RecordSummaryOutcome(body(), "x", SummaryPorous, "this.container")
+		RecordSummaryOutcome(nil, body(), "x", SummaryPorous, "this.container")
 	}
 	for range 2 {
-		RecordSummaryOutcome(body(), "y", SummaryPorous, "obj[key]")
+		RecordSummaryOutcome(nil, body(), "y", SummaryPorous, "obj[key]")
 	}
-	RecordSummaryOutcome(body(), "z", SummaryDeclined, "eval")
+	RecordSummaryOutcome(nil, body(), "z", SummaryDeclined, "eval")
 
 	tally := tracing.SummaryOutcomeTally()
 	named := tally.TopConstructs(2)
@@ -154,8 +154,8 @@ func TestSummaryOutcomeHistogramRanks(t *testing.T) {
 func TestSummaryOutcomeIgnoresNothingToRecord(t *testing.T) {
 	body := outcomeFixture(t)
 
-	RecordSummaryOutcome(nil, "nowhere", SummaryComplete, "")
-	RecordSummaryOutcome(body(), "unnamed", SummaryOutcome("guessed"), "")
+	RecordSummaryOutcome(nil, nil, "nowhere", SummaryComplete, "")
+	RecordSummaryOutcome(nil, body(), "unnamed", SummaryOutcome("guessed"), "")
 
 	complete, porous, declined, constructs := SummaryOutcomeTallies()
 	if complete+porous+declined != 0 {
@@ -188,10 +188,10 @@ func TestSummaryOutcomeReportRendersWithNoRecords(t *testing.T) {
 func TestSummaryOutcomeReportNamesConstructs(t *testing.T) {
 	body := outcomeFixture(t)
 	for range 15 {
-		RecordSummaryOutcome(body(), "whole", SummaryComplete, "")
+		RecordSummaryOutcome(nil, body(), "whole", SummaryComplete, "")
 	}
-	RecordSummaryOutcome(body(), "porous1", SummaryPorous, "this.httpAdapter")
-	RecordSummaryOutcome(body(), "porous2", SummaryPorous, "wrapper.instance")
+	RecordSummaryOutcome(nil, body(), "porous1", SummaryPorous, "this.httpAdapter")
+	RecordSummaryOutcome(nil, body(), "porous2", SummaryPorous, "wrapper.instance")
 
 	tally := tracing.SummaryOutcomeTally()
 	line, ok := tracing.SummaryOutcomeLineFor(&tally)

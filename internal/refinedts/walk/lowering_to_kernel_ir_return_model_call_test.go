@@ -44,7 +44,7 @@ func TestLowerReturnStatement_DirectReturnModuleSetHasCompletes(t *testing.T) {
 	`)
 	declaration := entryEnvFunctionNamed(t, p, "isSvgElementPropKey")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -71,7 +71,7 @@ func TestLowerReturnStatement_DirectReturnThisFieldMapHasCompletes(t *testing.T)
 	`)
 	declaration := fieldMapMethodOf(t, p, "has")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -101,7 +101,7 @@ func TestLowerReturnStatement_DirectReturnThisFieldMapGetStillCompletesUnknown(t
 	`)
 	declaration := fieldMapMethodOf(t, p, "get")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

@@ -115,7 +115,7 @@ func HoistCallEffect(context *LoweringContext, call *ast.Node) (kernelbridge.Loo
 	// hoisting is the same rule applySummary already enforces one call
 	// up, moved to where a callee's blob gets EMBEDDED rather than
 	// SERVED.
-	if outcome, _, recorded := SummaryOutcomeOf(callee); !recorded || outcome != SummaryComplete {
+	if outcome, _, recorded := SummaryOutcomeOf(checkerOf(context.Flow), callee); !recorded || outcome != SummaryComplete {
 		return kernelbridge.LoopEffect{}, false
 	}
 	// (2) the ordering gate, asked BEFORE the temp is allocated so a

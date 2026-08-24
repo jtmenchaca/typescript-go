@@ -235,7 +235,7 @@ func receiverWritten(ctx *FlowContext, declaration *ast.Node, contract *Function
 		// doubt direction is written. A declined lowering falls through
 		// to the name list below.
 		if _, lowered := LowerSummaryBody(ctx, contract.Declaration); lowered {
-			if outcome, _, recorded := SummaryOutcomeOf(contract.Declaration); recorded && outcome == SummaryComplete {
+			if outcome, _, recorded := SummaryOutcomeOf(checkerOf(ctx), contract.Declaration); recorded && outcome == SummaryComplete {
 				receiverTouched, _ := SummaryReceiverEffects(ctx, contract.Declaration)
 				return receiverTouched
 			}

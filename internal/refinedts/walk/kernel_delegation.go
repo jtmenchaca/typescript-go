@@ -309,7 +309,12 @@ func sortOfForms(forms []refinementsets.Refinement) BindingKind {
 				refinementsets.FormInteger, refinementsets.FormMultipleOf:
 				scalar = true
 			case refinementsets.FormEmptyTuple, refinementsets.FormConcatenation,
-				refinementsets.FormStar, refinementsets.FormRepeat, refinementsets.FormRepeatWord:
+				refinementsets.FormStar, refinementsets.FormRepeat, refinementsets.FormRepeatWord,
+				refinementsets.FormWord:
+				// a Word leaf only ever spells a literal of two or more
+				// codepoints (StringTuple's own length-1 case keeps the
+				// ambiguous OneOf singleton), so unlike oneOf it pins the
+				// sequence sort unambiguously
 				sequence = true
 			case refinementsets.FormUnion, refinementsets.FormDifference:
 				visit(f.A_.Forms)

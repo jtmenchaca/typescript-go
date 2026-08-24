@@ -12,7 +12,15 @@ func TestLiteralChainsFormatAtAsStringsOnlyThroughTheSortedDoor(t *testing.T) {
 	if _, ok := FormatStringLiteral(MakeRefinedSet(AtLeast(0))); ok {
 		t.Errorf("FormatStringLiteral(atLeast(0)) should fail")
 	}
-	if got := FormatForDiagnostics(StringTuple("US")); got != "85 · 83" {
-		t.Errorf("FormatForDiagnostics(StringTuple(US)) = %q, want %q", got, "85 · 83")
+	// a two-or-more-character literal is now a Word LEAF (StringTuple's
+	// own collapse), not a chain of Concatenation nodes: StringShapeOf
+	// does not read a bare Word (ConcatParts returns it as one
+	// unsplittable part, under the >= 2 parts floor the pattern-chain
+	// reading needs), so FormatForDiagnostics falls to FormatForm's own
+	// FormWord case, which spells the literal as its quoted text -- the
+	// true string, replacing the old per-codepoint "85 · 83" arithmetic
+	// a Concatenation chain used to read as.
+	if got := FormatForDiagnostics(StringTuple("US")); got != `"US"` {
+		t.Errorf("FormatForDiagnostics(StringTuple(US)) = %q, want %q", got, `"US"`)
 	}
 }

@@ -289,7 +289,7 @@ func joinArmCalleeReturnKernelOutcome(t *testing.T, kernel *kernelbridge.Refined
 	ctx.Contracts[makeSymbol] = &FunctionContract{Declaration: make_}
 	contract := &FunctionContract{Declaration: f}
 	KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{exactNumber(t, 7)}, contract)
-	outcome, construct, had := SummaryOutcomeOf(f)
+	outcome, construct, had := SummaryOutcomeOf(p.Checker, f)
 	if !had {
 		t.Fatalf("no outcome recorded for f")
 	}
@@ -560,7 +560,7 @@ func TestObjectSlots_AShorthandOfAnUntrackedNameStillFlattensWithThatLeafReading
 	if _, summarized := KernelSummaryDirect(ctx, []abstractdomain.AbstractValue{exactNumber(t, 7)}, contract); summarized {
 		t.Fatalf("KernelSummaryDirect ok = true — a porous body (the havocked declaration) must not serve")
 	}
-	outcome, _, recorded := SummaryOutcomeOf(declaration)
+	outcome, _, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded || outcome != SummaryPorous {
 		t.Errorf("outcome = %v (recorded %v), want porous — the body lowers with the declaration havocked, never declines whole", outcome, recorded)
 	}

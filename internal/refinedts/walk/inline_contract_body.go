@@ -91,7 +91,10 @@ func SummaryCallReceiver(ctx *FlowContext, env Env, call *ast.Node) abstractdoma
 	if constructed := constructedReceiverValue(ctx, env, receiver); constructed != nil {
 		return *constructed
 	}
-	return silence.Residue()
+	if chained := chainedCallReceiverValue(ctx, env, receiver); chained != nil {
+		return *chained
+	}
+	return silence.ResidueOf("a receiver that runs beyond a gated `new C(...)` construction keeps the residue the caller supplies")
 }
 
 // constructedReceiverValue reads a `new C(...)` RECEIVER —
@@ -129,6 +132,50 @@ func constructedReceiverValue(ctx *FlowContext, env Env, receiver *ast.Node) *ab
 	return EvaluateNewExpression(&silent, env, core)
 }
 
+// chainedCallReceiverValue reads a CALL-RESULT receiver — a builder
+// chain's `makeBuilder().type("x")` feeding `.size(1)` — as the value
+// that call determines, for a callee whose own body PROVABLY writes
+// nothing (Summarize's EffectFree gate, the same proof
+// evaluate_call_expression.go's own RecoverPure branch rests a second
+// read on).
+//
+// The caller's walk already ran this exact call once for its effects
+// (evaluate_call_expression.go's own "a contracted METHOD call reaches
+// here: its receiver expression still runs" pass, right before the
+// argument list) and dropped the value — SummaryCallReceiver used to
+// have nothing left to read the receiver's return through, so a
+// chained builder call's own field/return knowledge never reached the
+// outer call, exactly the gap constructedReceiverValue already closed
+// for `new C(...)`. Re-deriving the value here is sound on the same
+// terms: EffectFree is a PROOF the body writes nothing the caller
+// tracks (function_summaries.go's scanBody), so a second evaluation
+// cannot double a write the first one already made — there is none to
+// double. The re-run is SILENT: whatever the first evaluation had to
+// report is reported already.
+//
+// Nil for a receiver that is not a call, or whose contract does not
+// resolve, or whose body Summarize cannot prove effect-free — the
+// caller's own residue answer stands for all of those, exactly as
+// before this function existed.
+func chainedCallReceiverValue(ctx *FlowContext, env Env, receiver *ast.Node) *abstractdomain.AbstractValue {
+	core := Unwrapped(receiver)
+	if core == nil || !ast.IsCallExpression(core) {
+		return nil
+	}
+	callExpr := core.AsCallExpression()
+	contract := ContractOf(ctx, callExpr.Expression)
+	if contract == nil || contract.Declaration.Body() == nil {
+		return nil
+	}
+	if !Summarize(ctx, *contract).EffectFree {
+		return nil
+	}
+	silent := *ctx
+	silent.Report = func(assignability.RefinementDiagnostic) {}
+	value := EvaluateCallExpression(&silent, env, core)
+	return &value
+}
+
 // readsTwiceWithoutEffect: an argument a second evaluation cannot
 // double — an effect-free chain of names, or a literal (a negated
 // number included).
@@ -156,24 +203,59 @@ func readsTwiceWithoutEffect(argument *ast.Node) bool {
 // method (or get accessor) whose receiver resolves — through
 // SummaryCallReceiver, the same read the kernel-summary route and the
 // memo key already take — to a KindObject the walk actually holds
-// field facts for. A plain function call, a static method, an
-// object-literal method (ObjectLiteralMethodWalkCall's own case,
-// checked first so the two routes never both claim one call), and a
-// receiver SummaryCallReceiver could not read without running it
-// (silence.Residue, Kind != KindObject) all decline — the caller falls
-// through to the ordinary walk-route body walk with no `this` binding,
-// exactly as it did before this route existed.
-func classMethodWalkTarget(declaration *ast.Node, receiver abstractdomain.AbstractValue) bool {
+// field facts for. A plain function call and a static method decline
+// outright; a receiver SummaryCallReceiver could not read without
+// running it (silence.Residue, Kind != KindObject) declines too — the
+// caller falls through to the ordinary walk-route body walk with no
+// `this` binding, exactly as it did before this route existed.
+//
+// An OBJECT-LITERAL method is admitted here too, but only past
+// ObjectLiteralMethodWalkCall's own reach: that route claims a
+// NAME/`this`-rooted receiver (rootOfReceiver) — the shape it can also
+// WRITE BACK through, since the receiver is a caller-tracked env slot.
+// A CALL-ROOTED receiver (`makeBuilder().type("x").size(1)`) names no
+// such slot — ObjectLiteralMethodWalkCall's own objectLiteralMethodWalkTarget
+// declines it, and until this arm existed the two routes' shared
+// exclusivity ("checked first so the two routes never both claim one
+// call") left it on the floor: `this` unbound, `return this.x` reading
+// unknown. ClassMethodWalkCall's own body-walk (bind `this` = receiver,
+// run statements, collect the return) needs nothing class-specific —
+// its write-back block already gates on rootOfReceiver too and skips
+// cleanly for a call-rooted receiver, the same way it does for a
+// `new C(...)`-rooted one. objectLiteralReceiverIsCallRooted is the
+// one-time recognition that keeps this arm from firing where
+// ObjectLiteralMethodWalkCall could (and should) still claim the call.
+func classMethodWalkTarget(callee *ast.Node, declaration *ast.Node, receiver abstractdomain.AbstractValue) bool {
 	if declaration == nil {
 		return false
 	}
 	if !ast.IsMethodDeclaration(declaration) && !ast.IsGetAccessorDeclaration(declaration) && !ast.IsSetAccessorDeclaration(declaration) {
 		return false
 	}
-	if declaration.Parent == nil || !ast.IsClassLike(declaration.Parent) {
+	if receiver.Kind != abstractdomain.KindObject {
 		return false
 	}
-	return receiver.Kind == abstractdomain.KindObject
+	if declaration.Parent != nil && ast.IsClassLike(declaration.Parent) {
+		return true
+	}
+	return declaration.Parent != nil && ast.IsObjectLiteralExpression(declaration.Parent) &&
+		objectLiteralReceiverIsCallRooted(callee)
+}
+
+// objectLiteralReceiverIsCallRooted is whether a property-access
+// callee's receiver expression is a CALL — the one object-literal-method
+// shape ObjectLiteralMethodWalkCall's own rootOfReceiver gate cannot
+// claim (it recognizes only a plain name or `this`). Keeping this
+// check narrow (a call, specifically) rather than "not name/this"
+// keeps every OTHER receiver shape ObjectLiteralMethodWalkCall already
+// declines on (an element access, a parenthesized chain, …) on its
+// existing floor rather than silently rerouting it here too.
+func objectLiteralReceiverIsCallRooted(callee *ast.Node) bool {
+	if callee == nil || !ast.IsPropertyAccessExpression(callee) {
+		return false
+	}
+	receiver := callee.AsPropertyAccessExpression().Expression
+	return ast.IsCallExpression(Unwrapped(receiver))
 }
 
 // ClassMethodWalkCall runs a class instance method's body on the walk
@@ -202,15 +284,15 @@ func classMethodWalkTarget(declaration *ast.Node, receiver abstractdomain.Abstra
 func ClassMethodWalkCall(
 	ctx *FlowContext, env Env, call *ast.Node, contract *FunctionContract, effective EffectiveArguments, receiver abstractdomain.AbstractValue,
 ) (abstractdomain.AbstractValue, bool) {
-	if !classMethodWalkTarget(contract.Declaration, receiver) {
+	callee := CalleeExpressionOf(call)
+	if callee == nil {
+		return abstractdomain.AbstractValue{}, false
+	}
+	if !classMethodWalkTarget(callee, contract.Declaration, receiver) {
 		return abstractdomain.AbstractValue{}, false
 	}
 	body := contract.Declaration.Body()
 	if body == nil || !ast.IsBlock(body) {
-		return abstractdomain.AbstractValue{}, false
-	}
-	callee := CalleeExpressionOf(call)
-	if callee == nil {
 		return abstractdomain.AbstractValue{}, false
 	}
 	// RECURSION GUARD: a method that calls back into itself (through
@@ -231,7 +313,7 @@ func ClassMethodWalkCall(
 		inlining = map[*ast.Symbol]struct{}{}
 	}
 	if _, already := inlining[symbol]; already {
-		return silence.Residue(), true
+		return silence.ResidueOf("a method that calls back into itself re-enters this function with the same symbol marked"), true
 	}
 	inlining[symbol] = struct{}{}
 	defer delete(inlining, symbol)
@@ -305,7 +387,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	tracing.Count("inlineContractCall", 0)
 	body := contract.Declaration.Body()
 	if body == nil {
-		return silence.Residue()
+		return silence.ResidueOf("the contract's declaration has no body to inline")
 	}
 	// the placement seam: one entry per parameter position, values and
 	// nodes from the same construction, for a plain call, a spreading
@@ -389,7 +471,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 			// the recursive call may write the static
 			ForgetPlaceEntriesEnv(env, name)
 		}
-		return RecursionMarker(symbol)
+		return RecursionMarker(ctx, symbol, contract.Declaration)
 	}
 
 	// an OBJECT-LITERAL METHOD call tries its own precise walk-route
@@ -752,8 +834,16 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		summarized = JoinSinkSummarized(sink)
 	}
 	returned := summarized
-	if MarkerKey(summarized) == symbol {
-		returned = silence.Residue()
+	// IsMarkerOf, not MarkerKey(summarized) == symbol: the reverse
+	// scan MarkerKey runs can return ANY symbol whose marker is
+	// structurally `{Kind: KindUnknown}` — every marker ever built,
+	// process-lifetime — so it can name a DIFFERENT recursive
+	// function's symbol as this one's own once more than one exists
+	// in markerBySymbol. IsMarkerOf reads this symbol's own forward
+	// entry directly and is exact regardless of what else the
+	// registry holds (function_summaries.go's doc on both).
+	if IsMarkerOf(summarized, symbol) {
+		returned = silence.ResidueOf("an answer leaning on a recursion induction holds only inside it — never remembered")
 	}
 	// an answer leaning on a recursion induction holds only inside it —
 	// never remembered; everything else replays for identical keys

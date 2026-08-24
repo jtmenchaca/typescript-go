@@ -3,8 +3,16 @@
 // A summary is a slot-program the kernel compiles from a body's IR
 // ONCE. It quantifies over all entries, so it is context-free and
 // shared across every check with no per-check scoping and no
-// fingerprints: the store keys a declaration's blob by the
-// DECLARATION ALONE, under one mutex.
+// fingerprints — but the BUILD that produces it (lowerSummaryBody,
+// buildSummaryBlob's kernel compile) reads through a *checker.Checker,
+// and checkers are worker-exclusive lazy resolvers: two parallel
+// workers' checkers can each be mid-resolution when both ask for the
+// same declaration's blob, so a bare-node key lets whichever worker's
+// checker finishes first win the entry for every later reader, on
+// EITHER checker. The store therefore keys every map below by
+// (checker, declaration), the same discipline
+// typereading/host_type_memo.go and dataflowfacts/syntactic_facts.go's
+// programKey already hold.
 //
 // The build is bottom-up by recursion: lowering a body whose call
 // sites lower as IrStatementCall demands each callee's blob through
@@ -18,8 +26,17 @@ import (
 	"sync/atomic"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 )
+
+// summaryKey is the registry's map key: a summary's content is
+// computed through one worker's checker, so the checker rides beside
+// the declaration in every lookup — see this file's header.
+type summaryKey struct {
+	checker     *checker.Checker
+	declaration *ast.Node
+}
 
 // summaryBlobEntry is one declaration's answer. Ok false is a
 // REMEMBERED decline: a declaration whose body failed to lower, or
@@ -42,55 +59,58 @@ type summaryBlobEntry struct {
 // declarations recurse; summarySelfBlobs is the fixpoint's injection
 // seam.
 //
-// Keyed by declaration ALONE — a summary quantifies over all entries,
-// so it is context-free and shared across every check with no
-// per-check scoping and no fingerprints.
+// Keyed by (checker, declaration) — the compiled content and the
+// in-flight/cycle bits are all a function of the checker that is
+// resolving them, and checkers are worker-exclusive lazy resolvers
+// (this file's header).
 var (
 	summaryBlobsMu  sync.Mutex
-	summaryBlobs    = map[*ast.Node]summaryBlobEntry{}
-	summaryBuilding = map[*ast.Node]struct{}{}
+	summaryBlobs    = map[summaryKey]summaryBlobEntry{}
+	summaryBuilding = map[summaryKey]struct{}{}
 	// summaryCycled: declarations whose own build re-entered
 	// SummaryBlobFor for themselves — the recursive ones. Set by the
 	// cycle arm, read once by the outer build when it finishes so the
 	// fixpoint upgrade is attempted exactly on the bodies that need it.
-	summaryCycled = map[*ast.Node]struct{}{}
+	summaryCycled = map[summaryKey]struct{}{}
 	// summarySelfBlobs: the fixpoint's SELF-CONST override. While a
 	// declaration has an entry here, SummaryBlobFor answers that blob
 	// for it outright — before the store, before the cycle guard — so a
 	// re-lowering of the body lowers its own self-call as a REAL call
 	// statement against a table entry the fixpoint controls, instead of
 	// re-entering the in-flight build. Cleared when the round ends.
-	summarySelfBlobs = map[*ast.Node]kernelbridge.SummaryBlob{}
+	summarySelfBlobs = map[summaryKey]kernelbridge.SummaryBlob{}
 )
 
 // SummaryCycleInFlight answers whether the declaration's own summary
-// build is running right now — a call to it from inside its own
-// lowering is the recursive case. Read under the registry mutex, so a
-// lowering on another goroutine sees a consistent answer.
+// build is running right now, on THIS checker — a call to it from
+// inside its own lowering is the recursive case. Read under the
+// registry mutex, so a lowering on another goroutine sees a
+// consistent answer.
 //
 // The lowering route uses this to lower a cycle call as HAVOC rather
 // than declining the whole body: writing top is sound unconditionally,
 // so a body containing a recursive call still compiles and the
 // recursive declaration itself gets a blob. That havoc tier is the
 // FLOOR; summary_fixpoint.go's certified constant sits on top of it.
-func SummaryCycleInFlight(declaration *ast.Node) bool {
+func SummaryCycleInFlight(c *checker.Checker, declaration *ast.Node) bool {
 	if declaration == nil {
 		return false
 	}
 	summaryBlobsMu.Lock()
 	defer summaryBlobsMu.Unlock()
-	_, building := summaryBuilding[declaration]
+	_, building := summaryBuilding[summaryKey{checker: c, declaration: declaration}]
 	return building
 }
 
 // summaryHitOwnCycle answers whether the declaration's build re-entered
 // itself, clearing the bit — asked once, by the outer build, right
 // after it stores its answer.
-func summaryHitOwnCycle(declaration *ast.Node) bool {
+func summaryHitOwnCycle(c *checker.Checker, declaration *ast.Node) bool {
 	summaryBlobsMu.Lock()
 	defer summaryBlobsMu.Unlock()
-	_, cycled := summaryCycled[declaration]
-	delete(summaryCycled, declaration)
+	key := summaryKey{checker: c, declaration: declaration}
+	_, cycled := summaryCycled[key]
+	delete(summaryCycled, key)
 	return cycled
 }
 
@@ -152,35 +172,39 @@ func waitOutFixpoint() {
 }
 
 // holdSelfBlob installs the fixpoint's self-const override for one
-// declaration and answers the release. While it is held AND the gate is
-// held, summaryBlobForUngated answers that blob for that declaration.
-func holdSelfBlob(declaration *ast.Node, blob kernelbridge.SummaryBlob) func() {
+// declaration on ONE checker and answers the release. While it is held
+// AND the gate is held, summaryBlobForUngated answers that blob for
+// that (checker, declaration).
+func holdSelfBlob(c *checker.Checker, declaration *ast.Node, blob kernelbridge.SummaryBlob) func() {
+	key := summaryKey{checker: c, declaration: declaration}
 	summaryBlobsMu.Lock()
-	previous, had := summarySelfBlobs[declaration]
-	summarySelfBlobs[declaration] = blob
+	previous, had := summarySelfBlobs[key]
+	summarySelfBlobs[key] = blob
 	summaryBlobsMu.Unlock()
 	return func() {
 		summaryBlobsMu.Lock()
 		if had {
-			summarySelfBlobs[declaration] = previous
+			summarySelfBlobs[key] = previous
 		} else {
-			delete(summarySelfBlobs, declaration)
+			delete(summarySelfBlobs, key)
 		}
 		summaryBlobsMu.Unlock()
 	}
 }
 
-// replaceStoredBlob swaps a declaration's stored answer for a certified
-// one, keeping the out-shape the original build assigned: the certified
-// constant answers through the SAME out index the body's ret rides, so
-// every call site that already read the shape stays correct.
-func replaceStoredBlob(declaration *ast.Node, blob kernelbridge.SummaryBlob) {
+// replaceStoredBlob swaps a declaration's stored answer, on ONE
+// checker, for a certified one, keeping the out-shape the original
+// build assigned: the certified constant answers through the SAME out
+// index the body's ret rides, so every call site that already read the
+// shape stays correct.
+func replaceStoredBlob(c *checker.Checker, declaration *ast.Node, blob kernelbridge.SummaryBlob) {
+	key := summaryKey{checker: c, declaration: declaration}
 	summaryBlobsMu.Lock()
-	held, has := summaryBlobs[declaration]
+	held, has := summaryBlobs[key]
 	if has {
 		held.Blob = blob
 		held.Ok = true
-		summaryBlobs[declaration] = held
+		summaryBlobs[key] = held
 	}
 	summaryBlobsMu.Unlock()
 }
@@ -234,26 +258,28 @@ func summaryBlobForUngated(ctx *FlowContext, declaration *ast.Node) (kernelbridg
 	if declaration == nil {
 		return "", false
 	}
+	c := checkerOf(ctx)
+	key := summaryKey{checker: c, declaration: declaration}
 	summaryBlobsMu.Lock()
 	// the self-const override, consulted ONLY while a fixpoint holds the
 	// gate — so the uncertified constant is visible to the fixpoint's own
 	// re-lowering and to nothing else
 	if fixpointGateHeld.Load() {
-		if held, has := summarySelfBlobs[declaration]; has {
+		if held, has := summarySelfBlobs[key]; has {
 			summaryBlobsMu.Unlock()
 			return held, true
 		}
 	}
-	if held, has := summaryBlobs[declaration]; has {
+	if held, has := summaryBlobs[key]; has {
 		summaryBlobsMu.Unlock()
 		return held.Blob, held.Ok
 	}
-	if _, cycling := summaryBuilding[declaration]; cycling {
-		summaryCycled[declaration] = struct{}{}
+	if _, cycling := summaryBuilding[key]; cycling {
+		summaryCycled[key] = struct{}{}
 		summaryBlobsMu.Unlock()
 		return "", false
 	}
-	summaryBuilding[declaration] = struct{}{}
+	summaryBuilding[key] = struct{}{}
 	summaryBlobsMu.Unlock()
 
 	// The build runs OUTSIDE the mutex: lowering a body recursively
@@ -265,8 +291,8 @@ func summaryBlobForUngated(ctx *FlowContext, declaration *ast.Node) (kernelbridg
 	blob, outShape, ok := builder(ctx, declaration)
 
 	summaryBlobsMu.Lock()
-	delete(summaryBuilding, declaration)
-	summaryBlobs[declaration] = summaryBlobEntry{Blob: blob, OutShape: outShape, Ok: ok}
+	delete(summaryBuilding, key)
+	summaryBlobs[key] = summaryBlobEntry{Blob: blob, OutShape: outShape, Ok: ok}
 	summaryBlobsMu.Unlock()
 
 	// the build hit its OWN cycle guard: its self-calls lowered as
@@ -274,9 +300,9 @@ func summaryBlobForUngated(ctx *FlowContext, declaration *ast.Node) (kernelbridg
 	// certified constant. Failure keeps the floor, and the attempt
 	// never runs again for this declaration because the store now holds
 	// an entry the ask above hits first.
-	if ok && summaryHitOwnCycle(declaration) {
+	if ok && summaryHitOwnCycle(c, declaration) {
 		if certified, upgraded := upgradeRecursiveSummary(ctx, declaration); upgraded {
-			replaceStoredBlob(declaration, certified)
+			replaceStoredBlob(c, declaration, certified)
 			return certified, true
 		}
 	}
@@ -301,8 +327,9 @@ func SummaryOutShapeFor(ctx *FlowContext, declaration *ast.Node) (int, bool) {
 	if declaration == nil {
 		return 0, false
 	}
+	key := summaryKey{checker: checkerOf(ctx), declaration: declaration}
 	summaryBlobsMu.Lock()
-	held, has := summaryBlobs[declaration]
+	held, has := summaryBlobs[key]
 	summaryBlobsMu.Unlock()
 	if has {
 		return held.OutShape, held.Ok
@@ -311,7 +338,7 @@ func SummaryOutShapeFor(ctx *FlowContext, declaration *ast.Node) (int, bool) {
 		return 0, false
 	}
 	summaryBlobsMu.Lock()
-	held = summaryBlobs[declaration]
+	held = summaryBlobs[key]
 	summaryBlobsMu.Unlock()
 	return held.OutShape, held.Ok
 }
@@ -340,7 +367,7 @@ func buildSummaryBlob(ctx *FlowContext, declaration *ast.Node) (kernelbridge.Sum
 	//
 	// A porous body whose havoc later disappears is compiled then: the
 	// outcome is recomputed by the lowering, not cached as a verdict.
-	if outcome, _, recorded := SummaryOutcomeOf(declaration); recorded && outcome == SummaryPorous {
+	if outcome, _, recorded := SummaryOutcomeOf(checkerOf(ctx), declaration); recorded && outcome == SummaryPorous {
 		return "", 0, false
 	}
 	// arity is the WHOLE slot count, not the parameter count: the

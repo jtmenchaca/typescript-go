@@ -9,6 +9,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
@@ -238,6 +239,44 @@ func TestCheckWithProgramMarkerOverA7001LineStillSuppresses(t *testing.T) {
 		if d.Code == 7005 {
 			t.Fatalf("the marker is used — no stale 7005 should ride, got %+v", result.Refinements)
 		}
+	}
+}
+
+// TestF3_dead_DeadGuardFires: the F3.dead row's claim — with a flag
+// read as a fixed literal, a guard comparing it against a value it can
+// never equal is dead. A `const` narrowed to the literal "production"
+// compared by === against "development" can never pass; AnalyzeIfStatement
+// (walk/if_statement.go) must fire 7001 with the dead-guard sentence
+// rather than stay silent or fire on the (unreachable) return inside.
+func TestF3_dead_DeadGuardFires(t *testing.T) {
+	if !kernelbridge.KernelArtifactsPresent(kernelbridge.DylibPath) {
+		t.Skip("native kernel dylib not built")
+	}
+	source := "const nodeEnv = \"production\";\n" +
+		"function developmentBranchDead(): number {\n" +
+		"  if (nodeEnv === \"development\") {\n" +
+		"    return -1;\n" +
+		"  }\n" +
+		"  return 0;\n" +
+		"}\n" +
+		"void developmentBranchDead;\n"
+	built, err := ProgramFromSource(source, testSurfaceDir)
+	if err != nil {
+		t.Fatalf("ProgramFromSource: %v", err)
+	}
+	defer built.Done()
+	result, err := CheckWithProgram(context.Background(), built.Program, "/main.ts", []string{SurfacePath})
+	if err != nil {
+		t.Fatalf("CheckWithProgram: %v", err)
+	}
+	sawDeadGuard := false
+	for _, d := range result.Refinements {
+		if d.Code == 7001 && strings.Contains(d.MessageText, "provably false on every run") {
+			sawDeadGuard = true
+		}
+	}
+	if !sawDeadGuard {
+		t.Fatalf("expected a 7001 dead-guard fire on the unreachable === comparison, got %+v", result.Refinements)
 	}
 }
 

@@ -285,7 +285,7 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 	if len(candidates) == 0 {
 		return map[string]abstractdomain.AbstractValue{}
 	}
-	outsideWritten, classEscapes := publicStaticOutsideCensus(className, declaration)
+	outsideWriteNodes, outsidePoisoned, classEscapes := publicStaticOutsideCensus(className, declaration)
 
 	sink := map[string][]*ast.Node{}
 	poisoned := map[string]struct{}{}
@@ -321,20 +321,23 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 		if _, isPoisoned := poisoned[name]; isPoisoned {
 			continue
 		}
-		// an unsealed field with an outside write, or any unsealed field
-		// of a class whose object escapes, keeps NO invariant: module
-		// text can move it and this collection reads only the class's own
-		// text, so the claim would be stale exactly when it matters
+		// an unsealed field of a class whose object escapes, or one an
+		// outside UNSPELLABLE write touches (a compound assign, `++`/
+		// `--`, `delete` — publicStaticOutsideCensus's own poison, the
+		// same "cannot spell what landed" rule scanStaticWrites applies
+		// to in-class text), keeps NO invariant: this collection cannot
+		// state what the field holds, so the claim would be stale
+		// exactly when it matters.
 		if !sealed[name] {
 			if classEscapes {
 				continue
 			}
-			if _, written := outsideWritten[name]; written {
+			if _, isOutsidePoisoned := outsidePoisoned[name]; isOutsidePoisoned {
 				continue
 			}
 		}
 		var result abstractdomain.AbstractValue
-		if unconditional[name] && len(sink[name]) > 0 {
+		if unconditional[name] && len(sink[name]) > 0 && len(outsideWriteNodes[name]) == 0 {
 			// every write sunk for this name sits in the block's own
 			// straight-line statement list — it always runs, in the order
 			// written, so the LAST one is what a read observes after class
@@ -342,7 +345,12 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 			// (sec-runtime-semantics-classdefinitionevaluation), and the
 			// initializer is itself just the first write in that order —
 			// an unconditional later write in the same order replaces it
-			// outright rather than joining with it.
+			// outright rather than joining with it. An OUTSIDE write (module
+			// text elsewhere) is never provably ordered against the class's
+			// own text this way — module text runs whenever its own
+			// enclosing function is called, which class evaluation does not
+			// order — so its presence forces the join branch below even
+			// where the in-class writes alone would qualify for last-write.
 			last := sink[name][len(sink[name])-1]
 			result = evaluateExpression(&silent, NewEnv(), last)
 		} else {
@@ -350,6 +358,18 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 			for _, writeNode := range sink[name] {
 				written := evaluateExpression(&silent, NewEnv(), writeNode)
 				joined = abstractdomain.JoinKnown(joined, written)
+			}
+			// an unsealed field's SPELLABLE outside write (a plain
+			// `ClassName.field = v` in module text this file can see) joins
+			// in the same way an in-class write does: module text can run
+			// this write at any point some enclosing function is called, so
+			// a read anywhere — including the class's OWN text — must admit
+			// it too, never just the class-text value alone.
+			if !sealed[name] {
+				for _, writeNode := range outsideWriteNodes[name] {
+					written := evaluateExpression(&silent, NewEnv(), writeNode)
+					joined = abstractdomain.JoinKnown(joined, written)
+				}
 			}
 			result = joined
 		}
@@ -368,36 +388,42 @@ func computeStaticFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[s
 
 // publicStaticOutsideCensus walks the class's SOURCE FILE outside the
 // class declaration for what module text does with the class object:
-// which static fields it WRITES through the class name (a plain or
-// compound assignment, `++`/`--`, `delete`), and whether the class
-// object ESCAPES — any mention of the name that is not the receiver of
-// a property access hands the object somewhere this census cannot
-// follow (an alias, an argument, an export list), after which any
-// unsealed field may be written under a name the file never spells.
-func publicStaticOutsideCensus(className string, classDeclaration *ast.Node) (written map[string]struct{}, escapes bool) {
-	written = map[string]struct{}{}
+// which static fields it WRITES through the class name — a PLAIN
+// assignment's own right-hand side sinks into writeNodes, spellable
+// the same way an in-class write is (computeStaticFieldInvariants
+// joins it into the invariant rather than dropping the field
+// outright); a compound assignment, `++`/`--`, or `delete` poisons the
+// name instead, since the written value depends on whatever the field
+// held BEFORE this write — a claim this census cannot spell, the same
+// "unspellable write" rule scanStaticWrites already applies to
+// in-class text. `escapes` says whether the class object is handed
+// somewhere this census cannot follow (an alias, an argument, an
+// export list), after which any unsealed field may be written under a
+// name the file never spells.
+func publicStaticOutsideCensus(className string, classDeclaration *ast.Node) (writeNodes map[string][]*ast.Node, poisoned map[string]struct{}, escapes bool) {
+	writeNodes = map[string][]*ast.Node{}
+	poisoned = map[string]struct{}{}
 	if className == "" {
-		return written, true
+		return writeNodes, poisoned, true
 	}
 	file := ast.GetSourceFileOfNode(classDeclaration)
 	if file == nil {
-		return written, true
+		return writeNodes, poisoned, true
 	}
-	noteTarget := func(target *ast.Node) bool {
+	fieldNameOfTarget := func(target *ast.Node) (string, bool) {
 		target = Unwrapped(target)
 		if target == nil || !ast.IsPropertyAccessExpression(target) {
-			return false
+			return "", false
 		}
 		access := target.AsPropertyAccessExpression()
 		receiver := Unwrapped(access.Expression)
 		if receiver == nil || !ast.IsIdentifier(receiver) || receiver.Text() != className {
-			return false
+			return "", false
 		}
 		if field := access.Name(); field != nil && (ast.IsIdentifier(field) || ast.IsPrivateIdentifier(field)) {
-			written[field.Text()] = struct{}{}
-			return true
+			return field.Text(), true
 		}
-		return false
+		return "", false
 	}
 	var visit func(node *ast.Node) bool
 	visit = func(node *ast.Node) bool {
@@ -407,8 +433,16 @@ func publicStaticOutsideCensus(className string, classDeclaration *ast.Node) (wr
 		if ast.IsBinaryExpression(node) {
 			be := node.AsBinaryExpression()
 			op := be.OperatorToken.Kind
-			if op >= ast.KindFirstAssignment && op <= ast.KindLastAssignment {
-				if noteTarget(be.Left) {
+			if op == ast.KindEqualsToken {
+				if name, ok := fieldNameOfTarget(be.Left); ok {
+					writeNodes[name] = append(writeNodes[name], be.Right)
+					be.Right.ForEachChild(visit)
+					visit(be.Right)
+					return false
+				}
+			} else if op >= ast.KindFirstAssignment && op <= ast.KindLastAssignment {
+				if name, ok := fieldNameOfTarget(be.Left); ok {
+					poisoned[name] = struct{}{}
 					be.Right.ForEachChild(visit)
 					visit(be.Right)
 					return false
@@ -416,19 +450,23 @@ func publicStaticOutsideCensus(className string, classDeclaration *ast.Node) (wr
 			}
 		}
 		if ast.IsPostfixUnaryExpression(node) {
-			if noteTarget(node.AsPostfixUnaryExpression().Operand) {
+			if name, ok := fieldNameOfTarget(node.AsPostfixUnaryExpression().Operand); ok {
+				poisoned[name] = struct{}{}
 				return false
 			}
 		}
 		if ast.IsPrefixUnaryExpression(node) {
 			operator := node.AsPrefixUnaryExpression().Operator
-			if (operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken) &&
-				noteTarget(node.AsPrefixUnaryExpression().Operand) {
-				return false
+			if operator == ast.KindPlusPlusToken || operator == ast.KindMinusMinusToken {
+				if name, ok := fieldNameOfTarget(node.AsPrefixUnaryExpression().Operand); ok {
+					poisoned[name] = struct{}{}
+					return false
+				}
 			}
 		}
 		if ast.IsDeleteExpression(node) {
-			if noteTarget(node.AsDeleteExpression().Expression) {
+			if name, ok := fieldNameOfTarget(node.AsDeleteExpression().Expression); ok {
+				poisoned[name] = struct{}{}
 				return false
 			}
 		}
@@ -449,7 +487,7 @@ func publicStaticOutsideCensus(className string, classDeclaration *ast.Node) (wr
 		return false
 	}
 	file.AsNode().ForEachChild(visit)
-	return written, escapes
+	return writeNodes, poisoned, escapes
 }
 
 // ReadStaticFieldAccess reads `ClassName.field` through the class's

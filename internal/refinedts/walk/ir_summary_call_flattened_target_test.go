@@ -43,7 +43,7 @@ func TestImportedHookFlattenedDeclarationStatement_PolarToCartesianCompletesTheB
 			"}\n")
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -71,7 +71,7 @@ func TestImportedHookFlattenedDeclarationStatement_AWritingArgumentDeclines(t *t
 			"}\n")
 	fn := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, fn)
-	outcome, construct, recorded := SummaryOutcomeOf(fn)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, fn)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

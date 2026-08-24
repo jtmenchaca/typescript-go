@@ -111,11 +111,15 @@ type BundleEntry struct {
 }
 
 // kernelSummariesMu guards kernelSummaries: the LOWERED body per
-// declaration. Keyed by declaration alone, matching the registry
-// above it: the lowering no longer takes the call's argument sorts,
-// so one declaration has exactly one lowering. An entry with Ok
-// false remembers a body that declined (the TS source's Map value of
-// `null`, distinguished from "no entry yet" the same way
+// declaration. Keyed by (checker, declaration), matching the registry
+// above it: the lowering reads the declaration's own parameter type
+// annotations THROUGH a checker, and checkers are worker-exclusive
+// lazy resolvers, so a bare-node key would let whichever worker's
+// checker lowers first win the entry for every later reader on any
+// checker (this package's summary_registry.go carries the same key
+// shape, for the same reason). An entry with Ok false remembers a
+// body that declined (the TS source's Map value of `null`,
+// distinguished from "no entry yet" the same way
 // class_field_invariants.go's invariantMemoSet distinguishes
 // re-entry from "no answer computed").
 type summaryEntry struct {
@@ -125,7 +129,7 @@ type summaryEntry struct {
 
 var (
 	kernelSummariesMu sync.Mutex
-	kernelSummaries   = map[*ast.Node]summaryEntry{}
+	kernelSummaries   = map[summaryKey]summaryEntry{}
 )
 
 // absentState is ABSENT in the TS source: the definitely-undefined
@@ -307,15 +311,16 @@ func declaredParamTypeof(parameter *ast.Node) TypeofTag {
 // (SummaryBlobFor), and that recursion is what puts the table in
 // bottom-up order.
 func LowerSummaryBody(ctx *FlowContext, declaration *ast.Node) (LoweredSummary, bool) {
+	key := summaryKey{checker: checkerOf(ctx), declaration: declaration}
 	kernelSummariesMu.Lock()
-	held, has := kernelSummaries[declaration]
+	held, has := kernelSummaries[key]
 	kernelSummariesMu.Unlock()
 	if has {
 		return held.Summary, held.Ok
 	}
 	summary, ok := lowerSummaryBody(ctx, declaration)
 	kernelSummariesMu.Lock()
-	kernelSummaries[declaration] = summaryEntry{Summary: summary, Ok: ok}
+	kernelSummaries[key] = summaryEntry{Summary: summary, Ok: ok}
 	kernelSummariesMu.Unlock()
 	return summary, ok
 }
@@ -507,7 +512,7 @@ func applySummary(
 	// 2026-08-13) to widen the downstream sets until the call-site join
 	// machinery burned 14x the file's whole former wall. Porous blobs
 	// still count coverage; they no longer answer calls.
-	outcome, _, recorded := SummaryOutcomeOf(declaration)
+	outcome, _, recorded := SummaryOutcomeOf(checkerOf(ctx), declaration)
 	if !recorded || outcome != SummaryComplete {
 		return abstractdomain.AbstractValue{}, false
 	}
@@ -795,7 +800,7 @@ func SummaryWrittenThisExits(
 	if !lowered || summary.ReturnsReceiver {
 		return nil, false
 	}
-	if outcome, _, recorded := SummaryOutcomeOf(declaration); !recorded || outcome != SummaryComplete {
+	if outcome, _, recorded := SummaryOutcomeOf(checkerOf(ctx), declaration); !recorded || outcome != SummaryComplete {
 		return nil, false
 	}
 	blob, hasBlob := SummaryBlobFor(ctx, declaration)

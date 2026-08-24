@@ -12,8 +12,21 @@ func TestRepetitionBuildsBoundedRepetition(t *testing.T) {
 	if got := Repetition(E, 0, nil).Forms[0].Form; got != FormStar {
 		t.Errorf("Repetition(E,0,nil).Forms[0].Form = %v, want star", got)
 	}
-	if got := Repetition(E, 1, intPtr(1)); !reflect.DeepEqual(got, E) {
-		t.Errorf("Repetition(E,1,1) = %+v, want %+v", got, E)
+	// a NON-codepoint element (E here -- integers in {1,2}, the shape
+	// z.array(z.number()...) elements take) never collapses at (1,1):
+	// a 1-element ARRAY is [E], never bare E, so every window keeps
+	// its Repeat wrapper -- only Codepoints collapses (below).
+	if got := Repetition(E, 1, intPtr(1)).Forms[0].Form; got != FormRepeat {
+		t.Errorf("Repetition(E,1,1).Forms[0].Form = %v, want repeat", got)
+	}
+	if rep, ok := AsRepetition(Repetition(E, 1, intPtr(1))); !ok || rep.Lo != 1 || rep.Hi == nil || *rep.Hi != 1 || !reflect.DeepEqual(rep.Element, E) {
+		t.Errorf("AsRepetition(Repetition(E,1,1)) = %+v (ok=%v), want element %+v, lo=1, hi=1", rep, ok, E)
+	}
+	// a CODEPOINT element DOES collapse at (1,1): a 1-character
+	// string is itself a scalar (z.string().length(1) stays the
+	// Codepoints set).
+	if got := Repetition(Codepoints, 1, intPtr(1)); !reflect.DeepEqual(got, Codepoints) {
+		t.Errorf("Repetition(Codepoints,1,1) = %+v, want %+v", got, Codepoints)
 	}
 	// everything else is the native window -- O(1) syntax
 	if got := Repetition(E, 2, nil).Forms[0].Form; got != FormRepeat {

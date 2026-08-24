@@ -105,4 +105,11 @@ var SyntaxModels = map[ast.Kind]SyntaxModel{
 		Said:        "a function — read at its calls",
 		Unsupported: false,
 	},
+	// jsx_expression.go's arms read all four — never a scalar sort, an
+	// object with unstated keys, attributes and children walked for
+	// their own sinks
+	ast.KindJsxElement:            {Modeled: true},
+	ast.KindJsxSelfClosingElement: {Modeled: true},
+	ast.KindJsxFragment:           {Modeled: true},
+	ast.KindJsxExpression:         {Modeled: true},
 }

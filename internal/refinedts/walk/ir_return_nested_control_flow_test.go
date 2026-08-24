@@ -36,7 +36,7 @@ func TestReturnNestedControlFlow_ReturnInsideIfWithHookCallCompletes(t *testing.
 	`, returnHookCallHooksSource)
 	declaration := entryEnvFunctionNamed(t, p, "useConditionalLayout")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -71,7 +71,7 @@ func TestReturnNestedControlFlow_ReturnInsideSwitchWithMemberReadCompletes(t *te
 	`)
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -101,7 +101,7 @@ func TestReturnNestedControlFlow_ReturnInsideTryWithCallCompletes(t *testing.T) 
 	`, returnHookCallHooksSource)
 	declaration := entryEnvFunctionNamed(t, p, "useTriedLayout")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -128,7 +128,7 @@ func TestReturnNestedControlFlow_ReturnInsideWhileWithCallCompletes(t *testing.T
 	`, returnHookCallHooksSource)
 	declaration := entryEnvFunctionNamed(t, p, "useLoopedLayout")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

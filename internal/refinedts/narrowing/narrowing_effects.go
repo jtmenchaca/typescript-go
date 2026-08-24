@@ -32,6 +32,14 @@ type Narrowed struct {
 	// "" means the TS source's field was absent.
 	Definedness string // "" | "defined" | "undefined"
 
+	// KeepAbsent: the claim narrows the PRESENT part only and proves
+	// nothing about absence — the `P === undefined || <numeric tests
+	// on P>` disjunction's whenTrue, where the held condition admits
+	// the absent value OR a value the numeric side proves. Applied to
+	// a maybe-wrapped value, Forms narrow the inner part and the
+	// wrapper stays; the bare absent value passes whole.
+	KeepAbsent bool
+
 	// Truthiness: a bare-place condition read through ToBoolean: held
 	// truth keeps only truthy values (and rules NaN out — ToBoolean of
 	// NaN is false); held falsity keeps only the falsy ones, absence

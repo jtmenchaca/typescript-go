@@ -55,10 +55,24 @@ func UnmodeledCallResult(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.
 	// calls are the annotation reader's, not this walk's — no note.
 	if assignability.CollectingReasons() && !CalleeInSurface(ctx, call.Expression) {
 		callee := CalleeWords(call.Expression)
-		// `f.bind(...)` with f's body in reach: the bound function is
-		// modeled at its consumption sites (map callbacks, direct
-		// calls), so this declaration itself owes nothing more
-		if BoundFunctionOf(ctx, e) != nil {
+		// ext.1: a call into a NATIVE (compiled) module this checker
+		// carries no model for names ITSELF at this blocked position —
+		// the same naming-unit precedent refinedpy's own
+		// unmodeled_module_call("torch") sets, checked first since a
+		// native import has no body anywhere for ANY of the branches
+		// below to find, and the sharper name is strictly more useful
+		// than any of their generic wording.
+		if name, ok := NativeModuleCallName(ctx, e); ok {
+			assignability.NoteReason(assignability.ReasonNote{
+				Site:        "expression",
+				Node:        e,
+				Said:        "a call into '" + name + "', a native module this checker has no model for",
+				Unsupported: true,
+			})
+			// `f.bind(...)` with f's body in reach: the bound function is
+			// modeled at its consumption sites (map callbacks, direct
+			// calls), so this declaration itself owes nothing more
+		} else if BoundFunctionOf(ctx, e) != nil {
 			assignability.NoteReason(assignability.ReasonNote{
 				Site:        "expression",
 				Node:        e,

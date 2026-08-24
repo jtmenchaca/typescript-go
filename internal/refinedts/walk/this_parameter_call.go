@@ -272,7 +272,7 @@ func thisParameterCallBindKnown(ctx *FlowContext, env Env, receiver *ast.Node, s
 			inlining = map[*ast.Symbol]struct{}{}
 		}
 		if _, ok := inlining[symbol]; ok {
-			out := RecursionMarker(symbol)
+			out := RecursionMarker(ctx, symbol, contract.Declaration)
 			return &out
 		}
 		inlining[symbol] = struct{}{}

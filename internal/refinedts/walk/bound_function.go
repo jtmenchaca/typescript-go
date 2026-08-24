@@ -4,7 +4,7 @@
 // bound function called with arguments calls its target with the
 // prebound arguments PREPENDED — the target's argument list is the
 // list-concatenation of [[BoundArguments]] and the call's own
-// (tmp/ecma262/spec.html sec-function.prototype.bind,
+// (specifications/javascript/spec.html sec-function.prototype.bind,
 // sec-bound-function-exotic-objects-call-thisargument-argumentslist).
 // So a call's first argument binds the target's parameter at
 // `offset`, not at 0.

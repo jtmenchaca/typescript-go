@@ -108,6 +108,32 @@ func ContextAfterStatements(ctx *FlowContext, statements []*ast.Node) *FlowConte
 	return running
 }
 
+// mergedForeignOverrides combines two override maps for the SAME
+// statement index — existing may be nil (the ordinary case, nothing
+// pending yet at that key) or may already hold one edge's entry (a
+// diamond, or a call's own CallOverride landing on the same statement
+// as another edge's parse Override). Distinct node keys simply union;
+// this never arises for the SAME key today (a call node and its own
+// later parse node are never equal), so there is no overwrite rule to
+// pick between two claims about one node — only two maps to fold into
+// one.
+func mergedForeignOverrides(
+	existing map[*ast.Node]abstractdomain.AbstractValue,
+	added map[*ast.Node]abstractdomain.AbstractValue,
+) map[*ast.Node]abstractdomain.AbstractValue {
+	if len(existing) == 0 {
+		return added
+	}
+	merged := make(map[*ast.Node]abstractdomain.AbstractValue, len(existing)+len(added))
+	for k, v := range existing {
+		merged[k] = v
+	}
+	for k, v := range added {
+		merged[k] = v
+	}
+	return merged
+}
+
 func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotations.DeclaredRefinement) bool {
 	running := ctx
 	// walked: the index this list has already reached. The relational
@@ -165,7 +191,28 @@ func listWalk(ctx *FlowContext, env Env, statements []*ast.Node, result *annotat
 				// edge earlier in the list (a diamond's own second call)
 				// never touches this entry, and this one never touches
 				// another edge's still-pending entry either
-				pendingForeignOverrides[outcome.OverrideStatement] = outcome.Override
+				pendingForeignOverrides[outcome.OverrideStatement] = mergedForeignOverrides(
+					pendingForeignOverrides[outcome.OverrideStatement], outcome.Override)
+			}
+			if outcome.CallOverride != nil {
+				// the intermediate captured-stdout binding's own pin
+				// (foreign_edge.go's file banner, step 5): keyed at
+				// edge.Call's own statement — CallOverrideStatement is
+				// always THIS index, the statement listWalk is about to
+				// walk right below, never a later one the way the parse's
+				// Override is. Without this merge, evaluateExpression never
+				// sees the pin (ctx.NodeOverrides reads it, but nothing
+				// upstream of this loop ever sets it from CallOverride),
+				// so the bound name's initializer keeps evaluating
+				// ORDINARILY — exactly the gap that let a declared
+				// `string | Buffer` return flow through as a kindUnion
+				// instead of the plain-string-ground/serialized-set claim
+				// this route exists to attach. Merged (not overwritten)
+				// with whatever the SAME statement's Override may already
+				// carry, the same discipline the Override branch above
+				// keeps for a diamond's second edge.
+				pendingForeignOverrides[outcome.CallOverrideStatement] = mergedForeignOverrides(
+					pendingForeignOverrides[outcome.CallOverrideStatement], outcome.CallOverride)
 			}
 			// consumer-index prerequisite (docs/one-checker/lsp-coordinator.md
 			// build plan item 3): every edge this walk recognized — fired,

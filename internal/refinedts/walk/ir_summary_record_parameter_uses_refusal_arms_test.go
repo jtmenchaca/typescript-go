@@ -74,7 +74,7 @@ func TestWholeRecordUseAt_ASpreadCallArgumentRefuses(t *testing.T) {
 
 // TestWholeRecordUseAt_AStrictEqualityComparisonOperandReadsWhole pins
 // the WIDENED arm this pass adds: `p === q` reads both operand values
-// (IsStrictlyEqual, sec-isstrictlyequal, tmp/ecma262/spec.html) and
+// (IsStrictlyEqual, sec-isstrictlyequal, specifications/javascript/spec.html) and
 // answers a fresh boolean — neither operand is stored anywhere, so the
 // position now classifies as recordParameterReadWhole rather than
 // refusing.

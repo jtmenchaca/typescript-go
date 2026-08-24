@@ -5,7 +5,7 @@
 // the call it is. The tag call's argument list is the template object
 // first and the substitution values after it, in source order — the
 // list-concatenation of « siteObj » and the substitutions
-// (tmp/ecma262/spec.html
+// (specifications/javascript/spec.html
 // sec-runtime-semantics-argumentlistevaluation, the two
 // |TemplateLiteral| alternatives; the note at sec-tagged-templates
 // states the same shape). The effective-argument list built below
@@ -51,7 +51,7 @@ func EvaluateTaggedTemplate(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 	// the tag's arguments from position 1 on; position 0 is the template
 	// object, whose node slot is nil because the programmer wrote no
 	// expression for it — the object is built by GetTemplateObject from
-	// the literal itself (tmp/ecma262/spec.html sec-gettemplateobject).
+	// the literal itself (specifications/javascript/spec.html sec-gettemplateobject).
 	//
 	// It is built as the ONE effective-argument list every reader below
 	// takes, so a tag's parameters place against the same positions a
@@ -124,8 +124,17 @@ func EvaluateTaggedTemplate(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 	}
 	// a tag with NO BODY anywhere in reach — a .d.ts signature, an
 	// import from a module the program cannot see — builds its value
-	// outside this file's determination, so the read stays opaque
+	// outside this file's determination. The same worn-or-opaque
+	// reading unmodeled_call_result.go's opaqueWorn gives an unmodeled
+	// CALL applies here: the tag's own RESOLVED return type is a claim
+	// tsc already checked its (bodiless) signature against, so a tagged
+	// template whose ambient tag states a plain `string` return still
+	// carries that sort ground (LIBRARY grade) rather than falling to
+	// the bare, sort-blind opaque.
 	if BodilessCallee(ctx, tagged.Tag) && !CalleeInDefaultLib(ctx, tagged.Tag) {
+		if ground := ReturnTypeGround(ctx, e); ground != nil {
+			return abstractdomain.AtTrustLevel(*ground, abstractdomain.TrustLibrary)
+		}
 		return abstractdomain.Opaque
 	}
 	// a tag whose body sits in this program but wears no contract the
@@ -143,7 +152,7 @@ func EvaluateTaggedTemplate(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 
 // TemplateObjectValue is the object a tag receives as its FIRST
 // argument: the template object GetTemplateObject builds from the
-// literal (tmp/ecma262/spec.html sec-gettemplateobject).
+// literal (specifications/javascript/spec.html sec-gettemplateobject).
 //
 // Its indexed elements are the COOKED strings, in order, and each is
 // syntactic — the parser already cooked them, so every element is an

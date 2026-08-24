@@ -86,6 +86,19 @@ func TestDecodeWireSetEncodeSetRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(got, joined) {
 		t.Errorf("round trip joined: got %+v, want %+v", got, joined)
 	}
+
+	// a literal word -- StringTuple's own two-or-more-character
+	// spelling, and the kernel's own answer for the same shape (the
+	// wire contract is fixed: {"form":"word","w":[...]}, so a kernel
+	// answer decodes the identical way this checker's own encode does)
+	word := refinementsets.MakeRefinedSet(refinementsets.Word(refinementsets.CodepointsOf("hello")))
+	got = DecodeWireSet(parseWire(t, EncodeSet(word)))
+	if !reflect.DeepEqual(got, word) {
+		t.Errorf("round trip word: got %+v, want %+v", got, word)
+	}
+	if len(got.Forms) != 1 || got.Forms[0].Form != refinementsets.FormWord {
+		t.Errorf("round trip word did not survive as a single word form: %+v", got)
+	}
 }
 
 func TestDecodeJudgeAnswerFaultsAndTheWitnessBound(t *testing.T) {

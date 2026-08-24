@@ -30,10 +30,14 @@ package refinementsets
 // nodes (Concatenation, Star, Repeat, RepeatWord, Union, Difference)
 // anywhere in set's syntax -- every operand, and every sibling form in
 // every nested set's own Forms list. A leaf form (AtLeast/Above/
-// AtMost/Below/Integer/MultipleOf/OneOf/EmptyTuple) contributes zero.
-// The name is kept from the nesting-depth reading this measure
-// replaced; the file comment above states the size-vs-depth
-// distinction plainly for the next reader.
+// AtMost/Below/Integer/MultipleOf/OneOf/Word/EmptyTuple) contributes
+// zero -- a Word carries no nested RefinedSet operand, the same leaf
+// status as OneOf, so a multi-character literal collapsed to one Word
+// node counts zero here regardless of how many codepoints it holds
+// (where the old one-Concatenation-per-character spelling would have
+// counted once per character). The name is kept from the
+// nesting-depth reading this measure replaced; the file comment above
+// states the size-vs-depth distinction plainly for the next reader.
 func SequenceNestingDepth(set RefinedSet) int {
 	total := 0
 	for _, form := range set.Forms {
@@ -55,7 +59,7 @@ func refinementNestingDepth(form Refinement) int {
 		}
 		return 1 + SequenceNestingDepth(*form.A_)
 	default:
-		// AtLeast, Above, AtMost, Below, Integer, MultipleOf, OneOf,
+		// AtLeast, Above, AtMost, Below, Integer, MultipleOf, OneOf, Word,
 		// EmptyTuple -- every leaf form the grammar has
 		return 0
 	}

@@ -177,6 +177,9 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 		if answered := readDateNow(site); answered != nil {
 			return answered
 		}
+		if answered := readDateParse(site); answered != nil {
+			return answered
+		}
 		if answered := readJsonMethods(site); answered != nil {
 			return answered
 		}

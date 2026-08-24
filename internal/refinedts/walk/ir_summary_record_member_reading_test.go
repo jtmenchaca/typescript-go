@@ -104,7 +104,7 @@ func TestKernelSummaryDirect_ARecordMemberArrayLengthReadLowers(t *testing.T) {
 		"function f(node: { sourceLinks: number[]; y: number }): boolean { return node.sourceLinks.length > 0; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q — a record-member array length read must lower", outcome, construct)

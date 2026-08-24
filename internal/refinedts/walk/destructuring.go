@@ -117,9 +117,31 @@ func elementAtRepetition(rep refinementsets.Repeated, i int) abstractdomain.Abst
 // darkSlotOf is the OPAQUE-or-residue fallback shared by both slot
 // readers below: a slot of an OPAQUE value is opaque too — the whole
 // structure entered from outside the file's determination.
+//
+// A GRADED scalar source — a checked declaration's return read through
+// a cast the pattern's own type does not match (`unreadNumber() as
+// unknown as { age: number }`, `stream() as unknown as number[]`) — is
+// not opaque and not a plain residue either: the member/element read
+// off it is exactly as unconstrained as the whole value already was,
+// so the source's own ground and grade carry forward rather than
+// collapsing to an ungraded residue. Without this, CheckPossiblyNaN
+// cannot tell the propagated claim apart from AfterReaders' own
+// fallback seed for an expression this walk never examined at all
+// (nan_wrapper.go's two-case split), and declines a value the walk DID
+// determine, through the very cast that is supposed to carry it.
 func darkSlotOf(source abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	if source.Kind == abstractdomain.KindUnknown && source.Opaque {
 		return abstractdomain.Opaque
+	}
+	if source.Kind != abstractdomain.KindObject && source.Kind != abstractdomain.KindUnknown && source.Grade != "" {
+		return source
+	}
+	// a source the walk never determined, but whose OWN evaluation
+	// already named its first blocker (silence.ResidueOf) — a member
+	// read off it inherits the same sentence rather than losing it to
+	// a bare, unnamed residue
+	if source.Kind == abstractdomain.KindUnknown && source.ResidueReason != "" {
+		return silence.ResidueOf(source.ResidueReason)
 	}
 	return silence.Residue()
 }

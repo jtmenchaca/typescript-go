@@ -28,7 +28,7 @@ func ReadObjectKeyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain
 		threaded := ReadThroughMaybeReceiver(receiver, func(inner abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 			if inner.Kind == abstractdomain.KindObject {
 				if idx, ok := objectKeyIndex(inner, pa.Name().Text()); ok {
-					return inner.Keys[idx].Value
+					return memberValueGraded(inner, inner.Keys[idx].Value)
 				}
 				return silence.Residue()
 			}
@@ -55,7 +55,7 @@ func ReadObjectKeyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain
 	}
 	if receiver.Kind == abstractdomain.KindObject {
 		if idx, ok := objectKeyIndex(receiver, pa.Name().Text()); ok {
-			out := receiver.Keys[idx].Value
+			out := memberValueGraded(receiver, receiver.Keys[idx].Value)
 			return &out
 		}
 		// the OPEN-MAP gate the element read carries (element_access.go's
@@ -138,4 +138,36 @@ func ReadObjectKeyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain
 		}
 	}
 	return nil
+}
+
+// memberValueGraded is the property-access twin of
+// return_type_ground.go's typeGroundOf grade stamp: a member type read
+// off a DECLARATION-BACKED receiver is exactly as declaration-backed as
+// the receiver itself, so the member's own claim is capped at the
+// receiver's floor — AtTrustLevel only ever LOWERS (MinTrustLevel), so
+// a member the walk separately proved to a WEAKER grade than the
+// receiver (crossed its own boundary on the way here) keeps that
+// weaker floor rather than being raised back up to the receiver's.
+//
+// The rule reads off the RECEIVER's own Grade field, not off a fresh
+// declaration lookup at the member: receiver.Grade != "" is precisely
+// the signal a checked declaration's own type ground left behind
+// (typeGroundOf's AtTrustLevel(united, TrustLibrary) stamp on a call
+// like `device()`'s return, or any other reader that already graded
+// the whole object). An ORDINARY object the walk built itself — an
+// object literal, a plain narrowed value — carries no such stamp
+// (KnownObject's own floor computation only sets Grade when a member
+// or the constructor's own grade argument already reads below
+// TrustProved), so its members pass through untouched: nothing invents
+// a grade for a receiver that is itself an ungraded residue or a
+// plainly-proved value. This is the same split nan_wrapper.go's
+// CheckPossiblyNaN already keys on (`known.Grade != ""`) — a graded
+// wrapper is a served claim about a checked declaration; an ungraded
+// one is silence.AfterReaders' own fallback seed for something the
+// walk never examined, and must not be dressed up as more than that.
+func memberValueGraded(receiver, member abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	if receiver.Grade == "" {
+		return member
+	}
+	return abstractdomain.AtTrustLevel(member, receiver.Grade)
 }

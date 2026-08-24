@@ -4,21 +4,26 @@
 // re-deriving the same candidate round after round) widens to the
 // coarser sound form instead of growing further.
 //
-// MEASURED, the crash this guards against: tmp/recharts-src/src/util/
-// ReduceCSSCalc.ts's evaluateExpression feeds calculateParentheses's
-// while-loop output through a SECOND calculateArithmetic call, whose
-// own while-loop reassigns its string across repeated regex-driven
-// `.replace()` calls. The minimized reproducer
-// (/private/tmp/killer_slice10.ts) shows the kernel's seqSubset ask
-// growing by two (integer, union) pairs in its RHS star's alphabet on
-// each successive ask (2, then 4, then 6) before the third ask never
-// returns -- the kernel's own derivative-based deciders (refined-lean/
-// refined_sets/automata.lean's Concatenation case: `if A.nullable then
-// mkUnion (mkConcat (A.deriv v) B) (B.deriv v) else ...`) grow the
-// term on every nullable-left derivative step with no canonicalization
-// collapsing the repeated substructure, so a moderately-nested
-// Concatenation/Star tree the walk keeps handing back turns a bounded
-// question into an unbounded one on the kernel side.
+// THIS IS A PRECISION POLICY, not a crash guard. It once was one: the
+// ReduceCSSCalc.ts reproducer (tmp/recharts-src/src/util/
+// ReduceCSSCalc.ts's evaluateExpression, minimized at
+// /private/tmp/killer_slice10.ts) hung the kernel's seqSubset ask on a
+// growing RHS star alphabet, because refined-lean's mkUnion
+// (refined_sets/automata.lean) built a fresh Union layer on every
+// nullable-left derivative step (`if A.nullable then mkUnion (mkConcat
+// (A.deriv v) B) (B.deriv v) else ...`) with no canonicalization
+// collapsing a repeated branch, so a moderately-nested Concatenation/
+// Star tree the walk kept handing back grew without bound. mkUnion
+// now collapses a syntactically-repeated operand to one copy
+// (`A.structEq B`, refinements/grammar.lean) before building another
+// Union node, so the SAME shape this bound was written against
+// terminates in the kernel today -- the bound stays because an
+// unwidened join still keeps building a bigger, exact Concatenation/
+// Union/Star term every round, and that term's SIZE (not its
+// termination) is what this widens away: a large-but-terminating
+// candidate is still a costly one to encode, cache-key, and answer
+// questions about, and past ordinary program shapes there is no
+// precision left to buy.
 //
 // THE BOUND. 64 is chosen against the g-target corpus's own shapes,
 // which must derive EXACTLY, never widened:
@@ -34,9 +39,9 @@
 //
 // 64 sits far above both (text_timestamp's 18 has more than 3x
 // headroom) while still catching the reproducer's growth well before
-// the kernel spends unbounded time on it -- the trace shows the
-// pathological ask's operands already past this depth by the third
-// round of growth.
+// the join builds a term expensive to carry further -- the trace
+// shows the pathological ask's operands already past this depth by
+// the third round of growth.
 package abstractdomain
 
 const sequenceConcatenationWidenBound = 64

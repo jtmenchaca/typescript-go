@@ -31,7 +31,7 @@ func TestKernelSummaryDirect_ADefinedHolderTruthyTestFoldsThroughTheWholeRecordU
 		"function h(entry: { value: number }) { return (entry && entry.value) || 0; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	if !ok {
 		t.Fatalf("h's body declined: outcome=%q construct=%q", outcome, construct)
 	}
@@ -112,7 +112,7 @@ func TestKernelSummaryDirect_AnIfConditionOnAWholeRecordParameterFolds(t *testin
 		"function f(p: { lo: number }) { if (p) { return p.lo; } return 0; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q", outcome, construct)
 	}
@@ -168,7 +168,7 @@ func TestKernelSummaryDirect_AnAbsentHolderTruthyTestStaysRefused(t *testing.T) 
 		"function h(p: { lo: number } | undefined) { return (p && p.lo) || 0; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	// the pre-existing behavior for an optional/absent-admitting holder —
 	// this pin only guards against a regression widening past the
 	// non-optional case; it does not assert a specific outcome shape,

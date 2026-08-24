@@ -54,7 +54,7 @@ function centerY(node: SankeyNode) { return node.y + node.dy / 2; }
 	declaration := entryEnvFunctionNamed(t, p, "centerY")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}

@@ -342,7 +342,7 @@ wire_format.ts, wire_decode.ts, question_cache.ts).
   newlines.
 - No `grep`/`find` in bash — use mcp__search-mcp__search /
   find_files / list_tree, or Read.
-- `pnpm` / `deno test` / `deno check` commands require a 5-clause
+- `pnpm` / `bun test` / `bun scripts/parse-check.ts` commands require a 5-clause
   attestation comment block; `go build` / `go test` do not. Prefer go
   commands.
 

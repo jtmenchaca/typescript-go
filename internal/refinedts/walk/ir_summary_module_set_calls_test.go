@@ -33,7 +33,7 @@ func TestModuleSetCallStatement_ANamedBooleanServesThroughAssignment(t *testing.
 	`)
 	declaration := entryEnvFunctionNamed(t, p, "isSvgElementPropKey")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -66,7 +66,7 @@ func TestModuleSetCallStatement_TheFixtureShapeDirectReturnOutcome(t *testing.T)
 	`)
 	declaration := entryEnvFunctionNamed(t, p, "isSvgElementPropKey")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -91,7 +91,7 @@ func TestModuleSetCallStatement_DeleteAlsoServes(t *testing.T) {
 	`)
 	declaration := entryEnvFunctionNamed(t, p, "forget")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -118,7 +118,7 @@ func TestModuleSetCallStatement_ALetBindingDoesNotServe(t *testing.T) {
 	`)
 	declaration := entryEnvFunctionNamed(t, p, "isMember")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

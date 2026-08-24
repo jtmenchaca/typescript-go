@@ -47,7 +47,7 @@ func CallbackOutcome(
 	// codepoints to the callback as numeric elements
 	receiver := rawReceiver
 	if rawReceiver.Kind == abstractdomain.KindValues && rawReceiver.KindTag != abstractdomain.PrimitiveArray {
-		receiver = silence.Residue()
+		receiver = silence.ResidueOf("a word of another sort carried here must not feed its codepoints to the callback as numeric elements")
 	}
 	body := arrow.Body()
 	if body == nil {
@@ -85,7 +85,7 @@ func CallbackOutcome(
 			if SyntacticLiteral(argument) {
 				value = analyzers.EvaluateExpression(&silent, NewEnv(), argument)
 			} else {
-				value = silence.Residue()
+				value = silence.ResidueOf("the prebound value was fixed where bind ran, in an environment this walk does not hold — only a syntactic literal carries")
 			}
 			var parameter *ast.Node
 			if i < len(arrowParameters) {
@@ -275,7 +275,7 @@ func reduceOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.
 		if len(items) > 0 {
 			initial = items[0]
 		} else {
-			initial = silence.Residue()
+			initial = silence.ResidueOf("no initial value on an empty receiver throws at runtime — nothing to vouch for there")
 		}
 	} else {
 		initial = element
@@ -290,7 +290,15 @@ func reduceOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.
 	if items != nil {
 		folded := items
 		firstIndex := 0
-		if !initialized {
+		// no initial value on a PROVABLY EMPTY receiver: sec-array.
+		// prototype.reduce step 4 throws a TypeError there ("If length
+		// = 0 and initialValue is not present, throw a TypeError
+		// exception") — nothing completes, so `folded` stays the full
+		// (empty) `items` rather than slicing past it. `initial` is
+		// already the decline set above; the fold below runs zero
+		// times and falls through to that decline, the same stance
+		// oneArgumentReduceCallOf documents for this shape.
+		if !initialized && len(items) > 0 {
 			folded = items[1:]
 			firstIndex = 1
 		}
@@ -309,6 +317,17 @@ func reduceOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.
 			representative = abstractdomain.JoinKnown(representative, accumulator)
 		}
 		if accumulator.Kind != abstractdomain.KindUnknown {
+			exactResult = &accumulator
+		} else if len(folded) == 0 {
+			// the fold ran zero times: accumulator is `initial` untouched,
+			// which is already the exact, provably-known outcome for a
+			// provably empty receiver with no initial value — the residue
+			// this file's own comment above calls "the decline set above."
+			// Falling through to SolveAccumulation would ask a question
+			// about `element`'s recurrence that has nothing to do with why
+			// this receiver is unknown (it is unknown because the runtime
+			// throws, not because a fold step declined), discarding the
+			// named reason for an unrelated, unnamed one.
 			exactResult = &accumulator
 		}
 	}
@@ -372,7 +391,7 @@ func findOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.Ab
 	// the body's judgments report once; the result may be
 	// undefined, which leaves the model — unknown, never wrong
 	evalBody(ctx, reportPins(nil))
-	return finish(silence.Residue())
+	return finish(silence.ResidueOf("the body's judgments report once; the result may be undefined, which leaves the model — unknown, never wrong"))
 }
 
 // forEachExactFold runs a forEach over an exactly known sequence —
@@ -514,7 +533,10 @@ func forEachExactFold(walk *CallbackWalk, call *ast.CallExpression) (abstractdom
 		}
 		return true
 	})
-	return silence.Residue(), true
+	// sec-array.prototype.foreach's last step is "Return undefined" —
+	// forEach's own call result is that exact value unconditionally,
+	// not a decline
+	return abstractdomain.Undef, true
 }
 
 // forEachOutcome is the "forEach" case of callbackOutcome's method
@@ -579,8 +601,11 @@ func forEachOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain
 		} else {
 			HavocEnv(ctx.Aliases, env, trackedName)
 		}
-		return silence.Residue()
+		// sec-array.prototype.foreach's last step is "Return undefined"
+		// — forEach's own call result is that exact value
+		// unconditionally, not a decline
+		return abstractdomain.Undef
 	}
 	evalBody(ctx, reportPins(nil))
-	return finish(silence.Residue())
+	return finish(abstractdomain.Undef)
 }

@@ -1,10 +1,16 @@
 // The @refinedts-expect-error reader — ONE recognizer for every
-// consumer. A marker is recognized only when @refinedts-expect-error
-// is the first word of a comment's content, immediately after `//` or
-// `/*` (whitespace only in between) — the same discipline markers.rs
-// applies to `# refinedpy: expect-error`. The token appearing
-// mid-sentence in prose, even inside a real comment, is never a
-// marker. A marker declares that a line is EXPECTED to fire: a
+// consumer. A marker is recognized when @refinedts-expect-error is
+// the first word of a comment's content, immediately after `//` or
+// `/*` (whitespace only in between), OR when it directly follows
+// another KNOWN directive token — today, `@ts-expect-error` — with
+// only whitespace between them: the corpus's established compound for
+// a row that is both a plain TypeScript error and a refinement fire,
+// `// @ts-expect-error @refinedts-expect-error — reason`. This is the
+// same discipline markers.rs applies to `# refinedpy: expect-error`,
+// extended to the one compound spelling the corpus actually writes.
+// The token appearing mid-sentence in arbitrary prose, even inside a
+// real comment, is never a marker. A marker declares that a line is
+// EXPECTED to carry an error: a
 // standalone comment line covers the next line that is not itself a
 // comment-only line — comment lines between the marker and the code
 // are skipped, matching markers.rs — a trailing comment covers its
@@ -40,17 +46,28 @@ import (
 
 const expectErrorMarker = "@refinedts-expect-error"
 
-// expectErrorLinePattern recognizes a marker ONLY when
+// knownLeadingDirectives are the OTHER directive tokens that may sit
+// between the comment opener and @refinedts-expect-error without
+// disqualifying it as a marker — today, only `@ts-expect-error`, the
+// corpus's one compound spelling for a row that is both a plain
+// TypeScript error and a refinement fire. Adding a token here is a
+// grammar change, not a per-fixture patch: search the corpus first.
+const knownLeadingDirectives = `@ts-expect-error`
+
+// expectErrorLinePattern recognizes a marker when
 // @refinedts-expect-error is the first word of a comment's content —
 // immediately after `//` or `/*`, optionally with spaces/tabs between
-// (never other characters, so prose before the token never matches
-// even inside a real comment). This mirrors markers.rs's own
-// discipline: the token must open the comment, not merely appear
-// somewhere inside one. A `*`-continuation line of a block comment
-// (no `//` or `/*` of its own) is never a comment opener, so a
-// multi-line doc header that mentions the token mid-prose on such a
-// line is never read as a marker.
-var expectErrorLinePattern = regexp.MustCompile(`(^|\s)(//|/\*)[ \t]*@refinedts-expect-error(?:\s+(\d+))?(.*)$`)
+// — OR when it is preceded by nothing but one of
+// knownLeadingDirectives, again with only spaces/tabs between (never
+// other characters, so prose before the token never matches even
+// inside a real comment). This mirrors markers.rs's own discipline:
+// the token must open the comment or directly follow another known
+// directive, not merely appear somewhere inside one. A
+// `*`-continuation line of a block comment (no `//` or `/*` of its
+// own) is never a comment opener, so a multi-line doc header that
+// mentions the token mid-prose on such a line is never read as a
+// marker.
+var expectErrorLinePattern = regexp.MustCompile(`(^|\s)(//|/\*)[ \t]*(?:` + knownLeadingDirectives + `[ \t]+)?@refinedts-expect-error(?:\s+(\d+))?(.*)$`)
 var commentStartPattern = regexp.MustCompile(`//|/\*`)
 var commentOnlyLinePattern = regexp.MustCompile(`^\s*//`)
 var reasonSeparatorPattern = regexp.MustCompile(`^[\s—-]+`)

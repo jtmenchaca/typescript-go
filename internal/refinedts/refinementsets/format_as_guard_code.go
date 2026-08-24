@@ -86,7 +86,7 @@ func FormatAsSchemaChain(r RefinedSet) (string, bool) {
 			calls = append(calls, ".lt("+codeNumber(f.A)+")")
 		case FormMultipleOf:
 			calls = append(calls, ".multipleOf("+codeNumber(f.A)+")")
-		case FormOneOf, FormEmptyTuple, FormConcatenation, FormStar, FormRepeat, FormRepeatWord, FormUnion, FormDifference:
+		case FormOneOf, FormEmptyTuple, FormConcatenation, FormStar, FormRepeat, FormRepeatWord, FormUnion, FormDifference, FormWord:
 			// no chain spelling -- a wrong contract is worse than none
 			return "", false
 		default:
@@ -165,7 +165,7 @@ func FormatAsGuardCode(name string, r RefinedSet) (string, bool) {
 				}
 				parts = append(parts, "("+joinStrings(eqs, " || ")+")")
 			}
-		case FormMultipleOf, FormEmptyTuple, FormConcatenation, FormStar, FormRepeat, FormRepeatWord, FormUnion, FormDifference:
+		case FormMultipleOf, FormEmptyTuple, FormConcatenation, FormStar, FormRepeat, FormRepeatWord, FormUnion, FormDifference, FormWord:
 			// no liftable guard -- no example beats an unprovable one
 			return "", false
 		default:

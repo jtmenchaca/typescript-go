@@ -459,7 +459,7 @@ func TestGeneratorAlias_AYieldExpressionWithNoStatedNPositionStillDeclines(t *te
 // string-literal union wears, refinementsets' own OneOf-words encoding
 // — never KindValues, which holds ONE exact string's own codepoints)
 // must read as the exact SET {3, 5, 6}, one UTF-16 length per word
-// (sec-properties-of-string-instances-length, tmp/ecma262/spec.html).
+// (sec-properties-of-string-instances-length, specifications/javascript/spec.html).
 // Before the fix, AsRepetition declined the word-list set outright (it
 // is a union of exact tuples, never a Repetition window), so the read
 // fell through to the general "unknown receiver" tail and answered

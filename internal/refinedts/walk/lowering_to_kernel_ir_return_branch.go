@@ -196,7 +196,7 @@ func returnShortCircuitStatements(
 	// IrTestDefined is the CORRECT (either-admission) test for `??` here:
 	// CoalesceExpression's runtime semantics run the right operand
 	// whenever the left is undefined OR null (sec-binary-logical-
-	// operators, tmp/ecma262/spec.html:21099-21106), so definedness —
+	// operators, specifications/javascript/spec.html:21140-21143), so definedness —
 	// not the flavored eqUndef split — is what picks the side.
 	test := kernelbridge.IrTestDefined
 	tested := true
@@ -392,7 +392,7 @@ func returnBooleanLeftShortCircuit(
 // resolve to a slot readable twice. A record parameter's bare name is
 // TRACKED (declaredParamSort/recordParamMembersOf's own trust grade
 // proves its truth without reading any slot at all — ToBoolean answers
-// true for every Object, sec-toboolean, tmp/ecma262/spec.html), so the
+// true for every Object, sec-toboolean, specifications/javascript/spec.html), so the
 // arm that would return it is UNREACHABLE and never needs reading back:
 //
 //	entry && b  →  the record is always truthy, so the whole is always `b`
@@ -431,7 +431,7 @@ func returnTruthyRecordLeftShortCircuit(
 //     boolean by definition, which is the same fact booleanBinaryTokens
 //     (effect_expression.go) already states and reads as the {0,1} set.
 //   - `!e`: logical NOT produces a boolean whatever its operand is
-//     (sec-logical-not-operator, tmp/ecma262/spec.html) — the same rule
+//     (sec-logical-not-operator, specifications/javascript/spec.html) — the same rule
 //     testShaped's own `negated` flag rides.
 //   - `a && b` / `a || b` where BOTH sides are themselves boolean-valued:
 //     the value is one of the two operands, and both are booleans, so the
@@ -579,7 +579,7 @@ func returnArithmeticOverShortCircuit(
 	//
 	// IrTestDefined is correct (either-admission) for `??`: the right
 	// operand runs whenever the left is undefined OR null (CoalesceExpression,
-	// sec-binary-logical-operators, tmp/ecma262/spec.html:21099-21106).
+	// sec-binary-logical-operators, specifications/javascript/spec.html:21140-21143).
 	test := kernelbridge.IrTestDefined
 	tested := true
 	if kind != ast.KindQuestionQuestionToken {

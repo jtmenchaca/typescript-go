@@ -1,7 +1,7 @@
 // Reading a spread argument whose source is an EXACT sequence.
 //
 // A spread hands each element of its source to the call as its own
-// argument (tmp/ecma262/spec.html sec-argument-lists: ArgumentList :
+// argument (specifications/javascript/spec.html sec-argument-lists: ArgumentList :
 // ... AssignmentExpression appends every iterated value in order). So
 // a call site can count and place its arguments exactly when the
 // spread's source holds a known length and known items, and cannot

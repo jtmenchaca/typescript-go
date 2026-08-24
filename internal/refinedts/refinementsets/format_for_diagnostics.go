@@ -119,6 +119,13 @@ func FormatForm(r Refinement) string {
 		return "one of {" + joinStrings(parts, ", ") + "}"
 	case FormEmptyTuple:
 		return "the empty tuple"
+	case FormWord:
+		// a literal word leaf spells as its own quoted text -- the same
+		// reading a per-character Concatenation chain collapses to.
+		// StringLiteralPoints reads a bare Word directly, so this always
+		// succeeds.
+		literal, _ := FormatStringLiteral(MakeRefinedSet(r))
+		return literal
 	case FormConcatenation:
 		return pieceLabel(*r.A_) + " · " + pieceLabel(*r.B)
 	case FormStar:

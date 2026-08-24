@@ -23,6 +23,7 @@ const (
 	FormInteger       Form = "integer"
 	FormMultipleOf    Form = "multipleOf"
 	FormOneOf         Form = "oneOf"
+	FormWord          Form = "word"
 	FormEmptyTuple    Form = "emptyTuple"
 	FormConcatenation Form = "concatenation"
 	FormStar          Form = "star"
@@ -46,7 +47,9 @@ type Refinement struct {
 	// atLeast / above / atMost / below: the bound. multipleOf: the divisor d.
 	A float64
 
-	// oneOf: the admitted values w.
+	// oneOf: the admitted values w. word: the literal's codepoints w, in
+	// order -- a multi-character literal as ONE leaf node rather than a
+	// chain of one-codepoint Concatenations.
 	W []float64
 
 	// concatenation / union / difference: the left/first operand.
@@ -125,6 +128,18 @@ func OneOf(w []float64) Refinement {
 		out[i] = element(x, "one of W")
 	}
 	return Refinement{Form: FormOneOf, W: out}
+}
+
+// Word is "the literal word w" -- a multi-character literal's codepoints
+// carried on ONE leaf node, in order, replacing a one-Concatenation-per-
+// character chain over one-element OneOf leaves. Each codepoint refuses
+// NaN at construction, mirroring OneOf's own element() guard.
+func Word(w []float64) Refinement {
+	out := make([]float64, len(w))
+	for i, x := range w {
+		out[i] = element(x, "word W")
+	}
+	return Refinement{Form: FormWord, W: out}
 }
 
 // ModWindowForms is modWindowForms in the TS source: the NORMALIZED
@@ -346,6 +361,10 @@ func WordOf(set RefinedSet) ([]float64, bool) {
 				return nil, false
 			}
 			word = append(word, form.W[0])
+		case FormWord:
+			// a bare Word form IS a word -- read its codepoints directly,
+			// same as the chain-of-OneOf spelling collapses to.
+			word = append(word, form.W...)
 		case FormConcatenation:
 			pending = append(pending, *form.B, *form.A_)
 		default:
@@ -366,7 +385,7 @@ func StatesSequence(set RefinedSet) bool {
 	for _, f := range set.Forms {
 		if f.Form == FormStar || f.Form == FormConcatenation ||
 			f.Form == FormRepeat || f.Form == FormRepeatWord ||
-			f.Form == FormEmptyTuple {
+			f.Form == FormEmptyTuple || f.Form == FormWord {
 			return true
 		}
 	}
@@ -411,11 +430,12 @@ func SequenceShaped(set RefinedSet) bool {
 	}
 	for _, form := range set.Forms {
 		switch form.Form {
-		case FormEmptyTuple, FormConcatenation:
+		case FormEmptyTuple, FormConcatenation, FormWord:
 			// neither carries a separate "element sort" of its own -- an
-			// EmptyTuple names no element at all, and a Concatenation's
+			// EmptyTuple names no element at all, a Concatenation's
 			// operands are themselves nested sets this checker only ever
-			// builds over codepoints (the string-tuple encoding) --
+			// builds over codepoints (the string-tuple encoding), and a
+			// Word's codepoints are a literal by construction --
 			// sequence-shaped unconditionally
 		case FormStar, FormRepeat, FormRepeatWord:
 			if !repetitionElementIsCodepoints(form) {

@@ -314,12 +314,12 @@ func TestAssignmentCorpusForms_CartesianAxisMirrorBodyFates(t *testing.T) {
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	axisLine := entryEnvFunctionNamed(t, p, "axisLineMirror")
 	RelowerSummaryBody(ctx, axisLine)
-	if outcome, construct, _ := SummaryOutcomeOf(axisLine); outcome != SummaryComplete {
+	if outcome, construct, _ := SummaryOutcomeOf(p.Checker, axisLine); outcome != SummaryComplete {
 		t.Errorf("axisLineMirror outcome = %q (construct %q), want complete", outcome, construct)
 	}
 	tickLine := entryEnvFunctionNamed(t, p, "getTickLineCoord")
 	RelowerSummaryBody(ctx, tickLine)
-	if outcome, construct, _ := SummaryOutcomeOf(tickLine); outcome != SummaryPorous || construct != "switch" {
+	if outcome, construct, _ := SummaryOutcomeOf(p.Checker, tickLine); outcome != SummaryPorous || construct != "switch" {
 		t.Errorf("getTickLineCoord outcome = %q construct = %q — the layout remainder has moved; update the remainder note", outcome, construct)
 	}
 }
@@ -363,7 +363,7 @@ func TestAssignment_GlobalNaNRhsIntoThisFieldCompletes(t *testing.T) {
 	constructor := firstConstructorIn(t, p)
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, constructor)
-	outcome, construct, recorded := SummaryOutcomeOf(constructor)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, constructor)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -385,7 +385,7 @@ func TestAssignment_ShadowedNaNKeepsItsSlotRead(t *testing.T) {
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -417,7 +417,7 @@ func TestAssignment_NumericReadOfUnknownSortedLetDetermines(t *testing.T) {
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -440,7 +440,7 @@ func TestAssignmentCorpusForms_ReduceCSSCalcMirrorConstructorLeavesTheAssignment
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	constructor := firstConstructorIn(t, p)
 	RelowerSummaryBody(ctx, constructor)
-	outcome, construct, recorded := SummaryOutcomeOf(constructor)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, constructor)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

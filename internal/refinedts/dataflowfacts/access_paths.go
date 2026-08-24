@@ -71,23 +71,25 @@ func EnclosingThisClass(site *ast.Node) *ast.Node {
 	return nil
 }
 
-// EnclosingThisObjectLiteralMethod is the OBJECT-LITERAL method whose
-// own call the walk route binds `this` for — `{ age: 40, bump() {
-// this.age = this.age + 1 } }` — read through the containers that
-// keep the surrounding `this` (arrow functions), the same climb
-// EnclosingThisClass makes; stopped the first time it reaches a
-// method declaration (returning it only when the method's own parent
-// is an object literal, never a class), a function declaration or
-// expression, or a static block — none of those share the object
-// literal's `this`.
+// EnclosingThisObjectLiteralMethod is the OBJECT-LITERAL method,
+// getter, or setter whose own call/read/write the walk route binds
+// `this` for — `{ age: 40, bump() { this.age = this.age + 1 } }`,
+// `{ _age: 40, get age() { return this._age } }` — read through the
+// containers that keep the surrounding `this` (arrow functions), the
+// same climb EnclosingThisClass makes; stopped the first time it
+// reaches a method/getter/setter declaration (returning it only when
+// its own parent is an object literal, never a class), a function
+// declaration or expression, or a static block — none of those share
+// the object literal's `this`.
 //
-// Nil wherever `site` names no such method: a class method's `this`
+// Nil wherever `site` names no such member: a class member's `this`
 // is EnclosingThisClass's own instance, and a plain function's `this`
 // is its own dynamic receiver. The method-call walk route
-// (ObjectLiteralMethodWalkCall, method_this_writes.go) is the only
-// caller that ever binds "this" in env for a method matching this
-// climb, so a positive answer here is exactly when that binding is
-// live to read.
+// (ObjectLiteralMethodWalkCall, method_this_writes.go) and the
+// object-literal getter's own body walk (object_literal.go's direct
+// and spread-source routes) are the only callers that ever bind
+// "this" in env for a member matching this climb, so a positive
+// answer here is exactly when that binding is live to read.
 func EnclosingThisObjectLiteralMethod(site *ast.Node) *ast.Node {
 	cursor := site
 	for cursor != nil {
@@ -95,7 +97,8 @@ func EnclosingThisObjectLiteralMethod(site *ast.Node) *ast.Node {
 			ast.IsClassStaticBlockDeclaration(cursor) {
 			return nil
 		}
-		if ast.IsMethodDeclaration(cursor) {
+		if ast.IsMethodDeclaration(cursor) || ast.IsGetAccessorDeclaration(cursor) ||
+			ast.IsSetAccessorDeclaration(cursor) {
 			if (ast.GetCombinedModifierFlags(cursor) & ast.ModifierFlagsStatic) != 0 {
 				return nil
 			}
@@ -106,8 +109,6 @@ func EnclosingThisObjectLiteralMethod(site *ast.Node) *ast.Node {
 			return nil
 		}
 		if ast.IsConstructorDeclaration(cursor) ||
-			ast.IsGetAccessorDeclaration(cursor) ||
-			ast.IsSetAccessorDeclaration(cursor) ||
 			ast.IsPropertyDeclaration(cursor) {
 			return nil
 		}

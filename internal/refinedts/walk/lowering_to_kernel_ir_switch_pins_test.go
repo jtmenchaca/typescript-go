@@ -52,11 +52,11 @@ func TestSwitchPins_ConstObjectMemberLabelLowersViaBranchBoth(t *testing.T) {
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	_, loweredOk := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 		t.Fatalf("a const-object-member case label declined the whole switch at %q — "+
 			"LowerSwitch's branch-both fallback should serve it", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -91,11 +91,11 @@ func TestSwitchPins_LetBoundNonLiteralLabelLowersViaBranchBoth(t *testing.T) {
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	_, loweredOk := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 		t.Fatalf("a parameter-valued case label declined the whole switch at %q — "+
 			"LowerSwitch's branch-both fallback should serve it", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -132,11 +132,11 @@ func TestSwitchPins_CallDiscriminantLowersViaHoistedBranchBoth(t *testing.T) {
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	_, loweredOk := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 		t.Fatalf("an untracked call discriminant declined the whole switch at %q — "+
 			"the hoisted branch-both fallback should serve it", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -173,10 +173,10 @@ func TestSwitchPins_BooleanLabelLowersComplete(t *testing.T) {
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	_, loweredOk := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 		t.Fatalf("a boolean case label declined the switch at %q — switchLabelLiteral's boolean arm should serve it", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

@@ -559,7 +559,7 @@ func NullConst() LoopEffect {
 // of ℝ̄ (refinement_forms.go's boundary ruling), so it rides the state
 // flag the wire already carries for it. The global NaN property's
 // initial value is NaN and the property is non-writable
-// (sec-value-properties-of-the-global-object-nan, tmp/ecma262/spec.html:
+// (sec-value-properties-of-the-global-object-nan, specifications/javascript/spec.html:
 // "The initial value of the "NaN" property of the global object is NaN
 // ... This property has the attributes { [[Writable]]: false,
 // [[Enumerable]]: false, [[Configurable]]: false }."), so a read of the

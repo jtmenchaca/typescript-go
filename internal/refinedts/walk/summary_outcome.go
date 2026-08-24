@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
@@ -63,12 +64,18 @@ type summaryOutcomeRecord struct {
 	Construct string
 }
 
-// summaryOutcomesMu guards the record store. The store is keyed on the
-// declaration node, so one body has one outcome however many times the
-// lowering is entered for it.
+// summaryOutcomesMu guards the record store. The outcome is what ONE
+// checker's lowering found — the first havocked construct or decline
+// reason it read — so the store keys by (checker, declaration): two
+// parallel workers' checkers can each be mid-lowering the same
+// declaration, and a bare-node key would let whichever one finishes
+// first hand its outcome to the other's later reads, on a checker that
+// never produced it (the same reasoning summary_registry.go's
+// summaryKey carries). One body has one outcome PER CHECKER, however
+// many times its lowering is entered for it.
 var (
 	summaryOutcomesMu sync.Mutex
-	summaryOutcomes   = map[*ast.Node]summaryOutcomeRecord{}
+	summaryOutcomes   = map[summaryKey]summaryOutcomeRecord{}
 )
 
 // RecordSummaryOutcome reports what happened to one body's lowering.
@@ -83,7 +90,7 @@ var (
 // declaration once — the record that lands, and every later upgrade,
 // bumps the tally through the outcome it moved TO and un-counts the
 // one it moved from.
-func RecordSummaryOutcome(declaration *ast.Node, name string, outcome SummaryOutcome, construct string) {
+func RecordSummaryOutcome(c *checker.Checker, declaration *ast.Node, name string, outcome SummaryOutcome, construct string) {
 	if declaration == nil || summaryOutcomeRank(outcome) == 0 {
 		return
 	}
@@ -92,8 +99,9 @@ func RecordSummaryOutcome(declaration *ast.Node, name string, outcome SummaryOut
 		// outcomes that have something to name
 		construct = ""
 	}
+	key := summaryKey{checker: c, declaration: declaration}
 	summaryOutcomesMu.Lock()
-	held, had := summaryOutcomes[declaration]
+	held, had := summaryOutcomes[key]
 	if had && summaryOutcomeRank(outcome) <= summaryOutcomeRank(held.Outcome) {
 		summaryOutcomesMu.Unlock()
 		return
@@ -101,7 +109,7 @@ func RecordSummaryOutcome(declaration *ast.Node, name string, outcome SummaryOut
 	if name == "" && had {
 		name = held.Name
 	}
-	summaryOutcomes[declaration] = summaryOutcomeRecord{
+	summaryOutcomes[key] = summaryOutcomeRecord{
 		Name:      name,
 		Outcome:   outcome,
 		Construct: construct,
@@ -121,13 +129,13 @@ func RecordSummaryOutcome(declaration *ast.Node, name string, outcome SummaryOut
 // whether one was ever recorded. The serving rule reads this: a
 // COMPLETE blob serves unconditionally, a POROUS one keeps the TOP-ret
 // decline.
-func SummaryOutcomeOf(declaration *ast.Node) (SummaryOutcome, string, bool) {
+func SummaryOutcomeOf(c *checker.Checker, declaration *ast.Node) (SummaryOutcome, string, bool) {
 	if declaration == nil {
 		return "", "", false
 	}
 	summaryOutcomesMu.Lock()
 	defer summaryOutcomesMu.Unlock()
-	held, had := summaryOutcomes[declaration]
+	held, had := summaryOutcomes[summaryKey{checker: c, declaration: declaration}]
 	if !had {
 		return "", "", false
 	}
@@ -159,10 +167,10 @@ func SummaryOutcomeTallies() (complete int64, porous int64, declined int64, cons
 }
 
 // ClearSummaryOutcomes drops every recorded outcome. The store is keyed
-// on declaration nodes from one program, so a caller that builds a new
-// program clears it; the tests clear it between cases.
+// on (checker, declaration) from one program, so a caller that builds a
+// new program clears it; the tests clear it between cases.
 func ClearSummaryOutcomes() {
 	summaryOutcomesMu.Lock()
-	summaryOutcomes = map[*ast.Node]summaryOutcomeRecord{}
+	summaryOutcomes = map[summaryKey]summaryOutcomeRecord{}
 	summaryOutcomesMu.Unlock()
 }

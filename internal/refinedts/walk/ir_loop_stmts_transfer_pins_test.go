@@ -50,11 +50,11 @@ func TestLoopPins_DecrementCountedForWithContainedBreakLowers(t *testing.T) {
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	_, loweredOk := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 		t.Fatalf("a decrement-counted for with a contained break/continue declined at %q — "+
 			"LowerLoopStatements should serve it", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -94,11 +94,11 @@ func TestLoopPins_NullGuardedElementReadWithContinueLowers(t *testing.T) {
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	_, loweredOk := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 		t.Fatalf("the searchTargetsAndSources-shaped for declined at %q — "+
 			"LowerLoopStatements should serve it", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -134,11 +134,11 @@ func TestLoopPins_WhileOverMethodCallConditionLowers(t *testing.T) {
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	_, loweredOk := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !loweredOk {
-		_, construct, _ := SummaryOutcomeOf(declaration)
+		_, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 		t.Fatalf("a while over a method-call condition declined at %q — "+
 			"LowerLoopStatements should serve it", construct)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -187,7 +187,7 @@ func TestLoopDiagnosis_CallToLocallyDefinedFunctionAfterContinueFallsToWholeLoop
 	`)
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

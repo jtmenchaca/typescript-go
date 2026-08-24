@@ -81,7 +81,9 @@ func answerCallbackParameter(ctx CallSiteCtx, token *ast.Node, parameter *ast.No
 	if !hasWords {
 		return Answer{}, false
 	}
-	return Claim(words, abstractdomain.TrustLevelOf(plain), false), true
+	answer := Claim(words, abstractdomain.TrustLevelOf(plain), false)
+	answer.SortWord = abstractdomain.ScalarSortWordOfKnown(plain)
+	return answer, true
 }
 
 // AnswerParameter is answerParameter in the TS source.
@@ -119,7 +121,9 @@ func AnswerParameter(
 			plain.Set = refinementsets.SimplifyScalar(kernelSimplificationAdapter{kernel}, worn.Set)
 		}
 		if words, hasWords := abstractdomain.FormatAbstractValue(plain); hasWords {
-			return Claim(words, abstractdomain.TrustLevelOf(plain), false), true
+			answer := Claim(words, abstractdomain.TrustLevelOf(plain), false)
+			answer.SortWord = abstractdomain.ScalarSortWordOfKnown(plain)
+			return answer, true
 		}
 		if worn.Kind == abstractdomain.KindPossiblyUndefined {
 			return No(Unknown{Why: "noted", Said: Sentence.PresentAndAbsent, Unsupported: false}), true

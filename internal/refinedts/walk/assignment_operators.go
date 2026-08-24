@@ -37,7 +37,7 @@ func compoundOperator(kind ast.Kind) (NumericOperator, bool) {
 // table has no bitwise arm (NumericOperator is the "+ - * / %" union
 // only), so a compound bitwise token needs this separate table rather
 // than an addition to that one. AssignmentOperator's own grammar row
-// (tmp/ecma262/spec.html sec-assignment-operators, `*= /= %= += -= <<=
+// (specifications/javascript/spec.html sec-assignment-operators, `*= /= %= += -= <<=
 // >>= >>>= &= ^= |= **=`) lists these beside the arithmetic compounds,
 // and ApplyStringOrNumericBinaryOperator (the abstract operation every
 // AssignmentOperator's alg step runs) carries the bitwise ops as

@@ -230,7 +230,7 @@ in full before touching code.`
   binding rides it for free — no new gate needed.
 - **The `&&=`/`||=`/`??=` LogicalAssignment algs
   (sec-assignment-operators-runtime-semantics-evaluation,
-  tmp/ecma262/spec.html) never call `PutValue` on the branch that keeps
+  specifications/javascript/spec.html) never call `PutValue` on the branch that keeps
   the left side unchanged** — `&&=`: "If ToBoolean(leftValue) is false,
   return leftValue" with NO further steps; `||=` the truthy-dual; `??=`:
   "If leftValue is neither undefined nor null, return leftValue." The
@@ -453,7 +453,7 @@ in full before touching code.`
 - **`Array.from({length: n})` builds a DENSE array of `n` own
   properties holding `undefined` (sec-array.from's array-like branch,
   `CreateDataPropertyOrThrow` at every index 0..length-1,
-  tmp/ecma262/spec.html); `new Array(n)` builds `n` SPARSE holes (no
+  specifications/javascript/spec.html); `new Array(n)` builds `n` SPARSE holes (no
   own property at any index at all).** `KindArrayHoles`' Length/
   ElementSet pair (length `{n}`, present-element-set `∅`) covers BOTH
   soundly for `.length`, an element read, `Array.isArray`,
@@ -541,7 +541,7 @@ in full before touching code.`
 
 ## Doctrine the briefs repeat
 
-- ECMA-262 claims cite the vendored tmp/ecma262/spec.html by clause;
+- ECMA-262 claims cite the committed specifications/javascript/spec.html by clause;
   zod/surface claims cite the vendored surface files themselves.
 - Fixture conviction rule: compute the marked line's runtime value BY
   HAND; a marker on an in-set value is wrong regardless of current

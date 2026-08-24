@@ -142,7 +142,7 @@ func wireFormJSON(r refinementsets.Refinement) string {
 			panic(fmt.Sprintf("wireFormJSON: multipleOf: %v", err))
 		}
 		return fmt.Sprintf(`{"form":"%s","d":{"num":%d,"exp":%d}}`, r.Form, d.Num, d.Exp)
-	case refinementsets.FormOneOf:
+	case refinementsets.FormOneOf, refinementsets.FormWord:
 		w := make([]string, len(r.W))
 		for i, x := range r.W {
 			w[i] = marshalWireValue(WireNumberOf(x))
@@ -209,7 +209,7 @@ func wireFormValue(r refinementsets.Refinement) map[string]any {
 			panic(fmt.Sprintf("wireFormValue: multipleOf: %v", err))
 		}
 		return map[string]any{"form": string(r.Form), "d": map[string]any{"num": d.Num, "exp": d.Exp}}
-	case refinementsets.FormOneOf:
+	case refinementsets.FormOneOf, refinementsets.FormWord:
 		w := make([]any, len(r.W))
 		for i, x := range r.W {
 			w[i] = WireNumberOf(x)

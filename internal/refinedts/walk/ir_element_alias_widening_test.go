@@ -24,7 +24,7 @@ func elementAliasRelower(t *testing.T, source string, name string) (LoweredSumma
 	p := entryEnvTestProgram(t, source)
 	declaration := entryEnvFunctionNamed(t, p, name)
 	summary, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for %s", name)
 	}

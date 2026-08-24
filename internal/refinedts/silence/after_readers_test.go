@@ -135,3 +135,45 @@ func TestSeededBinding_HeldKnowledgeOutranksTheType(t *testing.T) {
 		}
 	}
 }
+
+// TestSeededBinding_AReasonCarryingUnknownIsReplacedByADeterminedSeed
+// pins AfterReaders' case-(a) verdict (see the function's own doc): a
+// KindUnknown `held` value carrying a ResidueReason, bound to a
+// checked (non-`any`) boolean-typed identifier, is re-seeded from the
+// host type — the seed is a determined KindValues set, never
+// KindUnknown, so the incoming reason has nothing to survive ON. This
+// documents the drop as sound, not a gap: check_assignability.go's
+// ResidueReason read is gated on KindUnknown, which a seeded value
+// never is.
+func TestSeededBinding_AReasonCarryingUnknownIsReplacedByADeterminedSeed(t *testing.T) {
+	p := programFromSource(t, "function f(flag: boolean): void { console.log(flag); }\n")
+	token := identifierIn(t, p, "flag", 1)
+	held := ResidueOf("a probe reason naming the walk's own first blocker")
+	worn := SeededBinding(p.checker, held, token)
+	if worn.Kind == abstractdomain.KindUnknown {
+		t.Fatalf("expected the boolean host type to seed a determined value, got %+v", worn)
+	}
+	if worn.ResidueReason != "" {
+		t.Errorf("ResidueReason = %q, want empty — a determined seed carries no reason", worn.ResidueReason)
+	}
+}
+
+// TestSeededBinding_ATypedParameterReceivingAReasonCarryingArgumentIsSeeded
+// pins the BindParameter channel (walk/callback_pins.go's BindParameter
+// → this same SeededBinding path, no separate re-seed of its own): a
+// residue-carrying unknown argument bound to a typed (non-`any`)
+// parameter is re-seeded exactly as a let-initializer is — only an
+// `any`/ambient parameter's ArrivedUnchecked gate would have kept the
+// incoming value (and its reason) unchanged.
+func TestSeededBinding_ATypedParameterReceivingAReasonCarryingArgumentIsSeeded(t *testing.T) {
+	p := programFromSource(t, "function g(n: number): void { console.log(n); }\n")
+	token := identifierIn(t, p, "n", 1)
+	held := ResidueOf("a probe reason naming the walk's own first blocker")
+	worn := SeededBinding(p.checker, held, token)
+	if worn.Kind == abstractdomain.KindUnknown {
+		t.Fatalf("expected the number host type to seed a determined value, got %+v", worn)
+	}
+	if worn.ResidueReason != "" {
+		t.Errorf("ResidueReason = %q, want empty — a determined seed carries no reason", worn.ResidueReason)
+	}
+}

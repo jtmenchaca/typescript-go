@@ -308,7 +308,7 @@ func typedArrayConstructorName(ctx *FlowContext, e *ast.Node) (string, bool) {
 //
 // Two rows, both from the shared _TypedArray_ (...args) algorithm
 // (#sec-typedarray, oldids sec-typedarray-length/sec-typedarray-object,
-// tmp/ecma262/spec.html):
+// specifications/javascript/spec.html):
 //   - one NUMBER argument (a non-Object length): "Assert: firstArg is
 //     not an Object. Let elementLength be ? ToIndex(firstArg). Return
 //     ? AllocateTypedArray(...)" — AllocateTypedArray's own

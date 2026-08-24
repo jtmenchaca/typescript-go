@@ -24,10 +24,25 @@ import (
 func AbstractValueOfDeclared(stated annotations.DeclaredRefinement) abstractdomain.AbstractValue {
 	switch stated.Kind {
 	case annotations.DeclaredSet:
+		// a set that ADDS NOTHING beyond a bare keyword's own ground
+		// (annotation_of_type.go's KindNumberKeyword/StringKeyword/
+		// BooleanKeyword arms, which ground a plain `number`/`string`/
+		// `boolean` position into a DeclaredSet purely so downstream
+		// assignability has something to ask) is a READ of the
+		// position's own syntax, not a checked claim about it —
+		// InitialStateOfPlainParameter's own doc draws exactly this
+		// line for a parameter's plain type ("closer to a cited
+		// language clause... than a checked LIBRARY signature") and
+		// stamps TrustSpec, never TrustProved. A GENUINE zod-derived
+		// bound (Age's [0,120]) still proves outright.
+		grade := abstractdomain.TrustProved
+		if AddsNothingSet(*stated.Set) {
+			grade = abstractdomain.TrustSpec
+		}
 		bare := abstractdomain.KnownSet(
 			*stated.Set,
 			stated.Temporal,
-			abstractdomain.TrustProved,
+			grade,
 			setKindTagOf(stated.KindTag),
 		)
 		worn := abstractdomain.KnownWithMeasures(bare, measuresOf(stated.Measures))
@@ -42,6 +57,9 @@ func AbstractValueOfDeclared(stated annotations.DeclaredRefinement) abstractdoma
 		// -- otherwise the grounding silently drops the NaN
 		// possibility a plain `number` position has always carried.
 		if refinementsets.IsNumberGround(*stated.Set) {
+			// PossiblyNaN reads its own grade off worn.Grade (TrustLevelOf),
+			// so the TrustSpec stamp above already carries through here —
+			// no separate downgrade needed.
 			return abstractdomain.PossiblyNaN(worn)
 		}
 		return worn

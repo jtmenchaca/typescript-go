@@ -26,7 +26,7 @@ func TestKernelSummaryDirect_ABindingPatternMixesAScalarAndATopEntryMember(t *te
 	declaration := summaryDeclarationOf(t, "function f({ a, b }: { a: number, b: number[] }) { return a; }")
 	lowered, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
-		outcome, construct, _ := SummaryOutcomeOf(declaration)
+		outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 		t.Fatalf("declined (%q / %q)", outcome, construct)
 	}
 	if lowered.ParamCount != 2 {
@@ -48,7 +48,7 @@ func TestKernelSummaryDirect_ABindingPatternMixesAScalarAndATopEntryMember(t *te
 	if !bOk || b.Key != "" || b.Sort != BindingKindUnknown || b.TypeofTag != TypeofTagNone || !b.TopEntry {
 		t.Errorf("entry b = %+v (ok %v), want no Key, sort unknown, typeof none, TopEntry true — b's member expanded to nested leaves with no depth-1 row", b, bOk)
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}

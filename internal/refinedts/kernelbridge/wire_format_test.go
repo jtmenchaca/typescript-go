@@ -57,6 +57,28 @@ func TestRecursiveFormsNestSets(t *testing.T) {
 	}
 }
 
+// TestWordEncodesToTheFixedWireContract pins the wire contract a Word
+// leaf crosses at: `{"form":"word","w":[<numbers>]}`, the "w" array
+// carrying each codepoint through the identical number encoding oneOf
+// already uses (marshalWireValue over WireNumberOf) -- the Lean side's
+// own decoder reads this exact shape.
+func TestWordEncodesToTheFixedWireContract(t *testing.T) {
+	got := EncodeSet(refinementsets.MakeRefinedSet(refinementsets.Word([]float64{104, 105})))
+	want := `{"forms":[{"form":"word","w":[{"num":104,"exp":0},{"num":105,"exp":0}]}]}`
+	if got != want {
+		t.Errorf("EncodeSet(word([104,105])) = %q, want %q", got, want)
+	}
+
+	// an empty Word (never built by StringTuple, which spells the empty
+	// string as emptyTuple, but a direct construction still crosses
+	// correctly) spells an empty "w" array
+	got = EncodeSet(refinementsets.MakeRefinedSet(refinementsets.Word([]float64{})))
+	want = `{"forms":[{"form":"word","w":[]}]}`
+	if got != want {
+		t.Errorf("EncodeSet(word([])) = %q, want %q", got, want)
+	}
+}
+
 // NOT PORTED: "a specification encodes nodes, paths, and objects" —
 // encodeSpecification takes a Specification (object_graphs, unported).
 // See wire_format.go's file comment; reported as blocked.

@@ -181,6 +181,15 @@ func formatAbstractValueAt(known AbstractValue, top bool) (string, bool) {
 		return tuple, true
 
 	case KindSet:
+		// a caller-supplied SEMANTIC spelling (KnownSetWithHoverWord) reads
+		// as prose, not a brace-wrapped fact -- "the JSON of number {0 <=
+		// x <= 1}" REPLACES the host type exactly as a single-value
+		// rendering already does (ReplacesHostType's own rule: anything not
+		// opening with "{" replaces rather than appends), since it names
+		// what the value IS rather than adding a fact about it
+		if known.HoverWord != "" {
+			return known.HoverWord, true
+		}
 		worn, wornOK := formatKindTaggedSet(known)
 		if wornOK {
 			if top {

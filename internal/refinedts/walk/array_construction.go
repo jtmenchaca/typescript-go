@@ -1,6 +1,6 @@
 // The Array constructor's own RESULT model — `Array(…)` and
 // `new Array(…)` build the same array: the one algorithm at sec-array
-// (oldids sec-array-len, sec-array-items; tmp/ecma262/spec.html) runs
+// (oldids sec-array-len, sec-array-items; specifications/javascript/spec.html) runs
 // for both spellings — a call without NewTarget takes the active
 // function object and continues through the same steps. The rows,
 // each a step of that algorithm:

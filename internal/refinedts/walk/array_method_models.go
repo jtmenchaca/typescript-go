@@ -124,7 +124,7 @@ func readArrayFrom(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abstr
 			} else if argCount == 1 {
 				// past the materialization ceiling, with NO mapper: sec-
 				// array.from's array-like branch (steps _arrayLike_.._k_,
-				// tmp/ecma262/spec.html sec-array.from) reads
+				// specifications/javascript/spec.html sec-array.from) reads
 				// Get(arrayLike, ToString(k)) at every index 0..length-1
 				// and writes it via CreateDataPropertyOrThrow — so every
 				// index becomes an OWN property. An array-like whose
@@ -428,7 +428,7 @@ func readArrayReadMethods(site MethodCallSite, argKnowns []abstractdomain.Abstra
 		}
 	}
 	// `join` over ARRAY-HOLES: sec-array.prototype.join
-	// (tmp/ecma262/spec.html, sec-array.prototype.join) reads
+	// (specifications/javascript/spec.html, sec-array.prototype.join) reads
 	// Get(obj, ToString(k)) at every index and, "If element is neither
 	// undefined nor null," appends its ToString — an undefined element
 	// (every element here; the present-element set is ∅) contributes

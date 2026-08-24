@@ -35,6 +35,13 @@ import (
 // the program that produced their nodes is in use by this port.
 
 type pureFacts struct {
+	// mu guards every lazy fill below: parallel entry walks reach the
+	// SAME node's facts when two workers inline one shared function
+	// body, and an unguarded check-then-write handed a reader a
+	// partially built set (measured: verdicts flipped between identical
+	// runs). Fills hold the lock for the whole scan; a filled map is
+	// never written again, so readers of the returned map need nothing.
+	mu                  sync.Mutex
 	assignedUnfiltered  map[string]struct{}
 	hasAssignedUnfilt   bool
 	assignedDirect      map[string]struct{}
@@ -71,6 +78,10 @@ type programKey struct {
 }
 
 type programFacts struct {
+	// mu: the same fill guard pureFacts carries. The key's checker is
+	// worker-exclusive in the sweep path, but the seam's safety must
+	// not depend on which caller holds it — the guard is uniform.
+	mu                sync.Mutex
 	assignedFiltered  map[string]struct{}
 	hasAssignedFilter bool
 	writes            map[string]struct{}
@@ -291,6 +302,8 @@ func assignedNamesCore(
 // the checker, so the memo keys by (checker, node).
 func AssignedNameSet(c *checker.Checker, node *ast.Node) map[string]struct{} {
 	held := programOf(c, node)
+	held.mu.Lock()
+	defer held.mu.Unlock()
 	if !held.hasAssignedFilter {
 		into := map[string]struct{}{}
 		assignedNamesCore(node, into, true, func(argument *ast.Node) bool {
@@ -307,6 +320,8 @@ func AssignedNameSet(c *checker.Checker, node *ast.Node) map[string]struct{} {
 // program to filter with.
 func AssignedNameSetUnfiltered(node *ast.Node) map[string]struct{} {
 	held := pureOf(node)
+	held.mu.Lock()
+	defer held.mu.Unlock()
 	if !held.hasAssignedUnfilt {
 		into := map[string]struct{}{}
 		assignedNamesCore(node, into, true, nil)
@@ -321,6 +336,8 @@ func AssignedNameSetUnfiltered(node *ast.Node) map[string]struct{} {
 // effects precisely.
 func AssignedDirectSet(node *ast.Node) map[string]struct{} {
 	held := pureOf(node)
+	held.mu.Lock()
+	defer held.mu.Unlock()
 	if !held.hasAssignedDirect {
 		into := map[string]struct{}{}
 		assignedNamesCore(node, into, false, nil)
@@ -335,6 +352,8 @@ func AssignedDirectSet(node *ast.Node) map[string]struct{} {
 // predicate-body reassignment question reads exactly this.
 func AssignedIdentifierNames(node *ast.Node) map[string]struct{} {
 	held := pureOf(node)
+	held.mu.Lock()
+	defer held.mu.Unlock()
 	if !held.hasAssignedIdent {
 		into := map[string]struct{}{}
 		var scan func(child *ast.Node) bool
@@ -389,6 +408,8 @@ func writtenNamesResolvesToDefaultLib(c *checker.Checker, node *ast.Node) bool {
 // copy), with a default-library method's receiver spared.
 func WrittenNamesOf(c *checker.Checker, fn *ast.Node) map[string]struct{} {
 	held := programOf(c, fn)
+	held.mu.Lock()
+	defer held.mu.Unlock()
 	if held.hasWrites {
 		return held.writes
 	}
@@ -484,6 +505,8 @@ func bindingNames(name *ast.Node, into map[string]struct{}) {
 // state.
 func DeclaredNameSet(node *ast.Node) map[string]struct{} {
 	held := pureOf(node)
+	held.mu.Lock()
+	defer held.mu.Unlock()
 	if held.hasDeclared {
 		return held.declared
 	}
@@ -512,6 +535,8 @@ func DeclaredNameSet(node *ast.Node) map[string]struct{} {
 // memo keys.
 func ObservedNamesOf(node *ast.Node) []string {
 	held := pureOf(node)
+	held.mu.Lock()
+	defer held.mu.Unlock()
 	if held.hasObserved {
 		return held.observed
 	}
@@ -553,6 +578,8 @@ func sortStrings(list []string) {
 // caller's world.
 func CalleeLocalSet(declaration *ast.Node) map[string]struct{} {
 	held := pureOf(declaration)
+	held.mu.Lock()
+	defer held.mu.Unlock()
 	if held.hasCalleeLocals {
 		return held.calleeLocals
 	}

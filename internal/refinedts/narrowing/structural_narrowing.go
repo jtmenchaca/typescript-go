@@ -202,7 +202,8 @@ func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name stri
 		// an absence test — a real runtime test both ways. The LOOSE
 		// forms read here too: `v == null` is true exactly of undefined
 		// and null (the spec's own equivalence), which is the model's
-		// absent marker either way.
+		// absent marker either way. (AbsenceTestPlace below is the same
+		// recognizer exposed for the cross-channel disjunction reader.)
 		if AbsentLiteral(c, otherSide) {
 			absent := Narrowed{Binding: testedPlace.Binding, Path: testedPlace.Path, Definedness: "undefined"}
 			present := Narrowed{Binding: testedPlace.Binding, Path: testedPlace.Path, Definedness: "defined"}
@@ -273,6 +274,33 @@ func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name stri
 	}
 
 	return None
+}
+
+// AbsenceTestPlace reads `P === undefined` / `P == null` (either
+// operand order, loose or strict equality) as the tested tracked
+// place — the recognizer the cross-channel disjunction reader
+// (condition_analysis.go) shares with the structural pass above.
+// (nil, false) for any other shape.
+func AbsenceTestPlace(c *checker.Checker, e *ast.Node, isTracked func(name string) bool) (*dataflowfacts.TrackedPlace, bool) {
+	bare := Peeled(e)
+	if !ast.IsBinaryExpression(bare) {
+		return nil, false
+	}
+	bin := bare.AsBinaryExpression()
+	op := bin.OperatorToken.Kind
+	if op != ast.KindEqualsEqualsEqualsToken && op != ast.KindEqualsEqualsToken {
+		return nil, false
+	}
+	testedPlace := dataflowfacts.TrackedPlaceOfWith(c, bin.Left, isTracked)
+	otherSide := bin.Right
+	if testedPlace == nil {
+		testedPlace = dataflowfacts.TrackedPlaceOfWith(c, bin.Right, isTracked)
+		otherSide = bin.Left
+	}
+	if testedPlace == nil || !AbsentLiteral(c, otherSide) {
+		return nil, false
+	}
+	return testedPlace, true
 }
 
 func numericTextIsZero(e *ast.Node) bool {

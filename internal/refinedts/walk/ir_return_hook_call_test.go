@@ -47,7 +47,7 @@ func TestReturnHookCall_UseAppSelectorCompletes(t *testing.T) {
 	`, returnHookCallHooksSource)
 	declaration := entryEnvFunctionNamed(t, p, "usePolarChartLayout")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for usePolarChartLayout")
 	}
@@ -74,7 +74,7 @@ func TestReturnHookCall_UseContextCompletes(t *testing.T) {
 	`, returnHookCallHooksSource)
 	declaration := entryEnvFunctionNamed(t, p, "useRawContext")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for useRawContext")
 	}

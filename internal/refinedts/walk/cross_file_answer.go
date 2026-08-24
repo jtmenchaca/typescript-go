@@ -30,7 +30,9 @@ func AnswerCrossFile(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKe
 			plain.Set = refinementsets.SimplifyScalar(kernelSimplificationAdapter{kernel}, worn.Set)
 		}
 		if words, hasWords := abstractdomain.FormatAbstractValue(plain); hasWords {
-			return Claim(words, abstractdomain.TrustLevelOf(plain), false), true
+			answer := Claim(words, abstractdomain.TrustLevelOf(plain), false)
+			answer.SortWord = abstractdomain.ScalarSortWordOfKnown(plain)
+			return answer, true
 		}
 		return No(Unknown{Why: "noted", Said: Sentence.WalkStatesNothing, Unsupported: false}), true
 	}

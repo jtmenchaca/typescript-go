@@ -45,8 +45,14 @@ func readPromiseResolve(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 	if inner.Kind == abstractdomain.KindPromise {
 		return &inner
 	}
-	if inner.Kind == abstractdomain.KindValues || inner.Kind == abstractdomain.KindSet ||
-		inner.Kind == abstractdomain.KindUndef || inner.Kind == abstractdomain.KindNaN {
+	// every kind CannotBeThenable answers yes for wraps unchanged
+	// (sec-promise.resolve's non-thenable fulfillment) — a checked
+	// declaration's bare `number` return (KindPossiblyNaN, the
+	// unreadNumber() shape ReturnTypeGround now grades TrustLibrary)
+	// included, so the settled value stays a real ground claim instead
+	// of falling to residue the moment a caller wraps it in
+	// Promise.resolve/await.
+	if CannotBeThenable(inner) {
 		out := abstractdomain.AbstractValue{Kind: abstractdomain.KindPromise, Inner: &inner}
 		return &out
 	}

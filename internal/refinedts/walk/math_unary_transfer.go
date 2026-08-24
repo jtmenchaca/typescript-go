@@ -105,7 +105,7 @@ func UnaryMathImage(name string, args []abstractdomain.AbstractValue, operandTru
 		if split, ok := domainSplitImage("log1p", A, -1, true, operandTrustLevel); ok {
 			return split, true
 		}
-		return silence.Residue(), true
+		return silence.ResidueOf("Math.log1p is real only past −1 and this operand straddles −1 — the split into a past-−1 image and a below-−1 NaN could not be built"), true
 	case "log", "log2", "log10":
 		// the log window is real only over POSITIVE operands — zero
 		// reaches −∞ (pinned kernel-side) and a negative is NaN, so
@@ -139,7 +139,7 @@ func UnaryMathImage(name string, args []abstractdomain.AbstractValue, operandTru
 		if split, ok := domainSplitImage(name, A, 0, true, operandTrustLevel); ok {
 			return split, true
 		}
-		return silence.Residue(), true
+		return silence.ResidueOf("Math." + name + " is real only over positive operands and this operand is not provably positive — the split into a positive-part image and a non-positive NaN could not be built"), true
 	case "sqrt":
 		// EXACTLY specified — 𝔽(√ℝ(n)) (vendored spec, sec-math.sqrt)
 		// is the correctly-rounded root, which is MONOTONE in n: the
@@ -180,7 +180,7 @@ func UnaryMathImage(name string, args []abstractdomain.AbstractValue, operandTru
 			if split, ok := domainSplitImage("sqrt", A, 0, false, operandTrustLevel); ok {
 				return split, true
 			}
-			return silence.Residue(), true
+			return silence.ResidueOf("Math.sqrt's window straddles zero — the split into the nonnegative part's exact roots and the negative part's NaN could not be built"), true
 		}
 		return abstractdomain.KnownSet(
 			refinementsets.MakeRefinedSet(refinementsets.AtLeast(math.Sqrt(window.Lo)), refinementsets.AtMost(math.Sqrt(window.Hi))),

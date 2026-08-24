@@ -158,7 +158,7 @@ func reduceCallOf(node *ast.Node) (source collectionCall, seed *ast.Node, ok boo
 
 // oneArgumentReduceCallOf reads `xs.reduce(cb)` — no seed, the array's
 // own first element standing in for the accumulator's starting value
-// (sec-array.prototype.reduce, tmp/ecma262/spec.html: with no initial
+// (sec-array.prototype.reduce, specifications/javascript/spec.html: with no initial
 // value, the accumulator is set to the array's element at index 0 and
 // the callback runs from index 1).
 //

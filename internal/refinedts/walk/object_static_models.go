@@ -196,7 +196,7 @@ func readObjectStaticMethods(site MethodCallSite) *abstractdomain.AbstractValue 
 		}
 		// Object.keys/values/entries over a KindArrayHoles receiver:
 		// EnumerableOwnProperties (sec-enumerableownproperties,
-		// tmp/ecma262/spec.html) walks OWN property keys only, and
+		// specifications/javascript/spec.html) walks OWN property keys only, and
 		// that is exactly what Dense/DenseKnown (abstract_value.go's
 		// KindArrayHoles doc) states. A KindArrayHoles receiver only
 		// ever exists PAST arrayConstructionHoleLimit (below it,

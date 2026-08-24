@@ -204,14 +204,17 @@ func TestStandaloneMarkerSkipsCommentLines(t *testing.T) {
 }
 
 // TestProseMentionOfTheTokenIsNotAMarker: the measured defect. A
-// marker is recognized only when @refinedts-expect-error is the first
-// word of a comment's content, immediately after `//` or `/*` — never
-// merely present somewhere inside a comment. Both measured
-// false-positive shapes (docs/one-checker/marker-parity.md's first
-// divergence row) are pinned here: a JSDoc header whose `*`-
-// continuation line mentions the token mid-prose (the exact shape in
-// language/edge-coverage/b-runners.ts and its three siblings), and a
-// `//` line comment with prose before the token.
+// marker is recognized only when @refinedts-expect-error opens a
+// comment's content or directly follows a known leading directive
+// (`@ts-expect-error`) — never when it merely appears somewhere
+// inside a comment, with arbitrary prose ahead of it. Three shapes
+// are pinned here: a JSDoc header whose `*`-continuation line mentions
+// the token mid-prose (the exact shape in
+// language/edge-coverage/b-runners.ts and its three siblings), a `//`
+// line comment with prose before the token, and `@ts-expect-error`
+// followed by unrelated prose that only later happens to mention
+// `@refinedts-expect-error` — the known-directive allowance covers
+// only the immediate compound, not any later mention on the line.
 func TestProseMentionOfTheTokenIsNotAMarker(t *testing.T) {
 	testCases := []struct {
 		name string
@@ -233,6 +236,11 @@ func TestProseMentionOfTheTokenIsNotAMarker(t *testing.T) {
 			text: "// see @refinedts-expect-error for details\n" +
 				"bad();\n",
 		},
+		{
+			name: "@ts-expect-error followed by unrelated prose, not the compound spelling",
+			text: "// @ts-expect-error this comment happens to mention @refinedts-expect-error later\n" +
+				"bad();\n",
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -241,6 +249,60 @@ func TestProseMentionOfTheTokenIsNotAMarker(t *testing.T) {
 				t.Fatalf("expected no expectations from prose mentioning the token, got %+v", read)
 			}
 		})
+	}
+}
+
+// TestCompoundTsExpectErrorMarkerRegisters: the measured defect. The
+// corpus's established spelling for a row that is both a plain
+// TypeScript error and a refinement fire is
+// `// @ts-expect-error @refinedts-expect-error — reason` (14+ sites
+// across sast-coverage and syntax-coverage fixtures). The marker must
+// register exactly as the first-token spelling does: same covered
+// line, same reason text.
+func TestCompoundTsExpectErrorMarkerRegisters(t *testing.T) {
+	testCases := []struct {
+		name       string
+		text       string
+		wantReason string
+	}{
+		{
+			name: "standalone compound marker, no code",
+			text: "// @ts-expect-error @refinedts-expect-error — md5 is outside StrongHash\n" +
+				"bad();\n",
+			wantReason: "md5 is outside StrongHash",
+		},
+		{
+			name: "trailing compound marker, no code",
+			text: "bad(); // @ts-expect-error @refinedts-expect-error — a plain string is not provably a member\n",
+			wantReason: "a plain string is not provably a member",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			read := ExpectationsOf(testCase.text)
+			if len(read) != 1 {
+				t.Fatalf("expected 1 expectation, got %+v", read)
+			}
+			if read[0].Reason != testCase.wantReason {
+				t.Fatalf("expected reason %q, got %+v", testCase.wantReason, read[0])
+			}
+			if read[0].HasCode {
+				t.Fatalf("expected no code, got %+v", read[0])
+			}
+		})
+	}
+}
+
+// TestBareTsExpectErrorRegistersNothing: `@ts-expect-error` alone,
+// without a trailing `@refinedts-expect-error`, is a plain TypeScript
+// directive and never a refinement marker — it must not register as
+// an Expectation.
+func TestBareTsExpectErrorRegistersNothing(t *testing.T) {
+	text := "// @ts-expect-error — a plain TypeScript error, no refinement fire expected\n" +
+		"bad();\n"
+	read := ExpectationsOf(text)
+	if len(read) != 0 {
+		t.Fatalf("expected no expectations from a bare @ts-expect-error, got %+v", read)
 	}
 }
 

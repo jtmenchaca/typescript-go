@@ -65,7 +65,7 @@ func TestSummaryParameterEntries_TupleAnnotatedArrayPatternBodyIsNotRefusedAtThe
 	arrow := arrowConstNamed(t, p.Entry.Statements.Nodes, "getValidInterval")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, arrow)
-	outcome, construct, recorded := SummaryOutcomeOf(arrow)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, arrow)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}

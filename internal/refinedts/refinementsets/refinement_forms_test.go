@@ -59,6 +59,72 @@ func TestInfinitiesAreElementsNaNIsRefused(t *testing.T) {
 	mustPanicWith(t, "NaN", func() { OneOf([]float64{1, math.NaN()}) })
 }
 
+// TestWordCarriesTheWireShape pins Word's own construction against the
+// FIXED wire contract: a bare Word form is `{form: "word", w: [...]}`,
+// the "w" array holding the literal's codepoints in order -- the same
+// field OneOf carries, read by the same wire door (wire_format.go's
+// wireFormJSON merges the two forms' encoding into one case since both
+// spell identically).
+func TestWordCarriesTheWireShape(t *testing.T) {
+	if !equalForm(Word([]float64{97, 98, 99}), Refinement{Form: FormWord, W: []float64{97, 98, 99}}) {
+		t.Errorf("Word([97,98,99]) mismatch")
+	}
+	if Word([]float64{}).Form != FormWord {
+		t.Errorf("Word([]).Form = %v, want word", Word([]float64{}).Form)
+	}
+}
+
+// TestWordRefusesNaN mirrors OneOf's own NaN boundary: NaN is not an
+// element of R-bar, so a Word carrying one panics at construction, the
+// same "impossible state, loudly" the element() helper enforces on
+// every other form.
+func TestWordRefusesNaN(t *testing.T) {
+	mustPanicWith(t, "NaN", func() { Word([]float64{97, math.NaN()}) })
+}
+
+// TestWordOfRoundTripsThroughStringTuple pins the builder <-> reader
+// round trip: StringTuple's own Word spelling for a two-or-more-
+// character literal reads back through WordOf to the exact same
+// codepoints -- the collapsed leaf and the recognizer agree on what a
+// literal word means.
+func TestWordOfRoundTripsThroughStringTuple(t *testing.T) {
+	set := StringTuple("hello")
+	if set.Forms[0].Form != FormWord {
+		t.Fatalf("StringTuple(hello).Forms[0].Form = %v, want word", set.Forms[0].Form)
+	}
+	got, ok := WordOf(set)
+	if !ok || !reflect.DeepEqual(got, CodepointsOf("hello")) {
+		t.Errorf("WordOf(StringTuple(hello)) = %v, %v, want %v, true", got, ok, CodepointsOf("hello"))
+	}
+	// a bare Word constructed directly reads back identically -- WordOf
+	// does not require the StringTuple door specifically
+	direct := MakeRefinedSet(Word([]float64{72, 73}))
+	got, ok = WordOf(direct)
+	if !ok || !reflect.DeepEqual(got, []float64{72, 73}) {
+		t.Errorf("WordOf(Word([72,73])) = %v, %v, want [72 73], true", got, ok)
+	}
+}
+
+// TestStringTupleKeepsTheAmbiguousSingletonSpellingAtLengthOne pins
+// StringTuple's own length boundary: a ONE-character literal stays the
+// ambiguous OneOf singleton (the same shape a numeric enum's own
+// member wears -- unambiguousStringLiteral's own doc states why), and
+// only two-or-more collapses to a Word leaf.
+func TestStringTupleKeepsTheAmbiguousSingletonSpellingAtLengthOne(t *testing.T) {
+	one := StringTuple("a")
+	if one.Forms[0].Form != FormOneOf {
+		t.Errorf("StringTuple(a).Forms[0].Form = %v, want oneOf (still ambiguous with a numeric singleton)", one.Forms[0].Form)
+	}
+	two := StringTuple("ab")
+	if two.Forms[0].Form != FormWord {
+		t.Errorf("StringTuple(ab).Forms[0].Form = %v, want word", two.Forms[0].Form)
+	}
+	empty := StringTuple("")
+	if empty.Forms[0].Form != FormEmptyTuple {
+		t.Errorf("StringTuple(\"\").Forms[0].Form = %v, want emptyTuple", empty.Forms[0].Form)
+	}
+}
+
 func mustPanicWith(t *testing.T, substr string, fn func()) {
 	t.Helper()
 	defer func() {

@@ -421,14 +421,14 @@ func TestSummaryCycleInFlight_TrueOnlyWhileTheDeclarationsOwnBuildRuns(t *testin
 	other := summaryDeclarationOf(t, "function g(n: number) { return n; }")
 	withSummaryBuilder(t, func(ctx *FlowContext, d *ast.Node) (kernelbridge.SummaryBlob, int, bool) {
 		if d == declaration {
-			duringOwnBuild = SummaryCycleInFlight(declaration)
-			duringAnothersBuild = SummaryCycleInFlight(other)
+			duringOwnBuild = SummaryCycleInFlight(checkerOf(ctx), declaration)
+			duringAnothersBuild = SummaryCycleInFlight(checkerOf(ctx), other)
 		}
 		return "blob", 2, true
 	})
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 
-	if SummaryCycleInFlight(declaration) {
+	if SummaryCycleInFlight(checkerOf(ctx), declaration) {
 		t.Errorf("in flight before any build started")
 	}
 	if _, ok := SummaryBlobFor(ctx, declaration); !ok {
@@ -440,10 +440,10 @@ func TestSummaryCycleInFlight_TrueOnlyWhileTheDeclarationsOwnBuildRuns(t *testin
 	if duringAnothersBuild {
 		t.Errorf("an unrelated declaration read as in flight")
 	}
-	if SummaryCycleInFlight(declaration) {
+	if SummaryCycleInFlight(checkerOf(ctx), declaration) {
 		t.Errorf("still in flight after the build finished")
 	}
-	if SummaryCycleInFlight(nil) {
+	if SummaryCycleInFlight(checkerOf(ctx), nil) {
 		t.Errorf("a nil declaration read as in flight")
 	}
 }
@@ -458,7 +458,7 @@ func TestSummaryBlobFor_AHeldSelfBlobAnswersOnlyInsideTheFixpointsGate(t *testin
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 
 	// OUTSIDE the gate the override is invisible: the ordinary route runs
-	releaseSelf := holdSelfBlob(declaration, "self-const")
+	releaseSelf := holdSelfBlob(checkerOf(ctx), declaration, "self-const")
 	outside, outsideOk := SummaryBlobFor(ctx, declaration)
 	if !outsideOk || outside != "built" {
 		t.Errorf("outside the gate = (%q, %v), want the ordinary answer %q", outside, outsideOk, "built")
@@ -468,7 +468,7 @@ func TestSummaryBlobFor_AHeldSelfBlobAnswersOnlyInsideTheFixpointsGate(t *testin
 	// INSIDE the gate it outranks the store
 	clearSummaryStore()
 	releaseGate := holdRegistryForFixpoint()
-	releaseSelf = holdSelfBlob(declaration, "self-const")
+	releaseSelf = holdSelfBlob(checkerOf(ctx), declaration, "self-const")
 	inside, insideOk := summaryBlobForUngated(ctx, declaration)
 	releaseSelf()
 	releaseGate()
@@ -477,9 +477,10 @@ func TestSummaryBlobFor_AHeldSelfBlobAnswersOnlyInsideTheFixpointsGate(t *testin
 	}
 
 	// the override stored nothing of its own
+	key := summaryKey{checker: checkerOf(ctx), declaration: declaration}
 	summaryBlobsMu.Lock()
-	_, stored := summaryBlobs[declaration]
-	_, heldStill := summarySelfBlobs[declaration]
+	_, stored := summaryBlobs[key]
+	_, heldStill := summarySelfBlobs[key]
 	summaryBlobsMu.Unlock()
 	if stored {
 		t.Errorf("the held self blob was stored as the declaration's answer")
@@ -499,7 +500,7 @@ func TestReplaceStoredBlob_SwapsTheAnswerAndKeepsTheOutShape(t *testing.T) {
 		t.Fatalf("the floor build declined")
 	}
 
-	replaceStoredBlob(declaration, "certified-const")
+	replaceStoredBlob(checkerOf(ctx), declaration, "certified-const")
 
 	blob, ok := SummaryBlobFor(ctx, declaration)
 	if !ok || blob != "certified-const" {
@@ -512,20 +513,23 @@ func TestReplaceStoredBlob_SwapsTheAnswerAndKeepsTheOutShape(t *testing.T) {
 }
 
 // seedSummaryShape puts a lowered shape into the body memo so the
-// fixpoint's LowerSummaryBody ask answers it without a kernel. Cleared
-// when the test ends.
+// fixpoint's LowerSummaryBody ask answers it without a kernel. Keyed
+// on the nil checker — every fixpoint test here builds its FlowContext
+// with no P, so checkerOf(ctx) reads nil at every call site this seeds
+// for. Cleared when the test ends.
 func seedSummaryShape(t *testing.T, declaration *ast.Node, shape LoweredSummary) {
 	t.Helper()
+	key := summaryKey{checker: nil, declaration: declaration}
 	kernelSummariesMu.Lock()
-	held, had := kernelSummaries[declaration]
-	kernelSummaries[declaration] = summaryEntry{Summary: shape, Ok: true}
+	held, had := kernelSummaries[key]
+	kernelSummaries[key] = summaryEntry{Summary: shape, Ok: true}
 	kernelSummariesMu.Unlock()
 	t.Cleanup(func() {
 		kernelSummariesMu.Lock()
 		if had {
-			kernelSummaries[declaration] = held
+			kernelSummaries[key] = held
 		} else {
-			delete(kernelSummaries, declaration)
+			delete(kernelSummaries, key)
 		}
 		kernelSummariesMu.Unlock()
 	})

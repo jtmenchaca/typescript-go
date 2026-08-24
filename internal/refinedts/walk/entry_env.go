@@ -21,6 +21,36 @@ import (
 // TS source: the set a PLAIN type states at a parameter — syntax
 // then host. Exported parameters whose type states nothing are
 // opaque: callers live outside this file.
+//
+// TRUST GRADE. A parameter's declared type is a declaration-backed
+// claim exactly as a resolved call's return type is
+// (return_type_ground.go's typeGroundOf, which stamps every ground it
+// hands back TrustLibrary so the claim's provenance survives to the
+// sink). The parallel is not exact, though: a return type's ground
+// comes from a callee tsc already CHECKED against real call sites
+// (library grade — the claim rests on some OTHER declaration's own
+// checking). A parameter's own annotation is instead READ, not
+// proved by any execution or cross-call check — the same standing
+// typeof_ground.go's GroundOfTypeofWord already stamps TrustSpec for
+// (`typeof x === "number"` grades its ground TrustSpec, not
+// TrustProved: a spec clause read correctly, never a kernel
+// decision). The Rust twin (refinedpy/pyrefly/crates/refinedpy/src/
+// check.rs, seed_parameters) states the identical rule in so many
+// words: "known_set, TrustSpec — the annotation is read, not proved
+// by execution." TrustSpec is the level chosen here for the same
+// reason: a same-file `age: number` is closer to a cited language
+// clause held for this one declaration than to a checked LIBRARY
+// signature spanning other call sites.
+//
+// AtTrustLevel only ever LOWERS (MinTrustLevel): the ordinary case is
+// a fresh TrustProved read (typereading's own recipes.go constructors
+// all build TrustProved, so this stamp is what turns it into TrustSpec),
+// but a read that already carries a weaker floor keeps that weaker
+// floor rather than being raised. Applied at the two return points
+// that carry a REAL type reading; Opaque and Residue are
+// KindUnknown-shaped and carry no grade to touch either way
+// (AtTrustLevel already no-ops there), so grading them explicitly
+// would add nothing.
 func InitialStateOfPlainParameter(p *program.CheckerProgram, parameter *ast.Node) abstractdomain.AbstractValue {
 	unread := func() abstractdomain.AbstractValue {
 		if ExportedFunctionParameter(p.Checker, parameter) {
@@ -34,12 +64,12 @@ func InitialStateOfPlainParameter(p *program.CheckerProgram, parameter *ast.Node
 	}
 	if decl.Type != nil {
 		if held, ok := typereading.ReadDeclaredType(p.Checker, decl.Type, decl.Name()); ok {
-			return held
+			return abstractdomain.AtTrustLevel(held, abstractdomain.TrustSpec)
 		}
 		return unread()
 	}
 	if held, ok := typereading.ReadHostType(p.Checker, typereading.TypeAtLocation(p.Checker, decl.Name()), decl.Name(), 0); ok {
-		return held
+		return abstractdomain.AtTrustLevel(held, abstractdomain.TrustSpec)
 	}
 	return unread()
 }

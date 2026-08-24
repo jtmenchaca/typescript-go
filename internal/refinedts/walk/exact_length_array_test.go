@@ -297,7 +297,7 @@ func TestEvaluate_TheLargeArrayElementReadIsAbsent(t *testing.T) {
 }
 
 /* ── Array.from({length: n}) past the ceiling: the same dense claim
-   — sec-array.from's array-like branch (tmp/ecma262/spec.html,
+   — sec-array.from's array-like branch (specifications/javascript/spec.html,
    sec-array.from) writes an OWN property at every index via
    CreateDataPropertyOrThrow, so the result is DENSE undefined values,
    not sparse holes like `new Array(n)` — but KindArrayHoles' two

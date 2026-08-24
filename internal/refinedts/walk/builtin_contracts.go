@@ -2,7 +2,7 @@
 //
 // The contracts the built-ins state about their OWN argument
 // positions — the table the surveys asked for. Each row transcribes
-// its clause from the vendored spec (tmp/ecma262/spec.html) or names
+// its clause from the vendored spec (specifications/javascript/spec.html) or names
 // its outside source, and each fires through the one assignability
 // path or speaks one plain sentence, so a contract refutation reads
 // like any other refutation.

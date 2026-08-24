@@ -136,6 +136,14 @@ func CheckFile(entryFilePath string, surfacePath string) (CheckResult, error) {
 //
 // The result map is keyed by the caller's own entryPaths spellings; a
 // path whose file did not parse into its group's program has no row.
+// factsCacheDisabled is the -no-facts-cache diagnostic switch: with it
+// set, CheckFiles hands runRefinements no shared facts store, so no
+// entry ever consumes facts another worker compiled.
+var factsCacheDisabled bool
+
+// SetFactsCacheDisabled is called once by the CLI before any check.
+func SetFactsCacheDisabled(disabled bool) { factsCacheDisabled = disabled }
+
 func CheckFiles(entryPaths []string, surfacePath string) map[string]CheckResult {
 	results := make(map[string]CheckResult, len(entryPaths))
 	if len(entryPaths) == 0 {
@@ -185,7 +193,14 @@ func CheckFiles(entryPaths []string, surfacePath string) map[string]CheckResult 
 		}
 		SweepPhases.ShapeMs += float64(time.Since(tShape)) / float64(time.Millisecond)
 		kernel := setupKernel()
-		factsStore := &sweepFactsStore{held: map[*ast.SourceFile]*walk.FileFacts{}}
+		factsStore := &sweepFactsStore{held: map[sweepFactsKey]*walk.FileFacts{}}
+		if factsCacheDisabled {
+			// -no-facts-cache: every entry compiles its own reachable
+			// files instead of consuming another worker's first compile
+			// — the determinism instrument that separates cache-carried
+			// variance from checker-history variance.
+			factsStore = nil
+		}
 		// walk scheduling: heaviest entries first off ONE shared list,
 		// each worker holding one checker exclusively until the list
 		// drains — longest-processing-time packing. The old file→checker
@@ -371,7 +386,7 @@ files:
 			if cache == nil {
 				return nil
 			}
-			held := cache.get(file)
+			held := cache.get(p.Checker, file)
 			valid := held != nil && (!reporting || held.HasDiagnostics)
 			if valid {
 				for name, hash := range held.ImportHashes {
@@ -396,11 +411,11 @@ files:
 		claimed := false
 		if cache != nil {
 			for {
-				ch, winner := cache.claim(file)
+				ch, winner := cache.claim(p.Checker, file)
 				if winner {
 					claimed = true
 					if h := validHeld(); h != nil {
-						cache.finish(file)
+						cache.finish(p.Checker, file)
 						useHeld(h)
 						continue files
 					}
@@ -415,7 +430,7 @@ files:
 		}
 		var held *walk.FileFacts
 		if cache != nil {
-			held = cache.get(file)
+			held = cache.get(p.Checker, file)
 		}
 		importHashes := map[string]string{}
 		for _, imported := range annotations.ImportedUserFiles(p, file) {
@@ -428,7 +443,7 @@ files:
 			if claimed {
 				// released even if a refused kernel question panics out —
 				// a waiter must never sleep on a dead claim
-				defer cache.finish(file)
+				defer cache.finish(p.Checker, file)
 			}
 			facts = walk.CompileFileFacts(p, file, merged, kernel, reporting, importHashes)
 			if cache != nil {
@@ -441,11 +456,11 @@ files:
 					updated := *held
 					updated.Diagnostics = facts.Diagnostics
 					updated.HasDiagnostics = facts.HasDiagnostics
-					cache.put(file, &updated)
+					cache.put(p.Checker, file, &updated)
 					currentHash[file.FileName()] = held.InterfaceHash
 				} else {
 					fresh := facts
-					cache.put(file, &fresh)
+					cache.put(p.Checker, file, &fresh)
 					currentHash[file.FileName()] = facts.InterfaceHash
 				}
 			} else {
@@ -527,47 +542,61 @@ func setupKernel() *kernelbridge.RefinedTSKernel {
 // compile — measured duplicated across most workers before the claim
 // existed). A waiter re-checks validity itself: an entry that needs
 // its own diagnostics may still recompile the file it waited on.
+// sweepFactsKey: facts are computed THROUGH a checker instance (the
+// annotation/contract compile asks it), so a row computed under one
+// worker's checker is that checker's own — serving it to another
+// worker's entry let one file's presence silently change another
+// file's judgment (measured: a three-entry batch missed a designated
+// error the same entry reported alone). The checker in the key is the
+// same discipline every walk memo now keeps.
+type sweepFactsKey struct {
+	checker *checker.Checker
+	file    *ast.SourceFile
+}
+
 type sweepFactsStore struct {
 	mu       sync.Mutex
-	held     map[*ast.SourceFile]*walk.FileFacts
-	inFlight map[*ast.SourceFile]chan struct{}
+	held     map[sweepFactsKey]*walk.FileFacts
+	inFlight map[sweepFactsKey]chan struct{}
 }
 
-func (s *sweepFactsStore) get(file *ast.SourceFile) *walk.FileFacts {
+func (s *sweepFactsStore) get(c *checker.Checker, file *ast.SourceFile) *walk.FileFacts {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.held[file]
+	return s.held[sweepFactsKey{checker: c, file: file}]
 }
 
-func (s *sweepFactsStore) put(file *ast.SourceFile, facts *walk.FileFacts) {
+func (s *sweepFactsStore) put(c *checker.Checker, file *ast.SourceFile, facts *walk.FileFacts) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.held[file] = facts
+	s.held[sweepFactsKey{checker: c, file: file}] = facts
 }
 
 // claim answers (nil, true) when the caller should compile `file` and
 // then call finish, or (ch, false) when another worker is compiling —
 // the caller waits on ch and re-reads the store.
-func (s *sweepFactsStore) claim(file *ast.SourceFile) (chan struct{}, bool) {
+func (s *sweepFactsStore) claim(c *checker.Checker, file *ast.SourceFile) (chan struct{}, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.inFlight == nil {
-		s.inFlight = map[*ast.SourceFile]chan struct{}{}
+		s.inFlight = map[sweepFactsKey]chan struct{}{}
 	}
-	if ch, busy := s.inFlight[file]; busy {
+	key := sweepFactsKey{checker: c, file: file}
+	if ch, busy := s.inFlight[key]; busy {
 		return ch, false
 	}
-	s.inFlight[file] = make(chan struct{})
+	s.inFlight[key] = make(chan struct{})
 	return nil, true
 }
 
 // finish releases a claim, waking every waiter.
-func (s *sweepFactsStore) finish(file *ast.SourceFile) {
+func (s *sweepFactsStore) finish(c *checker.Checker, file *ast.SourceFile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ch, held := s.inFlight[file]; held {
+	key := sweepFactsKey{checker: c, file: file}
+	if ch, held := s.inFlight[key]; held {
 		close(ch)
-		delete(s.inFlight, file)
+		delete(s.inFlight, key)
 	}
 }
 

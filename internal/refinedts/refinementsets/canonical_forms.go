@@ -72,6 +72,25 @@ func CanonicalScalarForms(set RefinedSet) RefinedSet {
 func canonicalFormList(forms []Refinement) []Refinement {
 	out := make([]Refinement, 0, len(forms))
 	for _, form := range forms {
+		// a CONCATENATION chain over single-codepoint OneOf singletons
+		// (SetOfKnown's per-character build for a multi-codepoint
+		// string, abstractdomain/lattice_operations.go) denotes the
+		// SAME literal a Word leaf does (StringTuple, codepoint_sets.go's
+		// own doc: "the Word leaf replaces what used to be a chain of
+		// one-codepoint Concatenation nodes -- the SAME literal, one
+		// node instead of one node per character"). Two readers of ONE
+		// string that build it through the two different constructors
+		// (a value evaluated per-character vs. a literal read off a
+		// type annotation) reach this fold with different spellings for
+		// identical members; without normalizing to the one leaf form
+		// here, the union-arm dedup below (sameSetJSON) never
+		// recognizes the pair as the same arm, and a merged union
+		// carrying both spellings is not a shape the kernel's own
+		// sequence deciders recognize as one family.
+		if word, ok := wordFromConcatenationChain(form); ok {
+			out = append(out, word)
+			continue
+		}
 		if form.Form == FormUnion {
 			arms := flattenUnionArms(RefinedSet{Forms: []Refinement{form}})
 			deduped := make([]RefinedSet, 0, len(arms))
@@ -140,6 +159,45 @@ func canonicalFormList(forms []Refinement) []Refinement {
 		}
 	}
 	return deduped
+}
+
+// wordFromConcatenationChain recognizes SetOfKnown's own per-character
+// build for a multi-codepoint string value: a RIGHT-NESTED chain of
+// Concatenation nodes, each left side a single-codepoint OneOf, ending
+// in one more single-codepoint OneOf. ok=false the moment any link is
+// not exactly this shape (a concatenation of anything wider than one
+// literal chain — a genuine multi-set sequence position — keeps its
+// own spelling; this fold only ever collapses codepoint-by-codepoint
+// literal chains, never a real sequence-position conjunction).
+func wordFromConcatenationChain(form Refinement) (Refinement, bool) {
+	if form.Form != FormConcatenation {
+		return Refinement{}, false
+	}
+	var codepoints []float64
+	current := form
+	for {
+		if current.Form != FormConcatenation {
+			return Refinement{}, false
+		}
+		left := current.A_
+		if left == nil || len(left.Forms) != 1 || left.Forms[0].Form != FormOneOf || len(left.Forms[0].W) != 1 {
+			return Refinement{}, false
+		}
+		codepoints = append(codepoints, left.Forms[0].W[0])
+		right := current.B
+		if right == nil || len(right.Forms) != 1 {
+			return Refinement{}, false
+		}
+		next := right.Forms[0]
+		if next.Form == FormOneOf && len(next.W) == 1 {
+			codepoints = append(codepoints, next.W[0])
+			return Word(codepoints), true
+		}
+		if next.Form != FormConcatenation {
+			return Refinement{}, false
+		}
+		current = next
+	}
 }
 
 // flattenUnionArms reads a set as the flat list of its union arms: a

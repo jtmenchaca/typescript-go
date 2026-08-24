@@ -102,6 +102,20 @@ func leafTreeOf(
 		}
 		return NumberTestLeaf(c, e, place, isTracked)
 	}
+	// The bare place itself as the whole test: ToBoolean on a number is
+	// false exactly for ±0 and NaN (sec-toboolean), so the truthy leaf
+	// is `not (x == 0 or isNaN(x))` and the kernel's own polarity
+	// handling reads the false arm back as `{0} ∪ NaN`. On a
+	// non-number set the eq-0/isNaN members intersect to nothing, so
+	// the leaf keeps everything — the over-approximating sound side
+	// (the empty string's own falsiness is the string channel's
+	// vocabulary, not this leaf's).
+	if tested := dataflowfacts.TrackedPlaceOfWith(c, e, isTracked); tested != nil && dataflowfacts.SameTrackedPlace(*tested, place) {
+		eqZero := kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindEq, K: 0}
+		isNaN := kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindIsNaN}
+		falsy := kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindOr, A: &eqZero, B: &isNaN}
+		return kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindNot, A: &falsy}
+	}
 	return Other
 }
 
@@ -236,6 +250,10 @@ func CollectPlaces(
 				add(call.Expression.AsPropertyAccessExpression().Expression)
 			}
 		}
+		// a bare place as the whole leaf (`if (x)`) tests that place —
+		// the truthiness leaf leafTreeOf reads for it. add declines
+		// every non-place shape itself, so the fall-through is free.
+		add(e)
 	}
 }
 

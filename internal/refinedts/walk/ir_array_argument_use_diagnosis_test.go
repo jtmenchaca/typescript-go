@@ -57,7 +57,7 @@ func arrayArgumentDiagnosis(t *testing.T, loop string) (outcome SummaryOutcome, 
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
 		t.Fatalf("the body declined whole — every variant here must at least lower")
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -110,7 +110,7 @@ func TestArrayArgumentDiagnosis_LengthReadWithoutTheCallServes(t *testing.T) {
 	if _, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration); !ok {
 		t.Fatalf("the call-free length-read loop declined whole")
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

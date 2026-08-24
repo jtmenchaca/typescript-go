@@ -44,7 +44,9 @@ func TypeSeedAnswer(p *program.CheckerProgram, kernel *kernelbridge.RefinedTSKer
 	if !hasWords {
 		return Answer{}, false
 	}
-	return Claim(words, abstractdomain.TrustLevelOf(plain), false), true
+	answer := Claim(words, abstractdomain.TrustLevelOf(plain), false)
+	answer.SortWord = abstractdomain.ScalarSortWordOfKnown(plain)
+	return answer, true
 }
 
 // anyWrittenMemo is the TS source's `WeakMap<CheckerProgram, Set<string>>`
@@ -221,7 +223,9 @@ func LiteralConstClaim(p *program.CheckerProgram, declaration *ast.Node, shownBy
 	if !hasWords {
 		return Answer{}, false
 	}
-	return Claim(words, abstractdomain.TrustProved, shownByHost), true
+	answer := Claim(words, abstractdomain.TrustProved, shownByHost)
+	answer.SortWord = abstractdomain.ScalarSortWordOfKnown(known)
+	return answer, true
 }
 
 func literalKnown(p *program.CheckerProgram, e *ast.Node, depth int) (abstractdomain.AbstractValue, bool) {

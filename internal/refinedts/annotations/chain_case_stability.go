@@ -57,7 +57,7 @@ func caseStableForm(f refinementsets.Refinement) bool {
 		// only an UNBOUNDED window survives inside a larger shape --
 		// expansion (ß → SS) can grow past any finite ceiling
 		return f.Hi == nil && caseClosedAlphabet(*f.A_)
-	case refinementsets.FormOneOf:
+	case refinementsets.FormOneOf, refinementsets.FormWord:
 		for _, v := range f.W {
 			if v != math.Trunc(v) || !caseInvariant(v) {
 				return false

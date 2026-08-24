@@ -78,6 +78,57 @@ func TestCanonicalScalarForms_DominatedAtLeastCollapsesToTightest(t *testing.T) 
 	}
 }
 
+// SetOfKnown's own per-character build for a multi-codepoint string
+// value (a right-nested Concatenation chain over single-codepoint
+// OneOf singletons) denotes the same literal a type-annotation reader
+// spells as one Word leaf (StringTuple). wordFromConcatenationChain
+// recognizes the chain and folds it to that same Word leaf.
+func TestWordFromConcatenationChain_FoldsToStringTuplesSpelling(t *testing.T) {
+	axisCodepoints := []float64{97, 120, 105, 115} // "axis"
+	var chain RefinedSet
+	for i := len(axisCodepoints) - 1; i >= 0; i-- {
+		singleton := MakeRefinedSet(OneOf([]float64{axisCodepoints[i]}))
+		if i == len(axisCodepoints)-1 {
+			chain = singleton
+			continue
+		}
+		chain = MakeRefinedSet(Concatenation(singleton, chain))
+	}
+	word, ok := wordFromConcatenationChain(chain.Forms[0])
+	if !ok {
+		t.Fatalf("wordFromConcatenationChain did not recognize the chain: %+v", chain)
+	}
+	wantWord := StringTuple("axis")
+	if !sameSetJSON(RefinedSet{Forms: []Refinement{word}}, wantWord) {
+		t.Errorf("folded = %+v, want %+v", word, wantWord.Forms[0])
+	}
+}
+
+// A union combining a Word-spelled arm and a Concatenation-chain arm
+// of the SAME literal (two independent readers of one string —
+// c-reads-and-values.ts's arrowReadsMaybeReadonlyArray row hit this
+// exact mismatch, asking the kernel a seqSubset question over a union
+// whose one member wore two different spellings) collapses to the
+// single Word form once CanonicalScalarForms runs.
+func TestCanonicalScalarForms_MixedWordAndConcatenationArmsCollapse(t *testing.T) {
+	axisCodepoints := []float64{97, 120, 105, 115} // "axis"
+	var concatArm RefinedSet
+	for i := len(axisCodepoints) - 1; i >= 0; i-- {
+		singleton := MakeRefinedSet(OneOf([]float64{axisCodepoints[i]}))
+		if i == len(axisCodepoints)-1 {
+			concatArm = singleton
+			continue
+		}
+		concatArm = MakeRefinedSet(Concatenation(singleton, concatArm))
+	}
+	wordArm := StringTuple("axis")
+	mixedUnion := MakeRefinedSet(Union(wordArm, concatArm))
+	canon := CanonicalScalarForms(mixedUnion)
+	if len(canon.Forms) != 1 || canon.Forms[0].Form != FormWord {
+		t.Errorf("CanonicalScalarForms(word(axis) ∪ concat-chain(axis)) = %+v, want the single Word form (both arms are the same literal)", canon)
+	}
+}
+
 // two atMost conjuncts collapse to the tightest — atMost(2) alone
 // dominates atMost(7) beside it.
 func TestCanonicalScalarForms_DominatedAtMostCollapsesToTightest(t *testing.T) {

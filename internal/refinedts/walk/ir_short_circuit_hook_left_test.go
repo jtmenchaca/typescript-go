@@ -30,7 +30,7 @@ func TestShortCircuitHookLeft_ImportedHookNullishCompletes(t *testing.T) {
 	`, importedHookHooksSource)
 	declaration := entryEnvFunctionNamed(t, p, "useCountOrZero")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for useCountOrZero")
 	}

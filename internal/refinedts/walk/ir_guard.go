@@ -100,7 +100,7 @@ func lowerGuard(
 			//
 			// IrTestDefined (either-admission) is the RIGHT test here, not
 			// IrTestEqUndef: CoalesceExpression's runtime semantics
-			// (sec-binary-logical-operators, tmp/ecma262/spec.html:21099-21106)
+			// (sec-binary-logical-operators, specifications/javascript/spec.html:21140-21143)
 			// runs the right operand whenever "_leftValue_ is neither
 			// *undefined* nor *null*" fails — so `??` treats null and
 			// undefined alike, which is exactly IrTestDefined's split.
@@ -147,7 +147,7 @@ func lowerGuard(
 			// the right test for `??` regardless of the operand's shape:
 			// CoalesceExpression's runtime semantics treat null and
 			// undefined alike (sec-binary-logical-operators,
-			// tmp/ecma262/spec.html:21099-21106 — "neither *undefined* nor
+			// specifications/javascript/spec.html:21140-21143 — "neither *undefined* nor
 			// *null*" gates the right operand's evaluation).
 			//
 			// THE SLOT IS READ TWICE and both reads are of the temp: the
@@ -197,7 +197,7 @@ func lowerGuard(
 			return els, true
 		}
 		// `typeof x === "undefined"` / `!==` is EXACTLY-UNDEFINED
-		// (sec-typeof-operator, tmp/ecma262/spec.html:20589-20590:
+		// (sec-typeof-operator, specifications/javascript/spec.html:20628-20629:
 		// `typeof null` answers "object", never "undefined") — the
 		// flavored eqUndef test, whose Then arm IS "the value is
 		// undefined", not IrTestDefined's either-admission split, which

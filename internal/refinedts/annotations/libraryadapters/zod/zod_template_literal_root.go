@@ -23,7 +23,7 @@ func sequenceShaped(set refinementsets.RefinedSet) bool {
 	for _, f := range set.Forms {
 		switch f.Form {
 		case refinementsets.FormStar, refinementsets.FormRepeat,
-			refinementsets.FormConcatenation, refinementsets.FormEmptyTuple:
+			refinementsets.FormConcatenation, refinementsets.FormEmptyTuple, refinementsets.FormWord:
 			// ok
 		case refinementsets.FormUnion, refinementsets.FormDifference:
 			if !sequenceShaped(*f.A_) || !sequenceShaped(*f.B) {

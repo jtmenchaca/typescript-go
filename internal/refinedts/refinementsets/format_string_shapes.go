@@ -99,12 +99,33 @@ func ConcatParts(r RefinedSet) []RefinedSet {
 }
 
 // SingletonPoint is the single codepoint a one-member singleton holds,
-// or ok=false.
+// or ok=false. A one-codepoint Word reads the same as a one-element
+// OneOf -- both are the singleton chain's own leaf shape.
 func SingletonPoint(r RefinedSet) (float64, bool) {
 	if len(r.Forms) == 1 && r.Forms[0].Form == FormOneOf && len(r.Forms[0].W) == 1 {
 		return r.Forms[0].W[0], true
 	}
+	if len(r.Forms) == 1 && r.Forms[0].Form == FormWord && len(r.Forms[0].W) == 1 {
+		return r.Forms[0].W[0], true
+	}
 	return 0, false
+}
+
+// PointsOfLiteralPart is the codepoints one ConcatParts slot contributes
+// to a literal chunk read between two Star parts -- a single point for
+// a one-element OneOf leaf (the per-character chain spelling), or every
+// codepoint at once for a bare Word leaf (the collapsed spelling). Both
+// spellings can arrive at this reader: a Word from a fresh StringTuple
+// build, or a OneOf chain from an older call site or the kernel's own
+// answer.
+func PointsOfLiteralPart(r RefinedSet) ([]float64, bool) {
+	if pt, ok := SingletonPoint(r); ok {
+		return []float64{pt}, true
+	}
+	if len(r.Forms) == 1 && r.Forms[0].Form == FormWord {
+		return append([]float64{}, r.Forms[0].W...), true
+	}
+	return nil, false
 }
 
 // FromPoints is fromPoints in the TS source: the JSON-quoted string
@@ -187,12 +208,12 @@ func StringShapeOf(r RefinedSet) (string, bool) {
 	parts := ConcatParts(r)
 	if len(parts) >= 2 {
 		stars := make([]bool, len(parts))
-		points := make([]float64, len(parts))
+		points := make([][]float64, len(parts))
 		hasPoint := make([]bool, len(parts))
 		for i, p := range parts {
 			stars[i] = IsStrings(p)
-			pt, pOk := SingletonPoint(p)
-			points[i] = pt
+			pts, pOk := PointsOfLiteralPart(p)
+			points[i] = pts
 			hasPoint[i] = pOk
 		}
 		literalBetween := func(from, to int) (string, bool) {
@@ -201,7 +222,7 @@ func StringShapeOf(r RefinedSet) (string, bool) {
 				if !hasPoint[i] {
 					return "", false
 				}
-				collected = append(collected, points[i])
+				collected = append(collected, points[i]...)
 			}
 			if len(collected) == 0 {
 				return "", false
@@ -238,10 +259,15 @@ func StringShapeOf(r RefinedSet) (string, bool) {
 // StringLiteralPoints is the codepoints a set is the singleton chain
 // of -- or ok=false. The raw walk behind FormatStringLiteral, exported
 // so a SORTLESS caller (the union display) can gate on printability
-// before spelling the chain as text.
+// before spelling the chain as text. A bare Word leaf reads its
+// codepoints directly -- the same literal a per-character Concatenation
+// chain would spell, collapsed to one node.
 func StringLiteralPoints(r RefinedSet) ([]float64, bool) {
 	if len(r.Forms) == 1 && r.Forms[0].Form == FormEmptyTuple {
 		return []float64{}, true
+	}
+	if len(r.Forms) == 1 && r.Forms[0].Form == FormWord {
+		return append([]float64{}, r.Forms[0].W...), true
 	}
 	parts := ConcatParts(r)
 	points := make([]float64, 0, len(parts))
@@ -324,7 +350,7 @@ func satisfiesScalar(x float64, r RefinedSet) (bool, bool) {
 			if !a || b {
 				return false, true
 			}
-		case FormEmptyTuple, FormConcatenation, FormStar, FormRepeat, FormRepeatWord:
+		case FormEmptyTuple, FormConcatenation, FormStar, FormRepeat, FormRepeatWord, FormWord:
 			return false, false // a sequence form: not a scalar question
 		default:
 			UnreachedForm(f)

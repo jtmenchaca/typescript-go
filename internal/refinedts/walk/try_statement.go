@@ -169,8 +169,16 @@ func AnalyzeTryStatement(ctx *FlowContext, env Env, statement *ast.Node, result 
 		binding := catchClause.VariableDeclaration
 		if binding != nil {
 			bindingName := binding.AsVariableDeclaration().Name()
+			caught := silence.ResidueOf("a caught value can be anything the try block threw — its own type states no sort")
 			if ast.IsIdentifier(bindingName) {
-				catchEnv.Set(bindingName.Text(), silence.SeededBinding(ctx.P.Checker, silence.Residue(), bindingName))
+				catchEnv.Set(bindingName.Text(), silence.SeededBinding(ctx.P.Checker, caught, bindingName))
+			} else if ast.IsBindingPattern(bindingName) {
+				// `catch ({ message })` — a pattern binder over the SAME
+				// caught value every plain `catch (error)` binds; each
+				// leaf reads through the shared destructuring reader
+				// (destructure_binding.go's destructureInto), the same
+				// route a variable declaration's own pattern takes
+				destructureInto(ctx, catchEnv, bindingName, caught)
 			}
 		}
 		catchExits = AnalyzeStatements(ctx, catchEnv, catchClause.Block.AsBlock().Statements.Nodes, result)

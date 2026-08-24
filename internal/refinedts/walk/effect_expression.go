@@ -303,8 +303,8 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 			// read moves nothing either (pureBuiltinEffect's own gates:
 			// exactly `<root>.<name>` on the global root, every argument
 			// write-and-call-free), and logical NOT of ANY value is exactly
-			// true or false (sec-logical-not-operator, tmp/ecma262/
-			// spec.html). The unnegated call already reads through the
+			// true or false (sec-logical-not-operator,
+			// specifications/javascript/spec.html). The unnegated call already reads through the
 			// pureBuiltinEffect arm below; this admits the same call under
 			// the `!`, carrying the same two-value set either way.
 			operand := Unwrapped(unary.Operand)
@@ -328,7 +328,7 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 		}
 		// `entry && b` where `entry` is a NON-OPTIONAL RECORD PARAMETER's
 		// own bare name: the value is always an object (ToBoolean answers
-		// true for every Object, sec-toboolean, tmp/ecma262/spec.html), so
+		// true for every Object, sec-toboolean, specifications/javascript/spec.html), so
 		// the whole is always `b` — not a join of both operands' sets, the
 		// EXACT reading, and it needs no slot for `entry` at all (there is
 		// none — recordParameterUseOf's expansion leaves the whole-name
@@ -470,7 +470,7 @@ func LowerEffectExpression(e *ast.Node, reader EffectReader) (kernelbridge.LoopE
 			return effect, true
 		}
 		// `Boolean(x)` called AS A FUNCTION is exactly ToBoolean(x)
-		// (sec-boolean-constructor-boolean-value, tmp/ecma262/spec.html:
+		// (sec-boolean-constructor-boolean-value, specifications/javascript/spec.html:
 		// "Let bool be ToBoolean(value)." with NewTarget undefined).
 		// ToBoolean's own signature carries no throw completion at all
 		// (sec-toboolean: "): a Boolean" — every value, of every type,

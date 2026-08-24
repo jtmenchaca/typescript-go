@@ -10,6 +10,8 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -106,14 +108,35 @@ func PredicateCallNarrowings(c *checker.Checker, call *ast.Node, isTracked func(
 // its body reads lands on a place holding no sort and carries nothing
 // out.
 //
-// TRUST: the annotation is taken at the same grade the checker gives
-// any declared type. `val is T` is tsc-checked SYNTAX whose body tsc
-// does NOT verify — a predicate may lie about its own body and tsc
-// will not say so — which is exactly the standing of every parameter
-// and return annotation this checker already reads and trusts. Trusting
-// the predicate is therefore not a new concession; refusing it while
-// reading `param: string` from the same signature would be the
-// inconsistency.
+// HONESTY GATE: the declared claim is believed only to the extent the
+// predicate's OWN BODY proves it. The body is read the same way a call
+// guard reads it (PredicateBodyBranches, the condition-tree walk every
+// ordinary guard goes through), folded onto the unknown parameter to
+// the PROVEN abstract value; the claimed T's set and the proven set
+// both reduce to the kernel's 1-tuple layer (abstractdomain.SetOfKnown)
+// and the kernel's ScalarSubset asks proven ⊆ claimed. `true` believes
+// the claim (the ordinary leaf below runs); `false` — a positive
+// theorem that the body proves LESS than it claims — does not believe
+// it, and this function declines (ok=false), so the call carries
+// nothing beyond what the tested place already held. The SAME decline
+// covers every case with no proof to check: the body is UNREADABLE
+// (PredicateBodyBranches ok=false — a multi-statement body outside its
+// early-return-false shape, a reassigned parameter, the predicate-read
+// depth bound), the proof or the claim does not reduce to a 1-tuple-
+// layer set (an object shape, a sequence), or the kernel declines the
+// ScalarSubset question outright (no kernel seated, or the ask panics).
+// A decline proves nothing either way, and believing on no evidence is
+// exactly the unsoundness this gate exists to close — never believe a
+// claim the walk could not check.
+//
+// TRUST: past the gate, the annotation is taken at the same grade the
+// checker gives any declared type. `val is T` is tsc-checked SYNTAX
+// whose body tsc does NOT verify — a predicate may lie about its own
+// body and tsc will not say so — which is exactly the standing of
+// every parameter and return annotation this checker already reads and
+// trusts. Trusting a PROVEN predicate is therefore not a new
+// concession; the gate above is what makes "proven" the operative word
+// rather than "declared."
 //
 // The result is the ordinary leaf shape — a Shape on the true side, an
 // ExcludesKind on the false side, both landing on a TrackedPlace — so
@@ -151,6 +174,9 @@ func StatedPredicateNarrowings(c *checker.Checker, call *ast.Node, isTracked fun
 	if !ok || held.Kind == abstractdomain.KindUnknown {
 		return BranchNarrowings{}, false
 	}
+	if !predicateClaimProven(c, fn, predicateNode.ParameterName.Text(), held) {
+		return BranchNarrowings{}, false
+	}
 	wears := Narrowed{Binding: place.Binding, Path: place.Path, Shape: held, HasShape: true}
 	whenFalse := []Narrowed{}
 	// the REFUTED side sheds the sort only where T pins ONE word — the
@@ -160,6 +186,75 @@ func StatedPredicateNarrowings(c *checker.Checker, call *ast.Node, isTracked fun
 		whenFalse = append(whenFalse, Narrowed{Binding: place.Binding, Path: place.Path, ExcludesKind: word})
 	}
 	return BranchNarrowings{WhenTrue: []Narrowed{wears}, WhenFalse: whenFalse}, true
+}
+
+// predicateClaimProven is the honesty gate: does the predicate's OWN
+// BODY prove the claimed type `held`, on the parameter the predicate
+// names? fn is the pinned function the predicate's body lives in
+// (nil where the callee is not pinned — no body to check, so the
+// claim is never proven). Neither an unreadable body, an unreducible
+// shape, nor a kernel decline proves anything — every one of those
+// answers false, the same "not believed" verdict a positive disproof
+// gets. Only a kernel THEOREM (ScalarSubset answering true) proves the
+// claim.
+func predicateClaimProven(c *checker.Checker, fn *ast.Node, parameterName string, held abstractdomain.AbstractValue) bool {
+	if fn == nil {
+		return false
+	}
+	branches, ok := PredicateBodyBranches(c, fn, func(name string) bool { return name == parameterName })
+	if !ok || len(branches.WhenTrue) == 0 {
+		return false
+	}
+	proven := abstractdomain.Unknown
+	for _, n := range branches.WhenTrue {
+		if n.Binding != parameterName || len(n.Path) != 0 {
+			// a claim about anything other than the bound parameter
+			// itself proves nothing about IT — the body read something,
+			// but not the thing the predicate claims
+			return false
+		}
+		proven = ApplyNarrowed(proven, n)
+	}
+	// a numeric TYPEOF ground wraps the real half as POSSIBLY NaN — the
+	// same wrapper checkPossiblyNaNSubset reads through (walk/
+	// nan_wrapper.go's known.Inner). A body proving `v >= 0 && v <= 120`
+	// on TOP of that ground already excludes NaN (NaN fails every
+	// comparison), so the wrapper is unwrapped here rather than
+	// SetOfKnown declining on it outright — the honest single-expression
+	// twin (`typeof v === "number" && ...`) must still reduce to a
+	// comparable set.
+	if proven.Kind == abstractdomain.KindPossiblyNaN {
+		proven = *proven.Inner
+	}
+	claimedForSet := held
+	if claimedForSet.Kind == abstractdomain.KindPossiblyNaN {
+		claimedForSet = *claimedForSet.Inner
+	}
+	provenSet, provenOk := abstractdomain.SetOfKnown(proven)
+	claimedSet, claimedOk := abstractdomain.SetOfKnown(claimedForSet)
+	if !provenOk || !claimedOk {
+		return false
+	}
+	kernel := NarrowKernel()
+	if kernel == nil || kernel.ScalarSubset == nil {
+		return false
+	}
+	subset, refused := scalarSubsetRefusable(kernel, provenSet, claimedSet)
+	return !refused && subset
+}
+
+// scalarSubsetRefusable asks the kernel's ScalarSubset question,
+// turning a refusal (a panic through the bridge, exactly as every
+// other kernel ask does) into an (answer, refused) pair — the same
+// recover() shape apply_narrowing.go's seqSubsetRefusable uses for
+// SeqSubset.
+func scalarSubsetRefusable(kernel *kernelbridge.RefinedTSKernel, a, b refinementsets.RefinedSet) (subset bool, refused bool) {
+	defer func() {
+		if recover() != nil {
+			subset, refused = false, true
+		}
+	}()
+	return kernel.ScalarSubset(a, b), false
 }
 
 // DeclaredTypePredicateOf is the `x is T` return annotation the callee

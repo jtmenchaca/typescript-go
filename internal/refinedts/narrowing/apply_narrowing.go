@@ -522,6 +522,22 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 		if n.Truthiness == "falsy" {
 			return keepFalsy(known)
 		}
+		if n.KeepAbsent {
+			// the `P === undefined || <numeric>` whenTrue: absence stays
+			// admitted whole, and the present part narrows to the
+			// numeric side's own claim
+			if known.Kind == abstractdomain.KindUndef {
+				return known
+			}
+			if known.Kind == abstractdomain.KindPossiblyUndefined {
+				leafOnly := n
+				leafOnly.KeepAbsent = false
+				narrowed := ApplyNarrowed(*known.Inner, leafOnly)
+				rewrapped := known
+				rewrapped.Inner = &narrowed
+				return rewrapped
+			}
+		}
 		if n.Refuting && known.Kind == abstractdomain.KindPossiblyNaN {
 			// NaN fails every comparison, so a REFUTED comparison keeps
 			// it: the real part narrows, NaN rides on
@@ -708,7 +724,8 @@ func everySequenceForm(forms []refinementsets.Refinement) bool {
 	for _, f := range forms {
 		switch f.Form {
 		case refinementsets.FormConcatenation, refinementsets.FormStar, refinementsets.FormRepeat,
-			refinementsets.FormDifference, refinementsets.FormUnion, refinementsets.FormEmptyTuple:
+			refinementsets.FormDifference, refinementsets.FormUnion, refinementsets.FormEmptyTuple,
+			refinementsets.FormWord:
 			// on the reading
 		default:
 			return false

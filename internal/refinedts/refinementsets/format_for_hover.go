@@ -109,12 +109,17 @@ func orSide(facts []string) string {
 }
 
 // unambiguousStringLiteral is the quoted string a set is UNAMBIGUOUSLY
-// the literal of -- a concatenation chain, or the empty tuple. A lone
-// scalar singleton has the same shape as a one-character string and
+// the literal of -- a concatenation chain, the empty tuple, or a
+// multi-character Word leaf. A lone scalar singleton (a OneOf, or a
+// one-codepoint Word) has the same shape as a one-character string and
 // only the checked position's sort could tell them apart, so it is
-// never read here.
+// never read here; a Word of two or more codepoints has no such
+// ambiguity -- only a literal word builds that shape.
 func unambiguousStringLiteral(s RefinedSet) (string, bool) {
 	if len(s.Forms) == 1 && (s.Forms[0].Form == FormConcatenation || s.Forms[0].Form == FormEmptyTuple) {
+		return FormatStringLiteral(s)
+	}
+	if len(s.Forms) == 1 && s.Forms[0].Form == FormWord && len(s.Forms[0].W) >= 2 {
 		return FormatStringLiteral(s)
 	}
 	return "", false
@@ -177,12 +182,12 @@ func stringFactsInHover(r RefinedSet) ([]string, bool) {
 	parts := ConcatParts(r)
 	if len(parts) >= 2 {
 		stars := make([]bool, len(parts))
-		points := make([]float64, len(parts))
+		points := make([][]float64, len(parts))
 		hasPoint := make([]bool, len(parts))
 		for i, p := range parts {
 			stars[i] = IsStrings(p)
-			pt, pOk := SingletonPoint(p)
-			points[i] = pt
+			pts, pOk := PointsOfLiteralPart(p)
+			points[i] = pts
 			hasPoint[i] = pOk
 		}
 		literalBetween := func(from, to int) (string, bool) {
@@ -191,7 +196,7 @@ func stringFactsInHover(r RefinedSet) ([]string, bool) {
 				if !hasPoint[i] {
 					return "", false
 				}
-				collected = append(collected, points[i])
+				collected = append(collected, points[i]...)
 			}
 			if len(collected) == 0 {
 				return "", false
@@ -374,7 +379,7 @@ func hoverFacts(r RefinedSet) ([]string, bool) {
 				}
 				excluded = append(excluded, "≠ "+removed)
 			}
-		case FormEmptyTuple, FormConcatenation, FormStar, FormRepeat, FormRepeatWord:
+		case FormEmptyTuple, FormConcatenation, FormStar, FormRepeat, FormRepeatWord, FormWord:
 			rest = append(rest, FormatForm(f))
 		default:
 			UnreachedForm(f)

@@ -136,6 +136,68 @@ func TestCompileAnnotation_StringChainsCompileRepetitionBoundsAndPatterns(t *tes
 	}
 }
 
+// requireArrayRepeat compiles a z.array chain and asserts its set is
+// EXACTLY one Repeat form (never a bare atLeast/atMost ray, and never
+// the collapsed bare-element shape z.string().length(1) uses) whose
+// window is [wantLo, wantHi] and whose element is the array's own
+// member set (min(-1).max(1) on z.number(), read back via the same
+// atLeast/atMost forms the element chain compiles to on its own).
+func requireArrayRepeat(t *testing.T, source string, wantLo int, wantHi *int) {
+	t.Helper()
+	c := compileTopLevel(t, source, "X")
+	if IsUnsupported(c) {
+		t.Fatalf("unexpected unsupported: %s", c.Unsupported.Unsupported)
+	}
+	set := derefSet(c.Annotation.Set)
+	if len(set.Forms) != 1 || set.Forms[0].Form != refinementsets.FormRepeat {
+		t.Fatalf("%s forms = %+v, want exactly one repeat form", source, set.Forms)
+	}
+	rep, ok := refinementsets.AsRepetition(set)
+	if !ok {
+		t.Fatalf("%s: AsRepetition failed on a Repeat-tagged set", source)
+	}
+	if rep.Lo != wantLo {
+		t.Errorf("%s: rep.Lo = %d, want %d", source, rep.Lo, wantLo)
+	}
+	if (rep.Hi == nil) != (wantHi == nil) || (rep.Hi != nil && wantHi != nil && *rep.Hi != *wantHi) {
+		t.Errorf("%s: rep.Hi = %v, want %v", source, rep.Hi, wantHi)
+	}
+	element := compileTopLevel(t, "const E = z.number().min(-1).max(1);\n", "E")
+	if IsUnsupported(element) {
+		t.Fatalf("unexpected unsupported building the element fixture")
+	}
+	if !sameSetStructurally(rep.Element, derefSet(element.Annotation.Set)) {
+		t.Errorf("%s: rep.Element = %+v, want the z.number().min(-1).max(1) set %+v", source, rep.Element, derefSet(element.Annotation.Set))
+	}
+}
+
+// z.array(z.number().min(-1).max(1)) chained with EVERY combination
+// of .min/.max/.length must carry the Repeat form with the correct
+// [lo, hi] window AND the element -- never a bare numeric ray. This
+// pins the min(1).max(1) drop: TightenRepetition's rebuild used to
+// route the exact-length-1 window through Repetition's (1,1)
+// collapse (correct only for a CODEPOINT element, where a
+// 1-character string IS the scalar layer), losing the Repeat wrapper
+// and every element-consuming reader (destructuring, relational
+// accumulation) along with it. Repetition now collapses at (1,1)
+// only when the element is demonstrably Codepoints.
+func TestCompileAnnotation_ArrayChainsCarryRepeatAcrossEveryLengthCombination(t *testing.T) {
+	one := 1
+	three := 3
+	// floored-only: z.array(E).min(1) -- [1, unbounded]
+	requireArrayRepeat(t, "const X = z.array(z.number().min(-1).max(1)).min(1);\n", 1, nil)
+	// floor+ceiling: z.array(E).min(1).max(3) -- [1, 3]
+	requireArrayRepeat(t, "const X = z.array(z.number().min(-1).max(1)).min(1).max(3);\n", 1, &three)
+	// exact .length(N): z.array(E).length(1) -- [1, 1], the exact
+	// shape the drop hit (the reported defect's own repro)
+	requireArrayRepeat(t, "const X = z.array(z.number().min(-1).max(1)).length(1);\n", 1, &one)
+	// ceiling-only: z.array(E).max(1) -- [0, 1]
+	requireArrayRepeat(t, "const X = z.array(z.number().min(-1).max(1)).max(1);\n", 0, &one)
+	// min(1).max(1): the exact reported defect's spelling -- same
+	// [1, 1] window .length(1) reaches by a different chain
+	requireArrayRepeat(t, "const X = z.array(z.number().min(-1).max(1)).min(1).max(1);\n", 1, &one)
+}
+
 func TestCompileAnnotation_TupleNestsRightRestAppendsTheStar(t *testing.T) {
 	two := compileTopLevel(t, "const X = z.tuple([z.number().int(), z.number()]);\n", "X")
 	if IsUnsupported(two) {

@@ -78,14 +78,14 @@ func TestReturnTemplateOverServedCall_CompletesThroughTheSequenceHoist(t *testin
 	if _, blobOk := LowerSummaryBody(ctx, arrow); !blobOk {
 		t.Fatalf("getClipPathId's body did not compile a blob — the premise (a servable callee) is gone")
 	}
-	if outcome, construct, _ := SummaryOutcomeOf(arrow); outcome != SummaryComplete {
+	if outcome, construct, _ := SummaryOutcomeOf(p.Checker, arrow); outcome != SummaryComplete {
 		t.Fatalf("getClipPathId: outcome=%q construct=%q, want complete", outcome, construct)
 	}
 	declaration := entryEnvFunctionNamed(t, p, "urlFor")
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
 		t.Fatalf("urlFor declined whole")
 	}
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for urlFor")
 	}

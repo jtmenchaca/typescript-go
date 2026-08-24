@@ -26,7 +26,12 @@ type Unknown struct {
 // answerable. The grade is the ledger's read of the claim — the
 // weakest boundary in its derivation — absent means proved.
 // ShownByHost marks a claim whose words TypeScript's own type line
-// already displays.
+// already displays. SortWord is the plain sort word of the known
+// value ("number", "string", "boolean", "bigint") when the walk has
+// it in hand from the AbstractValue itself — empty when the value's
+// sort is unknown or not scalar-sorted. A hover reads it to REPLACE a
+// host type that states no claim of its own ("any", "unknown") — see
+// internal/ls/hover_refinedts.go's spliceRefinementSpelling.
 type Answer struct {
 	// Known branch (set when Unknown.Why == "")
 	HasKnown    bool
@@ -34,6 +39,7 @@ type Answer struct {
 	Grade       abstractdomain.TrustLevel
 	HasGrade    bool
 	ShownByHost bool
+	SortWord    string
 	// Unknown branch
 	UnknownValue Unknown
 }

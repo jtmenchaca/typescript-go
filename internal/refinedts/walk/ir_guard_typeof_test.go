@@ -1,6 +1,6 @@
 // Pins TypeofRead's own split, consumed by lowerGuard (ir_guard.go): a
 // `typeof x === "undefined"` / `!==` head is EXACTLY-UNDEFINED
-// (sec-typeof-operator, tmp/ecma262/spec.html:20589-20590 — `typeof
+// (sec-typeof-operator, specifications/javascript/spec.html:20628-20629 — `typeof
 // null` answers "object", never "undefined") and must lower to the
 // flavored eqUndef test, not the conflated IrTestDefined the tag-quote
 // shape below correctly keeps. Kernel-less: LowerGuard's typeof route

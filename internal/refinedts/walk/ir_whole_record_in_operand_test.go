@@ -2,7 +2,7 @@
 // the RIGHT operand of `'key' in p` (axisSelectors.ts's
 // `getDomainDefinition`: `if (axisSettings == null || !('domain' in
 // axisSettings)) { … }`). HasProperty (sec-relational-operators-runtime-
-// semantics-evaluation, tmp/ecma262/spec.html) reads the right operand's
+// semantics-evaluation, specifications/javascript/spec.html) reads the right operand's
 // value and answers a fresh boolean — the same read-only shape the
 // truthiness/equality/typeof arms already cover — but wholeRecordUseAt
 // had no case for it, so the whole use fell to the default refusal.
@@ -52,7 +52,7 @@ function effect(listenerApi: Listener<RootState, unknown>) {
 	declaration := entryEnvFunctionNamed(t, p, "effect")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -92,7 +92,7 @@ function getDomainDefinition(axisSettings: AxisSettings) {
 	declaration := entryEnvFunctionNamed(t, p, "getDomainDefinition")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -117,7 +117,7 @@ func TestKernelSummaryDirect_AnInOperatorRightOperandReadsMemberSafe(t *testing.
 		"function f(p: { lo: number }) { if ('lo' in p) { return p.lo; } return 0; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("before-fix baseline: ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q", outcome, construct)
@@ -145,7 +145,7 @@ func TestKernelSummaryDirect_AnInOperatorLeftOperandStillDeclines(t *testing.T) 
 		"function f(p: { lo: number }, q: object) { if (p in q) { return 1; } return 0; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if ok {
 		t.Fatalf("f's body lowered — the left-operand shape was not meant to be served yet")
@@ -175,7 +175,7 @@ func TestCenterYShapedRecordParameter_MidPositionCallArgumentHandsOverWhole(t *t
 		}`)
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("position's body declined: outcome=%q construct=%q — the mid-position hand-over regressed", outcome, construct)
@@ -203,7 +203,7 @@ func TestCenterYShapedRecordParameter_SpreadReturnOfARecordParameterServes(t *te
 		}`)
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("horizontal's body declined: outcome=%q construct=%q — the spread-return shape regressed", outcome, construct)

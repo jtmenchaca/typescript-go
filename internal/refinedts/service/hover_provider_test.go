@@ -44,7 +44,7 @@ func TestFormatRefinementAtStatedAnnotation(t *testing.T) {
 	defer built.Done()
 
 	at := strings.Index(source, "zPct")
-	spelled, ok := FormatRefinementAt(context.Background(), built.Program, "/main.ts", at, []string{SurfacePath})
+	spelled, _, ok := FormatRefinementAt(context.Background(), built.Program, "/main.ts", at, []string{SurfacePath})
 	if !ok {
 		t.Fatal("expected the stated annotation to spell at the binding name")
 	}
@@ -63,7 +63,7 @@ func TestFormatRefinementAtNonName(t *testing.T) {
 
 	// hovering the `=` punctuation: not a name, nothing spelled
 	at := strings.Index(source, "=")
-	if spelled, ok := FormatRefinementAt(context.Background(), built.Program, "/main.ts", at, []string{SurfacePath}); ok {
+	if spelled, _, ok := FormatRefinementAt(context.Background(), built.Program, "/main.ts", at, []string{SurfacePath}); ok {
 		t.Fatalf("expected no spelling on punctuation, got %q", spelled)
 	}
 }

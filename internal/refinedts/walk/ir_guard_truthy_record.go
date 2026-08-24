@@ -5,7 +5,7 @@
 // (declaredParamSort, ir_call_hoist.go's own "THE TRUST GRADE" note): a
 // non-optional record annotation says the value is an object at every
 // call, and an object is truthy at every call — spec-wise, ToBoolean
-// (sec-toboolean, tmp/ecma262/spec.html) returns true for every Object
+// (sec-toboolean, specifications/javascript/spec.html) returns true for every Object
 // argument, no exception.
 //
 // NON-OPTIONAL IS PROVED SYNTACTICALLY HERE, never inferred from the

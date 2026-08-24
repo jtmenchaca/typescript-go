@@ -516,7 +516,7 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 		// EffectFree && SelfContained gate, and an effect-free callee
 		// cannot have mutated a reference argument or a closed-over name
 		// on any path, recursive ones included. The gate is the guard.
-		return RecursionMarker(symbol)
+		return RecursionMarker(ctx, symbol, contract.Declaration)
 	}
 	inlining[symbol] = struct{}{}
 	callEnv := NewEnv()
@@ -550,7 +550,7 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 	} else {
 		value = evaluateExpression(&silent, callEnv, body)
 	}
-	if markerKey(value) == symbol {
+	if IsMarkerOf(value, symbol) {
 		value = silence.Residue()
 	}
 	delete(inlining, symbol)
@@ -589,26 +589,35 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 // AbstractValue is a Go struct, not comparable by pointer identity
 // the way a JS object is, so markerSymbols here keys on the marker's
 // OWN symbol pointer directly (markerKey), which is exactly the
-// identity the TS WeakMap tracked (every marker is
-// `{ kind: "unknown" }` freshly built once per symbol in
-// RecursionMarker, so its identity IS the symbol that produced it).
+// identity the TS WeakMap tracked (every marker is built once per
+// symbol in RecursionMarker — today the callee's own declared return
+// type ground where one is readable, `{Kind: KindUnknown}` where none
+// is — so its identity IS the symbol that produced it, whatever it
+// happens to hold).
 var (
 	markerMu       sync.Mutex
 	markerBySymbol = map[*ast.Symbol]abstractdomain.AbstractValue{}
 	markerDrops    int
 )
 
-// markerKey answers the symbol a value's marker identity keys on, or
-// nil when the value is not (recognizably) a marker. Because
-// AbstractValue is not pointer-comparable, this walks markerBySymbol
-// to find a structurally-equal marker — the marker shape is always
-// exactly `{Kind: KindUnknown}` with no other fields, so equality is
-// unambiguous, and the map is small (one entry per recursive
-// symbol in view). This is the port's stand-in for the TS source's
-// exported `markerSymbols` WeakMap (`markerSymbols.get(value)`) —
-// call sites elsewhere in this package (inline_contract_body.go,
-// inline_replay.go) call MarkerKey where the TS source reads
-// markerSymbols directly.
+// markerKey answers SOME symbol a value's marker identity could key
+// on, or nil when the value is not (recognizably) a marker at all.
+// Because AbstractValue is not pointer-comparable, this walks
+// markerBySymbol to find a structurally-equal marker — SameKnown
+// compares by SHAPE, not by which call built the value, so two
+// DIFFERENT symbols whose markers happen to hold the same shape (a
+// bare `{Kind: KindUnknown}` where neither declared return type read;
+// two callees that both ground to plain `number`, e.g.) are the same
+// value by that equality — markerBySymbol growing past one live entry
+// with a shared shape (the registry is never cleared; every recursive
+// function analyzed anywhere in the process leaves its symbol keyed
+// here) makes which symbol comes back a matter of Go's map iteration
+// order, not identity. This is the port's stand-in for the TS
+// source's exported `markerSymbols` WeakMap (`markerSymbols.get(value)`),
+// sound only where markerBySymbol holds at most one entry OF A GIVEN
+// SHAPE — callers that need to test ONE PARTICULAR symbol's marker
+// must use IsMarkerOf instead, which never scans and is never
+// ambiguous.
 func markerKey(value abstractdomain.AbstractValue) *ast.Symbol {
 	markerMu.Lock()
 	defer markerMu.Unlock()
@@ -620,11 +629,30 @@ func markerKey(value abstractdomain.AbstractValue) *ast.Symbol {
 	return nil
 }
 
-// MarkerKey is the exported form of markerKey — the port's stand-in
-// for the TS source's exported `markerSymbols` WeakMap read as
-// `markerSymbols.get(value)`.
+// MarkerKey is the exported form of markerKey — safe for an "is this
+// value A marker at all" test (every call site outside this file
+// compares its result against nil, never against a specific symbol);
+// see markerKey's own doc for why comparing the result against ONE
+// symbol is unsound once more than one symbol's marker has ever been
+// built in this process. Callers asking "is value THIS symbol's own
+// marker" want IsMarkerOf.
 func MarkerKey(value abstractdomain.AbstractValue) *ast.Symbol {
 	return markerKey(value)
+}
+
+// IsMarkerOf answers whether value is EXACTLY symbol's own recursion
+// marker — a direct forward-map read (markerBySymbol[symbol]) compared
+// against value, never a reverse scan, so it stays exact regardless of
+// how many other symbols' markers the process-lifetime registry also
+// holds. This is the identity test inline_contract_body.go's own
+// induction-answer guard needs (was `MarkerKey(summarized) == symbol`,
+// ambiguous the moment a second recursive symbol's marker exists
+// anywhere in markerBySymbol).
+func IsMarkerOf(value abstractdomain.AbstractValue, symbol *ast.Symbol) bool {
+	markerMu.Lock()
+	defer markerMu.Unlock()
+	held, ok := markerBySymbol[symbol]
+	return ok && abstractdomain.SameKnown(held, value)
 }
 
 // MarkerDropCount reports how many recursion markers have been
@@ -636,15 +664,50 @@ func MarkerDropCount() int {
 	return markerDrops
 }
 
-// RecursionMarker is recursionMarker in the TS source.
-func RecursionMarker(symbol *ast.Symbol) abstractdomain.AbstractValue {
+// RecursionMarker is recursionMarker in the TS source, widened past
+// the bare `{Kind: KindUnknown}` sentinel: an in-flight recursive
+// call's VALUE is, at worst, the callee's own declared return type's
+// GROUND — tsc already checked the body against that signature, the
+// same standing wornReturnTypeIfUnknown's own worn-ground exemption
+// rests on (evaluate_call_expression.go). `declaration` is the
+// callee's function-like node (contract.Declaration at every
+// production call site); DeclaredReturnTypeGround reads its resolved
+// signature's return type through the same typeGroundOf part-walk
+// ReturnTypeGround uses for a call site, anchored on the declaration
+// itself since an in-flight call has no settled call-site type yet.
+// `ctx` or `declaration` being nil (a unit test building a marker
+// with no program in reach) or the ground reader declining (an
+// unspellable return type) both fall back to the old bare unknown —
+// there is nothing sound to wear, so the marker wears nothing, same
+// as before this widening.
+//
+// The marker stays a marker by IDENTITY, not by shape: IsMarkerOf
+// reads markerBySymbol[symbol] directly (function_summaries.go's own
+// doc on markerKey/IsMarkerOf), so a ground-carrying marker is
+// exactly as recognizable as the old bare-unknown one — every
+// consumer that tests "is this value a recursion marker" already
+// keys on the registry, never on Kind == KindUnknown.
+func RecursionMarker(ctx *FlowContext, symbol *ast.Symbol, declaration *ast.Node) abstractdomain.AbstractValue {
+	markerMu.Lock()
+	held, ok := markerBySymbol[symbol]
+	markerMu.Unlock()
+	if ok {
+		return held
+	}
+	held = abstractdomain.AbstractValue{Kind: abstractdomain.KindUnknown}
+	if ground := DeclaredReturnTypeGround(ctx, declaration); ground != nil {
+		held = *ground
+	}
 	markerMu.Lock()
 	defer markerMu.Unlock()
-	held, ok := markerBySymbol[symbol]
-	if !ok {
-		held = abstractdomain.AbstractValue{Kind: abstractdomain.KindUnknown}
-		markerBySymbol[symbol] = held
+	// a concurrent caller may have raced this one to the same symbol
+	// while the lock was released for the ground read above — the
+	// FIRST value stored wins, so every later reader of this symbol's
+	// marker (a forward-map read, IsMarkerOf) sees one stable value
+	if existing, raced := markerBySymbol[symbol]; raced {
+		return existing
 	}
+	markerBySymbol[symbol] = held
 	return held
 }
 
@@ -661,11 +724,23 @@ func RecursionMarker(symbol *ast.Symbol) abstractdomain.AbstractValue {
 // to the base case ALONE — `countdown(depth)` answered the exact
 // literal `0` for every `depth`, including `NaN`/`Infinity`, where the
 // recursive branch genuinely never resolves to 0 or anything else.
-// A sink of ONLY markers still claims nothing (unknown either way, so
-// residue is the same answer this branch would reach by joining unknown
-// with itself).
+// A sink of ONLY markers still claims nothing DETERMINED (unknown
+// either way), but the value handed back is the FIRST marker entry
+// itself, not a freshly built residue: InlineContractBody's own
+// induction-naming guard (IsMarkerOf(summarized, symbol)) needs this
+// return to still carry this call's own marker identity so it can
+// recognize "the whole answer leaned on the induction" and rebuild it
+// with that sentence, rather than losing the identity to a plain
+// unknown a caller cannot tell apart from any other decline. Every
+// entry in an all-marker sink is SOME symbol's marker (possibly more
+// than one, in nested recursion); the first stands for the sink the
+// same way bases[0] seeds the ordinary join below — a caller testing
+// ONE particular symbol's identity (IsMarkerOf) still gets an exact
+// answer regardless of which marker this picks, since a value that is
+// not that symbol's own marker answers false either way.
 func JoinSinkSummarized(sink []abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	var bases []abstractdomain.AbstractValue
+	var firstMarker *abstractdomain.AbstractValue
 	sawMarker := false
 	for _, entry := range sink {
 		if markerKey(entry) != nil {
@@ -673,11 +748,18 @@ func JoinSinkSummarized(sink []abstractdomain.AbstractValue) abstractdomain.Abst
 			markerDrops++
 			markerMu.Unlock()
 			sawMarker = true
+			if firstMarker == nil {
+				v := entry
+				firstMarker = &v
+			}
 			continue
 		}
 		bases = append(bases, entry)
 	}
 	if len(bases) == 0 {
+		if firstMarker != nil {
+			return *firstMarker
+		}
 		return silence.Residue()
 	}
 	joined := bases[0]

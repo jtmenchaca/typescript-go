@@ -198,7 +198,16 @@ func CheckVariableKnown(
 
 // CheckBigints is checkBigints in the TS source: a bigint value
 // where the statement wears the bigint kindTag: the kernel decides
-// membership over its exact integers.
+// membership over its exact integers. Every OTHER declared-set kind
+// tag ("" for the double sort, "symbol", "boolean") is a sound cross-
+// sort refutation on its own — `typeof` alone separates bigint from
+// every other sort, so no run of `10n` at a number-stated (or string-,
+// boolean-, symbol-stated) position ever satisfies it, the same
+// standing worn_set_membership.go's own scalar/sequence cross-sort
+// check rests on. This mirrors checkExactValues/checkWornSet's own
+// cross-sort branches rather than falling to the generic undetermined
+// alert, which used to leave EVERY non-bigint-stated position silent
+// about a value `typeof` alone already excludes.
 func CheckBigints(
 	ctx *FlowContext,
 	known abstractdomain.AbstractValue,
@@ -220,19 +229,56 @@ func CheckBigints(
 		}
 		return
 	}
+	if target.Kind == annotations.DeclaredSet {
+		say := "a bigint"
+		spelledValues := formatValues(func() []float64 {
+			out := make([]float64, len(known.BigintValues))
+			for i, v := range known.BigintValues {
+				out[i] = float64(v)
+			}
+			return out
+		}())
+		targetSaid := "a number"
+		switch target.KindTag {
+		case "boolean":
+			targetSaid = "a boolean"
+		case "symbol":
+			targetSaid = "a symbol"
+		}
+		ctx.Report(assignability.At(
+			node,
+			7001,
+			what+" of type '"+spelledValues+"n' is "+say+", and the position states "+
+				targetSaid+" — "+say+" is not allowed here",
+		))
+		return
+	}
 	ctx.Report(assignability.At(node, 7002, assignability.AlertText))
 }
 
 // CheckSymbol is checkSymbol in the TS source: a symbol where the
 // statement wears the symbol kindTag — the sort is the whole claim,
-// and it matches.
+// and it matches. A scalar-worded target (no kindTag at all — the
+// numeric/boolean line) never admits a symbol on any run, the same
+// law CheckHostFunction already states for a function: a symbol is a
+// definite rejection there, not an unproven position.
 func CheckSymbol(
 	ctx *FlowContext,
 	known abstractdomain.AbstractValue,
 	target annotations.DeclaredRefinement,
 	node *ast.Node,
+	what string,
 ) {
 	if target.Kind == annotations.DeclaredSet && target.KindTag == "symbol" {
+		return
+	}
+	if target.Kind == annotations.DeclaredSet && target.KindTag == "" {
+		ctx.Report(assignability.At(
+			node,
+			7001,
+			what+" of type 'a symbol' is not assignable to type '"+
+				StatedSetWords(*target.Set, target.Word)+"' — no refined set built from scalar words holds a symbol",
+		))
 		return
 	}
 	ctx.Report(assignability.At(node, 7002, assignability.AlertText))

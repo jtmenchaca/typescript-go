@@ -58,7 +58,7 @@ func TestKernelSummaryDirect_ATypeArgumentAnnotationExpandsThroughTheInstantiati
 		t.Errorf("p.tag sort = %v/%v, want string/string", tag.Sort, tag.TypeofTag)
 	}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -127,7 +127,7 @@ func TestRecordParamMembersIn_ACalledMethodMemberKeepsTheWholeNameSlot(t *testin
 		t.Fatalf("api expanded — the use-scan fallback must keep the whole-name slot for a body that calls a skipped method member")
 	}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -299,7 +299,7 @@ func TestRecordParamMembersIn_WideNestedInstantiatedMembersExpandInFull(t *testi
 		}
 	}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -351,7 +351,7 @@ func TestRecordParamMembersIn_AnAliasOfAGenericReferenceExpands(t *testing.T) {
 		t.Errorf("p.hi sort = %v/%v, want number/number — the instantiated argument's own sort", hi.Sort, hi.TypeofTag)
 	}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -453,7 +453,7 @@ func TestSummaryParameterEntriesIn_AnAliasOfAGenericReferenceAtAHeritageLinkExpa
 		t.Errorf("p.lo/p.hi sorts = %v/%v, want number/number", lo.Sort, hi.Sort)
 	}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -508,7 +508,7 @@ func TestRecordParamMembersIn_AnAliasOfAnIntersectionWithAGenericReferenceSideEx
 		t.Errorf("p.lo/p.hi sorts = %v/%v, want number/number", lo.Sort, hi.Sort)
 	}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}

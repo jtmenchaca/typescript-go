@@ -68,8 +68,10 @@ func TestStringTupleAndThePatternSets(t *testing.T) {
 	if !equalForm(StringTuple("a").Forms[0], Refinement{Form: FormOneOf, W: []float64{97}}) {
 		t.Errorf("StringTuple(a).Forms[0] mismatch")
 	}
-	if StringTuple("ab").Forms[0].Form != FormConcatenation {
-		t.Errorf("StringTuple(ab).Forms[0].Form mismatch")
+	// two or more characters collapse to ONE Word leaf carrying every
+	// codepoint, replacing the old one-Concatenation-per-character chain
+	if !equalForm(StringTuple("ab").Forms[0], Refinement{Form: FormWord, W: []float64{97, 98}}) {
+		t.Errorf("StringTuple(ab).Forms[0] mismatch")
 	}
 	if StartsWithSet("a").Forms[0].Form != FormConcatenation {
 		t.Errorf("StartsWithSet(a).Forms[0].Form mismatch")

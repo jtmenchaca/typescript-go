@@ -23,29 +23,30 @@ import (
 )
 
 // FormatRefinementAt is formatRefinementAt in the TS source: what the
-// hover position is known to be, spelled. A STATED refinement first;
-// where nothing is stated, what the flow walk KNOWS at the position.
-// ok=false where neither says anything. A claim whose words the type
-// line already displays is stated and counted, but never repeated in
-// the hover.
+// hover position is known to be, spelled, plus the plain sort word of
+// the known value ("number", "string", "boolean", "bigint") where the
+// walk has it in hand. A STATED refinement first; where nothing is
+// stated, what the flow walk KNOWS at the position. ok=false where
+// neither says anything. A claim whose words the type line already
+// displays is stated and counted, but never repeated in the hover.
 func FormatRefinementAt(
 	ctx context.Context,
 	prog *compiler.Program,
 	entryPath string,
 	position int,
 	surfacePaths []string,
-) (string, bool) {
+) (string, string, bool) {
 	answer := AnswerAt(ctx, prog, entryPath, position, surfacePaths)
 	if !answer.HasKnown || answer.ShownByHost {
-		return "", false
+		return "", "", false
 	}
 	// a bare function claim only restates the signature line the hover
 	// already shows — `function after(t: Cutoff): number` gains nothing
 	// from `{a function}` after it, so the tooltip drops it
 	if answer.Known == "{a function}" || answer.Known == "a function" {
-		return "", false
+		return "", "", false
 	}
-	return answer.Known, true
+	return answer.Known, answer.SortWord, true
 }
 
 // AnnotateAt is annotateAt in the TS source: the

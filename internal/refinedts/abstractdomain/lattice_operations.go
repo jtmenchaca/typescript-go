@@ -450,7 +450,11 @@ func SameKnown(a, b AbstractValue) bool {
 		return true
 	case KindUnknown:
 		// the opaque marker is provenance, not the same fact — joining
-		// an opaque path with a plain-unknown one stays plain
+		// an opaque path with a plain-unknown one stays plain.
+		// ResidueReason is deliberately NOT compared here: it is a
+		// diagnostic-only sentence (abstract_value.go's doc), and two
+		// unknowns naming different readers are still the same lattice
+		// value.
 		return a.Opaque == b.Opaque
 	default:
 		return false
@@ -617,6 +621,33 @@ func SetOfKnown(k AbstractValue) (refinementsets.RefinedSet, bool) {
 		}
 		return refinementsets.RefinedSet{}, false
 	case KindValues:
+		// a STRING's multi-codepoint tuple wears the SAME Word-leaf
+		// spelling refinementsets.StringTuple already builds for a
+		// literal read off a type annotation (codepoint_sets.go's own
+		// doc: "the Word leaf replaces what used to be a chain of
+		// one-codepoint Concatenation nodes -- the SAME literal, one
+		// node instead of one node per character"). Spelling a VALUE's
+		// own string differently from a DECLARED string of the same
+		// text builds two wire-distinct sets for one literal — the
+		// gap CheckWornSet's identity shortcut (sameSetJSON) and the
+		// kernel's own wire-equality check both rely on to skip a real
+		// question, and a union combining one of each shape here
+		// produces a mixed Word/Concatenation union no kernel decider
+		// recognizes as one sequence family (`"both sets must be
+		// recognized sequence shapes"`). Every other sort (a plain
+		// number/boolean tuple, an array-of-numbers) keeps the
+		// per-value Concatenation chain — only a string's OWN spelling
+		// changes here.
+		if k.KindTag == PrimitiveString {
+			switch len(k.Values) {
+			case 0:
+				return refinementsets.MakeRefinedSet(refinementsets.EmptyTuple), true
+			case 1:
+				return refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{k.Values[0]})), true
+			default:
+				return refinementsets.MakeRefinedSet(refinementsets.Word(k.Values)), true
+			}
+		}
 		if len(k.Values) == 1 {
 			return refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{k.Values[0]})), true
 		}
@@ -705,6 +736,14 @@ func statesOnlyLongSequences(set refinementsets.RefinedSet) bool {
 		// the same argument stringWordSet's own len==0 gate makes for
 		// the empty word on the KindValues side
 		if f.Form == refinementsets.FormEmptyTuple {
+			continue
+		}
+		// a bare Word leaf is a fixed literal of len(f.W) codepoints --
+		// long enough to never be reread as a scalar only when it holds
+		// two or more; a single-codepoint Word is exactly the 1-tuple
+		// rereading this test exists to catch, the same restriction a
+		// one-element OneOf would fail.
+		if f.Form == refinementsets.FormWord && len(f.W) >= 2 {
 			continue
 		}
 		if f.Form == refinementsets.FormUnion &&
@@ -1214,23 +1253,23 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 	}
 	// A JOIN THAT WOULD STACK PAST THE WIDENING BOUND answers the
 	// string ground directly instead of building the deeper
-	// Concatenation/Union/Star the arms below would produce. A loop
-	// body that reassigns a string across repeated derivations (a
-	// `.replace()`/`+` chain re-joined every iteration, with nothing to
-	// fold the accumulated structure back down) stacks one more
-	// Concatenation/Star layer onto the candidate each round; past
-	// sequenceConcatenationWidenBound layers deep, the JOIN ITSELF
-	// widens to Strings (C*, the sound "any string" claim every string
-	// value already sits inside) rather than handing the kernel's
-	// seqSubset decider an ever-deeper term to walk — the
-	// ReduceCSSCalc.ts hang (sequence_concatenation_widen.go's file
-	// comment measures it: the kernel's own derivative-based deciders
-	// grow the term on every nullable-left step with nothing
-	// collapsing the repeated substructure, so a moderately-nested
-	// tree turns into an unbounded question). Checked ahead of the
-	// union-building and absorption arms below, on either operand
-	// independently, so this widening triggers before either arm's own
-	// Concatenation/Union construction would compound it further.
+	// Concatenation/Union/Star the arms below would produce -- a
+	// PRECISION policy, not a crash guard (sequence_concatenation_widen.go's
+	// file comment has the full history: the kernel's mkUnion now
+	// canonicalizes away the term growth that used to hang on this
+	// shape). A loop body that reassigns a string across repeated
+	// derivations (a `.replace()`/`+` chain re-joined every iteration,
+	// with nothing to fold the accumulated structure back down) stacks
+	// one more Concatenation/Star layer onto the candidate each round;
+	// past sequenceConcatenationWidenBound layers deep, the JOIN
+	// ITSELF widens to Strings (C*, the sound "any string" claim every
+	// string value already sits inside) rather than handing the
+	// kernel's seqSubset decider an ever-larger exact term to encode,
+	// cache-key, and answer questions about for no precision a real
+	// program shape needs. Checked ahead of the union-building and
+	// absorption arms below, on either operand independently, so this
+	// widening triggers before either arm's own Concatenation/Union
+	// construction would grow the term further.
 	if aSet, aIsSet := SetOfKnown(a); aIsSet && refinementsets.StatesSequence(aSet) &&
 		refinementsets.SequenceNestingDepth(aSet) > sequenceConcatenationWidenBound {
 		return KnownSet(refinementsets.Strings, nil, grade, SetKindTagNone)

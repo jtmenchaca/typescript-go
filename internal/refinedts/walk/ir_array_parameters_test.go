@@ -52,7 +52,7 @@ function centerY(node: SankeyNode) { return node.y + node.dy / 2; }
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "centerY")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}
@@ -87,7 +87,7 @@ func TestArrayOfRecordsElementMemberRead_PremiseCheck(t *testing.T) {
 		t.Fatalf("ArrayParameterOf(xs) declined — the array-parameter flattening itself regressed")
 	}
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded — the lowering ran and must report a fate")
 	}

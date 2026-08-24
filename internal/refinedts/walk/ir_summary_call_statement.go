@@ -37,7 +37,7 @@ func summaryCallStatement(context *LoweringContext, call *ast.Node, target int) 
 	// this body's statements would compose that callee's weakened ret
 	// while this body still records itself complete. The same gate
 	// HoistCallEffect enforces, at the statement-route embed.
-	if outcome, _, recorded := SummaryOutcomeOf(callee); !recorded || outcome != SummaryComplete {
+	if outcome, _, recorded := SummaryOutcomeOf(checkerOf(context.Flow), callee); !recorded || outcome != SummaryComplete {
 		return kernelbridge.IrStatement{}, false
 	}
 	outIndex, shapeOk := SummaryOutShapeFor(context.Flow, callee)

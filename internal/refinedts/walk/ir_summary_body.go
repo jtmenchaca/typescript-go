@@ -124,14 +124,14 @@ func lowerSummaryBodyWithCaptures(
 		if isBodylessSignature(declaration) {
 			return LoweredSummary{}, false
 		}
-		RecordSummaryOutcome(declaration, name, SummaryDeclined, declined)
+		RecordSummaryOutcome(checkerOf(ctx), declaration, name, SummaryDeclined, declined)
 		return LoweredSummary{}, false
 	}
 	if havoc != "" {
-		RecordSummaryOutcome(declaration, name, SummaryPorous, havoc)
+		RecordSummaryOutcome(checkerOf(ctx), declaration, name, SummaryPorous, havoc)
 		return summary, true
 	}
-	RecordSummaryOutcome(declaration, name, SummaryComplete, "")
+	RecordSummaryOutcome(checkerOf(ctx), declaration, name, SummaryComplete, "")
 	return summary, true
 }
 

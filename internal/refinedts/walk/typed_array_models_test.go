@@ -22,7 +22,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 )
 
-/* ── the conversion table, hand-verified against tmp/ecma262/spec.html
+/* ── the conversion table, hand-verified against specifications/javascript/spec.html
    (#sec-toint8, #sec-touint8, #sec-touint8clamp, #sec-tofixedsizeinteger)
    — the same values the fixture's own comments claim ──────────────── */
 

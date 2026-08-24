@@ -205,7 +205,7 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 				// Repetition — AsRepetition below declines it outright. Read
 				// each word's own UTF-16 length (sec-properties-of-string-
 				// instances-length + sec-ecmascript-language-types-string-
-				// type, tmp/ecma262/spec.html — a String value is a finite
+				// type, specifications/javascript/spec.html — a String value is a finite
 				// ordered sequence of UTF-16 code units, and .length is the
 				// count of those elements) and answer the exact SET of
 				// lengths one arm at a time, trust carried from the receiver.

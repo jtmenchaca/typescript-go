@@ -99,7 +99,17 @@ func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 	if (flags & checker.TypeFlagsNumber) != 0 {
 		return NumberWithNaN(), true
 	}
-	if (flags & checker.TypeFlagsESSymbol) != 0 {
+	// TypeFlagsESSymbolLike (types.go) is ESSymbol | UniqueESSymbol: the
+	// plain `symbol` keyword and a `unique symbol` (`declare const x:
+	// unique symbol`, a symbol-typed class-private brand) carry separate
+	// bits, and checking ESSymbol alone left every unique-symbol-typed
+	// value unread -- readHostTypeUncached fell through every flag check
+	// to the final refusal. Both read as the same UnknownSymbol claim:
+	// a unique symbol's exact identity is not a set this reader states,
+	// but "some symbol, never a number/string/boolean" is true of it
+	// either way, and that sort alone is what excludes it from a scalar
+	// refinement like Age.
+	if (flags & checker.TypeFlagsESSymbolLike) != 0 {
 		return UnknownSymbol(), true
 	}
 	if (flags & checker.TypeFlagsTemplateLiteral) != 0 {

@@ -128,7 +128,9 @@ func AnswerExpressionBodiedParameter(p *program.CheckerProgram, kernel *kernelbr
 		plain.Set = refinementsets.SimplifyScalar(kernelSimplificationAdapter{kernel}, held.Set)
 	}
 	if words, hasWords := abstractdomain.FormatAbstractValue(plain); hasWords {
-		return Claim(words, abstractdomain.TrustLevelOf(plain), false), true
+		answer := Claim(words, abstractdomain.TrustLevelOf(plain), false)
+		answer.SortWord = abstractdomain.ScalarSortWordOfKnown(plain)
+		return answer, true
 	}
 	if held.Kind == abstractdomain.KindPossiblyUndefined {
 		return No(Unknown{Why: "noted", Said: Sentence.PresentAndAbsent, Unsupported: false}), true

@@ -57,7 +57,7 @@ function combine(tooltipInteraction: TooltipInteractionState | undefined): strin
 	declaration := entryEnvFunctionNamed(t, p, "combine")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("combine's body declined: outcome=%q construct=%q — the root-optional step on a declared leaf must read", outcome, construct)
@@ -81,7 +81,7 @@ func TestKernelSummaryDirect_ARootOptionalStepOnANonAbsentRecordReads(t *testing
 		"function f(a: { dataKey: string }) { if (a?.dataKey != null) { return a.dataKey; } return 'x'; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q", outcome, construct)
@@ -111,7 +111,7 @@ function f(state: Root) { return state.layout.inner; }
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q — a returned interior read must lower", outcome, construct)
@@ -140,7 +140,7 @@ function f(state: Root, id: string) { return state.axes.byId[id]; }
 	declaration := entryEnvFunctionNamed(t, p, "f")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q — a returned interior element read must lower", outcome, construct)
@@ -163,7 +163,7 @@ func TestKernelSummaryDirect_AnInteriorPathCalleeHandsOver(t *testing.T) {
 		"function f(p: { ticks: number[]; type: string }) { p.ticks.map(String); return p.type; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q — an interior-path callee must take the hand-over havoc", outcome, construct)
@@ -205,7 +205,7 @@ const f = (state: Root) => state.options.defaultKind;
 	}
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q — a concise arrow's interior body is the return position", outcome, construct)
@@ -233,7 +233,7 @@ func TestKernelSummaryDirect_AReadOnlyInteriorReadStoredInALocalLowers(t *testin
 		"function f(p: { inner: { deep: number } }) { const q = p.inner; return q.deep; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q — a read-only interior-read alias must lower", outcome, construct)
@@ -257,7 +257,7 @@ func TestKernelSummaryDirect_AWrittenInteriorAliasStillDeclines(t *testing.T) {
 		"function f(p: { inner: { deep: number } }) { const q = p.inner; q.deep = 5; return p.inner.deep; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if ok && construct != "a whole-record parameter use" {
 		t.Fatalf("f's body lowered (outcome=%q construct=%q) — a written-through interior alias was not meant to be served", outcome, construct)
@@ -296,7 +296,7 @@ function selectZAxisSettings(state: RechartsRootState, axisId: string): ZAxisSet
 	declaration := entryEnvFunctionNamed(t, p, "selectZAxisSettings")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("selectZAxisSettings's body declined: outcome=%q construct=%q — a null-guarded read-only interior alias must lower", outcome, construct)

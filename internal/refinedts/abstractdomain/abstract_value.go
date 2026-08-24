@@ -140,6 +140,18 @@ type AbstractValue struct {
 	Measures    *Measures
 	NaNElements bool
 
+	// "set", the SEMANTIC hover override: "" (the zero value) means no
+	// override — the ordinary refinementsets.FormatForHover(Set) reading
+	// applies, unchanged for every existing KnownSet call site. Set by
+	// KnownSetWithHoverWord for a value BUILT compositionally from a
+	// case list a structural re-read of Set alone could not recover
+	// (a composed JSON-serialization grammar's own object arm, e.g. —
+	// walk/foreign_edge.go's foreignStdoutSerializedValue) — the
+	// caller already knows the semantic spelling at construction time,
+	// the same reasoning Temporal already carries for a calendar chart
+	// FormatForHover cannot read back out of a bare window either.
+	HoverWord string
+
 	// "set", REPETITION-SHAPED only (refinementsets.AsRepetition succeeds
 	// on Set): SeqDense and SeqDenseKnown are KindArrayHoles's Dense/
 	// DenseKnown pair, carried on the one other array shape that needed
@@ -216,7 +228,7 @@ type AbstractValue struct {
 	// path EXCEPT Object.keys/values/entries does not need. `new
 	// Array(n)` and `Array.from({length: n})` build the same
 	// Length/ElementSet pair (sec-array vs. sec-array.from,
-	// tmp/ecma262/spec.html) but differ in OWN PROPERTIES: `new
+	// specifications/javascript/spec.html) but differ in OWN PROPERTIES: `new
 	// Array(n)` never calls CreateDataPropertyOrThrow, so no index
 	// 0..n-1 is an own property (SPARSE — Object.keys answers []);
 	// Array.from's array-like branch calls CreateDataPropertyOrThrow
@@ -294,6 +306,20 @@ type AbstractValue struct {
 	// "unknown": true when the value enters from outside the file's
 	// determination.
 	Opaque bool
+
+	// "unknown" ONLY: the plain sentence naming the reader that
+	// produced this unknown — set only where a call site has already
+	// composed one (silence.ResidueOf), empty everywhere else,
+	// including every other unknown built through silence.Residue().
+	// Read only by the diagnostic/hover path that reports RTS7002 at a
+	// checked position; NEVER consulted by a structural comparison.
+	// SameKnown's KindUnknown case (lattice_operations.go) compares
+	// only Opaque — this field is deliberately excluded there, because
+	// two unknowns that carry different provenance sentences for the
+	// same lattice position are still the SAME lattice value: the
+	// sentence is bookkeeping for the report, not part of what the
+	// value denotes.
+	ResidueReason string
 
 	// carried on every kind except the unclaimed ones (unknown, variable
 	// carry none in the TS source either — variable has no `grade?`
@@ -571,6 +597,25 @@ func KnownSetDense(known AbstractValue) AbstractValue {
 	out := known
 	out.SeqDense = true
 	out.SeqDenseKnown = true
+	return out
+}
+
+// KnownSetWithHoverWord marks an ALREADY-BUILT KindSet value with the
+// SEMANTIC spelling the caller already derived alongside Set — a new
+// wrapper constructor rather than a widened KnownSet signature, the
+// same convention KnownSetDense follows immediately above (every
+// existing KnownSet call site keeps compiling and keeps HoverWord=""
+// unchanged; only a caller that built the set FROM a description
+// FormatForHover cannot structurally recover reaches for this one).
+// word == "" is a no-op (KnownSet's own zero value already reads that
+// way; this guards against accidentally clearing a hover a different
+// wrapper already set).
+func KnownSetWithHoverWord(known AbstractValue, word string) AbstractValue {
+	if known.Kind != KindSet || word == "" {
+		return known
+	}
+	out := known
+	out.HoverWord = word
 	return out
 }
 

@@ -104,8 +104,8 @@ func TestArraySortBisect_WithFixtureNeighbors(t *testing.T) {
 	// only arraySort's own good leg (the `ages[0]` in `const good: Age =
 	// ages[0];`, right after `ages.sort();` — arraySort's own marked
 	// over-leg `overs.sort()`/`overs[0]` further down is EXPECTED to
-	// fire) is under test here; arrayConcat's own marked over-leg is
-	// expected to fire too, and arrayReverse's good leg shares the SAME
+	// carry an error) is under test here; arrayConcat's own marked
+	// over-leg expects an error too, and arrayReverse's good leg shares the SAME
 	// `const good: Age = ages[0];` text (a different function, the same
 	// local name), so the needle below includes the preceding
 	// `ages.sort();` line to stay unique to arraySort's own occurrence
@@ -200,7 +200,7 @@ func TestArraySortBisect_RenamedBinding(t *testing.T) {
 // assertSilentOnSubstring asserts no reported diagnostic's own Start
 // offset (RefinementDiagnostic carries a byte Start/Length, never a
 // line) falls inside the given substring's span in source — used
-// where a source file carries OTHER spans that are expected to fire (a
+// where a source file carries OTHER spans expected to carry errors (a
 // marked @refinedts-expect-error row beside the one good leg under
 // test), so a bare "want zero diagnostics" loop would be the wrong
 // assertion. needle must be unique in source, or the wrong occurrence

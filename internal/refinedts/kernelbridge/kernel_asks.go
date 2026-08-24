@@ -41,6 +41,33 @@ type KernelAsksInput struct {
 	Ask2 Ask2
 }
 
+// canonicalizeSequenceElement folds a Concatenation-chain-of-single-
+// codepoint-OneOf's INSIDE a top-level Star/Repeat/RepeatWord form's
+// own element into the same Word leaf refinementsets.StringTuple
+// builds for the identical literal — one level deep, never recursing
+// past the element itself, so this stays bounded regardless of how
+// deep an unrelated nested set elsewhere might run.
+// CanonicalScalarForms already folds a bare Concatenation chain and
+// dedupes union arms at whatever level it is asked to look, but it is
+// never asked to look INSIDE a repetition form's own element (that
+// recursion is deliberately not built into the pervasively-called
+// general fold — SeqSubset is the one ask that needs it, so it is
+// scoped here instead).
+func canonicalizeSequenceElement(set refinementsets.RefinedSet) refinementsets.RefinedSet {
+	if len(set.Forms) != 1 {
+		return set
+	}
+	form := set.Forms[0]
+	if (form.Form != refinementsets.FormStar && form.Form != refinementsets.FormRepeat &&
+		form.Form != refinementsets.FormRepeatWord) || form.A_ == nil {
+		return set
+	}
+	canonicalElement := refinementsets.CanonicalScalarForms(*form.A_)
+	canonicalForm := form
+	canonicalForm.A_ = &canonicalElement
+	return refinementsets.RefinedSet{Forms: []refinementsets.Refinement{canonicalForm}}
+}
+
 // KernelAsks is kernelAsks in the TS source: the questions over a live
 // call, minus InitMs (the caller sets that — mirrors the TS
 // `Omit<RefinedTSKernel, "initMs">` return type).
@@ -89,6 +116,22 @@ func KernelAsks(input KernelAsksInput) *RefinedTSKernel {
 		return BooleanField(raw, "empty")
 	}
 	kernel.SeqSubset = func(a, b refinementsets.RefinedSet) bool {
+		// CANONICALIZE the sequence element on both sides before they
+		// ever reach the wire: two independent readers of the SAME
+		// literal (a value evaluated codepoint-by-codepoint vs. a type
+		// annotation read as one Word leaf) build structurally
+		// different — but denotationally identical — spellings, and a
+		// union combining one of each is not a shape any kernel
+		// decider recognizes as one sequence family ("both sets must
+		// be recognized sequence shapes"). This is the ONE choke point
+		// every sequence-subset question passes through, so
+		// normalizing the element here (one level — a star/repeat's
+		// own element, never the pervasively-called
+		// CanonicalScalarForms path this ask alone needs) closes the
+		// gap regardless of which upstream constructor produced the
+		// mismatch.
+		a = canonicalizeSequenceElement(a)
+		b = canonicalizeSequenceElement(b)
 		// A singleton left side IS a membership question — {w} ⊆ B ⇔
 		// w ∈ B — and membership is exact in both directions
 		// (memberB_iff) and linear in the word, where the subset
@@ -570,7 +613,7 @@ func isInfOrNaN(x float64) bool {
 
 func calendarQuestionWire(q CalendarQuestion) map[string]any {
 	switch q.Op {
-	case CalendarOpEpochDays, CalendarOpValidDate:
+	case CalendarOpEpochDays, CalendarOpValidDate, CalendarOpWeekday, CalendarOpToOrdinal, CalendarOpIsoCalendar:
 		return map[string]any{"op": string(q.Op), "year": q.Year, "month": q.Month, "day": q.Day}
 	case CalendarOpIsoDate:
 		return map[string]any{"op": string(q.Op), "days": q.Days}

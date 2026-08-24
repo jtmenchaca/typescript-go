@@ -128,7 +128,7 @@ func TestNestedArrayElementRead_InnerLengthServes(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -148,7 +148,7 @@ func TestNestedArrayElementRead_IndexIndexServes(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -169,7 +169,7 @@ func TestNestedArrayAlias_RowLengthServes(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -188,7 +188,7 @@ func TestNestedArrayAlias_RowIndexServes(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -210,7 +210,7 @@ func TestNestedArrayAlias_SecondLevelRecordMemberServes(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -233,7 +233,7 @@ func TestElementAlias_NestedRecordMemberDoesNotServeFlat(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -253,7 +253,7 @@ func TestArrayOfRecords_OuterLengthReadServes(t *testing.T) {
 	ctx, p := namedTypeCtx(t, source)
 	declaration := namedTypeFunction(t, p, "f")
 	RelowerSummaryBody(ctx, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}

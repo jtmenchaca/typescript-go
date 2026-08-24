@@ -41,7 +41,7 @@ func TestReturnBinaryDiagnosis_HookCallLeftOfAndAndStillBlocked(t *testing.T) {
 	`, returnHookCallHooksSource)
 	declaration := entryEnvFunctionNamed(t, p, "useMaybeLayout")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for useMaybeLayout")
 	}

@@ -1,7 +1,7 @@
 // CompareKnown's null/undefined flavored rows, pinned against the
 // AbsentMark split: KindUndef means exactly-undefined, KindNull exactly-
 // null, and a KindPossiblyUndefined wrapper still admits both flavors at
-// once. Every row cites its ECMA-262 clause (tmp/ecma262/spec.html) —
+// once. Every row cites its ECMA-262 clause (specifications/javascript/spec.html) —
 // IsStrictlyEqual (sec-isstrictlyequal), IsLooselyEqual
 // (sec-islooselyequal), SameValueNonNumber (sec-samevaluenonnumber).
 

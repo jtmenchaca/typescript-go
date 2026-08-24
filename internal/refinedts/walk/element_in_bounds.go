@@ -345,7 +345,8 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 				allowed := true
 				for _, f := range layer.Forms {
 					if f.Form == refinementsets.FormConcatenation || f.Form == refinementsets.FormStar ||
-						f.Form == refinementsets.FormRepeat || f.Form == refinementsets.FormEmptyTuple {
+						f.Form == refinementsets.FormRepeat || f.Form == refinementsets.FormEmptyTuple ||
+						f.Form == refinementsets.FormWord {
 						allowed = false
 						break
 					}

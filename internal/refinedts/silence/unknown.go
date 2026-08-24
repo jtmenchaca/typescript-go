@@ -18,6 +18,17 @@ func Residue() abstractdomain.AbstractValue {
 	return abstractdomain.Unknown
 }
 
+// ResidueOf is Residue with the reader's own sentence attached: the
+// same unknown, naming why the position is unknown rather than
+// leaving it bare. reason is the plain sentence a call site has
+// already composed about its own decline — pass the same wording the
+// site already writes elsewhere (a NoteReason call, a code comment),
+// never a new category name. Every existing Residue() call site stays
+// bare; this is additive, for call sites that convert one at a time.
+func ResidueOf(reason string) abstractdomain.AbstractValue {
+	return abstractdomain.AbstractValue{Kind: abstractdomain.KindUnknown, ResidueReason: reason}
+}
+
 // CutUnknown is cutUnknown in the TS source.
 func CutUnknown() abstractdomain.AbstractValue {
 	return abstractdomain.Unknown

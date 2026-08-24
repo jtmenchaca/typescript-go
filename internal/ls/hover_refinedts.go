@@ -17,18 +17,20 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/service"
 )
 
-// refinementSpellingAt answers the refined-set spelling at a position,
+// refinementSpellingAt answers the refined-set spelling at a
+// position, plus the plain sort word of the known value ("number",
+// "string", "boolean", "bigint") where the walk has it in hand — "",
 // "" where nothing is stated or known. Gated to .ts files (the
 // plugin's own endsWith(".ts") gate — includes .d.ts, excludes .tsx).
-func (l *LanguageService) refinementSpellingAt(ctx context.Context, program *compiler.Program, file *ast.SourceFile, position int) string {
+func (l *LanguageService) refinementSpellingAt(ctx context.Context, program *compiler.Program, file *ast.SourceFile, position int) (string, string) {
 	if !strings.HasSuffix(file.FileName(), ".ts") {
-		return ""
+		return "", ""
 	}
-	spelled, ok := service.FormatRefinementAt(ctx, program, file.FileName(), position, service.SurfacePathsOf(program))
+	spelled, sortWord, ok := service.FormatRefinementAt(ctx, program, file.FileName(), position, service.SurfacePathsOf(program))
 	if !ok {
-		return ""
+		return "", ""
 	}
-	return spelled
+	return spelled, sortWord
 }
 
 // bareFunctionSpelling is the ENTIRE hover value FormatAbstractValue
@@ -46,16 +48,35 @@ const bareFunctionSpelling = "{a function}"
 // the signature already shows (bareFunctionSpelling) is dropped
 // entirely — refinement-bearing spellings ("{a function, or absent}",
 // any {...} with real content) still append as before.
-func spliceRefinementSpelling(quickInfo string, spelled string) string {
+//
+// One case renders as TWO lines instead, and it is checked BEFORE the
+// append/replace choice above — it overrides that choice rather than
+// following it: the host's right-hand side is exactly "any" or
+// "unknown" (trimmed) — no claim of its own — and sortWord is known.
+// There the sort word REPLACES that right-hand side and the spelling
+// (brace-opening or not — an "any"/"unknown" host has no claim for
+// ReplacesHostType to weigh against) rides after it
+// ("const level: number {0 ≤ 𝑥 ≤ 1}"), and the SECOND return value
+// carries the host's original, unmodified quickInfo for the caller to
+// render as an italic note below the type line ("(Note: tsc type is
+// 'const level: any')"). Every other case returns "" for the note and
+// behaves exactly as before (single line).
+func spliceRefinementSpelling(quickInfo string, spelled string, sortWord string) (string, string) {
 	if spelled == "" || spelled == bareFunctionSpelling {
-		return quickInfo
-	}
-	if !refinementsets.ReplacesHostType(spelled) {
-		return quickInfo + " " + spelled
+		return quickInfo, ""
 	}
 	cut := strings.LastIndexAny(quickInfo, "=:")
-	if cut == -1 {
-		return quickInfo + " " + spelled
+	if cut != -1 && sortWord != "" {
+		rhs := strings.TrimSpace(quickInfo[cut+1:])
+		if rhs == "any" || rhs == "unknown" {
+			return quickInfo[:cut+1] + " " + sortWord + " " + spelled, quickInfo
+		}
 	}
-	return quickInfo[:cut+1] + " " + spelled
+	if !refinementsets.ReplacesHostType(spelled) {
+		return quickInfo + " " + spelled, ""
+	}
+	if cut == -1 {
+		return quickInfo + " " + spelled, ""
+	}
+	return quickInfo[:cut+1] + " " + spelled, ""
 }

@@ -340,7 +340,7 @@ func recordParameterUseWithNestedRootsOf(
 // (the condition itself, or a term of one built from `&&`/`||`/`!` over
 // other such terms). Testing a value's truthiness reads it and hands out
 // no reference the body could store through — spec-wise, ToBoolean
-// (sec-toboolean, tmp/ecma262/spec.html) consumes the operand and
+// (sec-toboolean, specifications/javascript/spec.html) consumes the operand and
 // produces a fresh boolean, never the operand itself, so the record can
 // only escape through this position if it is ALSO used somewhere else
 // that already gets its own classification (a `return`, a call argument,
@@ -352,7 +352,7 @@ func recordParameterUseWithNestedRootsOf(
 // READ-WHOLE also covers an EQUALITY OR IDENTITY TEST — the node stands
 // as an operand of `===`, `!==`, `==`, or `!=` (`p === q`, `p == null`).
 // IsStrictlyEqual and IsLooselyEqual (sec-isstrictlyequal,
-// sec-abstract-equality-comparison, tmp/ecma262/spec.html) read both
+// sec-abstract-equality-comparison, specifications/javascript/spec.html) read both
 // operand VALUES and answer a fresh boolean; neither algorithm stores
 // either operand anywhere, so the position hands out no reference the
 // body could write through — the same argument the truthiness test
@@ -450,7 +450,7 @@ func wholeRecordUseAt(
 // isTruthinessTestPosition answers whether NODE stands in a position that
 // only ever tests its truthiness: a `!` operand, an `&&`/`||` operand, or
 // an `if`/`while`/ternary CONDITION. Each of these hands the value to
-// ToBoolean (sec-toboolean, tmp/ecma262/spec.html) and nowhere else — no
+// ToBoolean (sec-toboolean, specifications/javascript/spec.html) and nowhere else — no
 // route through this position lets the value itself escape as a
 // reference the body could store through.
 func isTruthinessTestPosition(node *ast.Node, parent *ast.Node) bool {
@@ -482,7 +482,7 @@ func isTruthinessTestPosition(node *ast.Node, parent *ast.Node) bool {
 // isEqualityTestOperand answers whether NODE stands as an operand of
 // `===`, `!==`, `==`, or `!=`. IsStrictlyEqual/the abstract equality
 // comparison (sec-isstrictlyequal, sec-abstract-equality-comparison,
-// tmp/ecma262/spec.html) read both operand values and answer a fresh
+// specifications/javascript/spec.html) read both operand values and answer a fresh
 // boolean — neither algorithm stores an operand anywhere, so this
 // position hands out no reference the body could write through, the
 // same argument isTruthinessTestPosition makes for ToBoolean.
@@ -499,7 +499,7 @@ func isEqualityTestOperand(node *ast.Node, parent *ast.Node) bool {
 
 // isTypeofOperand answers whether NODE is the operand of a
 // TypeOfExpression (`typeof p`). The typeof operator
-// (sec-typeof-operator, tmp/ecma262/spec.html) reads the operand's
+// (sec-typeof-operator, specifications/javascript/spec.html) reads the operand's
 // value and answers a fresh string tag; the operand itself never
 // escapes.
 func isTypeofOperand(node *ast.Node, parent *ast.Node) bool {
@@ -510,7 +510,7 @@ func isTypeofOperand(node *ast.Node, parent *ast.Node) bool {
 // operand of `in` (`'key' in p`) — axisSelectors.ts's getDomainDefinition
 // reads `!('domain' in axisSettings)` this way. The relational `in`
 // evaluation (sec-relational-operators-runtime-semantics-evaluation,
-// tmp/ecma262/spec.html) is `HasProperty(rightValue, ToPropertyKey(
+// specifications/javascript/spec.html) is `HasProperty(rightValue, ToPropertyKey(
 // leftValue))`: it reads the right operand's value and answers a fresh
 // boolean, never storing either operand anywhere — the same read-only
 // shape isEqualityTestOperand already argues for `===`/`==`. The LEFT

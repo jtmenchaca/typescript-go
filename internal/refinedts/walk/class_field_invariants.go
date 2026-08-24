@@ -32,28 +32,44 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
-// invariantMemoMu guards invariantMemo: one answer per class
-// declaration. The TS source keys this memo with a
+// invariantMemoMu guards invariantMemo: one answer per (checker, class
+// declaration). The TS source keys this memo with a
 // `WeakMap<ts.ClassDeclaration | ts.ClassExpression, ... | null>`; Go
 // has no weak maps, so this substitutes a regular map guarded by a
 // mutex — functionally identical per program (entries live exactly
 // as long as the program that produced the declarations is in use by
 // this port; see annotations/annotation_of_type.go's
 // readingTypeNodes for the same substitution).
+//
+// The CONTENT is computed through computeFieldInvariants, which walks
+// method bodies with evaluateExpression/AnalyzeStatements — reads that
+// go through ctx.P.Checker — so a bare-node key lets whichever
+// parallel worker's checker finishes first hand its invariant map to
+// every later reader, on any checker (typereading/host_type_memo.go
+// and summary_registry.go's summaryKey carry the same (checker, node)
+// discipline for the same reason: a checker is a worker-exclusive
+// lazy resolver).
 var (
 	invariantMemoMu sync.Mutex
-	invariantMemo   = map[*ast.Node]map[string]abstractdomain.AbstractValue{}
-	// invariantMemoSet tracks which declarations have an entry at
-	// all — the TS Map distinguishes "no entry" from "entry holding
-	// null" (re-entry in progress, or a computed answer that turned
-	// out empty is still a real, non-nil map), which a bare Go map
-	// lookup on invariantMemo cannot: a nil map value and a missing
-	// key both read as (nil, false) through the plain `ok` idiom, but
-	// `held.set(declaration, null)` (re-entry) must be reported
-	// exactly the same way as a null result the TS source treats as
-	// "no plain-key discipline, no invariant".
-	invariantMemoSet = map[*ast.Node]bool{}
+	invariantMemo   = map[invariantKey]map[string]abstractdomain.AbstractValue{}
+	// invariantMemoSet tracks which (checker, declaration) pairs have
+	// an entry at all — the TS Map distinguishes "no entry" from
+	// "entry holding null" (re-entry in progress, or a computed answer
+	// that turned out empty is still a real, non-nil map), which a
+	// bare Go map lookup on invariantMemo cannot: a nil map value and
+	// a missing key both read as (nil, false) through the plain `ok`
+	// idiom, but `held.set(declaration, null)` (re-entry) must be
+	// reported exactly the same way as a null result the TS source
+	// treats as "no plain-key discipline, no invariant".
+	invariantMemoSet = map[invariantKey]bool{}
 )
+
+// invariantKey pairs the checker with the class declaration — see the
+// header above for why the checker rides along.
+type invariantKey struct {
+	checker     *checker.Checker
+	declaration *ast.Node
+}
 
 // writtenAtKind is the "plain" | "other" tag writtenAt answers in the
 // TS source, plus a not-written case (TS: null).
@@ -328,18 +344,19 @@ func straightLineThisFieldWrite(statement *ast.Node, name string) bool {
 // member body once. Nil only on re-entry, where the answer would rest
 // on itself.
 func FieldInvariantsOf(ctx *FlowContext, declaration *ast.Node) map[string]abstractdomain.AbstractValue {
+	key := invariantKey{checker: checkerOf(ctx), declaration: declaration}
 	invariantMemoMu.Lock()
-	if invariantMemoSet[declaration] {
-		held := invariantMemo[declaration]
+	if invariantMemoSet[key] {
+		held := invariantMemo[key]
 		invariantMemoMu.Unlock()
 		return held
 	}
-	invariantMemoSet[declaration] = true
-	invariantMemo[declaration] = nil // re-entry answers nothing
+	invariantMemoSet[key] = true
+	invariantMemo[key] = nil // re-entry answers nothing
 	invariantMemoMu.Unlock()
 	computed := computeFieldInvariants(ctx, declaration)
 	invariantMemoMu.Lock()
-	invariantMemo[declaration] = computed
+	invariantMemo[key] = computed
 	invariantMemoMu.Unlock()
 	return computed
 }
@@ -399,7 +416,7 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 				key := parent.AsPropertyAccessExpression().Name().Text()
 				// a NUMERIC compound step (`this.#n++`, `this.#n *= k`, and
 				// kin) writes a number on every run whatever it read —
-				// ToNumeric runs on both sides first (tmp/ecma262/spec.html
+				// ToNumeric runs on both sides first (specifications/javascript/spec.html
 				// sec-compound-assignment-operators, sec-postfix-increment-
 				// operator) — so the field widens to the number ground
 				// instead of dropping out. `+=` is NOT one of these: it

@@ -99,7 +99,7 @@ func TestBooleanEffect_ACallingOperandKeepsTheOldPath(t *testing.T) {
 	if _, ok := RelowerSummaryBody(ctx, declaration); !ok {
 		t.Fatalf("the body declined outright — the call should havoc, not refuse")
 	}
-	outcome, _, recorded := SummaryOutcomeOf(declaration)
+	outcome, _, recorded := SummaryOutcomeOf(nil, declaration)
 	if !recorded || outcome == SummaryComplete {
 		t.Errorf("outcome = %q — a comparison over a call must not read as complete", outcome)
 	}

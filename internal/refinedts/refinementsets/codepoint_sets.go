@@ -50,19 +50,29 @@ func CodepointsOf(s string) []float64 {
 	return out
 }
 
-// StringTuple is the singleton set holding exactly one string: the
-// concatenation of its codepoint singletons (the empty string is the
-// empty tuple).
+// StringTuple is the singleton set holding exactly one string: a Word
+// leaf carrying every codepoint on the one node for two or more
+// characters, a one-element OneOf singleton for exactly one character
+// (kept ambiguous with a numeric scalar on purpose -- the same shape a
+// single-value numeric enum wears, so a lone codepoint still reads
+// either way depending on the checked position's sort, exactly as
+// unambiguousStringLiteral's own doc already states), and the empty
+// tuple for the empty string. The Word leaf replaces what used to be a
+// chain of one-codepoint Concatenation nodes -- the SAME literal, one
+// node instead of one node per character (the shape
+// kernelbridge/wire_nesting_guard.go's seam guard measures: an
+// N-character literal spelled the old way counted N sequence-family
+// nodes toward that guard's cap; spelled as one Word leaf it counts
+// zero).
 func StringTuple(s string) RefinedSet {
 	points := CodepointsOf(s)
 	if len(points) == 0 {
 		return MakeRefinedSet(EmptyTuple)
 	}
-	set := MakeRefinedSet(OneOf([]float64{points[len(points)-1]}))
-	for i := len(points) - 2; i >= 0; i-- {
-		set = MakeRefinedSet(Concatenation(MakeRefinedSet(OneOf([]float64{points[i]})), set))
+	if len(points) == 1 {
+		return MakeRefinedSet(OneOf([]float64{points[0]}))
 	}
-	return set
+	return MakeRefinedSet(Word(points))
 }
 
 // WordTuplesOf is the finite WORD LIST a set spells -- a union tree of
@@ -113,12 +123,18 @@ func WordTuplesOfConjunction(set RefinedSet) ([][]float64, bool) {
 	return best, held
 }
 
-// stringLiteralPointsOfSet reads one set as one exact word: a chain of
-// one-codepoint singletons (the StringTuple encoding), or the empty
-// tuple.
+// stringLiteralPointsOfSet reads one set as one exact word: a bare
+// Word leaf (the current StringTuple encoding for two or more
+// characters), a chain of one-codepoint singletons (the OLD StringTuple
+// encoding -- still read here since it can arrive from an older call
+// site or the kernel's own answers), a lone one-element OneOf (a
+// one-character StringTuple), or the empty tuple.
 func stringLiteralPointsOfSet(set RefinedSet) ([]float64, bool) {
 	if len(set.Forms) == 1 && set.Forms[0].Form == FormEmptyTuple {
 		return []float64{}, true
+	}
+	if len(set.Forms) == 1 && set.Forms[0].Form == FormWord {
+		return append([]float64{}, set.Forms[0].W...), true
 	}
 	var points []float64
 	cursor := &set

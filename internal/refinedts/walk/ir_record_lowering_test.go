@@ -179,7 +179,7 @@ func TestIrRecordLowering_ADestructuringDefaultLowersExactly(t *testing.T) {
 		[]BindingKind{BindingKindNumber, BindingKindNumber})
 	// `const { lo = 3 } = p` from a flattened holder: the leaf read into
 	// the bound name, then the eqUndef branch — KeyedBindingInitialization
-	// (tmp/ecma262/spec.html:10111, "If |Initializer| is present and _v_
+	// (specifications/javascript/spec.html:22322, "If |Initializer| is present and _value_
 	// is *undefined*") fires the default on EXACTLY undefined, never on
 	// null, so the default sits on eqUndef's Then arm, not on
 	// IrTestDefined's Else.

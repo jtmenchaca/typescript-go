@@ -176,7 +176,7 @@ type dateGetterWindow struct {
 
 // dateGetterWindows is DATE_GETTER_WINDOWS in the TS source: the
 // spec-pinned windows of the Date calendar getters, read from the
-// vendored spec (tmp/ecma262/spec.html): MonthFromTime 0–11
+// vendored spec (specifications/javascript/spec.html): MonthFromTime 0–11
 // (sec-monthfromtime), DateFromTime 1–31 (sec-datefromtime), WeekDay
 // 0–6 (sec-weekday), HourFromTime 0–23 (sec-hourfromtime), MinFromTime
 // 0–59 (sec-minfromtime), SecFromTime 0–59 (sec-secfromtime),
@@ -192,6 +192,57 @@ var dateGetterWindows = map[string]dateGetterWindow{
 	"getSeconds": {0, 59}, "getUTCSeconds": {0, 59},
 	"getMilliseconds": {0, 999}, "getUTCMilliseconds": {0, 999},
 	"getFullYear": {-271821, 275760}, "getUTCFullYear": {-271821, 275760},
+}
+
+// readDateParse is Date.parse(string) (date.5): sec-date.parse's own
+// text — "this function interprets the resulting String as a date and
+// time; it returns a Number" — is the IDENTICAL parse `new Date(v)`'s
+// own construction step already runs for a String argument
+// (sec-date's step 1.b.ii.1: "the result of parsing v as a date, in
+// exactly the same manner as for the `parse` method"), so this reuses
+// isoDateShape/jsDateParse verbatim rather than a second parser: the
+// two callees are provably the same algorithm by the spec's own words,
+// not a coincidence this file re-derives. The one difference from
+// ReadDateConstruction's ofMillis: Date.parse returns the bare time
+// value NUMBER directly (KindValues/PrimitiveNumber), never a
+// KindDate-wrapped object — sec-date.parse's own return type.
+func readDateParse(site MethodCallSite) *abstractdomain.AbstractValue {
+	ctx, env, receiverExpression, method := site.Ctx, site.Env, site.ReceiverExpression, site.Method
+	call := site.E.AsCallExpression()
+	var arguments []*ast.Node
+	if call.Arguments != nil {
+		arguments = call.Arguments.Nodes
+	}
+	if !ast.IsIdentifier(receiverExpression) || receiverExpression.Text() != "Date" || method != "parse" ||
+		!resolvesToDefaultLib(ctx, receiverExpression) || len(arguments) != 1 {
+		return nil
+	}
+	text := evaluateExpression(ctx, env, arguments[0])
+	if text.Kind != abstractdomain.KindValues || text.KindTag != abstractdomain.PrimitiveString {
+		return nil
+	}
+	grade := abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(text), abstractdomain.TrustSpec)
+	spelled := stringOf(text.Values)
+	if !isoDateShape.MatchString(spelled) {
+		// outside this file's own recognized ISO shape gate — the spec
+		// still names a Number, but this reader states no grammar for
+		// the wider Date Time String Format's own optional/legacy forms
+		// (date.6's own remaining gap), so the result is unread here
+		return nil
+	}
+	millis, ok := jsDateParse(spelled)
+	if !ok {
+		// the shape gate matched but Go's own layouts could not read it
+		// (a syntactically ISO-shaped string that is calendrically
+		// invalid, e.g. "2023-02-30", or a corner isoDateShape admits
+		// and jsDateParse declines) — the spec's own answer is NaN;
+		// ReadDateConstruction's identical ofMillis(math.NaN()) case
+		// answers nil (declines) rather than build a NaN-flavored
+		// value, and this reader matches that same convention
+		return nil
+	}
+	out := abstractdomain.KnownValues([]float64{millis}, abstractdomain.PrimitiveNumber, grade)
+	return &out
 }
 
 // readDateNow is readDateNow in the TS source: Date.now() — unknown,

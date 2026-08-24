@@ -1,5 +1,5 @@
 // ReadThroughMaybeReceiver's own absent-flavor claim, pinned against
-// sec-optional-chaining-evaluation (tmp/ecma262/spec.html): an
+// sec-optional-chaining-evaluation (specifications/javascript/spec.html): an
 // optional chain's short-circuit ("If baseValue is either undefined
 // or null, then Return undefined") answers EXACTLY undefined
 // regardless of which one the receiver held — the built wrapper's

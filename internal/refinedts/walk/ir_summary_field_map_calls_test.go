@@ -70,11 +70,11 @@ func TestThisFieldMapCallStatement_LRUCacheGetCompletes(t *testing.T) {
 	declaration := fieldMapMethodOf(t, p, "get")
 	summary, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
 	if !ok {
-		outcome, construct, recorded := SummaryOutcomeOf(declaration)
+		outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 		t.Fatalf("LRUCache.get declined to lower (outcome %q, construct %q, recorded %v) — the fixture should complete", outcome, construct, recorded)
 	}
 	_ = summary
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for LRUCache.get")
 	}
@@ -114,7 +114,7 @@ func TestThisFieldMapCallStatement_LRUCacheSetOutcome(t *testing.T) {
 	`)
 	declaration := fieldMapMethodOf(t, p, "set")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded for LRUCache.set")
 	}
@@ -152,7 +152,7 @@ func TestThisFieldMapCallStatement_LRUCacheSetWithoutTheChainedIteratorReadCompl
 	`)
 	declaration := fieldMapMethodOf(t, p, "set")
 	_, ok := RelowerSummaryBody(&FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, recorded := SummaryOutcomeOf(declaration)
+	outcome, construct, recorded := SummaryOutcomeOf(p.Checker, declaration)
 	if !recorded {
 		t.Fatalf("no outcome recorded")
 	}
@@ -182,7 +182,7 @@ func TestThisFieldMapCallStatement_ClearAndSizeMethodsComplete(t *testing.T) {
 	`)
 	clearDecl := fieldMapMethodOf(t, clearProgram, "clear")
 	_, clearOk := RelowerSummaryBody(&FlowContext{P: clearProgram, Contracts: map[*ast.Symbol]*FunctionContract{}}, clearDecl)
-	clearOutcome, clearConstruct, clearRecorded := SummaryOutcomeOf(clearDecl)
+	clearOutcome, clearConstruct, clearRecorded := SummaryOutcomeOf(clearProgram.Checker, clearDecl)
 	if !clearRecorded {
 		t.Fatalf("no outcome recorded for LRUCache.clear")
 	}
@@ -202,7 +202,7 @@ func TestThisFieldMapCallStatement_ClearAndSizeMethodsComplete(t *testing.T) {
 	`)
 	sizeDecl := fieldMapMethodOf(t, sizeProgram, "size")
 	_, sizeOk := RelowerSummaryBody(&FlowContext{P: sizeProgram, Contracts: map[*ast.Symbol]*FunctionContract{}}, sizeDecl)
-	sizeOutcome, sizeConstruct, sizeRecorded := SummaryOutcomeOf(sizeDecl)
+	sizeOutcome, sizeConstruct, sizeRecorded := SummaryOutcomeOf(sizeProgram.Checker, sizeDecl)
 	if !sizeRecorded {
 		t.Fatalf("no outcome recorded for LRUCache.size")
 	}

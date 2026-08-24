@@ -21,7 +21,7 @@ func TestKernelSummaryDirect_AStrictEqualityTestOverAWholeRecordParameterPins(t 
 	declaration := summaryDeclarationOf(t,
 		"function f(p: { lo: number, hi: number }) { if (p === undefined) { return 0; } return p.lo; }")
 	_, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	if !ok {
 		t.Fatalf("declined: outcome = %q, construct = %q", outcome, construct)
 	}
@@ -38,7 +38,7 @@ func TestKernelSummaryDirect_ATypeofTestOverAWholeRecordParameterPins(t *testing
 	declaration := summaryDeclarationOf(t,
 		"function f(p: { lo: number, hi: number }) { if (typeof p === 'object') { return p.lo; } return 0; }")
 	_, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	if !ok {
 		t.Fatalf("declined: outcome = %q, construct = %q", outcome, construct)
 	}

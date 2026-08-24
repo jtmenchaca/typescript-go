@@ -66,7 +66,7 @@ func EvaluateArrayLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomain
 			// `[...new Array(n)]` alone, n past the materialization
 			// ceiling: sec-runtime-semantics-arrayaccumulation's
 			// `SpreadElement : ... AssignmentExpression` row
-			// (tmp/ecma262/spec.html) drains the receiver's own
+			// (specifications/javascript/spec.html) drains the receiver's own
 			// GetIterator/IteratorStepValue result at each position — the
 			// ARRAY exotic object's own iterator (%ArrayIteratorPrototype%
 			// .next) yields VALUES by reading Get(array, ToString(index)),

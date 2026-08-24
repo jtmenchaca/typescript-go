@@ -116,6 +116,16 @@ func DecodeWireSet(raw any) refinementsets.RefinedSet {
 				w[j] = DecodeWireNumber(x)
 			}
 			forms[i] = refinementsets.OneOf(w)
+		case "word":
+			rawW, ok := o["w"].([]any)
+			if !ok {
+				panic(fmt.Sprintf("kernel answered an unknown form: %v", f))
+			}
+			w := make([]float64, len(rawW))
+			for j, x := range rawW {
+				w[j] = DecodeWireNumber(x)
+			}
+			forms[i] = refinementsets.Word(w)
 		case "emptyTuple":
 			forms[i] = refinementsets.EmptyTuple
 		case "concatenation":

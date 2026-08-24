@@ -156,6 +156,9 @@ func CheckAssignabilityOfArm(
 		}
 		fix, hasFix := GuardFix(node, target)
 		messageText := assignability.AlertText
+		if known.ResidueReason != "" {
+			messageText = known.ResidueReason
+		}
 		if ContainsPow(node) {
 			messageText = PowAlert(node, target)
 		}
@@ -212,7 +215,7 @@ func CheckAssignabilityOfArm(
 		return
 	}
 	if known.Kind == abstractdomain.KindSymbol {
-		CheckSymbol(ctx, known, target, node)
+		CheckSymbol(ctx, known, target, node, what)
 		return
 	}
 	if known.Kind == abstractdomain.KindHostFunction {

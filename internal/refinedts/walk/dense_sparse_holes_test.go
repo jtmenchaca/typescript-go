@@ -14,7 +14,7 @@
 // exists PAST arrayConstructionHoleLimit (below it,
 // ReadArrayConstruction/readArrayFrom both build a plain KindList
 // instead — see exact_length_array_test.go), so every case here is
-// necessarily a past-the-ceiling length. tmp/ecma262/spec.html
+// necessarily a past-the-ceiling length. specifications/javascript/spec.html
 // clauses cited throughout.
 
 package walk

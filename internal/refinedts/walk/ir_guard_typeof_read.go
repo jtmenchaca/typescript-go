@@ -17,7 +17,7 @@ var typeofWords = map[string]struct{}{
 // IsUndefinedQuote separates the two shapes that both set IsTest:
 // quoting "undefined" is an EXACTLY-UNDEFINED claim (sec-typeof-
 // operator: `typeof null` answers "object", never "undefined" —
-// tmp/ecma262/spec.html:20589-20590), so its caller must lower it as
+// specifications/javascript/spec.html:20628-20629), so its caller must lower it as
 // the flavored eqUndef test, which alone keeps null off the
 // undefined-triggered arm. Quoting the slot's OWN known tag
 // ("number"/"string"/"boolean") is a different claim — "this value

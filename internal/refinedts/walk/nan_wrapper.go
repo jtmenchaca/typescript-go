@@ -87,22 +87,33 @@ func CheckPossiblyNaN(
 		// a real half that ADDS NOTHING beyond the number sort's own
 		// ground (AddsNothingSet — the same "no information beyond the
 		// host type" test check_assignability.go's KindUnknown arm
-		// already asks of the TARGET) carries no more information than
-		// KindUnknown does: "any real, or NaN" is not a derived fact
-		// about this value, it is the un-narrowed sort itself, most
-		// often AfterReaders' own fallback seed for an expression this
-		// walk determined nothing about (silence/after_readers.go's
-		// NumberWithNaN — the ONLY producer of the maximal
-		// AtLeast(-Infinity) real half). A "subset of the target" question
-		// against that real half is a foregone false for every bounded
-		// target — refusing it as a genuine 7001 refutation would report
+		// already asks of the TARGET) is ambiguous on its own: "any real,
+		// or NaN" is either a genuine claim about a checked declaration's
+		// unbounded return (return_type_ground.go's typeGroundOf, which
+		// now stamps TrustLibrary on every ground it hands back — a
+		// checked .d.ts signature or a body tsc itself checked), or it is
+		// AfterReaders' own fallback seed for an expression this walk
+		// never examined at all (silence/after_readers.go's re-seed
+		// through typereading.NumberWithNaN, the only OTHER producer of
+		// this exact maximal AtLeast(-Infinity) shape). Both build the
+		// identical AbstractValue; only the GRADE tells them apart — the
+		// seed carries none, the declaration-read ground always does.
+		//
+		// So the two cases now split: a GRADED wrapper takes the subset
+		// path below like every other real half — the declaration's own
+		// unbounded number, met against a bounded sink, is a genuine
+		// kernel-proved refutation (7001, a served "possibly NaN, and
+		// even the real half doesn't fit" claim), never a reason to stay
+		// silent. An UNGRADED wrapper is the seed with nothing behind
+		// it — a "subset of the target" question against it would report
 		// "this value is out of range" about a value the walk never
-		// actually examined. Undetermined stays undetermined: skip
-		// straight to the 7002 alert below, the same verdict KindUnknown
-		// itself takes. (The declared side was already checked above: this
-		// gate is reached only where the TARGET excludes NaN — a genuinely
-		// refined set — so NaN remains a live obstacle here.)
-		if hasInnerSet && refinementsets.OnOneTupleLayer(innerSet) && !AddsNothingSet(innerSet) {
+		// actually looked at — so it still skips straight to the 7002
+		// alert below, the same verdict KindUnknown itself takes. (The
+		// declared side was already checked above: this gate is reached
+		// only where the TARGET excludes NaN — a genuinely refined set —
+		// so NaN remains a live obstacle either way.)
+		graded := known.Grade != ""
+		if hasInnerSet && refinementsets.OnOneTupleLayer(innerSet) && (graded || !AddsNothingSet(innerSet)) {
 			if checkPossiblyNaNSubset(ctx, innerSet, target, node, what) {
 				return // reported (either the sort refutation or the NaN refutation)
 			}

@@ -26,7 +26,7 @@ func TestKernelSummaryDirect_ADeclarationDestructuringTheWholeParameterPins(t *t
 	declaration := summaryDeclarationOf(t,
 		"function f(p: { lo: number, hi: number }) { const { lo } = p; return lo; }")
 	lowered, ok := RelowerSummaryBody(&FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	if !ok {
 		t.Fatalf("declined: outcome = %q, construct = %q", outcome, construct)
 	}
@@ -57,7 +57,7 @@ func TestKernelSummaryDirect_ADefaultedDestructureElementLowers(t *testing.T) {
 		"function f(options: { offset?: number; clamp?: boolean }): number { const { offset = 0, clamp } = options; return offset; }")
 	ctx := &FlowContext{Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(nil, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("f's body declined: outcome=%q construct=%q — a defaulted destructure element must lower", outcome, construct)
@@ -96,7 +96,7 @@ function getCartesianPosition(options: GetCartesianPositionOptions): number {
 	declaration := entryEnvFunctionNamed(t, p, "getCartesianPosition")
 	ctx := &FlowContext{P: p, Contracts: map[*ast.Symbol]*FunctionContract{}}
 	_, ok := RelowerSummaryBody(ctx, declaration)
-	outcome, construct, _ := SummaryOutcomeOf(declaration)
+	outcome, construct, _ := SummaryOutcomeOf(p.Checker, declaration)
 	t.Logf("ok=%v outcome=%q construct=%q", ok, outcome, construct)
 	if !ok {
 		t.Fatalf("getCartesianPosition's body declined: outcome=%q construct=%q — a renamed+defaulted destructure must lower", outcome, construct)

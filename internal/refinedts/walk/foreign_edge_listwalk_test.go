@@ -20,6 +20,7 @@ package walk
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,6 +43,16 @@ import (
 
 // childProcessDeclaration is a minimal child_process.d.ts body —
 // execFileSync's own signature, the only export these tests call.
+// Buffer is declared globally, exactly where the real @types/node
+// package declares it (buffer.d.ts's own `global { interface Buffer
+// extends Uint8Array {} }`, referenced from index.d.ts alongside
+// child_process.d.ts) — without it, execFileSync's stated `string |
+// Buffer` return resolves Buffer to an error type nothing can spell,
+// which poisons the WHOLE union in ReturnTypeGround (typeGroundOf's
+// own "a union with the unknown IS the unknown" rule) and falls the
+// captured-stdout binding to Opaque on any path that reads the call's
+// ordinary (non-overridden) evaluation. Declaring Buffer as the real
+// package does removes that fixture gap rather than papering over it.
 const childProcessDeclaration = `
 declare module "child_process" {
   export function execFileSync(
@@ -50,6 +61,14 @@ declare module "child_process" {
     options?: { input?: string; encoding?: string }
   ): string | Buffer;
 }
+`
+
+// bufferGlobalDeclaration stands Buffer up as a real global interface —
+// the same placement (global, extending Uint8Array) buffer.d.ts's own
+// ambient declaration uses, minimal past the extends clause since
+// nothing here reads any of Buffer's own members.
+const bufferGlobalDeclaration = `
+interface Buffer extends Uint8Array {}
 `
 
 // listWalkTestProgramWithNodeTypes stands up a program carrying a real
@@ -76,8 +95,10 @@ func listWalkTestProgramWithNodeTypes(t *testing.T, mainPath string, entrySource
 	fs := vfstest.FromMap(map[string]string{
 		mainPath: entrySource,
 		filepath.Join(nodeTypesDir, "child_process.d.ts"): childProcessDeclaration,
-		filepath.Join(nodeTypesDir, "index.d.ts"):          `/// <reference path="child_process.d.ts" />` + "\n",
-		filepath.Join(nodeTypesDir, "package.json"):        `{"name": "@types/node", "version": "1.0.0", "types": "index.d.ts"}`,
+		filepath.Join(nodeTypesDir, "buffer.d.ts"):         bufferGlobalDeclaration,
+		filepath.Join(nodeTypesDir, "index.d.ts"): `/// <reference path="child_process.d.ts" />` + "\n" +
+			`/// <reference path="buffer.d.ts" />` + "\n",
+		filepath.Join(nodeTypesDir, "package.json"): `{"name": "@types/node", "version": "1.0.0", "types": "index.d.ts"}`,
 		tsconfigPath: `{
 			"compilerOptions": {"types": ["node"]},
 			"files": [` + strconv.Quote(mainPath) + `]
@@ -371,6 +392,111 @@ function f(boosted: number[]): number {
 		if d.Code == 7002 {
 			t.Errorf("a 7002 decline fired: %s", d.MessageText)
 		}
+	}
+}
+
+/* ── (c1) the intermediate captured-stdout binding ─────────────────── */
+
+// TestListWalk_ADischargedCrossingBindsTheCapturedStdoutToTheJSONNumberGrammar
+// pins the intermediate binding this fix adds: after a DISCHARGED
+// crossing (audio_level.py's own 0…1 number return, StdoutPure, no
+// outbound fire), `stdout` itself — the name execFileSync's result
+// binds, read BETWEEN the call and JSON.parse — must no longer read as
+// residue. It must read as a string-sorted set that admits the
+// harness's own serialized text ("0.5\n") and excludes non-numeric
+// text ("abc") and a bare number missing its trailing newline ("0.5").
+func TestListWalk_ADischargedCrossingBindsTheCapturedStdoutToTheJSONNumberGrammar(t *testing.T) {
+	_, ctx, reported := listWalkForeignEdgeFixture(t, `
+import { execFileSync } from "child_process";
+function f(boosted: number[]): number {
+	const stdout = execFileSync("python3", ["./audio_level.py"], {
+		input: JSON.stringify(boosted),
+		encoding: "utf8",
+	});
+	const level: number = JSON.parse(stdout);
+	return level;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, ctx.P, "f")
+	env := NewEnv()
+	env.Set("boosted", abstractdomain.KnownSet(
+		mustParseRefinedSet(t, -2, 2, 1), nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+
+	AnalyzeStatements(ctx, env, statements, nil)
+
+	stdout, ok := env.Get("stdout")
+	if !ok {
+		t.Fatalf("env holds no value for stdout")
+	}
+	set := mustSetOfKnown(t, stdout)
+	if !ctx.Kernel.Member(set, refinementsets.CodepointsOf("0.5\n")) {
+		t.Errorf("the stdout binding does not admit %q, want the JSON-number-plus-newline grammar to admit it", "0.5\n")
+	}
+	if ctx.Kernel.Member(set, refinementsets.CodepointsOf("abc")) {
+		t.Errorf("the stdout binding admits %q, want non-numeric text excluded", "abc")
+	}
+	if ctx.Kernel.Member(set, refinementsets.CodepointsOf("0.5")) {
+		t.Errorf("the stdout binding admits %q (no trailing newline), want the harness's own newline required", "0.5")
+	}
+	for _, d := range *reported {
+		if d.Code == 7002 {
+			t.Errorf("a 7002 decline fired: %s", d.MessageText)
+		}
+	}
+}
+
+// TestListWalk_AFiredOutboundLegLeavesTheCapturedStdoutBindingUnchanged
+// pins the OTHER half of the rule this fix states in its own doc
+// comment: a crossing whose OUTBOUND leg fires 7001 (the value crossing
+// out escapes the target's stated entry) must NOT bind `stdout` to the
+// serialized-set claim — the unvalidated-parse reading stays exactly as
+// it read before this fix, since it is load-bearing for whatever
+// generic-union return model the (still-bound, per the independent-
+// truths design) parse node's own downstream read relies on.
+// audio_level.py's own entry is [-2, 2]; an unbounded boosted element
+// escapes it and fires at the call.
+func TestListWalk_AFiredOutboundLegLeavesTheCapturedStdoutBindingUnchanged(t *testing.T) {
+	_, ctx, reported := listWalkForeignEdgeFixture(t, `
+import { execFileSync } from "child_process";
+function f(boosted: number[]): number {
+	const stdout = execFileSync("python3", ["./audio_level.py"], {
+		input: JSON.stringify(boosted),
+		encoding: "utf8",
+	});
+	const level: number = JSON.parse(stdout);
+	return level;
+}
+`)
+	statements := relationalAccumulationBodyOf(t, ctx.P, "f")
+	env := NewEnv()
+	// an UNBOUNDED element — outside audio_level.py's stated [-2, 2]
+	// entry, so the outbound leg fires 7001 at the call (the same shape
+	// TestListWalk_AnOutboundFireStillBindsTheReturnLegFact's own object
+	// case exercises for the return leg, applied here to the SCALAR
+	// entry instead)
+	env.Set("boosted", abstractdomain.KnownSet(
+		refinementsets.Repetition(refinementsets.MakeRefinedSet(refinementsets.AtLeast(math.Inf(-1))), 1, nil),
+		nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+
+	AnalyzeStatements(ctx, env, statements, nil)
+
+	sawOutboundFire := false
+	for _, d := range *reported {
+		if d.Code == 7001 {
+			sawOutboundFire = true
+		}
+	}
+	if !sawOutboundFire {
+		t.Fatalf("no 7001 fired at the call — this test's own premise (an unbounded entry) did not hold: %+v", *reported)
+	}
+	stdout, ok := env.Get("stdout")
+	if !ok {
+		t.Fatalf("env holds no value for stdout")
+	}
+	set := mustSetOfKnown(t, stdout)
+	if !ctx.Kernel.Member(set, refinementsets.CodepointsOf("abc")) {
+		t.Errorf("a fired outbound leg narrowed the stdout binding to exclude %q — it must stay unchanged "+
+			"(residue), since the unvalidated-parse reading is load-bearing for the fired path", "abc")
 	}
 }
 

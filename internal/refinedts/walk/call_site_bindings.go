@@ -27,6 +27,42 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
+// missingArgumentContribution is what a call site contributes for one
+// parameter it wrote NO argument for, joined across every caller
+// declaredJoinUncached/callbackSitePins sees. A parameter with no
+// default binds exactly `undefined`
+// (specifications/javascript/spec.html sec-functiondeclarationinstantiation
+// — IteratorBindingInitialization on a shorter argument list). A
+// parameter carrying its OWN default
+// (`function f(age: number = 18)`) never actually holds `undefined`
+// inside the body at THIS call: IteratorBindingInitialization's
+// SingleNameBinding case runs the default exactly there
+// (specifications/javascript/spec.html:10146), the same eqUndef-gated
+// substitution ParameterArgumentOrDefault (inliner.go) already runs
+// for the inline-call route and summaryDefaultPrelude
+// (ir_summary_body_lowering_default_prelude.go) runs for the summary
+// route. Contributing bare Undef here — as this join used to — fed
+// entryStateMeet a call-site fact no real caller produces, and
+// MeetKnown's bottom case (KindUndef meeting a plain KindSet) let that
+// impossible Undef win outright, surfacing as a false "returned value
+// of type 'undefined'" refutation inside the defaulted function's own
+// body (e-class-and-function.ts's defaultParameter row).
+//
+// The default runs SILENTLY (Report discarded) on a fresh env, mirroring
+// ParameterArgumentOrDefault's own reading: the default's own
+// expression is evaluated in its OWN scope, not the caller's, and a
+// default that cannot be spelled (a call, a `new`) is honestly unknown
+// rather than wrongly Undef.
+func missingArgumentContribution(ctx *FlowContext, parameter *ast.Node) abstractdomain.AbstractValue {
+	pd := parameter.AsParameterDeclaration()
+	if pd.Initializer == nil {
+		return abstractdomain.Undef
+	}
+	silent := *ctx
+	silent.Report = func(assignability.RefinementDiagnostic) {}
+	return evaluateExpression(&silent, NewEnv(), pd.Initializer)
+}
+
 // CallSiteBindings is callSiteBindings in the TS source: what `fn`'s
 // call sites pin onto its parameters. A FunctionDeclaration wears the
 // join of every visible call; an inline callback wears what that one
@@ -213,7 +249,7 @@ func callbackSitePins(
 						argument = callExpr.Arguments.Nodes[i]
 					}
 					if argument == nil {
-						calleeEnv.Set(name, abstractdomain.Undef)
+						calleeEnv.Set(name, missingArgumentContribution(flowCtx, parameter))
 					} else {
 						calleeEnv.Set(name, evaluateExpression(flowCtx, outerEnv, argument))
 					}
@@ -242,7 +278,7 @@ func callbackSitePins(
 									}
 									var value abstractdomain.AbstractValue
 									if argument == nil {
-										value = abstractdomain.Undef
+										value = missingArgumentContribution(flowCtx, fnParameters[k])
 									} else {
 										value = evaluateExpression(flowCtx, calleeEnv.Clone(), argument)
 									}
@@ -646,13 +682,13 @@ func declaredJoinUncached(
 				return false
 			}
 			callExpr := call.AsCallExpression()
-			for i := range fnParameters {
+			for i, parameter := range fnParameters {
 				var arg *ast.Node
 				if callExpr.Arguments != nil && i < len(callExpr.Arguments.Nodes) {
 					arg = callExpr.Arguments.Nodes[i]
 				}
 				if arg == nil {
-					contribute(i, abstractdomain.Undef)
+					contribute(i, missingArgumentContribution(flowCtx, parameter))
 				} else {
 					contribute(i, evaluateExpression(flowCtx, env, arg))
 				}
