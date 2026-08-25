@@ -65,13 +65,41 @@ func stringOf(values []float64) string {
 // non-integers, an unbounded side) has no digit-count fact to read
 // off syntactically here, and keeps today's unbounded star.
 func numericSetText(set refinementsets.RefinedSet) refinementsets.RefinedSet {
+	return numericSetRadixText(set, 10)
+}
+
+// numericSetRadixText is numericSetText generalized to any radix in
+// [2, 36] (Number::toString's own range): the radix-r spelling of a
+// non-negative integer window [lo, hi] repeats the radix alphabet
+// exactly [digitCount_r(lo), digitCount_r(hi)] times — the same
+// no-leading-zero monotonicity argument numericSetText's own comment
+// gives for radix 10 holds in every radix.
+func numericSetRadixText(set refinementsets.RefinedSet, radix int) refinementsets.RefinedSet {
 	lo, hi, ok := refinementsets.NonNegativeIntegerBounds(set)
 	if !ok {
 		return refinementsets.Strings
 	}
-	loCount := digitCountOf(lo)
-	hiCount := digitCountOf(hi)
-	return refinementsets.Repetition(refinementsets.Digits, loCount, &hiCount)
+	loCount := digitCountInRadix(lo, radix)
+	hiCount := digitCountInRadix(hi, radix)
+	// a SINGLE-DIGIT window spells exactly the digit characters of its
+	// own members — [0, 9] at radix 16 never reaches 'a'..'f', so the
+	// full radix alphabet would overstate the image
+	if hiCount == 1 {
+		points := make([]float64, 0, int(hi-lo)+1)
+		for v := int(lo); v <= int(hi); v++ {
+			if v < 10 {
+				points = append(points, float64('0'+v))
+			} else {
+				points = append(points, float64('a'+v-10))
+			}
+		}
+		one := 1
+		return refinementsets.Repetition(refinementsets.MakeRefinedSet(refinementsets.OneOf(points)), 1, &one)
+	}
+	if radix == 10 {
+		return refinementsets.Repetition(refinementsets.Digits, loCount, &hiCount)
+	}
+	return refinementsets.Repetition(refinementsets.RadixDigits(radix), loCount, &hiCount)
 }
 
 // digitCountOf is the decimal digit count of a non-negative integer,
@@ -81,6 +109,13 @@ func numericSetText(set refinementsets.RefinedSet) refinementsets.RefinedSet {
 // formatting the float, so it stays exact at the double integers this
 // window ever carries (no float64 -> string round-trip to drift on).
 func digitCountOf(v float64) int {
+	return digitCountInRadix(v, 10)
+}
+
+// digitCountInRadix is digitCountOf in any radix: 0 spells one digit,
+// and every v >= 1 spells by repeated division — exact at the double
+// integers these windows carry, in every radix.
+func digitCountInRadix(v float64, radix int) int {
 	n := int64(v)
 	if n == 0 {
 		return 1
@@ -88,7 +123,7 @@ func digitCountOf(v float64) int {
 	count := 0
 	for n > 0 {
 		count++
-		n /= 10
+		n /= int64(radix)
 	}
 	return count
 }

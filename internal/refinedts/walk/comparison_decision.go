@@ -111,6 +111,56 @@ func compareSetAgainstNumber(ctx *FlowContext, op ComparisonOp, a, b abstractdom
 // answer it.
 const kernelRefusedTheQuestionSaid = "the kernel refused this membership or ordering question"
 
+// compareSetAgainstString decides `<sequence set> === <one exact
+// string>` (either order) through ONE membership question — is the
+// literal's codepoint tuple a member of the set? A NEGATIVE answer
+// proves both arms: === is false and !== is true on every run (the
+// literal cannot equal any member of a set that excludes it), exactly
+// the disjointness a narrowed grammar (a regex .test guard, say)
+// proves against a literal outside its language. A POSITIVE answer
+// does not decide the comparison (the set can hold other members
+// too), so it falls through to the boolean ground the same way an
+// undecided compareSetAgainstNumber arm does. Ordering (<, <=, >, >=)
+// against a set has no row here — SeqLexLt's own callMember-style
+// wrapper answers one pair, not a set-wide bound, so it stays out of
+// scope for this row. matched is false where the shape is not one
+// sequence set against one exact string, so the caller can keep
+// looking for another row.
+func compareSetAgainstString(ctx *FlowContext, op ComparisonOp, a, b abstractdomain.AbstractValue, kernelRow func(bool) abstractdomain.AbstractValue) (out *abstractdomain.AbstractValue, matched bool) {
+	if op != CompareEq && op != CompareNe {
+		return nil, false
+	}
+	defer func() {
+		if recover() != nil {
+			out = nil
+		}
+	}()
+	set := a
+	literal := b
+	if a.Kind != abstractdomain.KindSet || a.SetKindTag != abstractdomain.SetKindTagNone {
+		set = b
+		literal = a
+		if b.Kind != abstractdomain.KindSet || b.SetKindTag != abstractdomain.SetKindTagNone {
+			return nil, false
+		}
+	}
+	if literal.Kind != abstractdomain.KindValues || literal.KindTag != abstractdomain.PrimitiveString {
+		return nil, false
+	}
+	if abstractdomain.KindOfClaim(set) != abstractdomain.ClaimSortString {
+		return nil, false
+	}
+	member, err := callMember(ctx.Kernel, set.Set, literal.Values)
+	if err != nil {
+		return nil, true
+	}
+	if !member {
+		v := kernelRow(op == CompareNe)
+		return &v, true
+	}
+	return nil, true
+}
+
 // ComparisonOp is the "lt" | "gt" | "le" | "ge" | "eq" | "ne" union.
 type ComparisonOp string
 
@@ -227,6 +277,20 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 	// models.go's own doctrine: "even an undecided test determines the
 	// boolean ground — a value, never nothing").
 	if verdict, matched := compareSetAgainstNumber(ctx, op, a, b, kernelRow); matched {
+		if verdict != nil {
+			return *verdict
+		}
+		return boolGround(operandTrustLevel)
+	}
+	// a SEQUENCE set (a regex-narrowed grammar, say) against one exact
+	// string: ONE membership question — is the literal in the set? —
+	// decides the false arm outright wherever it answers no (the
+	// literal cannot equal any member of a set that excludes it), the
+	// same disjointness compareSetAgainstNumber proves for a numeric
+	// window. A yes answer does not pin the comparison (other members
+	// exist too), so it falls through to the boolean ground exactly as
+	// compareSetAgainstNumber's own undecided arm does.
+	if verdict, matched := compareSetAgainstString(ctx, op, a, b, kernelRow); matched {
 		if verdict != nil {
 			return *verdict
 		}

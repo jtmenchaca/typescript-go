@@ -11,6 +11,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/nameresolution"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
@@ -29,6 +30,11 @@ const allowCasts = false
 // too. Inlined at each call site per PORT.md (no ready-made wrapper
 // yet; service/program_resolution.ts is not ported).
 func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
+	// the binder's own tables answer first (nameresolution's file
+	// comment) — the checker settles only what they cannot
+	if s := nameresolution.DeclarationSymbolOf(c.BoundProgram(), node); s != nil {
+		return s
+	}
 	symbol := c.GetSymbolAtLocation(node)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
 		symbol = c.GetAliasedSymbol(symbol)

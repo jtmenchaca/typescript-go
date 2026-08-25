@@ -6,10 +6,12 @@
 package annotations
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -68,7 +70,23 @@ func CompileAnnotationFileFacts(
 				if initializer == nil || !ast.IsIdentifier(varDecl.Name()) {
 					continue
 				}
-				symbol := p.Checker.GetSymbolAtLocation(varDecl.Name())
+				// the BINDER's own symbol on the declaration node — set
+				// once at bind time, deterministic program data — keys
+				// the registries; the checker's resolver (measured
+				// drifting under concurrent per-entry checkers) fills in
+				// only when the binder left none.
+				symbol := declaration.Symbol()
+				fromBinder := symbol != nil
+				if symbol == nil {
+					symbol = p.Checker.GetSymbolAtLocation(varDecl.Name())
+				}
+				if diagnose.EventOn("annotations.compile") {
+					diagnose.Log("annotations.compile",
+						"name", varDecl.Name().Text(),
+						"symbol", fmt.Sprintf("%p", symbol),
+						"fromBinder", fromBinder,
+					)
+				}
 
 				if rootsInObject(p, initializer) || derivedObjectChain(p, initializer, merged.Registry, merged.Objects) {
 					compiled := CompileObject(p, initializer, merged.Registry, merged.Objects)
@@ -95,6 +113,13 @@ func CompileAnnotationFileFacts(
 						}
 						objects[symbol] = object
 						merged.Objects[symbol] = object
+						if diagnose.EventOn("annotations.compile") {
+							diagnose.Log("annotations.compile",
+								"name", varDecl.Name().Text(),
+								"symbol", fmt.Sprintf("%p", symbol),
+								"kind", "object",
+							)
+						}
 					}
 					continue
 				}
@@ -120,6 +145,14 @@ func CompileAnnotationFileFacts(
 				if symbol != nil {
 					annotations[symbol] = compiled.Annotation
 					merged.Registry[symbol] = compiled.Annotation
+					if diagnose.EventOn("annotations.compile") {
+						diagnose.Log("annotations.compile",
+							"name", varDecl.Name().Text(),
+							"symbol", fmt.Sprintf("%p", symbol),
+							"kind", "set",
+							"set", kernelbridge.EncodeSet(derefSet(compiled.Annotation.Set)),
+						)
+					}
 				}
 				if !reporting || kernel == nil {
 					continue

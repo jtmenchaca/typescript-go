@@ -8,6 +8,9 @@
 package walk
 
 import (
+	"math/big"
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
@@ -76,6 +79,9 @@ func RefutePossiblyAbsent(
 		messageText = what + " of type 'undefined' is not assignable to " +
 			statedWords + " — the absent value is a member of no " +
 			"refined set"
+	} else if known.Kind == abstractdomain.KindNull {
+		messageText = what + " of type '{null}' is not assignable to " +
+			statedWords + " — null is a member of no refined set"
 	} else {
 		// The wrapper's own absent side names which runtime value the
 		// refutation is about: NullOnly proves exactly 'null' admitted,
@@ -231,11 +237,24 @@ func CheckBigints(
 ) {
 	if target.Kind == annotations.DeclaredSet && target.KindTag == "bigint" {
 		for _, v := range known.BigintValues {
-			if !ctx.Kernel.Member(*target.Set, []float64{float64(v)}) {
+			f, exact := new(big.Float).SetInt(v).Float64()
+			if exact != big.Exact {
+				// the value sits past the float-exact range, so the
+				// membership question has no faithful float64 spelling —
+				// an alert, never a rounded ask
+				ctx.Report(assignability.At(
+					node,
+					7002,
+					assignability.AlertText+" The bigint "+v.String()+"n sits past the "+
+						"float-exact range, so its membership cannot be asked here.",
+				))
+				return
+			}
+			if !ctx.Kernel.Member(*target.Set, []float64{f}) {
 				ctx.Report(assignability.At(
 					node,
 					7001,
-					what+" of type '"+formatJSNumberLocal(float64(v))+"n' is not assignable to type "+
+					what+" of type '"+v.String()+"n' is not assignable to type "+
 						"'"+StatedSetWords(*target.Set, target.Word)+"'",
 				))
 				return
@@ -245,13 +264,11 @@ func CheckBigints(
 	}
 	if target.Kind == annotations.DeclaredSet {
 		say := "a bigint"
-		spelledValues := formatValues(func() []float64 {
-			out := make([]float64, len(known.BigintValues))
-			for i, v := range known.BigintValues {
-				out[i] = float64(v)
-			}
-			return out
-		}())
+		words := make([]string, len(known.BigintValues))
+		for i, v := range known.BigintValues {
+			words[i] = v.String()
+		}
+		spelledValues := strings.Join(words, " | ")
 		targetSaid := "a number"
 		switch target.KindTag {
 		case "boolean":

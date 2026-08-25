@@ -234,22 +234,22 @@ func RefineDecidedOnExact(predicate *ast.Node, known abstractdomain.AbstractValu
 				case "trimEnd":
 					return strings.TrimRightFunc(receiverStr, isJSWhiteSpace), true
 				// toLowerCase/toUpperCase map by the Unicode Default
-				// Case Conversion, including the multi-code-point
-				// SpecialCasing rows (sec-string.prototype.tolowercase,
-				// sec-string.prototype.touppercase). Those tables are
-				// not transcribed here, so only ASCII — where the
-				// mapping is the pinned a–z/A–Z shift — computes; any
-				// other code point declines.
+				// Case Conversion (sec-string.prototype.tolowercase,
+				// sec-string.prototype.touppercase): UnicodeData.txt's
+				// simple mapping plus SpecialCasing.txt's unconditional
+				// multi-code-point rows (mapCase, string_method_models.go)
+				// — a receiver holding a context/language-sensitive code
+				// point (Greek final sigma, Turkic dotted-I) declines.
 				case "toLowerCase":
-					if !isASCII(receiverStr) {
+					if hasConditionalCasing(receiverStr) {
 						return nil, false
 					}
-					return asciiLower(receiverStr), true
+					return mapCase(receiverStr, specialCasingLower, unicode.ToLower), true
 				case "toUpperCase":
-					if !isASCII(receiverStr) {
+					if hasConditionalCasing(receiverStr) {
 						return nil, false
 					}
-					return asciiUpper(receiverStr), true
+					return mapCase(receiverStr, specialCasingUpper, unicode.ToUpper), true
 				}
 				return nil, false
 			}
@@ -583,41 +583,6 @@ func isJSWhiteSpace(r rune) bool {
 	// USP: general category Space_Separator, which holds SPACE
 	// (U+0020) and NO-BREAK SPACE (U+00A0)
 	return unicode.Is(unicode.Zs, r)
-}
-
-// isASCII reports whether every code point is under U+0080 — the
-// range where case mapping is the pinned a–z/A–Z shift and no
-// SpecialCasing row applies.
-func isASCII(s string) bool {
-	for _, r := range s {
-		if r > 0x7F {
-			return false
-		}
-	}
-	return true
-}
-
-// asciiLower/asciiUpper map A–Z and a–z and leave every other ASCII
-// code point alone — the Unicode Default Case Conversion restricted
-// to the range isASCII admits.
-func asciiLower(s string) string {
-	units := []byte(s)
-	for i, c := range units {
-		if c >= 'A' && c <= 'Z' {
-			units[i] = c + ('a' - 'A')
-		}
-	}
-	return string(units)
-}
-
-func asciiUpper(s string) string {
-	units := []byte(s)
-	for i, c := range units {
-		if c >= 'a' && c <= 'z' {
-			units[i] = c - ('a' - 'A')
-		}
-	}
-	return string(units)
 }
 
 // stringOfCodepoints mirrors String.fromCodePoint(...values).

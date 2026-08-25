@@ -106,7 +106,7 @@ func spellInto(b *strings.Builder, known AbstractValue) bool {
 			if i > 0 {
 				b.WriteByte(',')
 			}
-			b.WriteString(strconv.FormatInt(x, 10))
+			b.WriteString(x.String())
 		}
 		b.WriteByte(';')
 		b.WriteString(string(known.Grade))
@@ -224,6 +224,22 @@ func spellInto(b *strings.Builder, known AbstractValue) bool {
 				b.WriteByte(',')
 			}
 			if !spellInto(b, item) {
+				return false
+			}
+		}
+		// a list's own NON-INDEX properties (a match array's `groups`)
+		// key the memo too: two lists with the same slots but different
+		// named properties answer a property read differently, so
+		// collapsing them to one key would serve one call's cached
+		// answer to the other.
+		b.WriteByte(';')
+		for i, key := range known.Keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(strconv.Quote(key.Name))
+			b.WriteByte('=')
+			if !spellInto(b, key.Value) {
 				return false
 			}
 		}

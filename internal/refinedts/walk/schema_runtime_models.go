@@ -23,12 +23,15 @@
 package walk
 
 import (
+	"fmt"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations/libraryadapters"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
@@ -259,6 +262,15 @@ func readSchemaRuntimeCall(site MethodCallSite) *abstractdomain.AbstractValue {
 			if schemaSymbol != nil {
 				object = ctx.Objects[schemaSymbol]
 				annotation = ctx.Registry[schemaSymbol]
+			}
+			if diagnose.EventOn("schema.parse.lookup") {
+				diagnose.Log("schema.parse.lookup",
+					"name", receiverExpression.Text(),
+					"symbol", fmt.Sprintf("%p", schemaSymbol),
+					"objectHit", object != nil,
+					"annotationHit", annotation != nil,
+					"registrySize", len(ctx.Registry),
+				)
 			}
 			if object != nil {
 				stated := WornOfObject(object)

@@ -10,6 +10,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -52,6 +53,12 @@ func AnalyzeReturnStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 		whenFalse := evaluateExpression(assumed.WhenFalse.Ctx, assumed.WhenFalse.Env, ternary.WhenFalse)
 		*ctx.ReturnSink = append(*ctx.ReturnSink, whenTrue)
 		*ctx.ReturnSink = append(*ctx.ReturnSink, whenFalse)
+		diagnose.LogIf(diagnose.EventOn("walk.return"), "walk.return",
+			"resultInHand", result != nil,
+			"branch", "ternary",
+			"whenTrue", spellValue(whenTrue),
+			"whenFalse", spellValue(whenFalse),
+		)
 		if result != nil {
 			// the check the stated type is owed: each arm against it at
 			// its own site, so the report names the arm that breaks it
@@ -70,6 +77,11 @@ func AnalyzeReturnStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 	if ctx.ReturnSink != nil {
 		*ctx.ReturnSink = append(*ctx.ReturnSink, known)
 	}
+	diagnose.LogIf(diagnose.EventOn("walk.return"), "walk.return",
+		"resultInHand", result != nil,
+		"branch", "plain",
+		"value", spellValue(known),
+	)
 	if result != nil && rs.Expression != nil {
 		CheckAssignability(ctx, known, *result, rs.Expression, "a returned value", nil)
 		// a parameter-dependent bound on the result is per-run — the

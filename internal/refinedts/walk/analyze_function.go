@@ -16,6 +16,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
@@ -119,6 +120,11 @@ func analyzeFunctionBody(outer *FlowContext, contract *FunctionContract, callSit
 	if contract.Grounded {
 		result = contract.Result
 	}
+	diagnose.LogIf(diagnose.EventOn("walk.function"), "walk.function",
+		"function", functionLabel(contract.Declaration),
+		"grounded", contract.Grounded,
+		"resultPassed", result != nil,
+	)
 	if ast.IsBlock(body) {
 		AnalyzeStatements(bodyCtx, env, body.AsBlock().Statements.Nodes, result)
 		return

@@ -82,6 +82,18 @@ type Narrowed struct {
 	WordSet    [][]float64
 	HasWordSet bool
 
+	// ExcludesBooleanWord: the word a REFUTED boolean-literal equality
+	// rules out — `b !== false` proves a BOOLEAN b is exactly true.
+	//
+	// Strict inequality against a boolean literal also holds for every
+	// NON-boolean value (`"x" !== false` is true), so this narrowing
+	// applies only where the held value is already known boolean-sorted:
+	// a KindValues tagged PrimitiveBoolean. Every other shape passes
+	// untouched, which is the answer that discards no runtime value.
+	// HasExcludesBooleanWord takes the place of TS's optional field.
+	ExcludesBooleanWord    float64
+	HasExcludesBooleanWord bool
+
 	// WordSetExcluded: the dual — the REFUTED disjunction proves the
 	// value is NONE of these words — word-listable claims shed them,
 	// and an arm whose every word is excluded drops. Falsity proves no

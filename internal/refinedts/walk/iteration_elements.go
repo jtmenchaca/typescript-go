@@ -6,6 +6,8 @@
 package walk
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -160,6 +162,36 @@ func IterationElementOf(ctx *FlowContext, env Env, iterable *ast.Node) *abstract
 		call := iterable.AsCallExpression()
 		if ast.IsPropertyAccessExpression(call.Expression) {
 			access := call.Expression.AsPropertyAccessExpression()
+			// s.matchAll(/pattern/g): each yielded match's group 0
+			// (index 0 of the RegExpExecArray) is IN the pattern's own
+			// language — sec-string.prototype.matchall step 5 builds
+			// the iterator over sec-regexpexec, whose group-0 slice is
+			// always what the pattern matched, whatever the receiver.
+			// This reads the pattern's own compiled grammar (the same
+			// door captureGroupSetOf/.match's const-regex reading use),
+			// never the receiver's content — so it holds for an
+			// UNTRACKED receiver too, unlike an exact-tuple execution.
+			if access.QuestionDotToken == nil && access.Name().Text() == "matchAll" &&
+				len(call.Arguments.Nodes) == 1 {
+				if pattern := regexLiteralReceiverOf(ctx, call.Arguments.Nodes[0]); pattern != nil {
+					literal := pattern.Text()
+					lastSlash := strings.LastIndex(literal, "/")
+					source := literal[1:lastSlash]
+					flags := literal[lastSlash+1:]
+					// group 0 is exactly what the pattern matched, not a
+					// substring-anywhere reading — anchor both sides the
+					// same way captureGroupSetOf anchors a capturing
+					// group's own sub-pattern, so an unanchored side is
+					// not padded with C* (FormatGrammar's own default for
+					// a bare, unanchored pattern).
+					compiled := refinementsets.FormatGrammar("^(?:"+source+")$", flags)
+					if compiled.Ok {
+						group0 := abstractdomain.KnownSet(compiled.Set, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+						out := abstractdomain.KnownList([]abstractdomain.AbstractValue{group0}, abstractdomain.TrustSpec)
+						return &out
+					}
+				}
+			}
 			if ast.IsIdentifier(access.Expression) &&
 				access.Expression.Text() == "Object" &&
 				access.Name().Text() == "entries" &&

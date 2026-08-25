@@ -76,6 +76,14 @@ func EvaluateNewExpression(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 		out := abstractdomain.KnownObject([]abstractdomain.ObjectKey{{Name: "message", Value: held}}, nil, false, abstractdomain.TrustSpec, false)
 		return &out
 	}
+	// `new URL(<exact string>)` — parsing is a pure function of the
+	// input, so every component and every query parameter is exactly
+	// known (url_models.go). Tried before the generic web row below,
+	// which answers the same construction as an object with unstated
+	// keys.
+	if exactUrl := ExactUrlNew(ctx, env, e); exactUrl != nil {
+		return exactUrl
+	}
 	// the web platform constructors (web.ts): Response with its
 	// birth facts, the rest as objects with unstated keys
 	web := WebNew(ctx.P, e, func(init *ast.Node, hasInit bool) *abstractdomain.AbstractValue {

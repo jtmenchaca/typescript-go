@@ -330,7 +330,7 @@ func formatAbstractValueAt(known AbstractValue, top bool) (string, bool) {
 		}
 		words := make([]string, len(known.BigintValues))
 		for i, v := range known.BigintValues {
-			words[i] = strconv.FormatInt(v, 10) + "n"
+			words[i] = v.String() + "n"
 		}
 		joined := strings.Join(words, " | ")
 		if top {

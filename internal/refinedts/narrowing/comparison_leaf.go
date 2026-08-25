@@ -76,6 +76,29 @@ func ModuloSide(c *checker.Checker, side *ast.Node, place dataflowfacts.TrackedP
 	return k, true
 }
 
+// MathSignSide reads `Math.sign(x)` when its argument is this place —
+// the sign-comparison recognizer, `ModuloSide`'s own shape for the one
+// other library call an equality against a literal genuinely narrows.
+func MathSignSide(c *checker.Checker, side *ast.Node, place dataflowfacts.TrackedPlace, isTracked func(name string) bool) bool {
+	bare := Peeled(side)
+	if !ast.IsCallExpression(bare) {
+		return false
+	}
+	call := bare.AsCallExpression()
+	if !ast.IsPropertyAccessExpression(call.Expression) {
+		return false
+	}
+	pa := call.Expression.AsPropertyAccessExpression()
+	if !ast.IsIdentifier(pa.Expression) || pa.Expression.Text() != "Math" || pa.Name().Text() != "sign" {
+		return false
+	}
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+		return false
+	}
+	tested := dataflowfacts.TrackedPlaceOfWith(c, call.Arguments.Nodes[0], isTracked)
+	return tested != nil && dataflowfacts.SameTrackedPlace(*tested, place)
+}
+
 // ComparisonLeaf is comparisonLeaf in the TS source: one comparison as
 // a leaf ON THE GIVEN PLACE — everything else is the `other` leaf,
 // which claims nothing in either direction.
@@ -160,6 +183,38 @@ func ComparisonLeaf(
 		}
 		leftLiteral, leftLiteralOk := LiteralOf(left)
 		rightLiteral, rightLiteralOk := LiteralOf(right)
+		// the sign test: Math.sign(x) === k lowers to the sign's own
+		// comparison on the EXISTING proven leaves — === 1 is x > 0
+		// (sign(NaN) is NaN and never 1, so truth proves realness, the
+		// strong Gt claim); === -1 is x < 0; === 0 is x ∈ {0, −0} (the
+		// float equality conflates the zeros exactly as the ground
+		// does). Any other literal never comes out of Math.sign — the
+		// test proves nothing HERE (deciding the branch dead is the
+		// dead-guard machinery's job, not a narrowing claim).
+		// sec-math.sign.
+		if MathSignSide(c, left, place, isTracked) || MathSignSide(c, right, place, isTracked) {
+			k, kOk := rightLiteral, rightLiteralOk
+			if !kOk {
+				k, kOk = leftLiteral, leftLiteralOk
+			}
+			if kOk {
+				var leaf kernelbridge.NarrowTree
+				switch k {
+				case 1:
+					leaf = kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindCmp, Op: kernelbridge.NarrowOpGt, K: 0}
+				case -1:
+					leaf = kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindCmp, Op: kernelbridge.NarrowOpLt, K: 0}
+				case 0:
+					leaf = kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindEq, K: 0}
+				default:
+					return Other
+				}
+				if isEquals {
+					return leaf
+				}
+				return negated(leaf)
+			}
+		}
 		zeroSide := (leftLiteralOk && leftLiteral == 0) || (rightLiteralOk && rightLiteral == 0)
 		if moduloOk && zeroSide {
 			leaf := kernelbridge.NarrowTree{Kind: kernelbridge.NarrowKindModZero, D: modulo}

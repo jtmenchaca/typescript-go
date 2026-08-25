@@ -227,6 +227,19 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 		if answered := readDateMethods(site); answered != nil {
 			return answered
 		}
+		// the text codecs' own pure reads (text_encoding_models.go)
+		if answered := readTextEncoderEncode(site); answered != nil {
+			return answered
+		}
+		if answered := readTextDecoderDecode(site); answered != nil {
+			return answered
+		}
+		// an EXACT query's own `.get(name)` — the value the parsed URL
+		// carries under that name, or null. Tried before the generic web
+		// row, which answers the string sort for the same call.
+		if answered := readExactSearchParamsGet(site); answered != nil {
+			return answered
+		}
 		if web := WebMethodCall(ctx.P, e, receiverExpression, method); web != nil {
 			return web
 		}

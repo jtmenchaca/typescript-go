@@ -7,6 +7,7 @@
 package walk
 
 import (
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -61,15 +62,15 @@ func EvaluateLiteral(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abs
 			trimmed = trimmed[:len(trimmed)-1]
 		}
 		// numeric separators are spelling, not value; base 0 reads the
-		// 0x/0o/0b prefixes the literal grammar admits. A magnitude past
-		// int64 has no representation here — the reading DECLINES and the
-		// caller treats the literal as unrecognized, never a crash.
+		// 0x/0o/0b prefixes the literal grammar admits. The value is
+		// arbitrary precision — a JS bigint has no width ceiling, and
+		// neither does this reading.
 		trimmed = strings.ReplaceAll(trimmed, "_", "")
-		v, err := strconv.ParseInt(trimmed, 0, 64)
-		if err != nil {
+		v, ok := new(big.Int).SetString(trimmed, 0)
+		if !ok {
 			return abstractdomain.AbstractValue{}, false
 		}
-		return abstractdomain.AbstractValue{Kind: abstractdomain.KindBigints, BigintValues: []int64{v}}, true
+		return abstractdomain.AbstractValue{Kind: abstractdomain.KindBigints, BigintValues: []*big.Int{v}}, true
 	}
 	// a regex literal is its source and flags exactly (the host
 	// object's mutable lastIndex stays untracked)

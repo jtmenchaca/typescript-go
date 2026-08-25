@@ -38,6 +38,13 @@ type execCaptureSpan struct {
 	innerStart int
 	innerEnd   int
 	optional   bool
+	// name is the group's own name for a `(?<name>...)` group, "" for a
+	// plain numbered group. RegExp names the same value twice on a
+	// match — at its index, and under this name on the result's
+	// `.groups` object (sec-regexpbuiltinexec step 34) — so the reader
+	// that builds `.groups` reads the name from here rather than
+	// re-walking the pattern.
+	name string
 }
 
 // captureGroupSourceSpans walks a pattern's capturing groups in order,
@@ -61,6 +68,9 @@ func captureGroupSourceSpans(pattern string) ([]execCaptureSpan, bool) {
 		capturing  bool
 		lookaround bool
 		alternated bool
+		// name is the text between "(?<" and ">" for a named group, ""
+		// otherwise.
+		name string
 	}
 	var groups []span
 	var stack []int
@@ -119,6 +129,7 @@ func captureGroupSourceSpans(pattern string) ([]execCaptureSpan, bool) {
 			// capturing group nested inside one still needs its outer
 			// bound read past the right delimiter)
 			innerStart := i + 1
+			groupName := ""
 			if special {
 				if named {
 					// skip to the closing ">" of (?<name>
@@ -126,6 +137,7 @@ func captureGroupSourceSpans(pattern string) ([]execCaptureSpan, bool) {
 					for j < len(runes) && runes[j] != '>' {
 						j++
 					}
+					groupName = string(runes[i+3 : j])
 					innerStart = j + 1
 				} else if at(i+2) == ':' {
 					innerStart = i + 3
@@ -137,6 +149,7 @@ func captureGroupSourceSpans(pattern string) ([]execCaptureSpan, bool) {
 				end:        -1,
 				capturing:  !special || named,
 				lookaround: special && !named && at(i+2) != ':',
+				name:       groupName,
 			})
 			stack = append(stack, len(groups)-1)
 			continue
@@ -177,7 +190,7 @@ func captureGroupSourceSpans(pattern string) ([]execCaptureSpan, bool) {
 				}
 			}
 		}
-		out = append(out, execCaptureSpan{innerStart: g.start, innerEnd: g.end, optional: optional})
+		out = append(out, execCaptureSpan{innerStart: g.start, innerEnd: g.end, optional: optional, name: g.name})
 	}
 	return out, true
 }
@@ -292,27 +305,75 @@ func readRegExpExecCall(site MethodCallSite) *abstractdomain.AbstractValue {
 	// claim for ANY string argument, exact or not, per group). The spec
 	// pins it as a string.
 	stringOut := abstractdomain.KnownSet(refinementsets.Strings, nil, oracleGrade, abstractdomain.SetKindTagNone)
-	items := make([]abstractdomain.AbstractValue, 0, len(spans)+1)
-	items = append(items, stringOut)
+	items := append([]abstractdomain.AbstractValue{stringOut}, captureGroupElements(source, flags, spans, oracleGrade)...)
+	innerList := withNamedGroups(abstractdomain.KnownList(items, abstractdomain.TrustProved), source, spans, items[1:], oracleGrade)
+	out := abstractdomain.PossiblyUndefined(innerList, "", false, false)
+	return &out
+}
+
+// captureGroupElements is the per-group slot value each capturing group
+// contributes to a match result, in the order RegExp numbers them: the
+// group's own language compiled by captureGroupSetOf, wrapped in the
+// maybe marker where a successful match can leave the group unset.
+// A sub-pattern outside the supported grammar answers residue — the
+// slot exists, its language is the walk's own gap.
+func captureGroupElements(
+	source string,
+	flags string,
+	spans []execCaptureSpan,
+	grade abstractdomain.TrustLevel,
+) []abstractdomain.AbstractValue {
+	items := make([]abstractdomain.AbstractValue, 0, len(spans))
 	for i := range spans {
 		set, compiled, optional := captureGroupSetOf(source, flags, i+1)
 		var element abstractdomain.AbstractValue
 		if compiled {
-			element = abstractdomain.KnownSet(set, nil, oracleGrade, abstractdomain.SetKindTagNone)
+			element = abstractdomain.KnownSet(set, nil, grade, abstractdomain.SetKindTagNone)
 		} else {
-			// the group's own sub-pattern falls outside the supported
-			// grammar (backreferences, lookaround, an unmodeled flag): the
-			// slot still exists at match time, but its language stays the
-			// walk's own gap rather than a guessed set
 			element = silence.Residue()
 		}
 		if optional {
-			items = append(items, abstractdomain.PossiblyUndefined(element, "", false, false))
-		} else {
-			items = append(items, element)
+			element = abstractdomain.PossiblyUndefined(element, "", false, false)
 		}
+		items = append(items, element)
 	}
-	innerList := abstractdomain.KnownList(items, abstractdomain.TrustProved)
-	out := abstractdomain.PossiblyUndefined(innerList, "", false, false)
-	return &out
+	return items
+}
+
+// withNamedGroups attaches the match result's own `groups` property.
+//
+// sec-regexpbuiltinexec builds `groups` as an ordinary object whose
+// keys are the pattern's group NAMES and whose values are the very
+// same values the numbered slots hold — so `m.groups.code` names the
+// value `m[1]` names when group 1 is `(?<code>...)`. A pattern with no
+// named group gets `groups: undefined` by the same step, which is what
+// the undefined value below states.
+//
+// The object is COMPLETE: the pattern fixes its key set exactly, so a
+// name the pattern does not define reads as undefined rather than as
+// the walk's gap. It rides on the list's own Keys — the list is the
+// match array, and `groups` is one of the array object's own
+// properties, not one of its indexed slots.
+func withNamedGroups(
+	list abstractdomain.AbstractValue,
+	source string,
+	spans []execCaptureSpan,
+	elements []abstractdomain.AbstractValue,
+	grade abstractdomain.TrustLevel,
+) abstractdomain.AbstractValue {
+	var keys []abstractdomain.ObjectKey
+	for i, span := range spans {
+		if span.name == "" || i >= len(elements) {
+			continue
+		}
+		keys = append(keys, abstractdomain.ObjectKey{Name: span.name, Value: elements[i]})
+	}
+	out := list
+	if len(keys) == 0 {
+		out.Keys = []abstractdomain.ObjectKey{{Name: "groups", Value: abstractdomain.Undef}}
+		return out
+	}
+	groups := abstractdomain.KnownObject(keys, nil, true, grade, false)
+	out.Keys = []abstractdomain.ObjectKey{{Name: "groups", Value: groups}}
+	return out
 }

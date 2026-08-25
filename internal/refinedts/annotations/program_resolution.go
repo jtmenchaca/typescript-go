@@ -14,8 +14,12 @@
 package annotations
 
 import (
+	"fmt"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
+	"github.com/microsoft/typescript-go/internal/refinedts/nameresolution"
 )
 
 // symbolAt is symbolAt in the TS source (service/program_resolution.ts):
@@ -23,10 +27,28 @@ import (
 // imported name resolves to its declaration in the exporting file, so
 // registries keyed by declaration symbols answer for imported names
 // too.
+//
+// The BINDER's own scope tables answer first (nameresolution): they
+// are written once at bind time and cannot drift, where the checker's
+// resolver was measured intermittently dropping an imported alias
+// under concurrent per-entry checkers. The checker settles only what
+// one syntactic edge cannot (globals, re-export chains, namespace
+// members).
 func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
+	if s := nameresolution.DeclarationSymbolOf(c.BoundProgram(), node); s != nil {
+		if diagnose.EventOn("annotations.symbolAt") {
+			diagnose.Log("annotations.symbolAt",
+				"text", diagnose.NodeText(node), "road", "binder", "symbol", fmt.Sprintf("%p", s))
+		}
+		return s
+	}
 	symbol := c.GetSymbolAtLocation(node)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
 		symbol = c.GetAliasedSymbol(symbol)
+	}
+	if diagnose.EventOn("annotations.symbolAt") {
+		diagnose.Log("annotations.symbolAt",
+			"text", diagnose.NodeText(node), "road", "checker", "symbol", fmt.Sprintf("%p", symbol))
 	}
 	return symbol
 }

@@ -72,14 +72,21 @@ func NarrowedSinceDeclaration(ctx *FlowContext, e *ast.Node) bool {
 // being followed — the guard that keeps a cyclic pair of module
 // bindings from recursing.
 //
-// The TS source keys this guard with a WeakSet<ts.Declaration>; Go has
-// no weak sets, so this substitutes a regular map guarded by a mutex
-// (same pattern as dataflowfacts.NestedFunctions's memo). Functionally
-// identical per program: entries live exactly as long as the program
-// that produced the declarations is in use by this port.
+// A cycle is a property of ONE CALL STACK, so the guard keys by
+// (goroutine, declaration) — never the declaration alone.
+// Declarations are shared AST across every per-entry checker, and a
+// declaration-only key read a CONCURRENT follow on another entry's
+// goroutine as a cycle, silently discarding the const's verdict — the
+// same defect annotations/annotation_of_type.go's node-only guard
+// carried (the A1 sweep nondeterminism, 2026-08-24).
+type followingKey struct {
+	gid         uint64
+	declaration *ast.Node
+}
+
 var (
 	followingMu sync.Mutex
-	following   = map[*ast.Node]bool{}
+	following   = map[followingKey]bool{}
 )
 
 // UntrackedIdentifier is untrackedIdentifier in the TS source: an
@@ -133,17 +140,18 @@ func UntrackedIdentifier(ctx *FlowContext, e *ast.Node) abstractdomain.AbstractV
 			(d.Parent.Flags&ast.NodeFlagsConst) != 0 &&
 			d.Parent.Parent != nil && ast.IsVariableStatement(d.Parent.Parent) &&
 			d.Parent.Parent.Parent != nil && ast.IsSourceFile(d.Parent.Parent.Parent) {
+			key := followingKey{gid: goroutineID(), declaration: d}
 			followingMu.Lock()
-			alreadyFollowing := following[d]
+			alreadyFollowing := following[key]
 			if !alreadyFollowing {
-				following[d] = true
+				following[key] = true
 			}
 			followingMu.Unlock()
 			if !alreadyFollowing {
 				followed := func() abstractdomain.AbstractValue {
 					defer func() {
 						followingMu.Lock()
-						delete(following, d)
+						delete(following, key)
 						followingMu.Unlock()
 					}()
 					return evaluateExpression(ctx, NewEnv(), vd.Initializer)

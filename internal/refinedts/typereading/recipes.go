@@ -9,13 +9,35 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
-// BooleanCodes is booleanCodes in the TS source.
+// BooleanCodes is booleanCodes in the TS source: the set a plain
+// `boolean` seeds, {false, true} written as the codes {0, 1} and TAGGED
+// "boolean".
+//
+// The tag is the whole point. A set carries no boolean tag
+// (SetKindTag holds only "bigint" and "symbol"), so a boolean seeded as
+// a KindSet read as a NUMBER everywhere downstream: KindOfClaim sent it
+// through setSortOfForms, which calls a scalar leaf "number", and the
+// return-position judge then said "a returned value is a number, and
+// the position states a boolean". The narrowing channels missed it the
+// same way — keepTruthy, keepFalsy, and consistentAtLeaf each read the
+// words only off a KindValues tagged number-or-boolean, so a `boolean`
+// binding under `if (b)`, `b !== false`, or a `case true:` arm kept the
+// unnarrowed {0, 1} (or fell to the numeric transfer, which answers the
+// open real interval (0, 1) for "nonzero" — a real-line answer to a
+// two-point question).
+//
+// KindValues{0, 1} tagged boolean is what every other boolean producer
+// in the tree already writes (comparison_decision.go's undecided
+// comparison, narrowing/typeof_ground.go's `typeof x === "boolean"`,
+// walk/membership_ground_models.go, walk/foreign_edge_cases.go), and it
+// is the same claim the ANNOTATION side already states for the
+// `boolean` keyword (annotations/type_node_sets.go writes OneOf{0,1}
+// with KindTag "boolean"). This seed was the one outlier.
 func BooleanCodes() abstractdomain.AbstractValue {
-	return abstractdomain.KnownSet(
-		refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1})),
-		nil,
+	return abstractdomain.KnownValues(
+		[]float64{0, 1},
+		abstractdomain.PrimitiveBoolean,
 		abstractdomain.TrustProved,
-		abstractdomain.SetKindTagNone,
 	)
 }
 

@@ -28,6 +28,32 @@ var Strings = MakeRefinedSet(Star(Codepoints))
 // literal.
 var Digits = MakeRefinedSet(OneOf([]float64{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'}))
 
+// RadixDigits is the radix-r digit alphabet Number::toString spells
+// over (sec-numeric-types-number-tostring: digits then LOWERCASE
+// letters): '0'..'9' capped at r for r <= 10, and '0'..'9' plus
+// 'a'..('a'+r-11) beyond. A radix outside [2, 36] is the caller's to
+// refuse; this constructor clamps to that range defensively.
+func RadixDigits(radix int) RefinedSet {
+	if radix < 2 {
+		radix = 2
+	}
+	if radix > 36 {
+		radix = 36
+	}
+	count := radix
+	if count > 10 {
+		count = 10
+	}
+	points := make([]float64, 0, radix)
+	for i := 0; i < count; i++ {
+		points = append(points, float64('0'+i))
+	}
+	for i := 10; i < radix; i++ {
+		points = append(points, float64('a'+i-10))
+	}
+	return MakeRefinedSet(OneOf(points))
+}
+
 // CodepointsOf is a string's codepoint tuple. Iteration is by code
 // point, so a paired surrogate reads as one scalar value.
 //

@@ -290,6 +290,17 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 				}
 			}
 		}
+		// SECOND PASS: a conjunction's narrowings apply in list order,
+		// and a refutation is honestly a no-op on a binding still
+		// unknown — so `[0.5, 1.5].includes(x) && x !== 1.5` needs the
+		// subtraction to run again once the pin has landed (and the
+		// mirrored spelling needs the pin met against the subtraction).
+		// Every application is intersective (apply_narrowing.go's
+		// Exact-meet and scatter-membership arms), so reapplying
+		// tightens or holds, never widens.
+		for _, n := range ns {
+			into.Set(n.Binding, narrowing.ApplyNarrowed(envOrResidue(into, n.Binding), n))
+		}
 	}
 	isStringKindAt := func(e *ast.Node) bool {
 		return primitives.IsStringKind(ctx.P.Checker, e)

@@ -12,6 +12,8 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
+	"github.com/microsoft/typescript-go/internal/refinedts/nameresolution"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
@@ -60,22 +62,61 @@ func ReadTypeNode(c *checker.Checker, node *ast.Node, at *ast.Node, depth int) (
 	}
 	if ast.IsTypeReferenceNode(node) {
 		typeName := node.AsTypeReferenceNode().TypeName
-		aliasSymbol := symbolAt(c, typeName)
-		if aliasSymbol != nil {
+		// the declaration resolves by SYNTAX first (nameresolution's
+		// file comment): the checker's resolver is not load-bearing
+		// for a written name, and its answer was measured drifting
+		// under concurrent per-entry checkers. The checker answers
+		// only what syntax cannot see.
+		if d := nameresolution.TypeDeclarationOf(c.BoundProgram(), typeName); d != nil {
+			if ast.IsTypeAliasDeclaration(d) {
+				aliasType := d.AsTypeAliasDeclaration().Type
+				if ast.IsUnionTypeNode(aliasType) {
+					value, ok := ReadTypeNode(c, aliasType, at, depth)
+					diagnose.LogIf(diagnose.EventOn("typeread.typeNode"), "typeread.typeNode",
+						"typeName", diagnose.NodeText(typeName), "road", "syntax", "declKind", "typeAlias.union",
+						"ok", ok, "value", inlineSpellingOrEmpty(value, ok))
+					return value, ok
+				}
+			} else if ast.IsEnumDeclaration(d) {
+				value, ok := EnumValuesState(d.AsEnumDeclaration())
+				diagnose.LogIf(diagnose.EventOn("typeread.typeNode"), "typeread.typeNode",
+					"typeName", diagnose.NodeText(typeName), "road", "syntax", "declKind", "enum",
+					"ok", ok, "value", inlineSpellingOrEmpty(value, ok))
+				return value, ok
+			}
+			diagnose.LogIf(diagnose.EventOn("typeread.typeNode"), "typeread.typeNode",
+				"typeName", diagnose.NodeText(typeName), "road", "syntax", "declKind", d.Kind.String(),
+				"ok", false, "value", "<fallthrough>")
+		} else if aliasSymbol := symbolAt(c, typeName); aliasSymbol != nil {
 			for _, d := range aliasSymbol.Declarations {
 				if ast.IsTypeAliasDeclaration(d) {
 					aliasType := d.AsTypeAliasDeclaration().Type
 					if ast.IsUnionTypeNode(aliasType) {
-						return ReadTypeNode(c, aliasType, at, depth)
+						value, ok := ReadTypeNode(c, aliasType, at, depth)
+						diagnose.LogIf(diagnose.EventOn("typeread.typeNode"), "typeread.typeNode",
+							"typeName", diagnose.NodeText(typeName), "road", "checker", "declKind", "typeAlias.union",
+							"ok", ok, "value", inlineSpellingOrEmpty(value, ok))
+						return value, ok
 					}
 					break
 				}
 			}
 			for _, d := range aliasSymbol.Declarations {
 				if ast.IsEnumDeclaration(d) {
-					return EnumValuesState(d.AsEnumDeclaration())
+					value, ok := EnumValuesState(d.AsEnumDeclaration())
+					diagnose.LogIf(diagnose.EventOn("typeread.typeNode"), "typeread.typeNode",
+						"typeName", diagnose.NodeText(typeName), "road", "checker", "declKind", "enum",
+						"ok", ok, "value", inlineSpellingOrEmpty(value, ok))
+					return value, ok
 				}
 			}
+			diagnose.LogIf(diagnose.EventOn("typeread.typeNode"), "typeread.typeNode",
+				"typeName", diagnose.NodeText(typeName), "road", "checker", "declKind", "<none-matched>",
+				"ok", false, "value", "<fallthrough>")
+		} else {
+			diagnose.LogIf(diagnose.EventOn("typeread.typeNode"), "typeread.typeNode",
+				"typeName", diagnose.NodeText(typeName), "road", "<none>", "declKind", "<none>",
+				"ok", false, "value", "<fallthrough>")
 		}
 	}
 	if ast.IsUnionTypeNode(node) {
@@ -182,9 +223,20 @@ func membersOf(c *checker.Checker, node *ast.Node) []*ast.Node {
 // PORT.md's adapter-layer rule) since the alias-following itself is
 // two checker calls, not adapter plumbing.
 func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
+	// the binder's own tables answer first (nameresolution's file
+	// comment) — the checker settles only what they cannot
+	if s := nameresolution.DeclarationSymbolOf(c.BoundProgram(), node); s != nil {
+		diagnose.LogIf(diagnose.EventOn("typeread.symbolAt"), "typeread.symbolAt",
+			"node", node.Text(), "road", "binder", "found", true)
+		return s
+	}
 	symbol := c.GetSymbolAtLocation(node)
+	followedAlias := false
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
 		symbol = c.GetAliasedSymbol(symbol)
+		followedAlias = true
 	}
+	diagnose.LogIf(diagnose.EventOn("typeread.symbolAt"), "typeread.symbolAt",
+		"node", node.Text(), "road", "checker", "followedAlias", followedAlias, "found", symbol != nil)
 	return symbol
 }

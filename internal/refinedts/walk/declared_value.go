@@ -39,6 +39,33 @@ func AbstractValueOfDeclared(stated annotations.DeclaredRefinement) abstractdoma
 		if AddsNothingSet(*stated.Set) {
 			grade = abstractdomain.TrustSpec
 		}
+		// a BOOLEAN position wears the tagged two-value form, not a set.
+		// The annotation side states a plain `boolean` as OneOf{0,1} with
+		// KindTag "boolean" (annotations/type_node_sets.go's
+		// KindBooleanKeyword arm), but SetKindTag holds only "bigint" and
+		// "symbol" — setKindTagOf below drops "boolean" to
+		// SetKindTagNone — so the boolean identity was lost right here and
+		// the value entered the body as an untagged numeric-looking set.
+		// Downstream that set read as a NUMBER (KindOfClaim sends an
+		// untagged set through setSortOfForms, which calls a scalar leaf
+		// "number") and every narrowing channel missed it (keepTruthy,
+		// keepFalsy, and consistentAtLeaf all read the words off a
+		// KindValues tagged number-or-boolean), so `if (b)`, `b !== false`
+		// and `case true:` left the {0, 1} unnarrowed or fell to the
+		// numeric transfer, which answers the open real interval (0, 1)
+		// for "nonzero" — a real-line answer to a two-point question.
+		//
+		// KindValues{0, 1} tagged boolean is the form every other boolean
+		// producer already writes (walk/comparison_decision.go's undecided
+		// comparison, narrowing/typeof_ground.go, walk/foreign_edge_cases.go,
+		// typereading/recipes.go's BooleanCodes), so the tag survives to
+		// the sink and the narrowings read it.
+		if stated.KindTag == "boolean" {
+			forms := stated.Set.Forms
+			if len(forms) == 1 && forms[0].Form == refinementsets.FormOneOf {
+				return abstractdomain.KnownValues(append([]float64{}, forms[0].W...), abstractdomain.PrimitiveBoolean, grade)
+			}
+		}
 		bare := abstractdomain.KnownSet(
 			*stated.Set,
 			stated.Temporal,

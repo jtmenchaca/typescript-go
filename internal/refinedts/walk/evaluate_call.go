@@ -98,6 +98,88 @@ func CheckCallbackArgument(ctx *FlowContext, argument *ast.Node, parameterType *
 	}
 }
 
+// CheckOwnStatedReturnCallback checks a function literal that states
+// its OWN return type, wherever it is handed.
+//
+// `(line): Code => { … }` is a statement the writer made about this
+// very function: every return owes Code. That holds whether the
+// parameter it fills states anything at all (Node's
+// `readline.Interface.on` types its listener's return as void), so the
+// obligation is read off the literal's own return type node rather than
+// off the position it fills. The body walks on a fresh environment for
+// the same reason CheckCallbackArgument's does: it runs at a time this
+// scope cannot place.
+func CheckOwnStatedReturnCallback(ctx *FlowContext, argument *ast.Node) {
+	if argument == nil {
+		return
+	}
+	if !ast.IsArrowFunction(argument) && !ast.IsFunctionExpression(argument) {
+		return
+	}
+	var returnType *ast.Node
+	if ast.IsArrowFunction(argument) {
+		returnType = argument.AsArrowFunction().Type
+	} else {
+		returnType = argument.AsFunctionExpression().Type
+	}
+	if returnType == nil {
+		return
+	}
+	read := annotations.AnnotationOfType(ctx.P, returnType, ctx.Registry, ctx.Objects)
+	if read.Stated == nil {
+		return
+	}
+	if read.Stated.Kind == annotations.DeclaredVariable && !read.Stated.BoundGrounded {
+		return
+	}
+	inner := *ctx
+	inner.Declared = map[string]*annotations.DeclaredRefinement{}
+	inner.ReturnSink = nil
+	inner.DifferenceConstraints = nil
+	inner.GateAssumptions = nil
+	callbackEnv := NewEnv()
+	body := argument.Body()
+	if body == nil {
+		return
+	}
+	if ast.IsBlock(body) {
+		AnalyzeStatements(&inner, callbackEnv, body.AsBlock().Statements.Nodes, read.Stated)
+		return
+	}
+	CheckAssignability(&inner, evaluateExpression(&inner, callbackEnv, body), *read.Stated, body, "a returned value", nil)
+}
+
+// CheckOwnStatedReturnCallbacks checks the function-literal arguments
+// of a call the checker holds NO contract for — a library method, a
+// d.ts declaration, any callee whose body is out of reach.
+//
+// ONLY the literal's OWN stated return type is judged here, never the
+// position's. The distinction matters: a callback the checker has a
+// contract for is walked with its parameters bound to the caller's
+// values (CheckContractArguments's own route, and the schema
+// vocabulary's inlining for `.refine((r) => r.hi >= r.lo)`), but this
+// route has no such bindings — it walks on a fresh environment where
+// every parameter holds nothing. Judging the POSITION's stated return
+// type through it would put an unbound body under an obligation the
+// surrounding machinery is what discharges, which reports the walk's
+// own empty environment as a defect of the program. The literal's own
+// annotation carries no such dependency: `(line): Code => …` is a
+// statement its writer made about this very function, and a return of
+// Σ* violates it whatever the parameters hold.
+//
+// Without this, an ordinary `rl.on("line", (line): Code => …)` never
+// had its body walked at all (A3.seed.boundary's
+// lineFromInputOutside), because the contract collector sees only the
+// file's own declarations.
+func CheckOwnStatedReturnCallbacks(ctx *FlowContext, arguments []*ast.Node) {
+	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil || len(arguments) == 0 {
+		return
+	}
+	for _, argument := range arguments {
+		CheckOwnStatedReturnCallback(ctx, argument)
+	}
+}
+
 // ProjectionSources is the tracked roots a binding's initializer
 // PROJECTS from: the receiver chain of a property or element read,
 // and each candidate of a conditional. Binding such a value shares

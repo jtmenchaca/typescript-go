@@ -123,6 +123,17 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			return evaluateExpression(ctx, env, argument)
 		}).Knowns
 	}
+	// a function literal that states its OWN return type owes it
+	// wherever it is handed — so this runs before the builtin chain
+	// below, which answers (and returns) for every unmodeled method call
+	// and would otherwise hide the obligation entirely
+	// (A3.seed.boundary's `rl.on("line", (line): Code => …)`). A
+	// CONTRACTED call reaches CheckContractArguments further down, which
+	// judges the same literals with their parameters bound, so this is
+	// skipped for one.
+	if ContractOf(ctx, call.Expression) == nil {
+		CheckOwnStatedReturnCallbacks(ctx, arguments)
+	}
 	if builtin := ReadBuiltinCall(ctx, env, e, spreadArguments); builtin != nil {
 		// a builtin path that determined NOTHING may still wear the
 		// call's resolved return annotation — the Map.get shape: the

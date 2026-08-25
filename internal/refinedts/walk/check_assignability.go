@@ -26,6 +26,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
@@ -55,6 +56,11 @@ func CheckAssignability(
 		}
 		judging = &withCastNote
 	}
+	if diagnose.EventOn("walk.assign") {
+		reported := new(bool)
+		judging = withAssignabilityDiagnosis(judging, known, target, what, reported)
+		defer logAssignabilityVerdict(known, target, what, reported)
+	}
 	if !tracing.Recording(tracing.GrainStep) {
 		CheckAssignabilityAgainst(judging, known, target, node, what, positionType)
 		return
@@ -63,6 +69,56 @@ func CheckAssignability(
 		CheckAssignabilityAgainst(judging, known, target, node, what, positionType)
 		return struct{}{}
 	}, tracing.GrainStep)
+}
+
+// withAssignabilityDiagnosis wraps ctx.Report so a refutation (7001)
+// or alert (7002) at this one check logs its verdict and marks
+// *reported — the site kind (`what`), the flowing value, and the
+// declared target all logged alongside so a divergent run's first bad
+// verdict names its position.
+func withAssignabilityDiagnosis(
+	ctx *FlowContext,
+	known abstractdomain.AbstractValue,
+	target annotations.DeclaredRefinement,
+	what string,
+	reported *bool,
+) *FlowContext {
+	knownSpelling := spellValue(known)
+	targetSpelling := spellDeclared(&target)
+	originalReport := ctx.Report
+	withDiagnosis := *ctx
+	withDiagnosis.Report = func(d assignability.RefinementDiagnostic) {
+		*reported = true
+		verdict := "undetermined"
+		if d.Code == 7001 {
+			verdict = "refused"
+		}
+		diagnose.Log("walk.assign",
+			"site", what,
+			"known", knownSpelling,
+			"target", targetSpelling,
+			"verdict", verdict,
+		)
+		originalReport(d)
+	}
+	return &withDiagnosis
+}
+
+// logAssignabilityVerdict logs the "admitted" line for a check that
+// never reported — deferred in CheckAssignability so it runs after
+// CheckAssignabilityAgainst actually finishes, unlike a line placed
+// inside the wrapper above (which would fire before dispatch, not
+// after).
+func logAssignabilityVerdict(known abstractdomain.AbstractValue, target annotations.DeclaredRefinement, what string, reported *bool) {
+	if *reported {
+		return
+	}
+	diagnose.Log("walk.assign",
+		"site", what,
+		"known", spellValue(known),
+		"target", spellDeclared(&target),
+		"verdict", "admitted",
+	)
 }
 
 // CheckAssignabilityAgainst is checkAssignabilityAgainst in the TS
@@ -182,7 +238,11 @@ func CheckAssignabilityOfArm(
 		CheckMaybeTarget(ctx, known, target, node, what, positionType)
 		return
 	}
-	if known.Kind == abstractdomain.KindUndef || known.Kind == abstractdomain.KindPossiblyUndefined {
+	if known.Kind == abstractdomain.KindUndef || known.Kind == abstractdomain.KindNull ||
+		known.Kind == abstractdomain.KindPossiblyUndefined {
+		// KindNull rides the same refutation: exactly-null is a member
+		// of no refined set either (JSON.parse("null")'s own value at a
+		// scalar-declared sink — A2.edge.json's NaN-crosses-as-null arm).
 		RefutePossiblyAbsent(ctx, known, target, node, what)
 		return
 	}

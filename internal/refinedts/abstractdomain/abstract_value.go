@@ -8,6 +8,8 @@
 package abstractdomain
 
 import (
+	"math/big"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -280,11 +282,14 @@ type AbstractValue struct {
 	Description    string
 	HasDescription bool
 
-	// "bigints": exact bigint values, at any width. int64 per the port
-	// convention (TS bigint -> int64 unless the source exceeds it; this
-	// domain carries exact literal values, which fit int64 the way the
-	// rest of the checker's number handling does).
-	BigintValues []int64
+	// "bigints": exact bigint values, at any width — arbitrary
+	// precision (math/big), because a JS bigint IS arbitrary precision
+	// and the corpus's own witnesses cross the 64-bit ceiling on
+	// purpose (A1.xfer.bigint). The old int64 convention lost exactly
+	// those values; the representation bound now lives at the FOLD
+	// (binary_arithmetic declines past a stated bit length), never at
+	// the value.
+	BigintValues []*big.Int
 
 	// "regex": a literal regex's source and flags.
 	Source string

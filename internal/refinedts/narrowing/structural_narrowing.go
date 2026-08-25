@@ -230,9 +230,15 @@ func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name stri
 			return BranchNarrowings{WhenFalse: []Narrowed{equalTo}}
 		}
 		// a held boolean-literal equality pins the exact word (true ↦ 1,
-		// false ↦ 0 — the boolean sort's two values); the failing side
-		// claims nothing, because strict inequality with a boolean also
-		// holds for every non-boolean value
+		// false ↦ 0 — the boolean sort's two values).
+		//
+		// The FAILING side excludes that word. Strict inequality with a
+		// boolean also holds for every non-boolean value (`"x" !== false`
+		// is true), so the exclusion states no set fact on its own — it is
+		// carried as ExcludesBooleanWord, which applies only where the
+		// held value is already known boolean-sorted and passes every
+		// other shape untouched. On a `b: boolean`, that is what makes
+		// `b !== false` prove b is exactly true.
 		var b float64
 		hasB := false
 		if otherSide.Kind == ast.KindTrueKeyword {
@@ -245,10 +251,14 @@ func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name stri
 				Binding: testedPlace.Binding, Path: testedPlace.Path,
 				Exact: []float64{b}, ExactSort: abstractdomain.PrimitiveBoolean,
 			}
-			if isEquals {
-				return BranchNarrowings{WhenTrue: []Narrowed{equalTo}}
+			excludes := Narrowed{
+				Binding: testedPlace.Binding, Path: testedPlace.Path,
+				ExcludesBooleanWord: b, HasExcludesBooleanWord: true,
 			}
-			return BranchNarrowings{WhenFalse: []Narrowed{equalTo}}
+			if isEquals {
+				return BranchNarrowings{WhenTrue: []Narrowed{equalTo}, WhenFalse: []Narrowed{excludes}}
+			}
+			return BranchNarrowings{WhenTrue: []Narrowed{excludes}, WhenFalse: []Narrowed{equalTo}}
 		}
 		return None
 	}

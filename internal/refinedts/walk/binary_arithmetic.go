@@ -8,7 +8,7 @@
 package walk
 
 import (
-	"math"
+	"math/big"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
@@ -19,6 +19,45 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
+
+// bigintFoldBitBound is the REPRESENTATION bound on a folded bigint's
+// bit length — the arbitrary-precision successor to the old int64
+// convention. A fold whose result passes it declines to unknown, the
+// same honest outcome the old width gave, at a width no genuine
+// fixture value approaches.
+const bigintFoldBitBound = 4096
+
+// bigintPowFold folds `a ** b` on exact bigints: BigInt::exponentiate
+// is exact integer arithmetic (sec-numeric-types-bigint-exponentiate).
+// A negative exponent THROWS at runtime (step 1), so it answers nil
+// (unknown) here rather than a value; a fold past the representation
+// bound declines the same way the +/−/× fold does — the exponent's
+// magnitude is checked BEFORE computing, so an astronomical spelling
+// never runs.
+func bigintPowFold(left, right abstractdomain.AbstractValue) *abstractdomain.AbstractValue {
+	values := make([]*big.Int, 0, len(left.BigintValues)*len(right.BigintValues))
+	for _, a := range left.BigintValues {
+		for _, b := range right.BigintValues {
+			if b.Sign() < 0 || !b.IsInt64() {
+				return nil
+			}
+			exp := b.Int64()
+			if a.BitLen() > 0 && exp > 0 && exp*int64(a.BitLen()) > bigintFoldBitBound {
+				return nil
+			}
+			v := new(big.Int).Exp(a, b, nil)
+			if v.BitLen() > bigintFoldBitBound {
+				return nil
+			}
+			values = append(values, v)
+		}
+	}
+	out := abstractdomain.AtTrustLevel(
+		abstractdomain.AbstractValue{Kind: abstractdomain.KindBigints, BigintValues: values},
+		abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(left), abstractdomain.TrustLevelOf(right)),
+	)
+	return &out
+}
 
 func numericOperatorOf(kind ast.Kind) (NumericOperator, bool) {
 	switch kind {
@@ -144,8 +183,17 @@ func ReadBinaryArithmetic(ctx *FlowContext, env Env, e *ast.Node, left, right ab
 	}
 	// `**` transfers exactly on the pinned branches of
 	// Number::exponentiate; the implementation-approximated final
-	// step stays unknown (the alert downstream)
+	// step stays unknown (the alert downstream). Two exact bigints
+	// fold exactly first (BigInt::exponentiate is exact integer
+	// arithmetic; a negative exponent throws at runtime, so it stays
+	// unknown here).
 	if bin.OperatorToken.Kind == ast.KindAsteriskAsteriskToken {
+		if left.Kind == abstractdomain.KindBigints && right.Kind == abstractdomain.KindBigints {
+			if raised := bigintPowFold(left, right); raised != nil {
+				return *raised
+			}
+			return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{left, right})
+		}
 		raised := TransferPow(left, right)
 		if raised.Kind == abstractdomain.KindUnknown {
 			return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{left, right})
@@ -178,29 +226,26 @@ func ReadBinaryArithmetic(ctx *FlowContext, env Env, e *ast.Node, left, right ab
 	// BigInt arithmetic is EXACT integer arithmetic — no float
 	// rounding (sec-numeric-types-bigint-add and its ±/× siblings) —
 	// so two exact bigint words answer their exact element-wise
-	// results here, int64 per the port convention; a fold past int64
-	// declines to unknown. `/` and `%` are not read (BigInt::divide
-	// throws on 0n and truncates), so they fall through to the
-	// numeric reading's honest unknown.
+	// results here at arbitrary precision; a fold past the
+	// representation bound (bigintFoldBitBound) declines to unknown.
+	// `/` and `%` are not read (BigInt::divide throws on 0n and
+	// truncates), so they fall through to the numeric reading's
+	// honest unknown.
 	if left.Kind == abstractdomain.KindBigints && right.Kind == abstractdomain.KindBigints &&
 		(op == OpAdd || op == OpSub || op == OpMul) {
-		values := make([]int64, 0, len(left.BigintValues)*len(right.BigintValues))
+		values := make([]*big.Int, 0, len(left.BigintValues)*len(right.BigintValues))
 		for _, a := range left.BigintValues {
 			for _, b := range right.BigintValues {
-				var v int64
-				overflowed := false
+				v := new(big.Int)
 				switch op {
 				case OpAdd:
-					v = a + b
-					overflowed = (b > 0 && v < a) || (b < 0 && v > a)
+					v.Add(a, b)
 				case OpSub:
-					v = a - b
-					overflowed = (b < 0 && v < a) || (b > 0 && v > a)
+					v.Sub(a, b)
 				case OpMul:
-					v = a * b
-					overflowed = a != 0 && (v/a != b || (a == -1 && b == math.MinInt64))
+					v.Mul(a, b)
 				}
-				if overflowed {
+				if v.BitLen() > bigintFoldBitBound {
 					return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{left, right})
 				}
 				values = append(values, v)

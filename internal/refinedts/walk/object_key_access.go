@@ -53,6 +53,18 @@ func ReadObjectKeyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain
 		out := silence.Residue()
 		return &out
 	}
+	// a LIST's own non-index properties: an array object carries named
+	// properties beside its indexed slots, and a match array's `groups`
+	// is the one the walk builds (regex_exec_capture.go's
+	// withNamedGroups). Only a name the list actually carries answers —
+	// the list states no complete key set, so any other name falls
+	// through to the readers below unchanged.
+	if receiver.Kind == abstractdomain.KindList && len(receiver.Keys) > 0 {
+		if idx, ok := objectKeyIndex(receiver, pa.Name().Text()); ok {
+			out := memberValueGraded(receiver, receiver.Keys[idx].Value)
+			return &out
+		}
+	}
 	if receiver.Kind == abstractdomain.KindObject {
 		if idx, ok := objectKeyIndex(receiver, pa.Name().Text()); ok {
 			out := memberValueGraded(receiver, receiver.Keys[idx].Value)

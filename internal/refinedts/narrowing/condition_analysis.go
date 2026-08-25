@@ -98,7 +98,24 @@ func NarrowingsOf(
 		b := NarrowingsOf(c, resolved.Condition, isTracked, sideBounds, readElsewhere)
 		if len(b.WhenTrue) > 0 || len(b.WhenFalse) > 0 {
 			if resolved.Flipped {
-				return BranchNarrowings{WhenTrue: b.WhenFalse, WhenFalse: b.WhenTrue}
+				b = BranchNarrowings{WhenTrue: b.WhenFalse, WhenFalse: b.WhenTrue}
+			}
+			// THE BOUND NAME NARROWS TOO. The resolved reading states what
+			// the guard proves about the condition's OWN operands (`if (ok)`
+			// through `const ok = true !== f` proves f is false), and that
+			// is the only thing this branch used to return — so `ok` itself
+			// crossed its own guard holding both truth values, and a `true`
+			// position then refused it. The bare place is a test of the
+			// name, whatever the name was bound to: held truth keeps its
+			// truthy values, held falsity the falsy ones. Both narrowings
+			// apply intersectively, so stating the name's own fact beside
+			// the operands' costs nothing where the operand reading already
+			// pinned it.
+			if place := dataflowfacts.TrackedPlaceOfWith(c, Peeled(condition), isTracked); place != nil {
+				truthy := Narrowed{Binding: place.Binding, Path: place.Path, Definedness: "defined", Truthiness: "truthy"}
+				falsy := Narrowed{Binding: place.Binding, Path: place.Path, Truthiness: "falsy"}
+				b.WhenTrue = append(b.WhenTrue, truthy)
+				b.WhenFalse = append(b.WhenFalse, falsy)
 			}
 			return b
 		}
@@ -272,30 +289,22 @@ func NarrowingsOf(
 				// a refused question narrows nothing — never a guess
 				continue
 			}
-			// a side already claimed by the structural pass keeps its
-			// claim; the kernel's answer would only restate it — an
-			// EXACT pin (a held string/boolean equality), or a set of
-			// FORMS already stated (array_shape_narrowing.go's
-			// `.includes` whenTrue, the one other structural leaf that
-			// states a set on the tested argument's place)
-			pinned := func(side []Narrowed) bool {
-				for _, n := range side {
-					if n.Binding != place.Binding || joinPath(n.Path) != joinPath(place.Path) {
-						continue
-					}
-					if n.Exact != nil || len(n.Forms) > 0 {
-						return true
-					}
-				}
-				return false
-			}
-			if answer.WhenTrue != nil && !pinned(structural.WhenTrue) {
+			// the kernel's answer rides BESIDE any structural claim on
+			// the same place, never behind it: for a CONJUNCTION the
+			// kernel's set carries every conjunct ([0.5, 1.5].includes(x)
+			// && x !== 1.5 answers {0.5, 1.5} ∖ {1.5}), so it is
+			// strictly tighter than the structural pin alone — dropping
+			// it kept the refuted member alive (A2.guard.ne's
+			// neSubtractionInside false positive). Both narrowings
+			// apply intersectively (apply_narrowing.go), so a genuinely
+			// redundant restatement costs nothing.
+			if answer.WhenTrue != nil {
 				whenTrue = append(whenTrue, Narrowed{
 					Binding: place.Binding, Path: place.Path,
 					Forms: answer.WhenTrue.Set.Forms, Refuting: !answer.WhenTrue.Strong,
 				})
 			}
-			if answer.WhenFalse != nil && !pinned(structural.WhenFalse) {
+			if answer.WhenFalse != nil {
 				whenFalse = append(whenFalse, Narrowed{
 					Binding: place.Binding, Path: place.Path,
 					Forms: answer.WhenFalse.Set.Forms, Refuting: !answer.WhenFalse.Strong,

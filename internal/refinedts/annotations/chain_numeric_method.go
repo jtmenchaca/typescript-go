@@ -10,6 +10,8 @@ import (
 	"math"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -47,9 +49,30 @@ func panicText(r any) string {
 }
 
 // NumericChainMethod is numericChainMethod in the TS source.
-func NumericChainMethod(params NumericChainMethodParams) *Compiled {
+func NumericChainMethod(params NumericChainMethodParams) (result *Compiled) {
 	p, at, inner, method, args := params.P, params.At, params.Inner, params.Method, params.Args
 	base := derefSet(inner.Set)
+
+	// the set spelling before and after this one method -- nil means
+	// "not a numeric method", read by ChainMethod as keep-looking, not
+	// as a dropped conjunct
+	if diagnose.EventOn("annotations.chainMethod") {
+		before := kernelbridge.EncodeSet(base)
+		defer func() {
+			if result == nil {
+				diagnose.Log("annotations.chainMethod",
+					"method", method, "before", before, "after", before, "numeric", false)
+				return
+			}
+			after := before
+			if result.Annotation != nil {
+				after = kernelbridge.EncodeSet(derefSet(result.Annotation.Set))
+			}
+			diagnose.Log("annotations.chainMethod",
+				"method", method, "before", before, "after", after, "numeric", true,
+				"unsupported", IsUnsupported(*result))
+		}()
+	}
 
 	withForm := func(build func(k float64) refinementsets.Refinement) *Compiled {
 		k, ok := oneNumberArg(p, args)

@@ -16,6 +16,8 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations/libraryadapters"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations/libraryadapters/zod"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
+	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -156,9 +158,24 @@ func normalizeSetForCompare(s refinementsets.RefinedSet) refinementsets.RefinedS
 }
 
 // ChainMethod is chainMethod in the TS source.
-func ChainMethod(params ChainMethodParams) *Compiled {
+func ChainMethod(params ChainMethodParams) (result *Compiled) {
 	p, at, inner, method, args, registry := params.P, params.At, params.Inner, params.Method, params.Args, params.Registry
 	base := derefSet(inner.Set)
+
+	// the set spelling before and after this one method -- what shows a
+	// `.int()` or `.min(0)` silently dropping out of the chain
+	if diagnose.EventOn("annotations.chainMethod") {
+		before := kernelbridge.EncodeSet(base)
+		defer func() {
+			after := before
+			if result != nil && result.Annotation != nil {
+				after = kernelbridge.EncodeSet(derefSet(result.Annotation.Set))
+			}
+			diagnose.Log("annotations.chainMethod",
+				"method", method, "before", before, "after", after,
+				"unsupported", result != nil && IsUnsupported(*result))
+		}()
+	}
 	// an opaque unread chain (a record, a map, a custom schema -- the
 	// unknown claim with the unread mark): any later method checks
 	// the parse further, which the claim already covers -- the

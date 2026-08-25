@@ -40,6 +40,36 @@ func keepTruthy(known abstractdomain.AbstractValue) abstractdomain.AbstractValue
 	return known
 }
 
+// dropBooleanWord sheds one word from a BOOLEAN-sorted value: `b !==
+// false` on a `b: boolean` leaves exactly {true}.
+//
+// Only a KindValues tagged PrimitiveBoolean is touched. Strict
+// inequality with a boolean literal holds for every non-boolean value
+// too, so on any other shape the refutation states nothing and the
+// value passes whole — no claim, no discard. An emptied list is left
+// alone rather than claimed empty: proving the branch dead is the
+// caller's machinery, not this filter's.
+func dropBooleanWord(known abstractdomain.AbstractValue, word float64) abstractdomain.AbstractValue {
+	if known.Kind == abstractdomain.KindPossiblyUndefined {
+		// falsity proves no presence, so the maybe wrapper stays — the
+		// same AbsentSide-preserving rebuild excludeKind keeps.
+		return abstractdomain.PossiblyAbsent(dropBooleanWord(*known.Inner, word), known.AbsentSide, "", false, known.ProvedAbsent)
+	}
+	if known.Kind != abstractdomain.KindValues || known.KindTag != abstractdomain.PrimitiveBoolean {
+		return known
+	}
+	var kept []float64
+	for _, v := range known.Values {
+		if v != word {
+			kept = append(kept, v)
+		}
+	}
+	if len(kept) == 0 || len(kept) == len(known.Values) {
+		return known
+	}
+	return abstractdomain.KnownValues(kept, known.KindTag, abstractdomain.TrustLevelOf(known))
+}
+
 // keepFalsy keeps only the falsy words; absence and NaN both stay —
 // each is false under ToBoolean.
 func keepFalsy(known abstractdomain.AbstractValue) abstractdomain.AbstractValue {
@@ -130,6 +160,20 @@ func consistentAtLeaf(held abstractdomain.AbstractValue, n Narrowed) bool {
 		if present.Kind == abstractdomain.KindObject || present.Kind == abstractdomain.KindList ||
 			present.Kind == abstractdomain.KindCollection {
 			return false // objects are always truthy
+		}
+		return true
+	}
+	// a refuted boolean equality: a variant whose key is EXACTLY the
+	// excluded word cannot be the runtime shape. Every other holding —
+	// a two-word boolean, a non-boolean sort — stays consistent.
+	if n.HasExcludesBooleanWord {
+		if present.Kind == abstractdomain.KindValues && present.KindTag == abstractdomain.PrimitiveBoolean {
+			for _, v := range present.Values {
+				if v != n.ExcludesBooleanWord {
+					return true
+				}
+			}
+			return false
 		}
 		return true
 	}
@@ -490,6 +534,9 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 		if n.HasWordSetExcluded {
 			return dropWordSet(known, n.WordSetExcluded)
 		}
+		if n.HasExcludesBooleanWord {
+			return dropBooleanWord(known, n.ExcludesBooleanWord)
+		}
 		if n.ExcludesKind != "" {
 			return excludeKind(known, n.ExcludesKind)
 		}
@@ -517,7 +564,56 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 			if exactSort == "" {
 				exactSort = abstractdomain.PrimitiveNumber
 			}
+			// the held test PINS the value to these words — MET with what
+			// was already known, never replacing it: a prior `!== 1.5`
+			// difference and a later `[0.5, 1.5].includes(x)` pin
+			// intersect to {0.5} in either application order.
+			if exactSort == abstractdomain.PrimitiveNumber {
+				if known.Kind == abstractdomain.KindValues && known.KindTag == exactSort {
+					var kept []float64
+					for _, v := range n.Exact {
+						if floatsInclude(known.Values, v) {
+							kept = append(kept, v)
+						}
+					}
+					if len(kept) < len(n.Exact) {
+						return abstractdomain.KnownValues(kept, exactSort, abstractdomain.TrustProved)
+					}
+				}
+				if known.Kind == abstractdomain.KindSet && known.SetKindTag == abstractdomain.SetKindTagNone &&
+					NarrowKernel() != nil {
+					var kept []float64
+					changed := false
+					for _, v := range n.Exact {
+						member, refused := memberRefusable(known.Set, v)
+						if refused || member {
+							kept = append(kept, v)
+						} else {
+							changed = true
+						}
+					}
+					if changed {
+						return abstractdomain.KnownValues(kept, exactSort, abstractdomain.TrustProved)
+					}
+				}
+			}
 			return abstractdomain.KnownValues(append([]float64{}, n.Exact...), exactSort, abstractdomain.TrustProved)
+		}
+		// A BOOLEAN-SORTED value answers truthiness by its own two words,
+		// never by the real-line forms riding alongside. The numeric
+		// truthiness channel poses "not (x === 0 or isNaN x)" over the
+		// whole line, and meeting that with {0, 1} spells the open
+		// interval (0, 1) — a real-line answer to a two-point question,
+		// which then failed a `true` position that {1} satisfies. The word
+		// filter is exact here: ToBoolean of the boolean sort is the
+		// identity on its two values.
+		if known.Kind == abstractdomain.KindValues && known.KindTag == abstractdomain.PrimitiveBoolean {
+			if n.Truthiness == "truthy" {
+				return keepTruthy(known)
+			}
+			if n.Truthiness == "falsy" {
+				return keepFalsy(known)
+			}
 		}
 		if n.Truthiness == "falsy" {
 			return keepFalsy(known)
@@ -595,6 +691,30 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 			if subset, refused := seqSubsetRefusable(candidate, known.Set); !refused && subset {
 				return abstractdomain.KnownSet(candidate, nil, abstractdomain.TrustLevelOf(known), abstractdomain.SetKindTagNone)
 			}
+		}
+		// a FINITE NUMERIC SCATTER narrows by MEMBERSHIP: each member
+		// either satisfies the guard's forms or is discarded — the
+		// {0.5, 1.5} scatter under a held `!== 1.5` is exactly {0.5}.
+		// NarrowKnown's KindValues arm cannot decide this (it has no
+		// kernel); the narrow kernel answers per member here, and a
+		// refused question keeps the member — no claim, no discard.
+		if known.Kind == abstractdomain.KindValues && known.KindTag == abstractdomain.PrimitiveNumber &&
+			NarrowKernel() != nil && len(n.Forms) > 0 {
+			formSet := refinementsets.MakeRefinedSet(n.Forms...)
+			var kept []float64
+			changed := false
+			for _, v := range known.Values {
+				member, refused := memberRefusable(formSet, v)
+				if refused || member {
+					kept = append(kept, v)
+				} else {
+					changed = true
+				}
+			}
+			if changed {
+				return abstractdomain.KnownValues(kept, known.KindTag, abstractdomain.TrustLevelOf(known))
+			}
+			return known
 		}
 		return shedRemovedEndpoints(abstractdomain.NarrowKnown(known, n.Forms))
 	}
@@ -732,6 +852,18 @@ func everySequenceForm(forms []refinementsets.Refinement) bool {
 		}
 	}
 	return true
+}
+
+// memberRefusable asks the kernel's Member question for one scalar,
+// turning a refusal into an (answer, refused) pair — the same
+// try/catch shape seqSubsetRefusable keeps for its own question.
+func memberRefusable(set refinementsets.RefinedSet, v float64) (member bool, refused bool) {
+	defer func() {
+		if recover() != nil {
+			member, refused = false, true
+		}
+	}()
+	return NarrowKernel().Member(set, []float64{v}), false
 }
 
 // seqSubsetRefusable asks the kernel's SeqSubset question, turning a

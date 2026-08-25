@@ -40,6 +40,20 @@ func SwitchLabelValues(labels []*ast.Node) (abstractdomain.AbstractValue, bool) 
 func SwitchLabelValuesWith(c *checker.Checker, labels []*ast.Node) (abstractdomain.AbstractValue, bool) {
 	var numbersSeen []float64
 	var stringsSeen []string
+	// a run of labels that is ENTIRELY boolean pins the boolean sort, not
+	// the number sort. The words are the same (true ↦ 1, false ↦ 0), but
+	// the TAG is what the sink and the narrowings read: pinned as a
+	// number, `case true:` set the discriminant to KindValues{1} tagged
+	// number, and the return judge then said "a returned value is a
+	// number, and the position states a boolean". PrimitiveBoolean is
+	// what walk/literal_values.go already gives a bare `true` literal.
+	//
+	// A run MIXING boolean and numeric labels keeps the number tag: the
+	// two sorts do not switch-match each other (`case true` never matches
+	// the number 1 — SwitchKeyOfKnown tags its keys apart for exactly
+	// this reason), so a mixed run states no single sort and the wider
+	// numeric reading is the one that discards no runtime value.
+	booleansOnly := len(labels) > 0
 	for _, label := range labels {
 		// a label follows its const-to-const links first, so the
 		// reading below sees the literal the label names
@@ -49,16 +63,20 @@ func SwitchLabelValuesWith(c *checker.Checker, labels []*ast.Node) (abstractdoma
 		}
 		if ast.IsNumericLiteral(resolved) {
 			numbersSeen = append(numbersSeen, switchNumberMust(resolved))
+			booleansOnly = false
 		} else if n, ok := switchNumberOf(resolved); ok && ast.IsPrefixUnaryExpression(resolved) {
 			numbersSeen = append(numbersSeen, n)
+			booleansOnly = false
 		} else if ast.IsStringLiteral(resolved) {
 			stringsSeen = append(stringsSeen, resolved.AsStringLiteral().Text)
+			booleansOnly = false
 		} else if ast.IsNoSubstitutionTemplateLiteral(resolved) {
 			stringsSeen = append(stringsSeen, resolved.Text())
+			booleansOnly = false
 		} else if resolved.Kind == ast.KindTrueKeyword {
-			// a boolean label rides the number sort: true is the exact
-			// word 1 and false the word 0, the spec's own ToNumber — the
-			// same encoding every boolean literal in this package wears
+			// a boolean label's WORD is the spec's own ToNumber — true is
+			// the exact word 1, false the word 0 — and the sort it is
+			// tagged with is decided once the whole run is read
 			numbersSeen = append(numbersSeen, 1)
 		} else if resolved.Kind == ast.KindFalseKeyword {
 			numbersSeen = append(numbersSeen, 0)
@@ -70,7 +88,11 @@ func SwitchLabelValuesWith(c *checker.Checker, labels []*ast.Node) (abstractdoma
 		return abstractdomain.AbstractValue{}, false
 	}
 	if len(numbersSeen) > 0 {
-		return abstractdomain.KnownValues(numbersSeen, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved), true
+		sort := abstractdomain.PrimitiveNumber
+		if booleansOnly {
+			sort = abstractdomain.PrimitiveBoolean
+		}
+		return abstractdomain.KnownValues(numbersSeen, sort, abstractdomain.TrustProved), true
 	}
 	if len(stringsSeen) == 1 {
 		return abstractdomain.KnownValues(refinementsets.CodepointsOf(stringsSeen[0]), abstractdomain.PrimitiveString, abstractdomain.TrustProved), true
@@ -344,15 +366,39 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 					caseLabels = append(caseLabels, nil)
 				}
 			}
-			// the labels the reader COULD pin as numbers are shed; an
+			// the labels the reader COULD pin as scalars are shed; an
 			// unreadable label leaves whatever it names in place. Shedding
 			// a subset is sound on its own: reaching the default arm means
 			// EVERY case failed, so failing each readable one is part of
 			// what the arm proves, and the labels left unread only mean
 			// the residual is wider than the truth — never narrower.
+			//
+			// A label is shed only when its SORT matches the discriminant's:
+			// `case true` never matches the number 1 (SwitchKeyOfKnown tags
+			// its keys apart for exactly this reason), so a boolean label
+			// proves nothing about a number-sorted discriminant, and the
+			// reverse. Both sorts carry their values as plain words, so the
+			// sort tag is the whole of the distinction.
+			heldSort := abstractdomain.PrimitiveKind("")
+			if hasHeld && held.Kind == abstractdomain.KindValues {
+				heldSort = held.KindTag
+			}
 			var numericLabels []float64
 			for _, l := range caseLabels {
-				if l == nil || l.Kind != abstractdomain.KindValues || l.KindTag != abstractdomain.PrimitiveNumber {
+				if l == nil || l.Kind != abstractdomain.KindValues {
+					continue
+				}
+				if l.KindTag != abstractdomain.PrimitiveNumber && l.KindTag != abstractdomain.PrimitiveBoolean {
+					continue
+				}
+				// a SET-known discriminant (heldSort == "") reaches the
+				// difference-form arm below, which spells the plain words —
+				// the number-sorted labels are the ones that arm can read
+				if heldSort == "" {
+					if l.KindTag != abstractdomain.PrimitiveNumber {
+						continue
+					}
+				} else if l.KindTag != heldSort {
 					continue
 				}
 				numericLabels = append(numericLabels, l.Values...)

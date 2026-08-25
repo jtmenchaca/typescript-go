@@ -27,12 +27,32 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/locale"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/service"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/walk"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
+
+// diagnoseFlagValue is -diagnose's custom flag.Value: a bare
+// `-diagnose` parses as "true" (IsBoolFlag lets flag.Parse accept the
+// flag with no `=value`), and `-diagnose=<prefixes>` carries the
+// comma-separated list through unchanged. diagnose.SetCapture reads
+// the final string exactly as this type stores it.
+type diagnoseFlagValue string
+
+func (d *diagnoseFlagValue) String() string { return string(*d) }
+
+func (d *diagnoseFlagValue) Set(value string) error {
+	*d = diagnoseFlagValue(value)
+	return nil
+}
+
+// IsBoolFlag is the flag package's own hook (flag.Value's documented
+// optional interface): a bare `-diagnose` (no `=value`) then calls
+// Set("true") instead of failing as a flag that requires a value.
+func (d *diagnoseFlagValue) IsBoolFlag() bool { return true }
 
 func main() {
 	// the sweep's live set is the program + facts; collecting at every
@@ -86,7 +106,12 @@ func main() {
 		"path to the refinedpy-check binary, for the Python foreign-edge auto-export (default: a project-root build, then PATH)")
 	projectRootFlag := flag.String("project-root", "",
 		"the project root outright, bypassing the .git-walk (default: walk up from each target's directory)")
+	var diagnoseFlag diagnoseFlagValue
+	flag.Var(&diagnoseFlag, "diagnose",
+		"write a determinism-diagnosis trace to stderr: bare -diagnose captures every event; "+
+			"-diagnose=walk.entryEnv,walk.contract captures only events whose name starts with one of these comma-separated prefixes")
 	flag.Parse()
+	diagnose.SetCapture(string(diagnoseFlag))
 	files := flag.Args()
 	if *listFlag != "" {
 		listed, err := os.ReadFile(*listFlag)
@@ -109,7 +134,7 @@ func main() {
 		os.Exit(2)
 	}
 	if *exportFactFlag == "" && len(files) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] [-list files.txt] [-wall] [-trace] [-trace-out path] <file.ts> [...]")
+		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] [-list files.txt] [-wall] [-trace] [-trace-out path] [-diagnose[=prefix,prefix,...]] <file.ts> [...]")
 		fmt.Fprintln(os.Stderr, "       refinedts-check -export-fact <file.ts> [-o path] [-producer-py path]")
 		os.Exit(2)
 	}
@@ -142,6 +167,7 @@ func main() {
 		for _, omission := range omissions {
 			fmt.Fprintln(os.Stderr, omission)
 		}
+		diagnose.Flush()
 		if exportErr != nil {
 			fmt.Fprintln(os.Stderr, exportErr)
 			os.Exit(2)
@@ -289,6 +315,11 @@ func main() {
 			_ = profileFile.Close()
 		}
 	}
+	// every worker goroutine CheckFiles started has joined by this
+	// point, so their diagnose buffers hold everything they will ever
+	// hold — safe to collect, sort, and write now, once, before either
+	// exit below.
+	diagnose.Flush()
 	if reported {
 		os.Exit(1)
 	}

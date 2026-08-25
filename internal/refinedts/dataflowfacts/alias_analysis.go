@@ -73,6 +73,10 @@ var StringReadMethods = map[string]struct{}{
 	// String.prototype.toString on a string is the string itself
 	// (sec-string.prototype.tostring)
 	"toString": {},
+	// String.prototype.normalize returns a NEW string in the named
+	// Unicode Normalization Form (sec-string.prototype.normalize) — a
+	// read, never a write on the receiver
+	"normalize": {},
 	"startsWith":  {},
 	"endsWith":    {},
 	"charAt":      {},

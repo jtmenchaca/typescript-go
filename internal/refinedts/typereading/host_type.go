@@ -10,12 +10,14 @@
 package typereading
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
@@ -55,6 +57,34 @@ const hostTypeDepthLimit = 5
 // first varies per run, and a site-dependent first write would make
 // the cached answer nondeterministic across runs.
 func readHostTypeUncached(c *checker.Checker, t *checker.Type, at *ast.Node, depth int, usedAt *bool) (abstractdomain.AbstractValue, bool) {
+	if diagnose.EventOn("typeread.host") {
+		value, ok := readHostTypeUncachedBody(c, t, at, depth, usedAt)
+		diagnose.Log("typeread.host",
+			"depth", depth,
+			"flags", strconv.FormatUint(uint64(t.Flags()), 16),
+			"typeString", checkerTypeStringSafe(c, t),
+			"ok", ok,
+			"value", inlineSpellingOrEmpty(value, ok),
+		)
+		return value, ok
+	}
+	return readHostTypeUncachedBody(c, t, at, depth, usedAt)
+}
+
+// checkerTypeStringSafe spells the checker's own name for a type,
+// swallowing a panic — some type shapes are not safe to stringify
+// this way at every depth this reader recurses through, and a
+// diagnostic line must never be the thing that crashes the check.
+func checkerTypeStringSafe(c *checker.Checker, t *checker.Type) (spelling string) {
+	defer func() {
+		if recover() != nil {
+			spelling = "<unstringable>"
+		}
+	}()
+	return c.TypeToString(t)
+}
+
+func readHostTypeUncachedBody(c *checker.Checker, t *checker.Type, at *ast.Node, depth int, usedAt *bool) (abstractdomain.AbstractValue, bool) {
 	flags := t.Flags()
 	if (flags & checker.TypeFlagsStringLiteral) != 0 {
 		value, ok := t.AsLiteralType().Value().(string)

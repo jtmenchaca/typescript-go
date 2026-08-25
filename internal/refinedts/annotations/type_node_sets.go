@@ -52,6 +52,13 @@ type literalTypeSetResult struct {
 	set   refinementsets.RefinedSet
 	label string
 	ok    bool
+	// kindTag is the sort the literal was written under — "boolean" for
+	// `true` and `false`, "" for a number or string literal, which need
+	// no tag (their forms already say which layer they live on). A
+	// boolean literal's set is OneOf{1} or OneOf{0}, indistinguishable
+	// from the numbers 1 and 0 by forms alone, so the position states
+	// the sort the same way the bare `boolean` keyword arm does.
+	kindTag string
 }
 
 func literalTypeSet(node *ast.Node) literalTypeSetResult {
@@ -76,10 +83,10 @@ func literalTypeSet(node *ast.Node) literalTypeSetResult {
 		return literalTypeSetResult{set: refinementsets.StringTuple(text), label: strconv.Quote(text), ok: true}
 	}
 	if literal.Kind == ast.KindTrueKeyword {
-		return literalTypeSetResult{set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1})), label: "true", ok: true}
+		return literalTypeSetResult{set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1})), label: "true", ok: true, kindTag: "boolean"}
 	}
 	if literal.Kind == ast.KindFalseKeyword {
-		return literalTypeSetResult{set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0})), label: "false", ok: true}
+		return literalTypeSetResult{set: refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0})), label: "false", ok: true, kindTag: "boolean"}
 	}
 	return literalTypeSetResult{}
 }
@@ -216,7 +223,7 @@ func annotationOfTypeSets(p *program.CheckerProgram, typeNode *ast.Node, registr
 	// a LITERAL type -- `3`, `"big"`, `true` -- and unions of them
 	if single := literalTypeSet(typeNode); single.ok {
 		return AnnotationOfTypeResult{Stated: &DeclaredRefinement{
-			Kind: DeclaredSet, Set: setPtr(single.set),
+			Kind: DeclaredSet, Set: setPtr(single.set), KindTag: single.kindTag,
 			Word: &WordSpelling{Text: single.label, Covers: len(single.set.Forms)},
 		}}, true
 	}

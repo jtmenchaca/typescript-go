@@ -19,6 +19,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
@@ -35,10 +36,53 @@ func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.A
 		// restating the write's own fire one line later. An admitted
 		// write is unchanged by the meet (it was already inside), so no
 		// exactness is lost on the silent path.
-		if stated.Kind == annotations.DeclaredSet && stated.Set != nil &&
+		if stated.Kind == annotations.DeclaredSet && stated.Set != nil && stated.Temporal != nil &&
+			value.Kind == abstractdomain.KindSet && value.SetKindTag == abstractdomain.SetKindTagNone {
+			// the same law for a TEMPORAL declaration: MeetKnown's set-meet
+			// arm cannot combine bounded temporal riders, so the binding
+			// wears the stated claim itself — set and rider together — and
+			// a later read proves A ⊆ A reflexively instead of re-asking
+			// the kernel the write's own question. An exact literal write
+			// (KindValues) never reaches here and keeps its exactness.
+			value = abstractdomain.KnownSet(*stated.Set, stated.Temporal, abstractdomain.TrustLevelOf(value), abstractdomain.SetKindTagNone)
+		} else if stated.Kind == annotations.DeclaredSet && stated.Set != nil &&
 			value.Kind == abstractdomain.KindSet && value.SetKindTag == abstractdomain.SetKindTagNone {
 			declared := abstractdomain.KnownSet(*stated.Set, nil, abstractdomain.TrustLevelOf(value), abstractdomain.SetKindTagNone)
 			value = abstractdomain.MeetKnown(value, declared)
+		} else if stated.Kind == annotations.DeclaredSet && stated.Set != nil &&
+			value.Kind == abstractdomain.KindValues &&
+			(value.KindTag == abstractdomain.PrimitiveNumber || value.KindTag == abstractdomain.PrimitiveBoolean) {
+			// THE SAME LAW FOR AN ENUMERATED SCALAR WRITE. The arms above
+			// read only a KindSet, so a finite word list written to a
+			// declared position kept its own words whole: `const t:
+			// TrueLiteral = x > 3` left t holding {false, true}, and the
+			// refusal then landed a second time at the following `return t`
+			// — one line below the defect, and reported as the READ rather
+			// than the write. The declared position's own words are the
+			// invariant, so the binding keeps the write's words that the
+			// declaration admits.
+			//
+			// Read by MEMBERSHIP against the stated forms, which is what a
+			// finite word list allows without a kernel round trip: a word
+			// the declaration's own oneOf does not list is not admitted.
+			// Where the declaration states anything other than a plain
+			// oneOf (a range, an integer grid), no word is dropped here —
+			// the write was already judged above, and dropping on an
+			// unread shape would claim more than this reading proves.
+			if declaredWords, ok := plainOneOfWords(*stated.Set); ok {
+				var kept []float64
+				for _, v := range value.Values {
+					for _, w := range declaredWords {
+						if v == w {
+							kept = append(kept, v)
+							break
+						}
+					}
+				}
+				if len(kept) > 0 && len(kept) < len(value.Values) {
+					value = abstractdomain.KnownValues(kept, value.KindTag, abstractdomain.TrustLevelOf(value))
+				}
+			}
 		}
 		// The same law for a possibly-NaN write (CheckPossiblyNaN's own
 		// path, nan_wrapper.go): a genuinely refined target (not
@@ -70,6 +114,18 @@ func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.A
 	// guard recorded): the path spoke about the value that just moved
 	ForgetPlaceEntriesEnv(env, name)
 	env.Set(name, value)
+}
+
+// plainOneOfWords is the words a set states when it states exactly a
+// finite list and nothing else — the shape a literal type and a literal
+// union compile to. Any other shape (a range, an integer grid, a
+// sequence form, several forms at once) answers ok=false: this reading
+// pins no words there, and the caller drops none.
+func plainOneOfWords(set refinementsets.RefinedSet) ([]float64, bool) {
+	if len(set.Forms) != 1 || set.Forms[0].Form != refinementsets.FormOneOf {
+		return nil, false
+	}
+	return set.Forms[0].W, true
 }
 
 // WriteElement is a write through an index. `name[i] = v` must land

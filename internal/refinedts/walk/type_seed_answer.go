@@ -8,6 +8,8 @@
 package walk
 
 import (
+	"math/big"
+	"strings"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -249,7 +251,7 @@ func literalKnown(p *program.CheckerProgram, e *ast.Node, depth int) (abstractdo
 		if len(text) > 0 {
 			text = text[:len(text)-1] // strip the trailing "n"
 		}
-		return abstractdomain.AbstractValue{Kind: abstractdomain.KindBigints, BigintValues: []int64{bigIntFromString(text)}}, true
+		return abstractdomain.AbstractValue{Kind: abstractdomain.KindBigints, BigintValues: []*big.Int{bigIntFromString(text)}}, true
 	}
 	if e.Kind == ast.KindNullKeyword {
 		return abstractdomain.Null, true
@@ -275,19 +277,19 @@ func literalKnown(p *program.CheckerProgram, e *ast.Node, depth int) (abstractdo
 }
 
 // bigIntFromString parses a decimal bigint literal's digits (with
-// the trailing "n" already stripped) into an int64, mirroring the TS
-// source's `BigInt(e.text.slice(0, -1))` for values that fit — per
-// PORT.md's convention (bigint -> int64 unless the source exceeds
-// it). Values past int64 are a divergence this port accepts (no
-// int64-exceeding bigint literal fixture exists in the conformance
-// suite as of this port).
-func bigIntFromString(digits string) int64 {
-	var value int64
-	for _, r := range digits {
+// the trailing "n" already stripped) at arbitrary precision — the TS
+// source's `BigInt(e.text.slice(0, -1))` exactly, no width ceiling.
+// Non-digit runes (numeric separators) are spelling, not value.
+func bigIntFromString(digits string) *big.Int {
+	cleaned := strings.Map(func(r rune) rune {
 		if r < '0' || r > '9' {
-			continue
+			return -1
 		}
-		value = value*10 + int64(r-'0')
+		return r
+	}, digits)
+	v, ok := new(big.Int).SetString(cleaned, 10)
+	if !ok {
+		return big.NewInt(0)
 	}
-	return value
+	return v
 }

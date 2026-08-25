@@ -36,6 +36,21 @@ func InterfaceHashOf(
 	contracts map[*ast.Symbol]*FunctionContract,
 	importHashes map[string]string,
 ) string {
+	parts := InterfaceParts(annotationFacts, objectFacts, contracts, importHashes)
+	return annotations.HashOf(strings.Join(parts, "\n"))
+}
+
+// InterfaceParts is InterfaceHashOf's own input lines, sorted — one
+// spelling per registry entry, object, import hash, and contract. Two
+// compiles of the same file MUST produce identical lists; the
+// facts-divergence self-check (service/check.go) diffs these to name
+// exactly which entry two checkers disagreed on.
+func InterfaceParts(
+	annotationFacts map[*ast.Symbol]*annotations.Annotation,
+	objectFacts map[*ast.Symbol]*annotations.ObjectAnnotation,
+	contracts map[*ast.Symbol]*FunctionContract,
+	importHashes map[string]string,
+) []string {
 	parts := annotations.PartsOfSets(annotationFacts, objectFacts, importHashes)
 	for symbol, contract := range contracts {
 		paramSpellings := make([]string, len(contract.Params))
@@ -60,7 +75,7 @@ func InterfaceHashOf(
 		parts = append(parts, line+":"+strconv.FormatBool(contract.Grounded))
 	}
 	annotations.SortStrings(parts)
-	return annotations.HashOf(strings.Join(parts, "\n"))
+	return parts
 }
 
 // FileFacts is FileFacts in the TS source.

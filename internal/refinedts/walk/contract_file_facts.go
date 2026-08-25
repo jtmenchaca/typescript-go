@@ -17,6 +17,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
@@ -131,8 +132,17 @@ func CompileContractFileFacts(
 	}
 
 	register := func(nameNode *ast.Node, declaration *ast.Node, signature contractSignature) {
-		symbol := p.Checker.GetSymbolAtLocation(nameNode)
+		// the BINDER's symbol on the named declaration — deterministic
+		// bind-time data; the checker's resolver (measured drifting
+		// under concurrent per-entry checkers) fills in only when the
+		// binder left none
+		symbol := nameNode.Parent.Symbol()
 		if symbol == nil {
+			symbol = p.Checker.GetSymbolAtLocation(nameNode)
+		}
+		if symbol == nil {
+			diagnose.LogIf(diagnose.EventOn("walk.contract"), "walk.contract",
+				"function", diagnose.NodeText(nameNode), "registered", false, "reason", "no symbol")
 			return
 		}
 		contract := &FunctionContract{
@@ -145,6 +155,19 @@ func CompileContractFileFacts(
 		}
 		contracts[symbol] = contract
 		mergedContracts[symbol] = contract
+		if diagnose.EventOn("walk.contract") {
+			paramSpellings := make([]string, len(signature.Params))
+			for i, p := range signature.Params {
+				paramSpellings[i] = spellDeclared(p)
+			}
+			diagnose.Log("walk.contract",
+				"function", diagnose.NodeText(nameNode),
+				"registered", true,
+				"params", paramSpellings,
+				"result", spellDeclared(signature.Result),
+				"grounded", signature.Grounded,
+			)
+		}
 	}
 
 	var collect func(node *ast.Node)
@@ -208,7 +231,10 @@ func CompileContractFileFacts(
 				if !ok {
 					continue
 				}
-				alias := p.Checker.GetSymbolAtLocation(vd.Name())
+				alias := declaration.Symbol()
+				if alias == nil {
+					alias = p.Checker.GetSymbolAtLocation(vd.Name())
+				}
 				if alias == nil {
 					continue
 				}
@@ -249,7 +275,10 @@ func CompileContractFileFacts(
 					target := symbolAt(p.Checker, assignment.Initializer)
 					if target != nil {
 						if contract, ok := mergedContracts[target]; ok {
-							alias := p.Checker.GetSymbolAtLocation(name)
+							alias := node.Symbol()
+							if alias == nil {
+								alias = p.Checker.GetSymbolAtLocation(name)
+							}
 							if alias != nil {
 								if _, has := mergedContracts[alias]; !has {
 									contracts[alias] = contract

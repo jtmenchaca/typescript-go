@@ -7,6 +7,9 @@
 package annotations
 
 import (
+	"bytes"
+	"runtime"
+	"strconv"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -21,31 +24,69 @@ import (
 // alias took a worker down through the alias arm, and the constraint
 // arm was next.
 //
-// The TS source's module-level Set becomes a mutex-guarded map here
-// (this port's substitute for shared mutable cross-call state; see
-// narrowing/pinned_function.go's resolvingFactoryBindings for the
-// same pattern) -- the checker walk is not guaranteed single-threaded
-// the way a TS worker's synchronous call stack is.
+// A cycle is a property of ONE CALL STACK, so the guard keys by
+// (goroutine, node) — never by the node alone. AST nodes are shared
+// across every per-entry checker, and a node-only key read a
+// CONCURRENT reader on another entry's goroutine as a cycle: that
+// read returned "plain TypeScript" for a written annotation,
+// intermittently, with nothing reported — the A1 sweep
+// nondeterminism (2026-08-24), where a parameter written `Wide`
+// seeded as plain number whenever two entries' reads of the support
+// file's nodes overlapped. The facts-divergence self-check
+// (service/check.go) is what caught it; this key is the fix at the
+// true layer.
+type readingTypeNodeKey struct {
+	gid  uint64
+	node *ast.Node
+}
+
 var (
 	readingTypeNodesMu sync.Mutex
-	readingTypeNodes   = map[*ast.Node]bool{}
+	readingTypeNodes   = map[readingTypeNodeKey]bool{}
 )
 
 // annotationOfType is annotationOfType in the TS source.
 func annotationOfType(p *program.CheckerProgram, typeNode *ast.Node, registry AnnotationRegistry, objects ObjectRegistry, bindings map[*ast.Symbol]*DeclaredRefinement) AnnotationOfTypeResult {
+	key := readingTypeNodeKey{gid: goroutineID(), node: typeNode}
 	readingTypeNodesMu.Lock()
-	if readingTypeNodes[typeNode] {
+	if readingTypeNodes[key] {
 		readingTypeNodesMu.Unlock()
 		return AnnotationOfTypeResult{}
 	}
-	readingTypeNodes[typeNode] = true
+	readingTypeNodes[key] = true
 	readingTypeNodesMu.Unlock()
 	defer func() {
 		readingTypeNodesMu.Lock()
-		delete(readingTypeNodes, typeNode)
+		delete(readingTypeNodes, key)
 		readingTypeNodesMu.Unlock()
 	}()
 	return annotationOfTypeUnguarded(p, typeNode, registry, objects, bindings)
+}
+
+// goroutineID parses the id out of runtime.Stack's first line — the
+// same helper tracing and diagnose carry (each package keeps its own
+// copy; the parse is the runtime's documented first-line shape). The
+// reentrancy key above needs it because a cycle only exists within
+// one goroutine's call stack.
+func goroutineID() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	// "goroutine 123 [running]:\n"
+	line := buf[:n]
+	const prefix = "goroutine "
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return 0
+	}
+	line = line[len(prefix):]
+	end := bytes.IndexByte(line, ' ')
+	if end < 0 {
+		return 0
+	}
+	id, err := strconv.ParseUint(string(line[:end]), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 func annotationOfTypeUnguarded(p *program.CheckerProgram, typeNode *ast.Node, registry AnnotationRegistry, objects ObjectRegistry, bindings map[*ast.Symbol]*DeclaredRefinement) AnnotationOfTypeResult {

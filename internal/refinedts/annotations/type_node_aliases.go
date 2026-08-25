@@ -7,10 +7,13 @@
 package annotations
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/jsnum"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
+	"github.com/microsoft/typescript-go/internal/refinedts/nameresolution"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -83,6 +86,13 @@ func conditionalOnBoundPrimitive(p *program.CheckerProgram, cond *ast.Conditiona
 // annotationOfTypeAliases is annotationOfTypeAliases in the TS
 // source. matched=false means "not an alias-shaped node".
 func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, registry AnnotationRegistry, objects ObjectRegistry, bindings map[*ast.Symbol]*DeclaredRefinement) (AnnotationOfTypeResult, bool) {
+	if diagnose.EventOn("annotations.typeNode") {
+		diagnose.Log("annotations.typeNode",
+			"text", diagnose.NodeText(typeNode),
+			"kind", typeNode.Kind.String(),
+			"path", "entry",
+		)
+	}
 	// `X extends { k: infer R } ? A : B` -- the infer-extracting
 	// conditional: when every member of the pattern is an infer slot
 	// and X reads as an object carrying those keys, each slot binds
@@ -235,12 +245,38 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 			}
 			return AnnotationOfTypeResult{Unsupported: "z.infer takes `typeof X` for a stated annotation X"}, true
 		}
-		symbol := symbolAt(p.Checker, exprName)
+		// the typeof-target resolves by SYNTAX first to its declaration,
+		// whose BINDER symbol keys the registries — the same
+		// deterministic road registration itself takes; the checker's
+		// resolver fills in only where syntax cannot see (a namespace
+		// member, a re-export chain).
+		var symbol *ast.Symbol
+		resolvedBy := ""
+		if declaration := nameresolution.ValueDeclarationOf(p.Program, exprName); declaration != nil {
+			symbol = declaration.Symbol()
+			resolvedBy = "syntax"
+		}
+		if symbol == nil {
+			symbol = symbolAt(p.Checker, exprName)
+			if symbol != nil {
+				resolvedBy = "checker"
+			}
+		}
 		if symbol != nil {
 			if object := objects[symbol]; object != nil {
+				if diagnose.EventOn("annotations.typeNode") {
+					diagnose.Log("annotations.typeNode",
+						"text", diagnose.NodeText(typeNode), "path", "registry-hit",
+						"resolvedBy", resolvedBy, "symbol", fmt.Sprintf("%p", symbol), "hit", true, "form", "object")
+				}
 				return AnnotationOfTypeResult{Stated: &DeclaredRefinement{Kind: DeclaredObject, Object: object}}, true
 			}
 			if annotation := registry[symbol]; annotation != nil {
+				if diagnose.EventOn("annotations.typeNode") {
+					diagnose.Log("annotations.typeNode",
+						"text", diagnose.NodeText(typeNode), "path", "registry-hit",
+						"resolvedBy", resolvedBy, "symbol", fmt.Sprintf("%p", symbol), "hit", true, "form", "set")
+				}
 				return AnnotationOfTypeResult{Stated: &DeclaredRefinement{
 					Kind:           DeclaredSet,
 					Set:            annotation.Set,
@@ -259,11 +295,34 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 			// threw the inline statement away; inference reads it.
 			records := ArrayOfRecords(p, symbol, registry, objects)
 			if records.Stated != nil || records.Unsupported != "" {
+				if diagnose.EventOn("annotations.typeNode") {
+					diagnose.Log("annotations.typeNode",
+						"text", diagnose.NodeText(typeNode), "path", "registry-hit",
+						"resolvedBy", resolvedBy, "symbol", fmt.Sprintf("%p", symbol), "hit", true, "form", "records")
+				}
 				return records, true
+			}
+			// the symbol resolved, but NEITHER registry knows it -- this
+			// is the silent-degradation path: a `z.infer<typeof X>`
+			// whose X compiled to nothing in this run's registries, so
+			// the position ahead reads as plain TypeScript instead of
+			// the stated set.
+			if diagnose.EventOn("annotations.typeNode") {
+				diagnose.Log("annotations.typeNode",
+					"text", diagnose.NodeText(typeNode), "path", "registry-MISS",
+					"resolvedBy", resolvedBy, "symbol", fmt.Sprintf("%p", symbol), "hit", false)
 			}
 		}
 		if zod {
+			if diagnose.EventOn("annotations.typeNode") {
+				diagnose.Log("annotations.typeNode",
+					"text", diagnose.NodeText(typeNode), "path", "unsupported-zod-silent", "resolvedBy", resolvedBy)
+			}
 			return AnnotationOfTypeResult{}, true
+		}
+		if diagnose.EventOn("annotations.typeNode") {
+			diagnose.Log("annotations.typeNode",
+				"text", diagnose.NodeText(typeNode), "path", "unsupported", "resolvedBy", resolvedBy)
 		}
 		return AnnotationOfTypeResult{Unsupported: "'" + exprName.AsIdentifier().Text + "' is not a stated annotation the checker read"}, true
 	}
@@ -276,18 +335,37 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 	// Pct` beside `type Pct`) lists the value declaration first --
 	// the alias is found wherever it sits, or the annotation silently
 	// went unread.
-	symbol := symbolAt(p.Checker, name)
-	var declaration *ast.Node
-	if symbol != nil {
-		for _, d := range symbol.Declarations {
-			if ast.IsTypeAliasDeclaration(d) {
-				declaration = d
-				break
+	//
+	// The declaration resolves by SYNTAX first (nameresolution): the
+	// checker's resolver is not load-bearing for a written name, and
+	// under concurrent per-entry checkers it was measured
+	// intermittently dropping an imported alias — the silent
+	// fall-through below then read the annotation as plain
+	// TypeScript, seeding a parameter written `Wide` as plain number.
+	// The checker answers only what syntax cannot see (a global, a
+	// namespace member, a type parameter, a re-export chain).
+	declaration := nameresolution.TypeDeclarationOf(p.Program, name)
+	aliasResolvedBy := "syntax"
+	var symbol *ast.Symbol
+	if declaration == nil {
+		symbol = symbolAt(p.Checker, name)
+		aliasResolvedBy = "checker"
+		if symbol != nil {
+			for _, d := range symbol.Declarations {
+				if ast.IsTypeAliasDeclaration(d) {
+					declaration = d
+					break
+				}
+			}
+			if declaration == nil && len(symbol.Declarations) > 0 {
+				declaration = symbol.Declarations[0]
 			}
 		}
-		if declaration == nil && len(symbol.Declarations) > 0 {
-			declaration = symbol.Declarations[0]
-		}
+	}
+	if diagnose.EventOn("annotations.typeNode") {
+		diagnose.Log("annotations.typeNode",
+			"text", diagnose.NodeText(typeNode), "path", "alias-lookup",
+			"resolvedBy", aliasResolvedBy, "found", declaration != nil)
 	}
 	if declaration != nil && ast.IsTypeAliasDeclaration(declaration) {
 		aliasDecl := declaration.AsTypeAliasDeclaration()
@@ -313,6 +391,10 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 				}
 			}
 			inner = child
+		}
+		if diagnose.EventOn("annotations.typeNode") {
+			diagnose.Log("annotations.typeNode",
+				"text", diagnose.NodeText(typeNode), "path", "alias-resolved", "resolvedBy", aliasResolvedBy)
 		}
 		return annotationOfType(p, aliasDecl.Type, registry, objects, inner), true
 	}
@@ -355,6 +437,10 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 			set = refinementsets.MakeRefinedSet(refinementsets.Union(set, p.set))
 			label += " | " + p.label
 		}
+		if diagnose.EventOn("annotations.typeNode") {
+			diagnose.Log("annotations.typeNode",
+				"text", diagnose.NodeText(typeNode), "path", "enum", "resolvedBy", aliasResolvedBy)
+		}
 		return AnnotationOfTypeResult{Stated: &DeclaredRefinement{
 			Kind: DeclaredSet, Set: setPtr(set),
 			Word: &WordSpelling{Text: label, Covers: len(set.Forms)},
@@ -365,6 +451,10 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 	// it wrote T
 	if symbol != nil {
 		if bound, ok := bindings[symbol]; ok {
+			if diagnose.EventOn("annotations.typeNode") {
+				diagnose.Log("annotations.typeNode",
+					"text", diagnose.NodeText(typeNode), "path", "type-parameter-bound", "resolvedBy", aliasResolvedBy)
+			}
 			return AnnotationOfTypeResult{Stated: bound}, true
 		}
 	}
@@ -372,6 +462,19 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 	// states T subset-of B; unconstrained, the bound is the root.
 	// Only a bound read from a stated annotation is grounded (checked
 	// against); `extends number` bounds by R-bar without grounding.
+	if declaration == nil && symbol == nil {
+		// the name resolved NOWHERE — not by syntax, not by the
+		// checker. A host-clean file's written name always has a
+		// declaration, so this is a failed read, and answering plain
+		// here would dress the failure as a plain type. It reports
+		// instead, naming the identifier it could not follow.
+		if diagnose.EventOn("annotations.typeNode") {
+			diagnose.Log("annotations.typeNode",
+				"text", diagnose.NodeText(typeNode), "path", "unresolved-nowhere", "resolvedBy", aliasResolvedBy)
+		}
+		return AnnotationOfTypeResult{Unsupported: "'" + name.Text() +
+			"' did not resolve to a declaration this reader could follow"}, true
+	}
 	if symbol != nil && declaration != nil && ast.IsTypeParameterDeclaration(declaration) {
 		bound := refinementsets.MakeRefinedSet()
 		boundGrounded := false
@@ -405,10 +508,18 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 				// a variable bound stays ungrounded: plain TS
 			}
 		}
+		if diagnose.EventOn("annotations.typeNode") {
+			diagnose.Log("annotations.typeNode",
+				"text", diagnose.NodeText(typeNode), "path", "type-parameter-variable", "resolvedBy", aliasResolvedBy)
+		}
 		return AnnotationOfTypeResult{Stated: &DeclaredRefinement{
 			Kind: DeclaredVariable, Symbol: symbol, Bound: setPtr(bound), BoundGrounded: boundGrounded,
 			BoundObject: boundObject, StarDepth: 0,
 		}}, true
+	}
+	if diagnose.EventOn("annotations.typeNode") {
+		diagnose.Log("annotations.typeNode",
+			"text", diagnose.NodeText(typeNode), "path", "plain-typescript", "resolvedBy", aliasResolvedBy)
 	}
 	return AnnotationOfTypeResult{}, true
 }

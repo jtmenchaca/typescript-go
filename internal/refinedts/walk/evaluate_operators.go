@@ -46,11 +46,17 @@ func ReadUnary(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.AbstractV
 			operand := evaluateExpression(ctx, env, unary.Operand)
 			verdict, known := abstractdomain.TruthinessDecided(operand)
 			if !known {
-				return abstractdomain.KnownSet(
-					refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1})),
-					nil,
+				// the two truth values, TAGGED boolean — the same form
+				// comparison_decision.go's boolGround answers for an
+				// undecided comparison. Written as an untagged KindSet, the
+				// {0, 1} read as a NUMBER downstream (KindOfClaim sends an
+				// untagged set through setSortOfForms, which calls a scalar
+				// leaf "number"), so `Number(!b)` fell to the widest ToNumber
+				// row and answered "number, or NaN" instead of {0, 1}.
+				return abstractdomain.KnownValues(
+					[]float64{0, 1},
+					abstractdomain.PrimitiveBoolean,
 					abstractdomain.TrustSpec,
-					abstractdomain.SetKindTagNone,
 				), true
 			}
 			v := float64(1)

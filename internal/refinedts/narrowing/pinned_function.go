@@ -9,6 +9,9 @@
 package narrowing
 
 import (
+	"bytes"
+	"runtime"
+	"strconv"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -88,17 +91,18 @@ func PinnedFunctionOf(c *checker.Checker, e *ast.Node) *ast.Node {
 			// makeAdder()` reads like a const-bound arrow. The guard set
 			// stops a cycle of call-initialized consts from re-entering.
 			if ast.IsCallExpression(init) {
+				key := resolvingFactoryKey{gid: goroutineID(), declaration: declaration}
 				resolvingFactoryMu.Lock()
-				_, cycling := resolvingFactoryBindings[declaration]
+				_, cycling := resolvingFactoryBindings[key]
 				if cycling {
 					resolvingFactoryMu.Unlock()
 					return nil
 				}
-				resolvingFactoryBindings[declaration] = struct{}{}
+				resolvingFactoryBindings[key] = struct{}{}
 				resolvingFactoryMu.Unlock()
 				defer func() {
 					resolvingFactoryMu.Lock()
-					delete(resolvingFactoryBindings, declaration)
+					delete(resolvingFactoryBindings, key)
 					resolvingFactoryMu.Unlock()
 				}()
 				return FactoryPinnedFunction(c, init)
@@ -114,13 +118,48 @@ func PinnedFunctionOf(c *checker.Checker, e *ast.Node) *ast.Node {
 // const bindings currently being resolved — a cycle
 // (`const a = b(); const b = a();`) answers nil instead of re-entering.
 //
-// The TS source keys this with a `Set<ts.Declaration>`; this substitutes
-// a regular map guarded by a mutex for the same reason the memoized
-// caches elsewhere in this port do (see reassigned_names.go).
+// A cycle is a property of ONE CALL STACK, so the guard keys by
+// (goroutine, declaration) — never the declaration alone. Declarations
+// are shared AST across every per-entry checker, and a
+// declaration-only key read a CONCURRENT resolve on another entry's
+// goroutine as a cycle, silently unpinning a pinned factory — the
+// same defect annotations/annotation_of_type.go's node-only guard
+// carried (the A1 sweep nondeterminism, 2026-08-24).
+type resolvingFactoryKey struct {
+	gid         uint64
+	declaration *ast.Node
+}
+
 var (
 	resolvingFactoryMu       sync.Mutex
-	resolvingFactoryBindings = map[*ast.Node]struct{}{}
+	resolvingFactoryBindings = map[resolvingFactoryKey]struct{}{}
 )
+
+// goroutineID parses the id out of runtime.Stack's first line — the
+// same helper tracing, diagnose, and annotations carry (each package
+// keeps its own copy by this port's convention). The reentrancy key
+// above needs it because a cycle only exists within one goroutine's
+// call stack.
+func goroutineID() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	// "goroutine 123 [running]:\n"
+	line := buf[:n]
+	const prefix = "goroutine "
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return 0
+	}
+	line = line[len(prefix):]
+	end := bytes.IndexByte(line, ' ')
+	if end < 0 {
+		return 0
+	}
+	id, err := strconv.ParseUint(string(line[:end]), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
 
 // ownReturnExpressions is ownReturnExpressions in the TS source: the
 // return expressions the factory's OWN body makes — a nested function's

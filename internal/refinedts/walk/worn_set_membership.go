@@ -124,10 +124,14 @@ func CheckWornSet(p WornSetParams) {
 	// syntactically IDENTICAL sets prove the LANGUAGE question
 	// outright — A ⊆ A needs no kernel ask, and it is exactly the
 	// guard-then-use shape a stated `.not(...)` difference produces.
-	// BOUNDED temporal positions are not proven by the language
-	// alone (their claim lives in the bounds rider), so they keep
-	// the full path.
-	identicalSets := target.Temporal == nil && sameSetJSON(known.Set, *target.Set)
+	// BOUNDED temporal positions add a bounds rider the language
+	// alone does not prove — but an IDENTICAL rider (same chart and
+	// the same stated bounds) is the same reflexivity: the full
+	// claim, language and bounds together, is A ⊆ A. Only differing
+	// riders keep the full path.
+	identicalTemporal := target.Temporal == nil ||
+		(known.Temporal != nil && *known.Temporal == *target.Temporal)
+	identicalSets := identicalTemporal && sameSetJSON(known.Set, *target.Set)
 	if identicalSets {
 		return
 	}

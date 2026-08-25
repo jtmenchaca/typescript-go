@@ -14,8 +14,12 @@
 package annotations
 
 import (
+	"fmt"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations/libraryadapters"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
+	"github.com/microsoft/typescript-go/internal/refinedts/nameresolution"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 )
 
@@ -45,17 +49,36 @@ func chainRoot(expr *ast.Node) *ast.Node {
 // through import aliases) declare in the surface module? THE
 // recognition question -- symbols, never names.
 func resolvesToSurface(p *program.CheckerProgram, node *ast.Node) bool {
-	symbol := p.Checker.GetSymbolAtLocation(node)
+	// the binder's own tables answer first (nameresolution's file
+	// comment) — the checker settles only what they cannot
+	symbol := nameresolution.DeclarationSymbolOf(p.Checker.BoundProgram(), node)
+	road := "binder"
 	if symbol == nil {
-		return false
-	}
-	if (symbol.Flags & ast.SymbolFlagsAlias) != 0 {
-		symbol = p.Checker.GetAliasedSymbol(symbol)
+		symbol = p.Checker.GetSymbolAtLocation(node)
+		road = "checker"
+		if symbol == nil {
+			if diagnose.EventOn("annotations.surfaceRoot") {
+				diagnose.Log("annotations.surfaceRoot",
+					"text", diagnose.NodeText(node), "road", road, "symbol", "nil", "result", false)
+			}
+			return false
+		}
+		if (symbol.Flags & ast.SymbolFlagsAlias) != 0 {
+			symbol = p.Checker.GetAliasedSymbol(symbol)
+		}
 	}
 	for _, d := range symbol.Declarations {
 		if p.SurfacePaths[ast.GetSourceFileOfNode(d).FileName()] {
+			if diagnose.EventOn("annotations.surfaceRoot") {
+				diagnose.Log("annotations.surfaceRoot",
+					"text", diagnose.NodeText(node), "road", road, "symbol", fmt.Sprintf("%p", symbol), "result", true)
+			}
 			return true
 		}
+	}
+	if diagnose.EventOn("annotations.surfaceRoot") {
+		diagnose.Log("annotations.surfaceRoot",
+			"text", diagnose.NodeText(node), "road", road, "symbol", fmt.Sprintf("%p", symbol), "result", false)
 	}
 	return false
 }
@@ -68,18 +91,37 @@ func resolvesToSurface(p *program.CheckerProgram, node *ast.Node) bool {
 // (plain TypeScript, untouched), never refused loudly the way the
 // checker's own surface is.
 func libraryAdapterOfNode(p *program.CheckerProgram, node *ast.Node) *libraryadapters.LibraryAdapter {
-	symbol := p.Checker.GetSymbolAtLocation(node)
+	// the binder's own tables answer first (nameresolution's file
+	// comment) — the checker settles only what they cannot
+	symbol := nameresolution.DeclarationSymbolOf(p.Checker.BoundProgram(), node)
+	road := "binder"
 	if symbol == nil {
-		return nil
-	}
-	if (symbol.Flags & ast.SymbolFlagsAlias) != 0 {
-		symbol = p.Checker.GetAliasedSymbol(symbol)
+		symbol = p.Checker.GetSymbolAtLocation(node)
+		road = "checker"
+		if symbol == nil {
+			if diagnose.EventOn("annotations.adapterRoot") {
+				diagnose.Log("annotations.adapterRoot",
+					"text", diagnose.NodeText(node), "road", road, "symbol", "nil", "adapter", "")
+			}
+			return nil
+		}
+		if (symbol.Flags & ast.SymbolFlagsAlias) != 0 {
+			symbol = p.Checker.GetAliasedSymbol(symbol)
+		}
 	}
 	for _, declaration := range symbol.Declarations {
 		adapter := libraryadapters.LibraryAdapterOfFile(ast.GetSourceFileOfNode(declaration).FileName())
 		if adapter != nil {
+			if diagnose.EventOn("annotations.adapterRoot") {
+				diagnose.Log("annotations.adapterRoot",
+					"text", diagnose.NodeText(node), "road", road, "symbol", fmt.Sprintf("%p", symbol), "adapter", adapter.Name)
+			}
 			return adapter
 		}
+	}
+	if diagnose.EventOn("annotations.adapterRoot") {
+		diagnose.Log("annotations.adapterRoot",
+			"text", diagnose.NodeText(node), "road", road, "symbol", fmt.Sprintf("%p", symbol), "adapter", "")
 	}
 	return nil
 }

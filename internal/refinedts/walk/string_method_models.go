@@ -13,15 +13,16 @@
 // positions only on astral-free tuples; elsewhere they can shift or
 // split a surrogate pair, and the answer is unknown, never a guess.
 //
-// RE2 (Go's regexp) has no lookahead/lookbehind — a JS regex literal
-// using those constructs fails regexToGo's compile and this file's
-// readers answer nil/residue for it rather than a silently wrong
-// match, per PORT.md's regex-divergence rule.
+// The case-mapping/trim rows live in string_method_models_case.go,
+// the regex-facing rows in string_method_models_regex.go, the
+// replace-family assembly in string_method_models_replace.go, and the
+// UTF-16 code-unit primitives in string_method_models_utf16.go.
 
 package walk
 
 import (
-	"regexp"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -42,32 +43,9 @@ var stringOutMethods = map[string]struct{}{
 	"trimLeft": {}, "trimRight": {},
 	"replace": {}, "replaceAll": {}, "charAt": {}, "padStart": {}, "padEnd": {},
 	"repeat": {}, "slice": {}, "substring": {},
-}
-
-// regexToGo translates a JS regex source/flags pair to a Go RE2
-// regexp, or (nil, false) where RE2 cannot express it (lookaround, a
-// few JS-only escapes) — the caller answers residue/nil rather than a
-// silently wrong match.
-func regexToGo(source string, flags string) (*regexp.Regexp, bool) {
-	prefix := ""
-	if strings.Contains(flags, "i") {
-		prefix += "i"
-	}
-	if strings.Contains(flags, "s") {
-		prefix += "s"
-	}
-	if strings.Contains(flags, "m") {
-		prefix += "m"
-	}
-	pattern := source
-	if prefix != "" {
-		pattern = "(?" + prefix + ")" + pattern
-	}
-	compiled, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil, false
-	}
-	return compiled, true
+	// normalize returns a string in the named Unicode Normalization
+	// Form (sec-string.prototype.normalize)
+	"normalize": {},
 }
 
 // exactStringOf is the TS source's inline exactString: an exact
@@ -87,6 +65,80 @@ func exactIntOf(k abstractdomain.AbstractValue) (int, bool) {
 		return int(k.Values[0]), true
 	}
 	return 0, false
+}
+
+// repeatCountLimit is how many counts a `.repeat` image is spelled one
+// at a time. Each count contributes one word to a union, so this also
+// bounds the width of the set built below.
+const repeatCountLimit = 16
+
+// repeatCountMembers is the finite list of NON-NEGATIVE INTEGER counts
+// a `.repeat` argument holds, read through the kernel's own proved
+// membership enumeration — the same door SimplifyScalar's members
+// reading uses. (nil, false) where the value is not a plain scalar set,
+// where no kernel is seated, where the set holds more counts than the
+// limit, or where any member is negative or fractional (a count
+// sec-string.prototype.repeat step 3 raises a RangeError for, which
+// carries no value for the image to hold).
+func repeatCountMembers(ctx *FlowContext, count abstractdomain.AbstractValue) (members []int, ok bool) {
+	if count.Kind != abstractdomain.KindSet || count.SetKindTag != abstractdomain.SetKindTagNone {
+		return nil, false
+	}
+	if ctx == nil || ctx.Kernel == nil || ctx.Kernel.Members == nil {
+		return nil, false
+	}
+	defer func() {
+		if recover() != nil {
+			members, ok = nil, false
+		}
+	}()
+	// repeat TRUNCATES its count: sec-string.prototype.repeat step 2
+	// runs ToIntegerOrInfinity, which drops the fractional part. So the
+	// image over a count window is the image over the INTEGERS in that
+	// window, and a real-valued window like [0, 3] names the same four
+	// results {0, 1, 2, 3} do. Conjoining Integer here is what makes the
+	// window finite enough to enumerate at all.
+	integral := count.Set
+	integral.Forms = append(append([]refinementsets.Refinement{}, integral.Forms...), refinementsets.Integer)
+	raw := ctx.Kernel.Members(integral, repeatCountLimit)
+	if len(raw) == 0 || len(raw) > repeatCountLimit {
+		return nil, false
+	}
+	out := make([]int, 0, len(raw))
+	for _, value := range raw {
+		if value < 0 || value != math.Trunc(value) {
+			return nil, false
+		}
+		out = append(out, int(value))
+	}
+	return out, true
+}
+
+// unionOfExactStrings folds a list of exact string words into ONE set
+// value spelling exactly those words — the union tree WordTuplesOf
+// reads back. Every input must be an exact string word; anything else
+// answers (zero, false) and the caller keeps the answer it had.
+func unionOfExactStrings(words []abstractdomain.AbstractValue, grade abstractdomain.TrustLevel) (abstractdomain.AbstractValue, bool) {
+	if len(words) == 0 {
+		return abstractdomain.AbstractValue{}, false
+	}
+	if len(words) == 1 {
+		return words[0], true
+	}
+	var folded refinementsets.RefinedSet
+	for i, word := range words {
+		text, textOk := exactStringOf(word)
+		if !textOk {
+			return abstractdomain.AbstractValue{}, false
+		}
+		tuple := refinementsets.StringTuple(text)
+		if i == 0 {
+			folded = tuple
+			continue
+		}
+		folded = refinementsets.MakeRefinedSet(refinementsets.Union(folded, tuple))
+	}
+	return abstractdomain.KnownSet(folded, nil, grade, abstractdomain.SetKindTagNone), true
 }
 
 // readStringMethods is readStringMethods in the TS source: the string
@@ -131,6 +183,53 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 	}
 	outNumber := func(v float64) abstractdomain.AbstractValue {
 		return abstractdomain.KnownValues([]float64{v}, abstractdomain.PrimitiveNumber, oracleGrade)
+	}
+	// Number.prototype.toString (sec-numeric-types-number-tostring): a
+	// NUMERIC receiver spells its radix-r digits, lowercase letters past
+	// '9'. An exact integer receiver computes the exact spelling through
+	// the host's own formatter; a non-negative integer WINDOW answers
+	// the digit-counted repetition over the radix alphabet — the same
+	// transfer numericSetText already gives String(n) at radix 10. The
+	// radix must be an exact integer in [2, 36] (absent is 10);
+	// anything else falls through to the sort answer.
+	if method == "toString" && !receiverStringy && len(argKnowns) <= 1 {
+		radix, radixOk := 10, len(argKnowns) == 0
+		if len(argKnowns) == 1 {
+			if r, ok := exactIntOf(argKnowns[0]); ok && r >= 2 && r <= 36 {
+				radix, radixOk = r, true
+			}
+		}
+		if radixOk {
+			grade := abstractdomain.MinTrustLevel(oracleGrade, abstractdomain.TrustSpec)
+			if receiver.Kind == abstractdomain.KindValues && receiver.KindTag == abstractdomain.PrimitiveNumber {
+				allInt := true
+				texts := make([]string, 0, len(receiver.Values))
+				for _, v := range receiver.Values {
+					if v != math.Trunc(v) || math.Abs(v) > float64(int64(1)<<53) {
+						allInt = false
+						break
+					}
+					texts = append(texts, strconv.FormatInt(int64(v), radix))
+				}
+				if allInt && len(texts) == 1 {
+					out := outString(texts[0])
+					return &out
+				}
+				if allInt && len(texts) > 1 {
+					set := refinementsets.StringTuple(texts[0])
+					for i := 1; i < len(texts); i++ {
+						set = unionOf(set, refinementsets.StringTuple(texts[i]))
+					}
+					out := abstractdomain.KnownSet(set, nil, grade, abstractdomain.SetKindTagNone)
+					return &out
+				}
+			}
+			if receiver.Kind == abstractdomain.KindSet && receiver.SetKindTag == abstractdomain.SetKindTagNone &&
+				refinementsets.OnOneTupleLayer(receiver.Set) {
+				out := abstractdomain.KnownSet(numericSetRadixText(receiver.Set, radix), nil, grade, abstractdomain.SetKindTagNone)
+				return &out
+			}
+		}
 	}
 	// the spec-exact string reads, computed ON THE EXACT TUPLE by
 	// round-tripping through the host's own string functions (the
@@ -224,7 +323,14 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 				for i, word := range result {
 					words[i] = abstractdomain.KnownValues(refinementsets.CodepointsOf(word), abstractdomain.PrimitiveString, abstractdomain.TrustProved)
 				}
-				out := abstractdomain.KnownList(words, oracleGrade)
+				list := abstractdomain.KnownList(words, oracleGrade)
+				// the pattern's NAMED groups name the same exact values a
+				// second time, under the result's `groups` object
+				// (sec-regexpbuiltinexec step 34)
+				if spans, spansOk := captureGroupSourceSpans(pattern.Source); spansOk && len(spans)+1 == len(words) {
+					list = withNamedGroups(list, pattern.Source, spans, words[1:], oracleGrade)
+				}
+				out := list
 				return &out
 			}
 		}
@@ -328,6 +434,26 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 				}
 			}
 		}
+		// `.normalize(form)` on an exact string
+		// (sec-string.prototype.normalize): the Unicode Normalization
+		// Form the argument names, applied to the receiver — a pure
+		// function of the two, so the host computes it. The default with
+		// no argument is NFC (step 3). An unrecognized form THROWS a
+		// RangeError (step 5), so it carries no value; that shape falls
+		// through to the sort-level answer rather than being claimed.
+		if method == "normalize" && len(argKnowns) <= 1 {
+			form := "NFC"
+			formOk := true
+			if len(argKnowns) == 1 {
+				form, formOk = exactStringOf(argKnowns[0])
+			}
+			if formOk {
+				if normalized, ok := normalizedText(form, text); ok {
+					out := outString(normalized)
+					return &out
+				}
+			}
+		}
 		if method == "repeat" && len(argKnowns) == 1 {
 			n, ok := exactIntOf(argKnowns[0])
 			// a negative count THROWS rather than returning — the
@@ -335,6 +461,24 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 			if ok && n >= 0 {
 				out := outString(strings.Repeat(text, n))
 				return &out
+			}
+			// a count the flow bounded to a SMALL INTEGER SET (`0 <= n &&
+			// n <= 3`) names finitely many results, one per member —
+			// sec-string.prototype.repeat is a function of the count, so
+			// the image of a finite count set is the finite set of those
+			// repetitions. The members come from the kernel's own proved
+			// membership enumeration, so this claims exactly the counts
+			// the set holds and no others; a set it will not enumerate,
+			// or one holding a negative count (which throws), falls
+			// through to the sort-level answer below.
+			if counts, countsOk := repeatCountMembers(ctx, argKnowns[0]); countsOk {
+				words := make([]abstractdomain.AbstractValue, 0, len(counts))
+				for _, count := range counts {
+					words = append(words, outString(strings.Repeat(text, count)))
+				}
+				if joined, joinedOk := unionOfExactStrings(words, oracleGrade); joinedOk {
+					return &joined
+				}
 			}
 		}
 		if (method == "charAt" || method == "charCodeAt" || method == "codePointAt") && len(argKnowns) <= 1 {
@@ -473,19 +617,19 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 				out := abstractdomain.PossiblyUndefined(inner, "", false, false)
 				return &out
 			}
-			captures, ok := CaptureGroupsOf(source[1:lastSlash])
+			// each capturing group's own slot carries the LANGUAGE its
+			// sub-pattern denotes (captureGroupSetOf, the same door
+			// `.regex` and `.exec` compile through), not the bare string
+			// sort — /(?<digits>\d+)/ names a digit grammar, and the
+			// result's `.groups` names the same value under the group's
+			// own name (sec-regexpbuiltinexec step 34).
+			pattern := source[1:lastSlash]
+			spans, ok := captureGroupSourceSpans(pattern)
 			if ok {
 				stringOut := abstractdomain.KnownSet(refinementsets.Strings, nil, oracleGrade, abstractdomain.SetKindTagNone)
-				items := make([]abstractdomain.AbstractValue, 0, len(captures)+1)
-				items = append(items, stringOut)
-				for _, group := range captures {
-					if group.Optional {
-						items = append(items, abstractdomain.PossiblyUndefined(stringOut, "", false, false))
-					} else {
-						items = append(items, stringOut)
-					}
-				}
-				inner := abstractdomain.KnownList(items, abstractdomain.TrustProved)
+				elements := captureGroupElements(pattern, flags, spans, oracleGrade)
+				items := append([]abstractdomain.AbstractValue{stringOut}, elements...)
+				inner := withNamedGroups(abstractdomain.KnownList(items, abstractdomain.TrustProved), pattern, spans, elements, oracleGrade)
 				out := abstractdomain.PossiblyUndefined(inner, "", false, false)
 				return &out
 			}
@@ -594,395 +738,4 @@ func readStringMethods(site MethodCallSite, argKnowns []abstractdomain.AbstractV
 		}
 	}
 	return nil
-}
-
-// readStringMatchWithConstRegex is readStringMatchWithConstRegex in
-// the TS source: `.match` with a LITERAL pattern on an exact string —
-// the result is exactly specified (String.prototype.match through
-// RegExp semantics), so the host computes the exact row — the string-
-// read rule again. The regex OBJECT stays unmodeled; only the spec-
-// pinned result of this call is claimed. No match is null, which
-// leaves the model as the absent marker. The pattern may ride through
-// a const name bound to a regex literal — but a sticky non-global
-// regex reads its own lastIndex, which is process state, so that
-// shape stays out.
-func readStringMatchWithConstRegex(site MethodCallSite) *abstractdomain.AbstractValue {
-	ctx, env, e, receiver := site.Ctx, site.Env, site.E, site.Receiver
-	call := e.AsCallExpression()
-	var arguments []*ast.Node
-	if call.Arguments != nil {
-		arguments = call.Arguments.Nodes
-	}
-	regexLiteralOf := func(argument *ast.Node) *ast.Node {
-		if ast.IsRegularExpressionLiteral(argument) {
-			return argument
-		}
-		if !ast.IsIdentifier(argument) {
-			return nil
-		}
-		symbol := symbolAt(ctx.P.Checker, argument)
-		if symbol == nil || len(symbol.Declarations) != 1 {
-			return nil
-		}
-		declaration := symbol.Declarations[0]
-		if !ast.IsVariableDeclaration(declaration) {
-			return nil
-		}
-		varDecl := declaration.AsVariableDeclaration()
-		if varDecl.Initializer == nil || !ast.IsRegularExpressionLiteral(varDecl.Initializer) {
-			return nil
-		}
-		declList := declaration.Parent
-		if declList == nil || !ast.IsVariableDeclarationList(declList) ||
-			declList.Flags&ast.NodeFlagsConst == 0 {
-			return nil
-		}
-		text := varDecl.Initializer.Text()
-		flags := text[strings.LastIndex(text, "/")+1:]
-		if strings.Contains(flags, "y") && !strings.Contains(flags, "g") {
-			return nil
-		}
-		return varDecl.Initializer
-	}
-	var pattern *ast.Node
-	if site.Method == "match" && len(arguments) == 1 {
-		pattern = regexLiteralOf(arguments[0])
-	}
-	if pattern == nil {
-		return nil
-	}
-	receiverKnown := receiver
-	if site.HasTrackedName {
-		if held, ok := env.Get(site.TrackedName); ok {
-			receiverKnown = held
-		} else {
-			receiverKnown = silence.Residue()
-		}
-	}
-	if !(receiverKnown.Kind == abstractdomain.KindValues && receiverKnown.KindTag == abstractdomain.PrimitiveString) {
-		return nil
-	}
-	text := stringOf(receiverKnown.Values)
-	literal := pattern.Text()
-	lastSlash := strings.LastIndex(literal, "/")
-	source := literal[1:lastSlash]
-	flags := literal[lastSlash+1:]
-	grade := abstractdomain.MinTrustLevel(abstractdomain.TrustLevelOf(receiverKnown), abstractdomain.TrustSpec)
-	compiled, ok := regexToGo(source, flags)
-	if !ok {
-		out := silence.Residue()
-		return &out
-	}
-	matched := compiled.FindStringSubmatch(text)
-	if matched == nil {
-		out := abstractdomain.AtTrustLevel(abstractdomain.Undef, grade)
-		return &out
-	}
-	// an unmatched capture group is undefined — the absent slot. Go's
-	// regexp reports an unmatched group as "" indistinguishably from an
-	// empty match — FindStringSubmatchIndex tells them apart by index.
-	indices := compiled.FindStringSubmatchIndex(text)
-	items := make([]abstractdomain.AbstractValue, len(matched))
-	for i, part := range matched {
-		if i > 0 && indices[2*i] == -1 {
-			items[i] = abstractdomain.Undef
-			continue
-		}
-		items[i] = abstractdomain.KnownValues(refinementsets.CodepointsOf(part), abstractdomain.PrimitiveString, grade)
-	}
-	out := abstractdomain.KnownList(items, grade)
-	return &out
-}
-
-// exactZeroArgStringRow computes the argument-free string reads on an
-// exact receiver text — the case-mapping and trimming rows of
-// readStringMethods, split out so their transcription is testable on
-// its own. ("", false) where no row speaks.
-func exactZeroArgStringRow(method string, text string) (string, bool) {
-	switch method {
-	// Go's ToUpper/ToLower is the SIMPLE case mapping; the spec's
-	// Default Case Conversion carries SpecialCasing's multi-point rows
-	// ("ß" uppercases to "SS" — sec-string.prototype.touppercase), so
-	// only the ASCII range, where the two agree, computes — a wider
-	// receiver keeps the sort-level answer
-	case "toUpperCase":
-		if isASCII(text) {
-			return strings.ToUpper(text), true
-		}
-	case "toLowerCase":
-		if isASCII(text) {
-			return strings.ToLower(text), true
-		}
-	// the trims remove the spec's white-space set (sec-trimstring:
-	// WhiteSpace ∪ LineTerminator), which is not Go's — unicode.IsSpace
-	// holds NEL and omits ZWNBSP — and not the ASCII cut list either
-	// (NBSP, LS, PS). trimLeft/trimRight are the Annex B names for the
-	// SAME function objects — "The initial value of the *trimLeft*
-	// property is %String.prototype.trimStart%"
-	// (String.prototype.trimleft, String.prototype.trimright) — so each
-	// alias computes its target's row.
-	case "trim":
-		return strings.TrimFunc(text, isJSWhiteSpace), true
-	case "trimStart", "trimLeft":
-		return strings.TrimLeftFunc(text, isJSWhiteSpace), true
-	case "trimEnd", "trimRight":
-		return strings.TrimRightFunc(text, isJSWhiteSpace), true
-	}
-	return "", false
-}
-
-// replaceWithFunctionResult assembles String.prototype.replace /
-// replaceAll over an exact receiver and an exact string pattern with a
-// per-position replacement oracle. Positions are UTF-16 CODE-UNIT
-// indices (StringIndexOf counts code units); replaceAll's match scan
-// advances by max(1, _searchLength_) (sec-string.prototype.replaceall),
-// and the pieces concatenate preserved-then-replacement with the tail
-// appended (sec-string.prototype.replace steps 9-15). ("", false) when
-// the oracle cannot pin a replacement.
-func replaceWithFunctionResult(text string, pattern string, everyMatch bool, replacementAt func(matched string, position int) (string, bool)) (string, bool) {
-	units := utf16UnitsOf(text)
-	patternUnits := utf16UnitsOf(pattern)
-	searchLength := len(patternUnits)
-	advanceBy := searchLength
-	if advanceBy < 1 {
-		advanceBy = 1
-	}
-	// StringIndexOf over code units: the first start at or after `from`
-	// where every pattern unit matches; an EMPTY pattern matches at
-	// every index up to and including the length (sec-stringindexof)
-	indexOfUnits := func(from int) int {
-		for i := from; i+searchLength <= len(units); i++ {
-			match := true
-			for j := 0; j < searchLength; j++ {
-				if units[i+j] != patternUnits[j] {
-					match = false
-					break
-				}
-			}
-			if match {
-				return i
-			}
-		}
-		return -1
-	}
-	var positions []int
-	position := indexOfUnits(0)
-	if everyMatch {
-		for position != -1 {
-			positions = append(positions, position)
-			position = indexOfUnits(position + advanceBy)
-		}
-	} else if position != -1 {
-		positions = append(positions, position)
-	}
-	// no match: the receiver rides unchanged (sec-string.prototype.replace
-	// returns _string_ when _position_ is ~not-found~)
-	if len(positions) == 0 {
-		return text, true
-	}
-	var built []uint16
-	endOfLastMatch := 0
-	for _, matchPosition := range positions {
-		replacement, ok := replacementAt(pattern, matchPosition)
-		if !ok {
-			return "", false
-		}
-		built = append(built, units[endOfLastMatch:matchPosition]...)
-		built = append(built, utf16UnitsOf(replacement)...)
-		endOfLastMatch = matchPosition + searchLength
-	}
-	if endOfLastMatch < len(units) {
-		built = append(built, units[endOfLastMatch:]...)
-	}
-	return utf16ToString(built), true
-}
-
-// inlineReplacerCall runs a function replacer's body once with the
-// spec's three arguments bound — « _searchString_, 𝔽(_position_),
-// _string_ » (sec-string.prototype.replace) — the same mechanics as
-// InlineCallback (callback_models.go), widened to the three-argument
-// shape. Whatever the body writes to outer names is forgotten: a
-// replacer is still a write site.
-func inlineReplacerCall(ctx *FlowContext, env Env, replacer *ast.Node, matched string, position int, whole string) abstractdomain.AbstractValue {
-	callArguments := []abstractdomain.AbstractValue{
-		abstractdomain.KnownValues(refinementsets.CodepointsOf(matched), abstractdomain.PrimitiveString, abstractdomain.TrustSpec),
-		abstractdomain.KnownValues([]float64{float64(position)}, abstractdomain.PrimitiveNumber, abstractdomain.TrustSpec),
-		abstractdomain.KnownValues(refinementsets.CodepointsOf(whole), abstractdomain.PrimitiveString, abstractdomain.TrustSpec),
-	}
-	parameters := replacer.Parameters()
-	bindings := map[string]abstractdomain.AbstractValue{}
-	for i, argument := range callArguments {
-		var parameter *ast.Node
-		if len(parameters) > i {
-			parameter = parameters[i]
-		}
-		BindParameter(ctx.P.Checker, parameter, argument, bindings)
-	}
-	callEnv := env.Clone()
-	for name, known := range bindings {
-		callEnv.Set(name, known)
-	}
-	body := replacer.Body()
-	result := silence.Residue()
-	if body != nil {
-		if ast.IsBlock(body) {
-			var sink []abstractdomain.AbstractValue
-			sinkCtx := *ctx
-			sinkCtx.ReturnSink = &sink
-			AnalyzeStatement(&sinkCtx, callEnv, body, nil)
-			if len(sink) > 0 {
-				joined := sink[0]
-				for _, v := range sink[1:] {
-					joined = abstractdomain.JoinKnown(joined, v)
-				}
-				result = joined
-			}
-		} else {
-			result = evaluateExpression(ctx, callEnv, body)
-		}
-	}
-	written := map[string]struct{}{}
-	if body != nil {
-		AssignedNames(ctx.P.Checker, body, written)
-	}
-	for name := range written {
-		if _, ok := env.Get(name); ok {
-			HavocEnv(ctx.Aliases, env, name)
-		}
-	}
-	return result
-}
-
-// goReplacementOf mirrors a JS plain-string replacement against Go's
-// regexp ReplaceAll, which reads `$name`/`$1` as its own group syntax
-// — a literal `$` in a JS replacement string must escape to `$$`.
-func goReplacementOf(replacement string) string {
-	return strings.ReplaceAll(replacement, "$", "$$")
-}
-
-// splitEmpty mirrors `"".split("")` semantics: one entry per UTF-16
-// code unit (JS String.prototype.split on the empty separator is
-// unit-indexed, same as charAt).
-func splitEmpty(text string) []string {
-	units := utf16UnitsOf(text)
-	out := make([]string, len(units))
-	for i, u := range units {
-		out[i] = utf16ToString([]uint16{u})
-	}
-	return out
-}
-
-// utf16UnitsOf/utf16ToString/jsSlice/jsSubstring/codePointAtUTF16/
-// jsPadStart/jsPadEnd: UTF-16 code-unit primitives — JS string reads
-// are unit-indexed (sec-ecmascript-language-types-string-type), which
-// this file's exact reads must mirror exactly rather than reading Go's
-// (rune-indexed) strings directly.
-func utf16UnitsOf(s string) []uint16 {
-	var out []uint16
-	for _, r := range s {
-		if r > 0xFFFF {
-			r -= 0x10000
-			out = append(out, uint16(0xD800+(r>>10)), uint16(0xDC00+(r&0x3FF)))
-		} else {
-			out = append(out, uint16(r))
-		}
-	}
-	return out
-}
-
-func utf16ToString(units []uint16) string {
-	var b strings.Builder
-	for i := 0; i < len(units); i++ {
-		u := units[i]
-		if u >= 0xD800 && u <= 0xDBFF && i+1 < len(units) && units[i+1] >= 0xDC00 && units[i+1] <= 0xDFFF {
-			r := (rune(u)-0xD800)<<10 + (rune(units[i+1]) - 0xDC00) + 0x10000
-			b.WriteRune(r)
-			i++
-			continue
-		}
-		b.WriteRune(rune(u))
-	}
-	return b.String()
-}
-
-func jsSlice(units []uint16, a, b int) []uint16 {
-	n := len(units)
-	clamp := func(i int) int {
-		if i < 0 {
-			i = n + i
-			if i < 0 {
-				i = 0
-			}
-		}
-		if i > n {
-			i = n
-		}
-		return i
-	}
-	start := clamp(a)
-	end := clamp(b)
-	if start >= end {
-		return nil
-	}
-	return units[start:end]
-}
-
-func jsSubstring(units []uint16, a, b int) []uint16 {
-	n := len(units)
-	clamp := func(i int) int {
-		if i < 0 {
-			return 0
-		}
-		if i > n {
-			return n
-		}
-		return i
-	}
-	start := clamp(a)
-	end := clamp(b)
-	if start > end {
-		start, end = end, start
-	}
-	return units[start:end]
-}
-
-func codePointAtUTF16(units []uint16, i int) (int, bool) {
-	if i < 0 || i >= len(units) {
-		return 0, false
-	}
-	u := units[i]
-	if u >= 0xD800 && u <= 0xDBFF && i+1 < len(units) && units[i+1] >= 0xDC00 && units[i+1] <= 0xDFFF {
-		return int((rune(u)-0xD800)<<10+(rune(units[i+1])-0xDC00)) + 0x10000, true
-	}
-	return int(u), true
-}
-
-func jsPadStart(text string, targetLength int, pad string) string {
-	units := utf16UnitsOf(text)
-	if len(units) >= targetLength || pad == "" {
-		return text
-	}
-	padUnits := utf16UnitsOf(pad)
-	need := targetLength - len(units)
-	var built []uint16
-	for len(built) < need {
-		built = append(built, padUnits...)
-	}
-	built = built[:need]
-	return utf16ToString(built) + text
-}
-
-func jsPadEnd(text string, targetLength int, pad string) string {
-	units := utf16UnitsOf(text)
-	if len(units) >= targetLength || pad == "" {
-		return text
-	}
-	padUnits := utf16UnitsOf(pad)
-	need := targetLength - len(units)
-	var built []uint16
-	for len(built) < need {
-		built = append(built, padUnits...)
-	}
-	built = built[:need]
-	return text + utf16ToString(built)
 }

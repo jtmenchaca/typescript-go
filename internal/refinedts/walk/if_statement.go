@@ -15,11 +15,21 @@ import (
 )
 
 // PerformsTest is performsTest in the TS source: whether a condition
-// PERFORMS a test — applies a call, a comparison, or a negation of
-// one to its values — as opposed to a bare read of a constant flag
-// or a literal, the spelling of deliberate dead code
-// (`if (DEBUG)`), which stays exempt the way tsc exempts `if
-// (false)` bodies from its unreachable-code error.
+// PERFORMS a test — applies a call, a comparison, or a NEGATION to its
+// values — as opposed to a bare read of a constant flag or a literal,
+// the spelling of deliberate dead code (`if (DEBUG)`), which stays
+// exempt the way tsc exempts `if (false)` bodies from its
+// unreachable-code error.
+//
+// A NEGATION is a test whatever it negates. `!` applies ToBoolean and
+// inverts it — an operation on the value, not a bare read of it — so
+// `if (!b)` on a b the walk proved true is a dead branch the author
+// needs to hear about, exactly as `if (b === false)` would be. The
+// earlier reading recursed into the operand, so a negated bare
+// identifier answered false and the dead-guard report was suppressed on
+// the one spelling this row is about. The exemption the doc above
+// describes is for a BARE read (`if (DEBUG)`); `!DEBUG` was never that
+// spelling.
 func PerformsTest(e *ast.Node) bool {
 	bare := e
 	if ast.IsParenthesizedExpression(e) {
@@ -47,7 +57,7 @@ func PerformsTest(e *ast.Node) bool {
 	if ast.IsPrefixUnaryExpression(bare) {
 		unary := bare.AsPrefixUnaryExpression()
 		if unary.Operator == ast.KindExclamationToken {
-			return PerformsTest(unary.Operand)
+			return true
 		}
 	}
 	return false

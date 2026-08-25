@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
@@ -239,6 +240,13 @@ type BindEntryEnvInput struct {
 // (assignability's FlowContext-reading files join this package per
 // PORT.md) — called the same way.
 func BindEntryEnv(input BindEntryEnvInput) {
+	// bind funnels every write this function makes through one place,
+	// so the log always shows exactly what the environment received —
+	// this is where "Wide" first shows as plain number if it does.
+	bind := func(name string, held abstractdomain.AbstractValue) {
+		input.Env.Set(name, held)
+		diagnose.LogIf(diagnose.EventOn("walk.entryEnv"), "walk.entryEnv", "param", name, "value", spellValue(held))
+	}
 	for i, parameter := range input.Parameters {
 		var stated *annotations.DeclaredRefinement
 		if input.StatedParams != nil && i < len(input.StatedParams) {
@@ -253,7 +261,7 @@ func BindEntryEnv(input BindEntryEnvInput) {
 			if stated != nil {
 				source := AbstractValueOfDeclared(*stated)
 				ReadDestructuring(decl.Name(), source, func(name string, held abstractdomain.AbstractValue, at *ast.Node) {
-					input.Env.Set(name, silence.SeededBinding(input.P.Checker, held, at))
+					bind(name, silence.SeededBinding(input.P.Checker, held, at))
 				})
 				continue
 			}
@@ -268,11 +276,11 @@ func BindEntryEnv(input BindEntryEnvInput) {
 			ReadDestructuring(decl.Name(), plain, func(name string, held abstractdomain.AbstractValue, at *ast.Node) {
 				if input.CallSiteInitialStates != nil {
 					if fromCall, ok := input.CallSiteInitialStates[name]; ok {
-						input.Env.Set(name, entryStateMeet(input.P.Checker, at, fromCall, held))
+						bind(name, entryStateMeet(input.P.Checker, at, fromCall, held))
 						return
 					}
 				}
-				input.Env.Set(name, silence.SeededBinding(input.P.Checker, held, at))
+				bind(name, silence.SeededBinding(input.P.Checker, held, at))
 			})
 			continue
 		}
@@ -294,14 +302,14 @@ func BindEntryEnv(input BindEntryEnvInput) {
 			// instead of the unstated one.
 			if input.CallSiteInitialStates != nil {
 				if fromCall, ok := input.CallSiteInitialStates[name]; ok {
-					input.Env.Set(name, entryStateMeet(input.P.Checker, parameter, fromCall, declaredValue))
+					bind(name, entryStateMeet(input.P.Checker, parameter, fromCall, declaredValue))
 					if input.OnStated != nil {
 						input.OnStated(name, stated)
 					}
 					continue
 				}
 			}
-			input.Env.Set(name, declaredValue)
+			bind(name, declaredValue)
 			if input.OnStated != nil {
 				input.OnStated(name, stated)
 			}
@@ -309,7 +317,7 @@ func BindEntryEnv(input BindEntryEnvInput) {
 		}
 		if input.CallSiteInitialStates != nil {
 			if fromCall, ok := input.CallSiteInitialStates[name]; ok {
-				input.Env.Set(name, entryStateMeet(input.P.Checker, parameter, fromCall, InitialStateOfPlainParameter(input.P, parameter)))
+				bind(name, entryStateMeet(input.P.Checker, parameter, fromCall, InitialStateOfPlainParameter(input.P, parameter)))
 				continue
 			}
 		}
@@ -326,6 +334,6 @@ func BindEntryEnv(input BindEntryEnvInput) {
 		if name == "this" {
 			continue
 		}
-		input.Env.Set(name, InitialStateOfPlainParameter(input.P, parameter))
+		bind(name, InitialStateOfPlainParameter(input.P, parameter))
 	}
 }
