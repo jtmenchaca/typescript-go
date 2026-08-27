@@ -210,6 +210,13 @@ func foreignEntryRowOf(declared *annotations.DeclaredRefinement, name string) (F
 		return ForeignEntryRow{}, "parameter '" + name + "' states an array of records, which crosses no single set"
 	case annotations.DeclaredVariable:
 		return ForeignEntryRow{}, "parameter '" + name + "' states a refinement variable, which crosses no single set"
+	case annotations.DeclaredTuple:
+		// the row carries ONE element case for a sequence, and a tuple's
+		// slots may each state a different one — there is no slot to put
+		// the disagreement in, so the row says what it cannot carry
+		// rather than collapsing the slots into a single case that
+		// claims more than any one of them does.
+		return ForeignEntryRow{}, "parameter '" + name + "' states a tuple, whose slots may differ and the entry row carries one element case"
 	case annotations.DeclaredPossiblyUndefined:
 		if declared.Inner == nil {
 			return ForeignEntryRow{}, "parameter '" + name + "' admits the absent value, which crosses no single set"

@@ -19,6 +19,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/compiler"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/walk"
 )
 
@@ -143,11 +144,13 @@ func answerAtRaw(
 	if token == nil || !ast.IsIdentifier(token) {
 		return walk.No(walk.Unknown{Why: "not-a-name"})
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := p.Checker.GetSymbolAtLocation(token)
 	if symbol == nil {
 		return walk.No(walk.Unknown{Why: "not-a-name"})
 	}
 	if (symbol.Flags & ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		symbol = p.Checker.GetAliasedSymbol(symbol)
 	}
 

@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // ArgumentNodesOf is THE SYNTACTIC argument-reading seam: the
@@ -287,6 +288,7 @@ func InlineStoredClosure(ctx *FlowContext, env Env, call *ast.Node, effective Ef
 		if !ast.IsIdentifier(calleeExpression) {
 			return nil
 		}
+		tracing.CountBy("host.symbolAtLocation", 1)
 		found := ctx.P.Checker.GetSymbolAtLocation(calleeExpression)
 		if found == nil {
 			return nil

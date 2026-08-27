@@ -11,8 +11,8 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
-	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
@@ -20,9 +20,23 @@ import (
 // collectionKey is the TS source's collectionKey: a key a collection
 // can carry: a primitive exact value — SameValueZero on primitives is
 // value equality the model decides. An object key compares by
-// reference, identity the walk does not carry; a NaN key arrives as
-// the NAN kind and is refused with it.
+// reference, identity the walk does not carry.
+//
+// NaN IS SUCH A KEY. A Map or Set compares keys by SameValueZero
+// (sec-map.prototype.set, sec-set.prototype.add), and its Number arm
+// opens "If x is NaN and y is NaN, return *true*"
+// (sec-numeric-types-number-sameValueZero step 1). So NaN is ONE key
+// that a second, syntactically distinct NaN lookup hits — exactly the
+// question this predicate answers yes to for every other exact
+// primitive. The domain already decides the comparison: SameKnown
+// answers true for two KindNaN values, which is the equality
+// findCollectionEntry looks entries up by. Refusing the NAN kind here
+// left `m.set(NaN, v)` storing no entry, so `m.has(NaN)` could not
+// answer the *true* the spec fixes.
 func collectionKey(k abstractdomain.AbstractValue) bool {
+	if k.Kind == abstractdomain.KindNaN {
+		return true
+	}
 	return k.Kind == abstractdomain.KindValues && k.KindTag != abstractdomain.PrimitiveArray &&
 		(k.KindTag == abstractdomain.PrimitiveString || len(k.Values) == 1)
 }
@@ -130,7 +144,15 @@ func readWeakEntrySet(site MethodCallSite, collectionReceiver abstractdomain.Abs
 		if grade != abstractdomain.TrustProved {
 			next.Grade = grade
 		}
-		UpdateTrackedEnv(ctx.Aliases, env, site.TrackedName, next)
+		// THE LAST-TOUCH SITE SEAM: the call itself — `.set(key, value)` /
+		// `.add(key)` — is the mutating construct behind this write.
+		if derivation.Active() {
+			closeSite := derivation.TouchSite(derivation.Construct(e), derivation.Range(e))
+			UpdateTrackedEnv(ctx.Aliases, env, site.TrackedName, next)
+			closeSite()
+		} else {
+			UpdateTrackedEnv(ctx.Aliases, env, site.TrackedName, next)
+		}
 		return next
 	}
 	symbol, hasIdentity := weakEntryIdentity(ctx, arguments[0])
@@ -231,12 +253,23 @@ func readWeakEntryGet(site MethodCallSite, collectionReceiver abstractdomain.Abs
 
 // ReadCollectionConstruction is readCollectionConstruction in the TS
 // source: `new Map([[k, v], …])` / `new Set([v, …])` on the
-// default-lib constructor with a LITERAL entry array: the built
-// collection, entries evaluated in order, a later duplicate key
-// overwriting the earlier (the constructor's own Set/add semantics).
-// Bare `new Map()` is the empty complete collection. A spread, an
-// object key, or a non-literal argument leaves the construction
-// unread.
+// default-lib constructor: the built collection, entries taken in
+// order, a later duplicate key overwriting the earlier (the
+// constructor's own set/add semantics, per AddEntriesFromIterable's
+// own per-item loop). Bare `new Map()` is the empty complete
+// collection.
+//
+// The entry list is read from whichever side states it. A LITERAL
+// entry array states its pairs in syntax. A SPREAD element inside one
+// states them through the spread value — a built collection's own
+// iteration order, or an exactly-held list's items. And a NON-LITERAL
+// argument that evaluates to an exactly-held list states them
+// outright, which is the `new Map(Object.entries(o))` shape: the
+// constructor iterates what it is handed, so a list the walk holds
+// exactly is an entry set it can carry through.
+//
+// An object key, or any item the walk cannot read as the shape the
+// constructor requires, leaves the construction unread.
 func ReadCollectionConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.AbstractValue {
 	newExpr := e.AsNewExpression()
 	if !ast.IsIdentifier(newExpr.Expression) {
@@ -278,7 +311,7 @@ func ReadCollectionConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstrac
 	if weak {
 		return nil
 	}
-	if len(args) != 1 || !ast.IsArrayLiteralExpression(args[0]) {
+	if len(args) != 1 {
 		return nil
 	}
 	var entries []abstractdomain.CollectionEntry
@@ -295,8 +328,84 @@ func ReadCollectionConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstrac
 		entries = append(entries, abstractdomain.CollectionEntry{Key: key, Value: value})
 		return true
 	}
+	// putIterated pours ONE iterated item into the fold, the way the
+	// constructor's own loop does. AddEntriesFromIterable
+	// (sec-map-iterable) requires each item of a Map's iterable to be an
+	// Object and reads its "0" and "1" — exactly a two-item list here —
+	// then calls set(k, v); a Set's constructor calls add(item) on the
+	// item itself (sec-set-iterable). An item the walk cannot read as
+	// that shape puts nothing and stops the read.
+	putIterated := func(item abstractdomain.AbstractValue) bool {
+		if flavor != abstractdomain.FlavorMap {
+			return put(item, abstractdomain.Undef)
+		}
+		if item.Kind != abstractdomain.KindList || len(item.Items) != 2 {
+			return false
+		}
+		return put(item.Items[0], item.Items[1])
+	}
+	// THE WHOLE ARGUMENT AS A VALUE. `new Map(entries)` where entries is
+	// a binding — not an array literal written at the call — is the same
+	// construction: AddEntriesFromIterable walks whatever the argument
+	// iterates, and an exactly-held list states every item it yields, in
+	// order. So a complete list argument is read here, which is how a
+	// Map built from Object.entries(o) or from a drained view carries the
+	// entry set those produced rather than losing it at the constructor.
+	//
+	// WHAT IS READ, AND WHY NOT EVERYTHING. The argument's value is taken
+	// from what the walk already HOLDS for a name, and evaluated only for
+	// a call this tree already knows writes nothing it is handed
+	// (ReadOnlyStaticCalls — Object.entries and its kin). Anything richer
+	// is left alone: this reader runs inside a chain whose later readers
+	// evaluate the same construction, so evaluating an effectful argument
+	// here would run its code a second time.
+	if !ast.IsArrayLiteralExpression(args[0]) {
+		held := constructorIterableValue(ctx, env, args[0])
+		if held == nil || held.Kind != abstractdomain.KindList {
+			return nil
+		}
+		for _, item := range held.Items {
+			if !putIterated(item) {
+				return nil
+			}
+		}
+		out := abstractdomain.AbstractValue{Kind: abstractdomain.KindCollection, CollectionFlavor: flavor, Entries: entries, Complete: true}
+		return &out
+	}
 	for _, element := range args[0].AsArrayLiteralExpression().Elements.Nodes {
+		if ast.IsSpreadElement(element) {
+			// a spread pours the spread value's own items in, in order.
+			// A built collection states them through collectionSpreadItems
+			// — a Set contributes its members one apiece, a Map its
+			// [key, value] pairs (sec-map.prototype-%symbol.iterator%) —
+			// and an exactly-held list states them outright. Each item
+			// then lands through the constructor's own per-item step, so a
+			// later duplicate key overwrites the earlier exactly as a
+			// written-out pair would. The spread value is read under
+			// constructorIterableValue's own no-replay rule, so a spread of
+			// an effectful expression declines rather than running it here.
+			spread := constructorIterableValue(ctx, env, element.AsSpreadElement().Expression)
+			if spread == nil {
+				return nil
+			}
+			items, spreadable := collectionSpreadItems(*spread)
+			if !spreadable {
+				if spread.Kind != abstractdomain.KindList {
+					return nil
+				}
+				items = spread.Items
+			}
+			for _, item := range items {
+				if !putIterated(item) {
+					return nil
+				}
+			}
+			continue
+		}
 		if flavor == abstractdomain.FlavorMap {
+			// a pair written out at the call site reads its two halves
+			// straight from the syntax, so a key or value the walk can
+			// evaluate needs no list value standing behind the pair
 			if !ast.IsArrayLiteralExpression(element) || len(element.AsArrayLiteralExpression().Elements.Nodes) != 2 {
 				return nil
 			}
@@ -308,26 +417,50 @@ func ReadCollectionConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstrac
 			}
 			continue
 		}
-		if ast.IsSpreadElement(element) {
-			// a spread of a KNOWN complete collection pours its members
-			// in, in insertion order — Set's own add semantics dedupe
-			spread := evaluateExpression(ctx, env, element.AsSpreadElement().Expression)
-			if spread.Kind != abstractdomain.KindCollection || !spread.Complete {
-				return nil
-			}
-			for _, member := range spread.Entries {
-				if !put(member.Key, abstractdomain.Undef) {
-					return nil
-				}
-			}
-			continue
-		}
 		if !put(evaluateExpression(ctx, env, element), abstractdomain.Undef) {
 			return nil
 		}
 	}
 	out := abstractdomain.AbstractValue{Kind: abstractdomain.KindCollection, CollectionFlavor: flavor, Entries: entries, Complete: true}
 	return &out
+}
+
+// constructorIterableValue is the value of a Map/Set constructor's
+// whole-argument iterable, where reading it cannot replay an effect.
+//
+// A NAME (or a property chain off one) is read from what the walk
+// already holds — no code runs at all. A CALL is evaluated only when
+// its callee is one of the statics this tree already recognizes as
+// reading its arguments and writing nothing (ReadOnlyStaticCalls:
+// Object.entries and its kin), which is the `new Map(Object.entries(o))`
+// shape. Nil for anything else, so an effectful argument is never run
+// here — the same discipline heldArgumentValue's own doc states, with
+// the read-only statics allowed through because they provably have
+// nothing to replay.
+func constructorIterableValue(ctx *FlowContext, env Env, argument *ast.Node) *abstractdomain.AbstractValue {
+	if held := heldArgumentValue(ctx, env, argument); held != nil {
+		return held
+	}
+	if !ast.IsCallExpression(argument) {
+		return nil
+	}
+	call := argument.AsCallExpression()
+	if !ast.IsPropertyAccessExpression(call.Expression) {
+		return nil
+	}
+	access := call.Expression.AsPropertyAccessExpression()
+	if !ast.IsIdentifier(access.Expression) || !resolvesToDefaultLib(ctx, access.Expression) {
+		return nil
+	}
+	methods, known := dataflowfacts.ReadOnlyStaticCalls[access.Expression.Text()]
+	if !known {
+		return nil
+	}
+	if _, readOnly := methods[access.Name().Text()]; !readOnly {
+		return nil
+	}
+	value := evaluateExpression(ctx, env, argument)
+	return &value
 }
 
 // findCollectionEntry finds an entry by SameValueZero-equal key
@@ -381,8 +514,20 @@ func readCollectionGetHas(site MethodCallSite) *abstractdomain.AbstractValue {
 					out := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, grade)
 					return &out
 				}
-				out := silence.ResidueOf("this key was never seen set, but the record isn't complete — " +
-					"a miss only answers when every entry is named")
+				// a standing guard already established this exact key
+				// present — the entry is in [[MapData]], so this read is
+				// the *true* sec-map.prototype.has returns for one, even
+				// though THIS walk never saw the entry set on the record
+				if KeyPresenceEstablishedForHas(env, e) {
+					out := abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean, abstractdomain.MinTrustLevel(abstractdomain.TrustSpec, grade))
+					return &out
+				}
+				// neither entry nor fact pins WHICH boolean — but `has`
+				// answers a Boolean on every run (sec-map.prototype.has
+				// returns *true* or *false*, nothing else), so the sort's
+				// whole ground {0, 1} is the determined answer, not a
+				// residue: an incomplete record blocks exactness only
+				out := abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, abstractdomain.MinTrustLevel(abstractdomain.TrustSpec, grade))
 				return &out
 			}
 			if collectionReceiver.CollectionFlavor == abstractdomain.FlavorMap {
@@ -402,6 +547,31 @@ func readCollectionGetHas(site MethodCallSite) *abstractdomain.AbstractValue {
 					"a miss only answers when every entry is named")
 				return &out
 			}
+		}
+		// a SYMBOLIC key the value-equality reading cannot compare can
+		// still be established present — by a held `has(k)` guard or a
+		// completed `set(k, v)` — under the fact's own spelling
+		// discipline, which compares the key's spelling rather than its
+		// value (key_presence_facts.go). Consulted before the residue
+		// below; `get` needs no arm here because its residue answers
+		// KindUnknown and evaluate_call_expression's unknown path asks
+		// the same fact before wearing the resolved signature.
+		if method == "has" && KeyPresenceEstablishedForHas(env, e) {
+			out := abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean,
+				abstractdomain.MinTrustLevel(abstractdomain.TrustSpec, abstractdomain.TrustLevelOf(collectionReceiver)))
+			return &out
+		}
+		// a symbolic key with no standing fact still gets `has`'s SORT:
+		// a Boolean comes back on every run, so {0, 1} is determined
+		// even though which one is not — the same reading the exact-key
+		// incomplete-miss arm above takes. `get` keeps the residue: its
+		// value is the held V or undefined, and the annotation readers
+		// on the caller's side reconstruct that pair from the stated
+		// signature.
+		if method == "has" {
+			out := abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean,
+				abstractdomain.MinTrustLevel(abstractdomain.TrustSpec, abstractdomain.TrustLevelOf(collectionReceiver)))
+			return &out
 		}
 		out := silence.ResidueOf("the key isn't one primitive exact value, so it isn't a key " +
 			"collectionKey's value-equality reading can compare")
@@ -469,7 +639,15 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 				if grade != abstractdomain.TrustProved {
 					next.Grade = grade
 				}
-				UpdateTrackedEnv(ctx.Aliases, env, insertName, next)
+				// THE LAST-TOUCH SITE SEAM: the call `m.getOrInsert(k, v)`
+				// itself is the mutating construct behind this write.
+				if derivation.Active() {
+					closeSite := derivation.TouchSite(derivation.Construct(e), derivation.Range(e))
+					UpdateTrackedEnv(ctx.Aliases, env, insertName, next)
+					closeSite()
+				} else {
+					UpdateTrackedEnv(ctx.Aliases, env, insertName, next)
+				}
 			}
 			if collectionKey(key) {
 				grade = abstractdomain.MinTrustLevel(grade, abstractdomain.TrustLevelOf(key))
@@ -485,16 +663,34 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 					return &out
 				}
 				// maybe-present: after the call the key holds its OLD value
-				// or v, and the old value is not named — the entry stays
-				// unstated and the answer with it
+				// or v. The receiver's own stated `Map<K, V>` covers both
+				// — the old value entered wearing V at its own write, and
+				// v is judged against V by the same reader — so the answer
+				// is V's stated set joined with v where V is spelled, and
+				// the key is present afterward either way
+				// (sec: the model's own header; RecordKeyPresenceAfterWrite
+				// runs after refresh's sweep). Only a receiver spelling no
+				// V keeps the residue.
 				refresh(c.Entries, false)
+				RecordKeyPresenceAfterWrite(env, receiverExpression, arguments[0])
+				if statedValue := MapStatedValueOfGetOrInsert(ctx, receiverExpression, value, arguments[1]); statedValue != nil {
+					out := abstractdomain.AtTrustLevel(abstractdomain.JoinKnown(*statedValue, value), grade)
+					return &out
+				}
 				out := silence.ResidueOf("getOrInsert's key may already be present, but the old value " +
 					"isn't named, so the entry stays unstated")
 				return &out
 			}
 			// an unreadable key still writes the COLLECTION, not the walk's
-			// knowledge of its class — the entries drop, the record stays
+			// knowledge of its class — the entries drop, the record stays.
+			// The answered VALUE follows the same stated-V rule as the
+			// maybe-present arm above, and the key is present afterward
 			refresh(nil, false)
+			RecordKeyPresenceAfterWrite(env, receiverExpression, arguments[0])
+			if statedValue := MapStatedValueOfGetOrInsert(ctx, receiverExpression, value, arguments[1]); statedValue != nil {
+				out := abstractdomain.AtTrustLevel(abstractdomain.JoinKnown(*statedValue, value), grade)
+				return &out
+			}
 			out := silence.ResidueOf("getOrInsert's key isn't one primitive exact value, so the " +
 				"collection writes but the inserted-or-held value isn't named")
 			return &out
@@ -512,7 +708,15 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 			if grade != abstractdomain.TrustProved {
 				next.Grade = grade
 			}
-			UpdateTrackedEnv(ctx.Aliases, env, trackedName, next)
+			// THE LAST-TOUCH SITE SEAM: the call — `.set`/`.add`/`.delete`/
+			// `.clear` — is the mutating construct behind this write.
+			if derivation.Active() {
+				closeSite := derivation.TouchSite(derivation.Construct(e), derivation.Range(e))
+				UpdateTrackedEnv(ctx.Aliases, env, trackedName, next)
+				closeSite()
+			} else {
+				UpdateTrackedEnv(ctx.Aliases, env, trackedName, next)
+			}
 			return next
 		}
 		if method == "clear" && len(arguments) == 0 {
@@ -531,6 +735,11 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 		if c.CollectionFlavor == abstractdomain.FlavorMap && method == "set" && len(arguments) == 2 {
 			key := evaluateExpression(ctx, env, arguments[0])
 			value := evaluateExpression(ctx, env, arguments[1])
+			// the receiver's stated `Map<K, V>` makes V an invariant on
+			// every stored value — judged here, at the write, the same
+			// way a declared binding's own set is (CheckMapValueWrite's
+			// own doc on why the read side depends on it)
+			CheckMapValueWrite(ctx, e, value, arguments[1])
 			if collectionKey(key) {
 				var next []abstractdomain.CollectionEntry
 				if held := findCollectionEntry(c.Entries, key); held != nil {
@@ -575,7 +784,17 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 					}
 					next = append(next, entry)
 				}
+				// refresh's UpdateTrackedEnv sweeps every dotted entry
+				// under the root, surviving presence facts included — a
+				// literal-keyed fact different from a literal deleted key
+				// names an entry this delete cannot touch
+				// (KeyPresenceSurvivesRemoval), so those are collected
+				// first and written back after the sweep
+				survivors := keyPresenceSurvivorsHeld(env, receiverExpression, arguments[0])
 				refresh(next, c.Complete)
+				for _, place := range survivors {
+					env.Set(place, keyPresenceEstablished)
+				}
 				if found {
 					out := abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean, grade)
 					return &out
@@ -584,8 +803,11 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 					out := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveBoolean, grade)
 					return &out
 				}
-				out := silence.ResidueOf("this key was never seen set, but the record isn't complete — " +
-					"an untracked call could have deleted or set this exact key too")
+				// which boolean is unpinned on an incomplete record, but
+				// `delete` answers a Boolean on every run
+				// (sec-map.prototype.delete returns *true* or *false*), so
+				// the sort's whole ground {0, 1} is the determined answer
+				out := abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, abstractdomain.MinTrustLevel(abstractdomain.TrustSpec, grade))
 				return &out
 			}
 		}
@@ -595,10 +817,23 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 		// their rows instead of noting an unmodeled call
 		dropped := refresh(nil, false)
 		if method == "delete" {
-			out := abstractdomain.KnownSet(refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1})), nil, abstractdomain.MinTrustLevel(abstractdomain.TrustSpec, grade), abstractdomain.SetKindTagNone)
+			// delete answers a BOOLEAN (sec-map.prototype.delete), and a
+			// boolean is KindValues{0,1} wearing PrimitiveBoolean — a
+			// KindSet oneOf{0,1} is indistinguishable from the numbers 0
+			// and 1, so every later reader asking "is this a boolean?"
+			// says no and Number(...) of it models the general conversion,
+			// NaN included.
+			out := abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, abstractdomain.MinTrustLevel(abstractdomain.TrustSpec, grade))
 			return &out
 		}
 		if method == "add" || method == "set" {
+			// the record's entries dropped, but the KEY handed to set/add
+			// is present afterward whatever the other entries are — the
+			// same fact a held `has(k)` guard writes, written after
+			// refresh's own sweep (RecordKeyPresenceAfterWrite's doc)
+			if len(arguments) >= 1 {
+				RecordKeyPresenceAfterWrite(env, receiverExpression, arguments[0])
+			}
 			return &dropped
 		}
 		out := silence.ResidueOf("clear/set/add/delete matched with an argument count the model " +
@@ -621,11 +856,60 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 		if receiverTypeName == "Set" || receiverTypeName == "Map" || receiverTypeName == "WeakSet" || receiverTypeName == "WeakMap" {
 			if (method == "delete" || method == "has") && len(arguments) == 1 {
 				evaluateExpression(ctx, env, arguments[0])
-				out := abstractdomain.KnownSet(refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1})), nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
+				// a delete REMOVES an entry, so the standing presence
+				// facts it can invalidate sweep — all but a literal-keyed
+				// fact provably different from a literal deleted key
+				// (DropKeyPresenceOnRemoval's doc); the tracked arm gets
+				// its sweep from UpdateTrackedEnv and restores the same
+				// survivors after it
+				if method == "delete" {
+					DropKeyPresenceOnRemoval(env, receiverExpression, arguments[0])
+				}
+				// a standing guard for this exact key answers the read
+				// exactly, even on a receiver whose entries the walk
+				// never watched — the fact is about [[MapData]], not
+				// about the walk's record of it (key_presence.go)
+				if method == "has" && KeyPresenceEstablishedForHas(env, e) {
+					out := abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec)
+					return &out
+				}
+				// both answer a BOOLEAN, which the domain spells as
+				// KindValues{0,1} tagged PrimitiveBoolean; an untagged
+				// KindSet oneOf{0,1} reads back as the numbers 0 and 1 and
+				// loses the sort.
+				out := abstractdomain.KnownValues([]float64{0, 1}, abstractdomain.PrimitiveBoolean, abstractdomain.TrustSpec)
 				return &out
 			}
 			if method == "add" && len(arguments) == 1 {
 				evaluateExpression(ctx, env, arguments[0])
+				// after the add this key IS present
+				// (sec-set.prototype.add appends when no entry matches,
+				// returns with it present either way) — the fact a later
+				// `has(k)` reads (RecordKeyPresenceAfterWrite's doc)
+				RecordKeyPresenceAfterWrite(env, receiverExpression, arguments[0])
+				return &receiver
+			}
+			// `m.set(k, v)` on a receiver the walk holds no entries for.
+			// The RECORD is not pinned, so nothing is claimed about what
+			// the map holds afterward — but the receiver's stated
+			// `Map<K, V>` still makes V an invariant on the value going
+			// in, and that obligation does not depend on knowing the
+			// entries. Judging it here is what makes a declared map
+			// parameter a real sink; without this arm the call fell
+			// through unclaimed and the written value was never judged
+			// at all. `set` answers the receiver itself
+			// (sec-map.prototype.set's own `return M`).
+			if receiverTypeName == "Map" && method == "set" && len(arguments) == 2 {
+				evaluateExpression(ctx, env, arguments[0])
+				written := evaluateExpression(ctx, env, arguments[1])
+				CheckMapValueWrite(ctx, e, written, arguments[1])
+				// after the set this key IS present (sec-map.prototype.set
+				// appends a new record or writes the matching one) — the
+				// fact a later `get(k)`/`has(k)` reads to drop the absence
+				// its host signature states (RecordKeyPresenceAfterWrite's
+				// doc). Other keys' standing facts survive: a set removes
+				// no entry.
+				RecordKeyPresenceAfterWrite(env, receiverExpression, arguments[0])
 				return &receiver
 			}
 			// get answers the held value, or undefined for a missing key
@@ -638,6 +922,10 @@ func readCollectionMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 				return &out
 			}
 			if method == "clear" && len(arguments) == 0 {
+				// clear removes EVERY entry, so every standing presence
+				// fact rooted at this receiver sweeps with them — the nil
+				// removed key keeps nothing
+				DropKeyPresenceOnRemoval(env, receiverExpression, nil)
 				out := abstractdomain.Undef
 				return &out
 			}

@@ -20,6 +20,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -143,11 +144,13 @@ func anyWriteReachesToken(p *program.CheckerProgram, token *ast.Node) bool {
 	//
 	// A read the checker does not place answers no symbol; then nothing
 	// is proved and every write stays in the ordering rules below.
+	tracing.CountBy("host.symbolAtLocation", 1)
 	readSymbol := p.Checker.GetSymbolAtLocation(token)
 	reaching := writes
 	if readSymbol != nil {
 		reaching = nil
 		for _, write := range writes {
+			tracing.CountBy("host.symbolAtLocation", 1)
 			writeSymbol := p.Checker.GetSymbolAtLocation(write)
 			if writeSymbol != nil && writeSymbol != readSymbol {
 				continue // another binding's slot — this write cannot reach

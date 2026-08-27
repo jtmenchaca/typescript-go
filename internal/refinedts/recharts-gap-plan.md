@@ -37,11 +37,11 @@ bound** under exclusive checker leases, not “need more cores.”
 
 ### Two diseases (same corpus, different mechanisms)
 
-Use `-trace` **per-file** for mechanism; untraced WALL for product.
+Use `-trace-time` **per-file** for mechanism; untraced WALL for product.
 
 #### Disease A — join-owned file (`CartesianAxis.tsx`)
 
-Single-file `-trace` (ratios trusted; ms inflated):
+Single-file `-trace-time` (ratios trusted; ms inflated):
 
 | Signal | Value |
 |---|---|
@@ -115,7 +115,7 @@ Already added: per-file `callSiteJoin` / `analyzeFunction`, join
 counters (`join.declared|callback|memo.*|reach.*`), inline ledger
 (`inline.<name>`, `freshkey.*`, `unkeyed.*`).
 
-**Rule:** diagnose with single-file `-trace`; ship gauges with
+**Rule:** diagnose with single-file `-trace-time`; ship gauges with
 untraced `-wall`. Do not trust traced absolute ms for “are we at
 0.7s.”
 
@@ -170,7 +170,7 @@ freshkey counts. |
 repeat inlines become asks over argument sets — only after 2a/2b
 stop the free wins. | prisma/recharts inline self-time. |
 
-**Feedback loop:** single-file Sankey `-trace` for ledger; untraced
+**Feedback loop:** single-file Sankey `-trace-time` for ledger; untraced
 full list for WALL. Fixes must move other heavy arrows
 (CartesianGrid `@13619`, Text `@8368`) the same way — prove breadth
 on a second file before declaring the lever done.
@@ -238,12 +238,12 @@ Sankey ledger in hand.
 refinedts-check -wall -list /tmp/recharts-files.txt
 
 # disease A
-refinedts-check -trace -trace-out /tmp/cartesian-axis-trace.txt \
+refinedts-check -trace-time=/tmp/cartesian-axis-trace.txt \
   …/cartesian/CartesianAxis.tsx
 # look: join.reach.snapshot vs fallback; callSiteJoin vs analyzeFunction
 
 # disease B
-refinedts-check -trace -trace-out /tmp/sankey-trace.txt \
+refinedts-check -trace-time=/tmp/sankey-trace.txt \
   …/chart/Sankey.tsx
 # look: inline.unkeyed.* / inline.freshkey.* / slowest contracts
 ```

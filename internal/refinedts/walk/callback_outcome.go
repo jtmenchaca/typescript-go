@@ -169,7 +169,7 @@ func CallbackOutcome(
 	// body provably only READS it, or the method models the writes
 	// precisely (forEach over an exact tuple)
 	ownerIndex := 2
-	if method == "reduce" {
+	if method == "reduce" || method == "reduceRight" {
 		ownerIndex = 3
 	}
 	ownerParameter, hasOwnerParameter := nameAt(ownerIndex)
@@ -217,7 +217,14 @@ func CallbackOutcome(
 	case "filter":
 		return FilterOutcome(walk)
 	case "reduce":
-		return reduceOutcome(walk, callExpr)
+		return reduceOutcome(walk, callExpr, false)
+	case "reduceRight":
+		// sec-array.prototype.reduceright is sec-array.prototype.reduce
+		// with k running DOWN from length − 1 (its step 5 sets k to
+		// length − 1 and each Repeat step decrements): the same fold,
+		// the items visited in descending order. One flag through the
+		// one reader, rather than a second copy of the fold.
+		return reduceOutcome(walk, callExpr, true)
 	case "find":
 		return findOutcome(walk, callExpr)
 	case "forEach":
@@ -227,11 +234,19 @@ func CallbackOutcome(
 	}
 }
 
-// reduceOutcome is the "reduce" case of callbackOutcome's method
-// switch — split out as its own function to keep CallbackOutcome
-// under the file-length target; behavior is 1:1 with the TS source's
-// inline switch case.
-func reduceOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.AbstractValue {
+// reduceOutcome is the "reduce" and "reduceRight" cases of
+// callbackOutcome's method switch — split out as its own function to
+// keep CallbackOutcome under the file-length target.
+//
+// descending is reduceRight's own direction (sec-array.prototype.
+// reduceright step 5 starts k at length − 1 and each Repeat step
+// decrements it, against reduce's ascending k). It changes three
+// things and nothing else: which end the no-initial-value case takes
+// its first accumulator from, the order the items fold in, and the
+// index each step reports. The SUM-measure shortcut above it holds
+// either way — the measure is the total of the members, and a plain
+// `+` fold from 0 reaches that total from either end.
+func reduceOutcome(walk *CallbackWalk, call *ast.CallExpression, descending bool) abstractdomain.AbstractValue {
 	ctx, env, receiver, body, silent := walk.Ctx, walk.Env, walk.Receiver, walk.Body, walk.Silent
 	element, analyzers := walk.Element, walk.Analyzers
 	ownerParameter, hasOwnerParameter := walk.OwnerParameter, walk.HasOwnerParameter
@@ -273,7 +288,15 @@ func reduceOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.
 		initial = analyzers.EvaluateExpression(ctx, env, call.Arguments.Nodes[1])
 	} else if items != nil {
 		if len(items) > 0 {
-			initial = items[0]
+			// with no initial value the first accumulator is the item at
+			// the END the fold starts from: index 0 ascending, the last
+			// index descending (sec-array.prototype.reduceright's own
+			// step 5 k = length − 1)
+			if descending {
+				initial = items[len(items)-1]
+			} else {
+				initial = items[0]
+			}
 		} else {
 			initial = silence.ResidueOf("no initial value on an empty receiver throws at runtime — nothing to vouch for there")
 		}
@@ -288,27 +311,41 @@ func reduceOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.
 	var exactResult *abstractdomain.AbstractValue
 	representative := initial
 	if items != nil {
-		folded := items
-		firstIndex := 0
+		// the INDEXES the fold visits, in visiting order — ascending for
+		// reduce, descending for reduceRight. Carrying the index rather
+		// than the item keeps the index parameter's own value right in
+		// both directions: reduceRight reports the item's REAL position,
+		// which is what its callback's third argument receives
+		// (sec-array.prototype.reduceright's `𝔽(_k_)`), not a count of
+		// steps taken.
+		visited := make([]int, len(items))
+		for i := range visited {
+			if descending {
+				visited[i] = len(items) - 1 - i
+			} else {
+				visited[i] = i
+			}
+		}
 		// no initial value on a PROVABLY EMPTY receiver: sec-array.
 		// prototype.reduce step 4 throws a TypeError there ("If length
 		// = 0 and initialValue is not present, throw a TypeError
-		// exception") — nothing completes, so `folded` stays the full
-		// (empty) `items` rather than slicing past it. `initial` is
+		// exception") — nothing completes, so `visited` stays the full
+		// (empty) list rather than slicing past it. `initial` is
 		// already the decline set above; the fold below runs zero
 		// times and falls through to that decline, the same stance
 		// oneArgumentReduceCallOf documents for this shape.
 		if !initialized && len(items) > 0 {
-			folded = items[1:]
-			firstIndex = 1
+			// the first item already became the accumulator above, so the
+			// fold starts at the NEXT one in visiting order
+			visited = visited[1:]
 		}
 		accumulator := initial
-		for i, item := range folded {
+		for _, at := range visited {
 			bindings := map[string]abstractdomain.AbstractValue{}
 			BindParameter(ctx.P.Checker, parameterAcc, accumulator, bindings)
-			BindParameter(ctx.P.Checker, parameterVal, item, bindings)
+			BindParameter(ctx.P.Checker, parameterVal, items[at], bindings)
 			if indexParameter, ok := nameAt(2); ok {
-				bindings[indexParameter] = abstractdomain.KnownValues([]float64{float64(i + firstIndex)}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+				bindings[indexParameter] = abstractdomain.KnownValues([]float64{float64(at)}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
 			}
 			if hasOwnerParameter {
 				bindings[ownerParameter] = receiver
@@ -318,7 +355,7 @@ func reduceOutcome(walk *CallbackWalk, call *ast.CallExpression) abstractdomain.
 		}
 		if accumulator.Kind != abstractdomain.KindUnknown {
 			exactResult = &accumulator
-		} else if len(folded) == 0 {
+		} else if len(visited) == 0 {
 			// the fold ran zero times: accumulator is `initial` untouched,
 			// which is already the exact, provably-known outcome for a
 			// provably empty receiver with no initial value — the residue

@@ -95,6 +95,30 @@ func AbstractValueOfDeclared(stated annotations.DeclaredRefinement) abstractdoma
 	case annotations.DeclaredPossiblyUndefined:
 		inner := AbstractValueOfDeclared(*stated.Inner)
 		return abstractdomain.PossiblyUndefined(inner, "", false, false)
+	case annotations.DeclaredTuple:
+		// a TUPLE position seeds the list itself: one item per slot,
+		// carrying that slot's own statement. From here the walk's
+		// existing KindList machinery serves every read and write —
+		// `t[0]` indexes Items, `t.length` answers the exact count, a
+		// slot write judges against that slot — with no tuple-specific
+		// reader anywhere downstream.
+		//
+		// The LIST's own grade is TrustProved and each SLOT carries its
+		// own, because KnownList takes the MINIMUM of the grade handed
+		// in and every item's — so any weaker grade written here would
+		// lower proved slots rather than leaving them alone. The claim
+		// the list itself makes is the LENGTH, and that is read straight
+		// off the written tuple's slot count with nothing else assumed;
+		// what each slot may HOLD is the item's claim, at the item's own
+		// grade (a genuine refined alias arrives proved through the
+		// DeclaredSet arm above, a bare keyword's ground arrives at
+		// TrustSpec through that same arm's AddsNothingSet stamp), and
+		// the minimum then carries the weakest of them onto the list.
+		items := make([]abstractdomain.AbstractValue, 0, len(stated.Slots))
+		for _, slot := range stated.Slots {
+			items = append(items, AbstractValueOfDeclared(*slot))
+		}
+		return abstractdomain.KnownList(items, abstractdomain.TrustProved)
 	case annotations.DeclaredObjectArray:
 		// an ARRAY OF RECORDS holds no single tracked value here —
 		// element reads consult the declared statement
@@ -102,7 +126,20 @@ func AbstractValueOfDeclared(stated annotations.DeclaredRefinement) abstractdoma
 		return silence.Residue()
 	case annotations.DeclaredObject:
 		keys := make([]abstractdomain.ObjectKey, 0, len(stated.Object.Keys))
+		// anyKeyMayBeAbsent tracks whether some key the statement names
+		// might not be on the value at all. It is the second half of the
+		// completeness question: WholeKeySet says no key exists OUTSIDE
+		// this list, and this says every key IN the list is really
+		// there. Complete's readers need both — Object.keys/values/
+		// entries (walk/object_static_models.go) count one item per
+		// named key with no absence check, so a Complete object with an
+		// optional key would be counted as carrying a key that may not
+		// exist.
+		anyKeyMayBeAbsent := false
 		for _, key := range stated.Object.Keys {
+			if key.MayBeAbsent || (key.Value.Kind == annotations.KeyValueSet && key.Value.Absent) {
+				anyKeyMayBeAbsent = true
+			}
 			switch key.Value.Kind {
 			case annotations.KeyValueSet:
 				bare := abstractdomain.KnownSet(*key.Value.Set, nil, abstractdomain.TrustProved, setKindTagOf(key.Value.KindTag))
@@ -167,9 +204,118 @@ func AbstractValueOfDeclared(stated annotations.DeclaredRefinement) abstractdoma
 				keys = append(keys, abstractdomain.ObjectKey{Name: key.Name, Value: worn})
 			}
 		}
-		return abstractdomain.KnownObject(keys, objectAnnotationRefOf(stated.Object), false, abstractdomain.TrustProved, false)
+		// COMPLETE when the statement's key list is the value's whole key
+		// set (WholeKeySet — the producer strips or refuses extras) and
+		// every key it names is really present (no optional or nullable
+		// key). A statement missing either half stays incomplete, which
+		// is where every declared object stood before the bit existed.
+		//
+		// A statement whose `.refine` body the reader could not parse is
+		// UNREAD: the parse checks more than the keys say. That is a
+		// claim about the key VALUES, not about which keys exist, so it
+		// does not bear on completeness and is deliberately not read
+		// here.
+		complete := stated.Object.WholeKeySet && !anyKeyMayBeAbsent
+		return abstractdomain.KnownObject(keys, objectAnnotationRefOf(stated.Object), complete, abstractdomain.TrustProved, false)
 	}
 	return abstractdomain.Unknown
+}
+
+// SharpenedTupleSeed reconciles the two roads that can seed a TUPLE
+// position, keeping whichever states more at each slot.
+//
+// The two roads see different things, and neither dominates. The
+// ANNOTATION road (annotations/type_node_sets.go's tuple arm, through
+// AbstractValueOfDeclared above) resolves refined aliases — `[Age,
+// Wide]`, where each name is a `z.infer<typeof …>` the registry holds —
+// which the host erases to bare `number`. The HOST road
+// (typereading/host_type.go's IsTupleType branch) reads a LITERAL slot
+// exactly — `[10, 20]` gives KnownValues{10}, KnownValues{20} — which
+// the annotation road spells as a set (KnownSet(OneOf{10})), a weaker
+// form: a set-shaped slot spreads as a set, so `[...item]` then read a
+// set at rows[0] instead of the exact 10.
+//
+// Both describe the SAME position, so at each slot the sharper reading
+// is the true one. An exact-value slot is sharper than a set-shaped
+// slot stating the same words; anything else keeps the annotation's,
+// which is the road that resolves what the host cannot see.
+//
+// This runs only where the declared reading actually carries a tuple
+// (directly, or behind the absence wrapper a `[10, 20] | null` states):
+// every other declared shape passes through untouched, so no existing
+// seed changes.
+func SharpenedTupleSeed(
+	declared abstractdomain.AbstractValue,
+	fromHost abstractdomain.AbstractValue,
+	hostOk bool,
+) abstractdomain.AbstractValue {
+	if !hostOk {
+		return declared
+	}
+	// the absence wrapper rides on BOTH sides for a `tuple | null`
+	// position — unwrap together and rewrap, so the maybe the
+	// declaration states is preserved exactly as it was
+	if declared.Kind == abstractdomain.KindPossiblyUndefined && declared.Inner != nil {
+		host := fromHost
+		if host.Kind == abstractdomain.KindPossiblyUndefined && host.Inner != nil {
+			host = *host.Inner
+		}
+		inner := SharpenedTupleSeed(*declared.Inner, host, true)
+		if abstractdomain.SameKnown(inner, *declared.Inner) {
+			return declared
+		}
+		return abstractdomain.PossiblyUndefined(inner, "", false, false)
+	}
+	if declared.Kind != abstractdomain.KindList || fromHost.Kind != abstractdomain.KindList {
+		return declared
+	}
+	if len(declared.Items) != len(fromHost.Items) {
+		return declared
+	}
+	items := make([]abstractdomain.AbstractValue, len(declared.Items))
+	changed := false
+	for i, item := range declared.Items {
+		items[i] = item
+		// the host's EXACT slot wins over a set-shaped declared slot:
+		// KnownValues names the runtime values outright, and the
+		// declared side at such a slot is a literal type's own set,
+		// which states the same words less sharply. A declared slot
+		// that is already exact, or that carries something the host
+		// cannot see (a refined alias's window, which reaches here as
+		// PossiblyNaN over a set, never as KnownValues), keeps its own
+		// reading.
+		//
+		// SHARPER, never wider: the swap is taken only where the
+		// declared slot spells a finite word list and the host's values
+		// are drawn from it. Both roads read the same literal type node,
+		// so the lists coincide in the case this exists for; the check
+		// is what makes that a checked fact rather than an argued one,
+		// and any slot where they diverge keeps the declared reading.
+		host := fromHost.Items[i]
+		if item.Kind != abstractdomain.KindSet || host.Kind != abstractdomain.KindValues {
+			continue
+		}
+		declaredWords, listed := plainOneOfWords(item.Set)
+		if !listed || item.SetKindTag != abstractdomain.SetKindTagNone {
+			continue
+		}
+		within := true
+		for _, v := range host.Values {
+			if !floatsInclude(declaredWords, v) {
+				within = false
+				break
+			}
+		}
+		if !within {
+			continue
+		}
+		items[i] = host
+		changed = true
+	}
+	if !changed {
+		return declared
+	}
+	return abstractdomain.KnownList(items, abstractdomain.TrustLevelOf(declared))
 }
 
 // DeclaredOfKey is declaredOfKey in the TS source: what a key

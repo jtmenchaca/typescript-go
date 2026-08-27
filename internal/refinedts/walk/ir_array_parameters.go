@@ -7,6 +7,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // arrayParameterElementSort is the element sort of a parameter declared
@@ -203,10 +204,12 @@ func elementTypeNodeOf(typeNode *ast.Node) *ast.Node {
 // checkedElementSort reads an array TYPE NODE's element sort through the
 // host checker, under the same flag masking LocalSortResolved uses.
 func checkedElementSort(c *checker.Checker, typeNode *ast.Node) BindingKind {
+	tracing.CountBy("host.typeFromTypeNode", 1)
 	t := c.GetTypeFromTypeNode(typeNode)
 	if t == nil {
 		return BindingKindUnknown
 	}
+	tracing.CountBy("host.elementTypeOfArrayType", 1)
 	element := c.GetElementTypeOfArrayType(t)
 	if element == nil {
 		return BindingKindUnknown

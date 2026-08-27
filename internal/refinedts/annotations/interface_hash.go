@@ -81,6 +81,17 @@ func FormatStated(stated *DeclaredRefinement) string {
 			strconv.FormatBool(stated.BoundGrounded) + ":" + strconv.Itoa(stated.StarDepth)
 	case DeclaredPossiblyUndefined:
 		return "m:" + FormatStated(stated.Inner)
+	case DeclaredTuple:
+		// each slot's own key, in order — two tuples with the same slot
+		// sets in a different order are different statements, and the
+		// slot COUNT is itself part of the claim, so both ride the key.
+		// Without this arm every tuple hashed to the empty string and
+		// collided with every other one.
+		key := "t:" + strconv.Itoa(len(stated.Slots))
+		for _, slot := range stated.Slots {
+			key += ":" + FormatStated(slot)
+		}
+		return key
 	case DeclaredObjectArray:
 		hi := "null"
 		if !stated.HiUnbounded {

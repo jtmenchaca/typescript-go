@@ -17,6 +17,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 var (
@@ -36,8 +37,10 @@ func TypeAtLocation(c *checker.Checker, node *ast.Node) *checker.Type {
 	t, hit := memo[node]
 	typeAtLocationMu.Unlock()
 	if hit {
+		tracing.CountBy("host.typeAtLocation.hit", 1)
 		return t
 	}
+	tracing.CountBy("host.typeAtLocation.ask", 1)
 	t = c.GetTypeAtLocation(node)
 	typeAtLocationMu.Lock()
 	memo[node] = t

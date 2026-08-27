@@ -181,6 +181,47 @@ func annotationOfTypeSets(p *program.CheckerProgram, typeNode *ast.Node, registr
 		}
 		return starOfElement(element), true
 	}
+	// [X, Y] -- a TUPLE type node: each slot's OWN statement at an exact
+	// length. This is strictly stronger than the star the array arm
+	// above spells: the star says "any length, elements in the union",
+	// which throws away both the length and the per-slot disagreement a
+	// tuple states. Each slot compiles through the same
+	// annotationOfType road an array element takes, so a refined alias
+	// in a slot (`[Age, Wide]`, where each name is a
+	// `z.infer<typeof ...>` the alias road resolves against the
+	// registry) reaches its own set here — the road the syntax reader
+	// in typereading cannot take, since it follows only union aliases
+	// and enums.
+	//
+	// Only the ALL-REQUIRED form is read (DeclaredRefinement.Slots'
+	// own doc, and typereading's tuple arm keeps the identical gate):
+	// an optional, rest, or named slot costs the exact
+	// position-to-length pairing, and such a tuple states nothing here.
+	// A slot the reader cannot state leaves the whole tuple stating
+	// nothing rather than a partial per-slot claim the judge would read
+	// as complete.
+	if ast.IsTupleTypeNode(typeNode) {
+		elements := typeNode.AsTupleTypeNode().Elements
+		if elements == nil || len(elements.Nodes) == 0 {
+			return AnnotationOfTypeResult{}, true
+		}
+		slots := make([]*DeclaredRefinement, 0, len(elements.Nodes))
+		for _, element := range elements.Nodes {
+			if ast.IsOptionalTypeNode(element) || ast.IsRestTypeNode(element) ||
+				ast.IsNamedTupleMember(element) {
+				return AnnotationOfTypeResult{}, true
+			}
+			read := annotationOfType(p, element, registry, objects, bindings)
+			if read.Unsupported != "" {
+				return read, true
+			}
+			if read.Stated == nil {
+				return AnnotationOfTypeResult{}, true // a plain-TS slot: the whole tuple stays plain
+			}
+			slots = append(slots, read.Stated)
+		}
+		return AnnotationOfTypeResult{Stated: &DeclaredRefinement{Kind: DeclaredTuple, Slots: slots}}, true
+	}
 	// keyof over a readable object SHAPE: the union of its key words
 	// -- exact strings the set language speaks
 	if ast.IsTypeOperatorNode(typeNode) && typeNode.AsTypeOperatorNode().Operator == ast.KindKeyOfKeyword {
@@ -275,6 +316,17 @@ func annotationOfTypeSets(p *program.CheckerProgram, typeNode *ast.Node, registr
 			if ast.IsLiteralTypeNode(branch) && branch.AsLiteralTypeNode().Literal.Kind == ast.KindNullKeyword {
 				sawAbsent = true
 				continue
+			}
+			// A TUPLE branch keeps the whole union plain: the host road
+			// builds the exact per-slot list behind the absence wrapper for
+			// `[10, 20] | null` (the reading
+			// ternary_spread_nullable_tuple_test.go pins), and a stated
+			// wrapped tuple was measured to change downstream behavior even
+			// when seeded with the identical value — the != null narrowing
+			// stopped stripping the wrapper. The plain tuple annotation, with
+			// no wrapper in play, keeps the DeclaredTuple road above.
+			if ast.IsTupleTypeNode(branch) {
+				return AnnotationOfTypeResult{}, true
 			}
 			read := annotationOfType(p, branch, registry, objects, bindings)
 			if read.Stated == nil {

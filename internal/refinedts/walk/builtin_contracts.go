@@ -115,10 +115,17 @@ func CheckBuiltinContracts(ctx *FlowContext, env Env, e *ast.Node) {
 			// fraction, or 2^32-and-up names a construction that may
 			// throw a RangeError — the hazard is the row's own, and the
 			// guard is the reader's next move. A refutation (an exact
-			// bad length) rides through unchanged.
+			// bad length) rides through unchanged. A possibly-NaN length
+			// (arithmetic_transfer.go's held-arm answer over two
+			// number-sorted operands the kernel could not tighten, e.g.
+			// `tickCount - 1`) reports its own genuine 7001 through
+			// nan_wrapper.go's checkPossiblyNaNSubset rather than the
+			// generic 7002 this rewrite watches for — same hazard, same
+			// row, so it gets the same RangeError wording rather than
+			// its own value-spelled sentence.
 			contractCtx := *ctx
 			contractCtx.Report = func(d assignability.RefinementDiagnostic) {
-				if d.Code == 7002 {
+				if d.Code == 7002 || d.Code == 7001 {
 					d = assignability.At(
 						args[0], 7001,
 						"the array length is not pinned to a whole number in [0, 4294967295] — "+

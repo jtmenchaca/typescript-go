@@ -68,14 +68,16 @@ func TestCheckAssignability_JSONParseOfUnknownTextNamesItsOwnReaderNotTheBareAle
 	}
 }
 
-// TestCheckAssignability_AnUnconvertedResidueSiteStillReportsTheBareAlert
-// pins the fallback: `age` written directly from an unread parameter
+// TestCheckAssignability_AnUnconvertedResidueSiteProjectsTheBareAlert
+// pins the fallback under the projection rule (DERIVATION-TRACE.md —
+// the printed undetermined sentence IS the projection, traced or not):
+// `age` written directly from an unread parameter
 // (untracked_identifier.go's last-reader path — not yet converted to
-// ResidueOf) must still report the bare AlertText. This is the
-// fleet's own regression gate: every future conversion is measurable
-// as this test's counterpart flipping from AlertText to a named
-// sentence, never a silent behavior change here.
-func TestCheckAssignability_AnUnconvertedResidueSiteStillReportsTheBareAlert(t *testing.T) {
+// ResidueOf) reports the bare AlertText AS ITS GATE, wrapped in the
+// projection template rather than printed raw. Conversion progress is
+// still measurable here: a converted site's counterpart carries its own
+// named sentence in place of AlertText inside the same template.
+func TestCheckAssignability_AnUnconvertedResidueSiteProjectsTheBareAlert(t *testing.T) {
 	p := entryEnvTestProgram(t, "function f(text: unknown): void {\n"+
 		"  let age = text;\n"+
 		"  age;\n"+
@@ -88,8 +90,15 @@ func TestCheckAssignability_AnUnconvertedResidueSiteStillReportsTheBareAlert(t *
 	if len(diagnostics) == 0 {
 		t.Fatalf("`let age = text` (unread) against a declared window raised no diagnostic, want RTS7002")
 	}
-	if diagnostics[0].MessageText != assignability.AlertText {
-		t.Errorf("diagnostic MessageText = %q, want the bare AlertText (this site is not yet converted to ResidueOf)", diagnostics[0].MessageText)
+	got := diagnostics[0].MessageText
+	if got == assignability.AlertText {
+		t.Errorf("diagnostic MessageText = the RAW AlertText, want the projection template")
+	}
+	if !strings.HasPrefix(got, "text: ") {
+		t.Errorf("diagnostic MessageText = %q, want the projection's construct prefix (\"text: \")", got)
+	}
+	if !strings.Contains(got, "— held") {
+		t.Errorf("diagnostic MessageText = %q, want the projection's held tail", got)
 	}
 }
 

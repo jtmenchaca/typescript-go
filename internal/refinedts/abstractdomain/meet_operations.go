@@ -25,6 +25,23 @@ func MeetKnown(a, b AbstractValue) AbstractValue {
 	if b.Kind == KindPossiblyUndefined && a.Kind != KindPossiblyUndefined {
 		return MeetKnown(a, *b.Inner)
 	}
+	// a claim that is a plain SET drops the other side's NaN half, for
+	// the same reason the absence arm above drops the absent half: no
+	// refinement set holds NaN (refinement_forms.go), so a side that
+	// states a set states "not NaN" along with it, and the conjunction
+	// of "X, or NaN" with a set is that set met with X.
+	//
+	// This is what lets a guard on a possibly-NaN read narrow it:
+	// `d.getTime()` reads as "an integer time value, or NaN", and
+	// `if (d.getTime() === 100)` proves the run is one where it is 100
+	// — NaN passes no comparison (sec-strict-equality-comparison), so
+	// the guard's own set is the whole answer on that arm.
+	if a.Kind == KindPossiblyNaN && a.Inner != nil && (b.Kind == KindSet || b.Kind == KindValues) {
+		return MeetKnown(*a.Inner, b)
+	}
+	if b.Kind == KindPossiblyNaN && b.Inner != nil && (a.Kind == KindSet || a.Kind == KindValues) {
+		return MeetKnown(a, *b.Inner)
+	}
 	if a.Kind == KindValues {
 		return a
 	}

@@ -56,6 +56,15 @@ func CompileContractFileFacts(
 		if s.Kind == annotations.DeclaredSet || s.Kind == annotations.DeclaredObject || s.Kind == annotations.DeclaredObjectArray {
 			return true
 		}
+		// a TUPLE position grounds: its LENGTH is a claim the position
+		// makes on its own, independent of what the slots state, so a
+		// function whose only stated position is `[number, number,
+		// number]` still has a real obligation for the judge to check —
+		// without this arm that signature never grounded and the return
+		// was never judged at all.
+		if s.Kind == annotations.DeclaredTuple {
+			return true
+		}
 		if s.Kind == annotations.DeclaredVariable && s.BoundGrounded {
 			return true
 		}
@@ -138,6 +147,7 @@ func CompileContractFileFacts(
 		// binder left none
 		symbol := nameNode.Parent.Symbol()
 		if symbol == nil {
+			tracing.CountBy("host.symbolAtLocation", 1)
 			symbol = p.Checker.GetSymbolAtLocation(nameNode)
 		}
 		if symbol == nil {
@@ -233,6 +243,7 @@ func CompileContractFileFacts(
 				}
 				alias := declaration.Symbol()
 				if alias == nil {
+					tracing.CountBy("host.symbolAtLocation", 1)
 					alias = p.Checker.GetSymbolAtLocation(vd.Name())
 				}
 				if alias == nil {
@@ -277,6 +288,7 @@ func CompileContractFileFacts(
 						if contract, ok := mergedContracts[target]; ok {
 							alias := node.Symbol()
 							if alias == nil {
+								tracing.CountBy("host.symbolAtLocation", 1)
 								alias = p.Checker.GetSymbolAtLocation(name)
 							}
 							if alias != nil {

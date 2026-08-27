@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // instanceTable is INSTANCE_TABLE in the TS source: the
@@ -91,9 +92,13 @@ func ReadInstanceOf(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Abst
 	evaluateExpression(ctx, env, bin.Right)
 	var constructor string
 	hasConstructor := false
-	if ast.IsIdentifier(bin.Right) && instanceTable[bin.Right.Text()] &&
-		ctx.P.Checker.SymbolInDefaultLib(ctx.P.Checker.GetSymbolAtLocation(bin.Right)) {
-		constructor, hasConstructor = bin.Right.Text(), true
+	if ast.IsIdentifier(bin.Right) && instanceTable[bin.Right.Text()] {
+		tracing.CountBy("host.symbolAtLocation", 1)
+		symbol := ctx.P.Checker.GetSymbolAtLocation(bin.Right)
+		tracing.CountBy("host.symbolInDefaultLib", 1)
+		if ctx.P.Checker.SymbolInDefaultLib(symbol) {
+			constructor, hasConstructor = bin.Right.Text(), true
+		}
 	}
 	boolPair := func() abstractdomain.AbstractValue {
 		return abstractdomain.KnownSet(refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1})), nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)

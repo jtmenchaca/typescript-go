@@ -19,6 +19,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -63,6 +64,7 @@ func OpenMapAt(c *checker.Checker, at *ast.Node) bool {
 	if atType == nil {
 		return false
 	}
+	tracing.CountBy("host.indexInfosOfType", 1)
 	return len(c.GetIndexInfosOfType(atType)) > 0
 }
 
@@ -83,6 +85,7 @@ func IndexSignatureValueTypeAt(ctx *FlowContext, at *ast.Node) (abstractdomain.A
 	if atType == nil {
 		return abstractdomain.AbstractValue{}, false
 	}
+	tracing.CountBy("host.indexInfosOfType", 1)
 	infos := ctx.P.Checker.GetIndexInfosOfType(atType)
 	if len(infos) == 0 {
 		return abstractdomain.AbstractValue{}, false
@@ -487,13 +490,45 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 					// every value it can answer is one the join admits. A
 					// member the object does not name reads as the
 					// missing-key rule above answers it; a member the walk
-					// cannot resolve leaves the whole read unclaimed. The
-					// sort gate keeps a numeric one-member set from being
-					// reread as code units (oneOf pins neither sort —
-					// sortOfForms, kernel_delegation.go).
-					if index.Kind == abstractdomain.KindSet && index.SetKindTag == abstractdomain.SetKindTagNone &&
-						sortOfForms(index.Set.Forms) == BindingKindString {
-						if words, wordsOK := exactWordsOfSet(index.Set); wordsOK && len(words) > 0 {
+					// cannot resolve leaves the whole read unclaimed.
+					//
+					// THE SORT GATE, AND THE ONE READING THAT PASSES
+					// WITHOUT IT. A spelling of bare exact values pins no
+					// sort (`oneOf` — sortOfForms, kernel_delegation.go),
+					// and a one-CODEPOINT word is spelled that way, so a
+					// union of single-letter keys like `"a" | "b"` arrives
+					// sort-unpinned even though every member is a string.
+					// Reading such a set as numbers would name the code
+					// units U+0061 and U+0062 as keys instead of "a" and
+					// "b", which is why the gate is here at all.
+					//
+					// It is settled by the RECEIVER rather than by the
+					// spelling: where every enumerated member names a key
+					// the receiver actually states, the numeric reading is
+					// refuted outright — an object naming "a" does not also
+					// name the character U+0061, and no spelling in this
+					// tree writes one. So the join runs on a sort-unpinned
+					// set exactly when the object itself vouches for every
+					// member, and stays refused otherwise.
+					if index.Kind == abstractdomain.KindSet && index.SetKindTag == abstractdomain.SetKindTagNone {
+						sortPinned := sortOfForms(index.Set.Forms) == BindingKindString
+						words, wordsOK := exactWordsOfSet(index.Set)
+						if wordsOK && len(words) > 0 && !sortPinned {
+							everyMemberNamed := true
+							for _, word := range words {
+								name := stringOf(word)
+								if symbolSlotKey(name) {
+									everyMemberNamed = false
+									break
+								}
+								if _, found := objectKeyIndex(receiver, name); !found {
+									everyMemberNamed = false
+									break
+								}
+							}
+							sortPinned = everyMemberNamed
+						}
+						if wordsOK && len(words) > 0 && sortPinned {
 							var joined abstractdomain.AbstractValue
 							hasJoined := false
 							determined := true
@@ -775,8 +810,77 @@ func ElementAccessOf(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.Abs
 				// below, which would otherwise blame the index for a gap that
 				// is really about the receiver's own type.
 				if receiver.Kind == abstractdomain.KindUnknown && !receiver.Opaque && openMapReceiver(ctx, elem.Expression) {
+					// WHICH key answers is unproven, but WHAT a key answers
+					// is not: the index signature states one value type for
+					// every key it admits — `string` in
+					// `Record<string, string>` — and that is a fact of the
+					// receiver's own type, present key or not. So the read
+					// answers the signature's stated value rather than
+					// nothing, and the assignability layer downstream
+					// decides whether that value fits the target set (the
+					// same reading the tracked-KindObject arm above already
+					// does for a key absent from its own keys).
+					//
+					// The absence rides only where the shape channel puts
+					// one, the same rule element_in_bounds.go states for a
+					// repetition read: with noUncheckedIndexedAccess ON,
+					// GetTypeAtLocation answers `T | undefined` at every
+					// indexed read and this wrapper agrees with it; with
+					// the flag OFF — the default, and what tsc's `strict`
+					// leaves it at — the host answers `T`, and wrapping
+					// anyway would make this layer refuse a value the shape
+					// channel has already accepted. sec-ordinaryget: a
+					// missing own property falls to the prototype chain,
+					// which for an ordinary record carries no such key, so
+					// the miss answers exactly undefined — never null, so
+					// the wrapper's absent side is UndefOnly.
+					if valueType, ok := IndexSignatureValueTypeAt(ctx, elem.Expression); ok && valueType.Kind != abstractdomain.KindUnknown {
+						if !UncheckedIndexedAccessHonored(ctx) {
+							return &valueType
+						}
+						out := abstractdomain.PossiblyAbsent(valueType, abstractdomain.AbsentFlavorUndefOnly, abstractdomain.TrustSpec, true, false)
+						return &out
+					}
 					out := silence.ResidueOf("the receiver names no fixed key set — an index signature or an " +
 						"incomplete record admits any key at runtime, and the checker never witnessed which")
+					return &out
+				}
+				// a KIND UNION receiver — the shape `JSON.parse(text)`
+				// answers (coercion_models_json.go's anyJSONValue: a
+				// number, a string, a boolean, null, or an object, one arm
+				// each). The runtime read lands on whichever arm the value
+				// is actually on, so what the read can answer is the JOIN
+				// over the arms' own element readings — sound for exactly
+				// the reason JoinKnown is sound anywhere else: every value
+				// the read can produce is a value some arm produces.
+				//
+				// Arms that hold no sequence at all — a number, a boolean,
+				// null — read no element position: an index into them
+				// finds no own property and falls to the prototype chain
+				// (sec-ordinaryget), which for these arms carries no
+				// numeric slot, so the read is exactly undefined. That
+				// undefined joins in rather than blocking the whole read,
+				// which is the honest answer: a JSON document that spells
+				// a number really does make `parsed[0]` undefined.
+				//
+				// An arm whose OWN element reading declines takes the
+				// whole read with it — the join would otherwise claim the
+				// union answers less than one of its arms might.
+				if receiver.Kind == abstractdomain.KindKindUnion {
+					if joined := unionElementOf(receiver, index); joined != nil {
+						return joined
+					}
+					// an arm the reader could not answer for. The union's own
+					// carried reason names where the union came from
+					// (JSON.parse states one, coercion_models_json.go), which
+					// is the position's real first blocker — the index is not
+					// what stopped this read.
+					if receiver.ResidueReason != "" {
+						out := silence.ResidueOf(receiver.ResidueReason)
+						return &out
+					}
+					out := silence.ResidueOf("the receiver is one of several kinds and at least one of " +
+						"them states no element at this position, so the join over the arms can't be pinned")
 					return &out
 				}
 				out := silence.ResidueOf("the index isn't a single exact value against a tracked value set, " +

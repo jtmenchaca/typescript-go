@@ -166,7 +166,21 @@ func CheckObjectTarget(
 	what string,
 ) {
 	if known.Kind != abstractdomain.KindObject {
-		ctx.Report(assignability.At(node, 7002, assignability.AlertText))
+		// THE DECLINE HELPER, adopted at this fallback — the known value
+		// carries no object shape to check key by key against the stated
+		// object annotation, so the position stays undetermined. Without
+		// this call the outer checkAssignability root span stays answered
+		// with the declared target's spelling: nothing here ever declines
+		// it, so the trace and the printed sentence drift apart.
+		messageText := assignability.AlertText
+		if projected := DeclineSentence(
+			"the value carries no object shape to check against the stated keys",
+			node,
+			spellUnknownHeld(known),
+		); projected != "" {
+			messageText = projected
+		}
+		ctx.Report(assignability.At(node, 7002, messageText))
 		return
 	}
 	// the same annotation, by identity: nothing left to check
@@ -251,8 +265,22 @@ func CheckObjectTarget(
 	// an UNREAD refine rides the statement: the parse checks more
 	// than the keys say, so a position the keys would prove stays
 	// undetermined, honestly
+	//
+	// THE DECLINE HELPER, adopted here — without this call the outer
+	// checkAssignability root span stays answered with the declared
+	// target's spelling even though the per-key walk above proved every
+	// key: nothing here ever declines it, so the trace and the printed
+	// sentence drift apart.
 	if target.Object.Unread {
-		ctx.Report(assignability.At(node, 7002, assignability.AlertText))
+		messageText := assignability.AlertText
+		if projected := DeclineSentence(
+			"the statement carries an unread .refine predicate beyond the keys",
+			node,
+			spellUnknownHeld(known),
+		); projected != "" {
+			messageText = projected
+		}
+		ctx.Report(assignability.At(node, 7002, messageText))
 	}
 }
 

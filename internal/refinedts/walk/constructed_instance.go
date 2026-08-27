@@ -17,6 +17,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // ErrorConstructors is the Error constructors sharing one shape: the
@@ -121,6 +122,7 @@ func constructedInstanceInner(
 		}
 		var symbol *ast.Symbol
 		if baseExpression != nil {
+			tracing.CountBy("host.symbolAtLocation", 1)
 			symbol = ctx.P.Checker.GetSymbolAtLocation(baseExpression)
 		}
 		var baseDeclaration *ast.Node

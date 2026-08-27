@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
@@ -347,6 +348,29 @@ func AnalyzeSwitchStatement(ctx *FlowContext, env Env, statement *ast.Node, resu
 				}
 				if pinned, ok := SwitchLabelValuesWith(ctx.P.Checker, labels); ok {
 					clauseEnv.Set(switchStmt.Expression.Text(), pinned)
+				}
+			}
+		}
+		// `switch (typeof v)` narrows a NAMED discriminant place
+		// (SwitchKeyOfKnown/the identifier branch above), never the
+		// typeof-wrapped operand's own binding: the ground a case label
+		// names (GroundOfTypeofWord) is a SORT, not the strict-equality
+		// key this reader's exact-scrutinee narrowing keys on, so the case
+		// body's binding is left exactly as unbound as the switch found
+		// it. That is a real write the walk chooses not to act on, not an
+		// absence of one, so it is recorded on the last-touch ledger here
+		// — the read at evaluateExpression then names the switch's own
+		// case clause instead of falling to a bare residue with no
+		// mutation to point at.
+		if ast.IsCaseClause(clause) && ast.IsTypeOfExpression(switchStmt.Expression) {
+			operand := switchStmt.Expression.AsTypeOfExpression().Expression
+			if ast.IsIdentifier(operand) {
+				if _, has := clauseEnv.Get(operand.Text()); has {
+					if derivation.Active() {
+						closeSite := derivation.TouchSite(derivation.Construct(clause), derivation.Range(clause))
+						derivation.RecordTouchFromSite(operand.Text(), derivation.TouchWritten)
+						closeSite()
+					}
 				}
 			}
 		}

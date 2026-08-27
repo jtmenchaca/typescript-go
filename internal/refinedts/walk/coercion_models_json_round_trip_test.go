@@ -253,3 +253,68 @@ func TestAnyJSONValue_CarriesAnObjectArm(t *testing.T) {
 		t.Errorf("anyJSONValue(TrustSpec).Arms = %+v, want one KindObject arm (JSON's object/array grammar)", got.Arms)
 	}
 }
+
+// TestA5_edge_json_StringifyDropsAnUndefinedValuedKey pins
+// A5.edge.json's own claim: `JSON.stringify({ a: undefined })` is
+// exactly "{}".
+//
+// sec-serializejsonproperty step 8 — a property whose value serializes
+// to undefined is DROPPED from the object text, never written as
+// "null" (that reading belongs to an ARRAY item,
+// sec-serializejsonarray step 8, which the list arm already spells).
+//
+// The bug this pins: KindUndef's own arm answers ("", false), since a
+// bare undefined names no ONE exact text. Recursing into the key's
+// value BEFORE testing for it therefore threw the whole object away —
+// the drop check below could never be reached, and the row went
+// undetermined. The test would pass trivially against a checker that
+// simply declined, so the ok flag is asserted too.
+func TestA5_edge_json_StringifyDropsAnUndefinedValuedKey(t *testing.T) {
+	object := abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{{Name: "a", Value: abstractdomain.Undef}},
+		nil, true, abstractdomain.TrustProved, false,
+	)
+	got, ok := jsonStringifyOf(object, nil)
+	if !ok {
+		t.Fatalf("jsonStringifyOf({a: undefined}) declined, want an exact text")
+	}
+	if got != "{}" {
+		t.Errorf("jsonStringifyOf({a: undefined}) = %q, want \"{}\" (sec-serializejsonproperty step 8 drops the key)", got)
+	}
+}
+
+// A present key beside a dropped one still writes, with no stray comma
+// — the drop must not disturb the separator bookkeeping.
+func TestA5_edge_json_StringifyKeepsPresentKeysBesideADroppedOne(t *testing.T) {
+	one := abstractdomain.KnownValues([]float64{1}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	object := abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{
+			{Name: "a", Value: abstractdomain.Undef},
+			{Name: "b", Value: one},
+		},
+		nil, true, abstractdomain.TrustProved, false,
+	)
+	got, ok := jsonStringifyOf(object, nil)
+	if !ok {
+		t.Fatalf("jsonStringifyOf({a: undefined, b: 1}) declined, want an exact text")
+	}
+	if got != `{"b":1}` {
+		t.Errorf("jsonStringifyOf({a: undefined, b: 1}) = %q, want `{\"b\":1}`", got)
+	}
+}
+
+// The ARRAY reading is the opposite one and must not have moved: an
+// undefined ITEM serializes as "null" (sec-serializejsonarray step 8),
+// never dropped — the position is meaningful in an array.
+func TestA5_edge_json_StringifyWritesAnUndefinedArrayItemAsNull(t *testing.T) {
+	list := abstractdomain.KnownList(
+		[]abstractdomain.AbstractValue{abstractdomain.Undef}, abstractdomain.TrustProved,
+	)
+	got, ok := jsonStringifyOf(list, nil)
+	if !ok {
+		t.Fatalf("jsonStringifyOf([undefined]) declined, want an exact text")
+	}
+	if got != "[null]" {
+		t.Errorf("jsonStringifyOf([undefined]) = %q, want \"[null]\" (sec-serializejsonarray step 8)", got)
+	}
+}

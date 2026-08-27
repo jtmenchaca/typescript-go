@@ -34,6 +34,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -162,6 +163,7 @@ func generatorYieldElement(ctx *FlowContext, declaration *ast.Node) (abstractdom
 	// declared yield type is what speaks for the recursion.
 	var walkingKey *ast.Symbol
 	if name := declaration.Name(); name != nil {
+		tracing.CountBy("host.symbolAtLocation", 1)
 		walkingKey = ctx.P.Checker.GetSymbolAtLocation(name)
 	}
 	walking := ctx.Inlining
@@ -294,12 +296,14 @@ func generatorDeclaredElement(ctx *FlowContext, call *ast.Node) (*checker.Type, 
 	if symbol == nil || !generatorReturnTypeNames[symbol.Name] {
 		return nil, false
 	}
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	if !ctx.P.Checker.SymbolInDefaultLib(symbol) {
 		return nil, false
 	}
 	if (t.ObjectFlags() & checker.ObjectFlagsReference) == 0 {
 		return nil, false
 	}
+	tracing.CountBy("host.typeArguments", 1)
 	arguments := ctx.P.Checker.GetTypeArguments(t)
 	if len(arguments) == 0 {
 		return nil, false

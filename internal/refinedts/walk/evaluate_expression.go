@@ -18,10 +18,12 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -76,7 +78,7 @@ func ClearDeepestWalk() {
 // wrapper: this runs once per expression node in the program, and the
 // extra call frame a wrapper adds was measured at a third of a whole
 // real-codebase run.
-func evaluateExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractValue {
+func evaluateExpression(ctx *FlowContext, env Env, e *ast.Node) (answer abstractdomain.AbstractValue) {
 	analysisDepthMu.Lock()
 	analysisDepths[ctx.P]++
 	depth := analysisDepths[ctx.P]
@@ -105,6 +107,44 @@ func evaluateExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.A
 		if pinned, isPinned := ctx.NodeOverrides[e]; isPinned {
 			return pinned
 		}
+	}
+	// THE EXPRESSION DISPATCH SEAM of the derivation trace: one span per
+	// sub-expression the walk reads, carrying that sub-expression's OWN
+	// spelling and range — never the enclosing statement's. Readers below
+	// never manage spans; this seam pushes and records for all of them.
+	// Off is one atomic load inside Active(); nothing is spelled and no
+	// line map is scanned until a trace is running.
+	//
+	// The span closes on the value this seam actually HANDS BACK, not on
+	// evaluateForm's raw answer: the resolved-type re-seed below can turn
+	// a join's unknown into a determined value, and a span that recorded
+	// the pre-seed unknown would name a decline the walk did not make.
+	// So the recording rides a defer over the named result.
+	if derivation.Active() {
+		span := derivation.BeginNode("evaluateExpression", e)
+		defer func() {
+			if answer.Kind == abstractdomain.KindUnknown {
+				// the reader's own first-blocker sentence is the gate where
+				// it composed one; where it did not AND the answer is not
+				// opaque either, the span carries no gate and its projection
+				// falls back to "<construct>: <reader> declined" — a visible
+				// work item, per the spec, never an accepted state
+				gate := answer.ResidueReason
+				if gate == "" && answer.Opaque {
+					// an OPAQUE answer is a real, checker-wide gate even with
+					// no reader-composed sentence: the value is determined
+					// OUTSIDE the file (a global whose declarations are all
+					// ambient, an external call's result) — a standing strong
+					// enough to refute at some sinks but never strong enough
+					// to state a set
+					gate = "the value is determined outside this file, which proves no set"
+				}
+				span.Decline(gate, "", "no set")
+			} else {
+				span.Answer(spellValue(answer))
+			}
+			span.End()
+		}()
 	}
 	known := evaluateForm(ctx, env, e)
 	// a call `this` reaches — as method receiver, argument, or
@@ -341,6 +381,7 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 		// so "not shadowed by any user binding" is the whole test
 		if e.Text() == "undefined" {
 			if _, tracked := env.Get(e.Text()); !tracked {
+				tracing.CountBy("host.symbolAtLocation", 1)
 				symbol := ctx.P.Checker.GetSymbolAtLocation(e)
 				shadowed := false
 				if symbol != nil {
@@ -362,6 +403,22 @@ func evaluateForm(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstrac
 			// not read it — the walk's own gap, never the outside's silence
 			if held.Kind == abstractdomain.KindUnknown && held.Opaque && NarrowedSinceDeclaration(ctx, e) {
 				return silence.Residue()
+			}
+			// a bare tracked unknown with no reason of its own still names
+			// its own gate when the last-touch ledger recorded WHAT moved
+			// it there: a havoc, a forget, or a plain write with no
+			// producing subtree behind it. Reading the ledger here — at the
+			// read site, rather than only at trace assembly (attachLastTouch)
+			// — lets THIS span's own decline carry the sentence instead of
+			// falling to "evaluateExpression declined", which named the
+			// reader and nothing about why. A name the ledger never touched
+			// (a narrowing that left it exactly as unresolved as it found
+			// it, `v` under `typeof v === "number"` with no band guard)
+			// keeps the bare residue: there is truly no mutation to name.
+			if held.Kind == abstractdomain.KindUnknown && !held.Opaque && held.ResidueReason == "" {
+				if touch := derivation.LastTouchOf(e.Text()); touch != "" {
+					return silence.ResidueOf("the last write to this name " + touch + " left nothing behind")
+				}
 			}
 			return held
 		}

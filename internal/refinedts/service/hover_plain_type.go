@@ -9,6 +9,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // PlainTypeNode is plainTypeNode in the TS source: a type node with no
@@ -168,12 +169,14 @@ func LiteralBearingType(p *program.CheckerProgram, t *checker.Type, depth int, s
 	}
 	if (flags & checker.TypeFlagsObject) != 0 {
 		if (t.ObjectFlags() & checker.ObjectFlagsReference) != 0 {
+			tracing.CountBy("host.typeArguments", 1)
 			for _, argument := range c.GetTypeArguments(t) {
 				if LiteralBearingType(p, argument, depth+1, seen, at) {
 					return true
 				}
 			}
 		}
+		tracing.CountBy("host.propertiesOfType", 1)
 		properties := c.GetPropertiesOfType(t)
 		if len(properties) > 48 {
 			return true
@@ -199,6 +202,7 @@ func LiteralBearingType(p *program.CheckerProgram, t *checker.Type, depth int, s
 			if declaration == nil {
 				return true
 			}
+			tracing.CountBy("host.typeOfSymbolAtLocation", 1)
 			held := c.GetTypeOfSymbolAtLocation(property, declaration)
 			if LiteralBearingType(p, held, depth+1, seen, at) {
 				return true
@@ -207,6 +211,7 @@ func LiteralBearingType(p *program.CheckerProgram, t *checker.Type, depth int, s
 		return false
 	}
 	if (flags & checker.TypeFlagsTypeParameter) != 0 {
+		tracing.CountBy("host.constraintOfType", 1)
 		constraint := c.GetConstraintOfType(t)
 		return constraint != nil && LiteralBearingType(p, constraint, depth+1, seen, at)
 	}

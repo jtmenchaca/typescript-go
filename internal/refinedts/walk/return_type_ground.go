@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -51,6 +52,7 @@ func AnnotationOfReturnType(ctx *FlowContext, e *ast.Node) *abstractdomain.Abstr
 	// runs, so a generic's instantiated return keeps its existing
 	// route.
 	if ast.IsCallExpression(e) && ctx.P != nil && ctx.P.Checker != nil {
+		tracing.CountBy("host.resolvedSignature", 1)
 		if signature := ctx.P.Checker.GetResolvedSignature(e); signature != nil {
 			if declaration := signature.Declaration(); declaration != nil {
 				// only a TYPE REFERENCE (an alias like `Age`, or a stated
@@ -138,6 +140,7 @@ func AnnotationOfReturnType(ctx *FlowContext, e *ast.Node) *abstractdomain.Abstr
 // declaration carries no spelled type (an inferred field), answers
 // nil the way an unresolvable name always did.
 func declaredTypeNodeOfReceiver(ctx *FlowContext, receiver *ast.Node) *ast.Node {
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(receiver)
 	if symbol == nil {
 		return nil
@@ -169,17 +172,256 @@ func declaredTypeNodeOfReceiver(ctx *FlowContext, receiver *ast.Node) *ast.Node 
 	return nil
 }
 
+// mapValueTypeNodeOfReceiver is the type node spelling V for a `.get()`
+// receiver that is a Map — the node MapValueAnnotation reads its stated
+// set from.
+//
+// Three ways a receiver states V, and the last two are what a map with
+// no written-out annotation has. Written out, the declaration spells
+// `Map<K, V>` and V is its second type argument. Inferred from its own
+// construction — `const m = new Map(source)` — the declaration spells
+// nothing, and V comes from what the constructor was HANDED:
+// AddEntriesFromIterable
+// reads each item's "1" and sets it as the value
+// (sec-add-entries-from-iterable), so every value in the built map is
+// one of the source's second components, and the source's own declared
+// element type states which. That is the same generic discipline the
+// written-out case leans on, read one step earlier — at the
+// construction rather than at the annotation the construction would
+// have been assigned to.
+//
+// The source shapes read here are the ones that spell a value type
+// syntactically: an array of PAIRS (`[K, V][]`, whose element is a
+// two-slot tuple), and `Object.entries(record)` over a record whose own
+// declared type states its value (`Record<K, V>`). And CLONED from
+// another map — `const cloned = structuredClone(m)` — where the clone
+// wears the original's type and the question moves to the original.
+//
+// A source that states no element type answers nil, and the read falls
+// back the way an unresolvable receiver always did.
+func mapValueTypeNodeOfReceiver(ctx *FlowContext, receiver *ast.Node) *ast.Node {
+	if typeNode := declaredTypeNodeOfReceiver(ctx, receiver); typeNode != nil {
+		return mapValueTypeArgument(typeNode)
+	}
+	tracing.CountBy("host.symbolAtLocation", 1)
+	symbol := ctx.P.Checker.GetSymbolAtLocation(receiver)
+	if symbol == nil || symbol.ValueDeclaration == nil {
+		return nil
+	}
+	declaration := symbol.ValueDeclaration
+	if !ast.IsVariableDeclaration(declaration) {
+		return nil
+	}
+	initializer := declaration.AsVariableDeclaration().Initializer
+	if initializer == nil {
+		return nil
+	}
+	// a CLONE states the original's value type. structuredClone is
+	// declared `structuredClone<T = any>(value: T, …): T`, and the
+	// algorithm rebuilds a Map by re-setting the original's entries into
+	// a fresh one — same values, fresh identity — so a clone of a
+	// `Map<K, V>` is a `Map<K, V>` and the question moves to the
+	// original's own receiver (structured_clone_model.go carries the
+	// contents transfer; this carries the stated value type, which is
+	// what a receiver the walk built no entries for still has).
+	if ast.IsCallExpression(initializer) {
+		call := initializer.AsCallExpression()
+		if ast.IsIdentifier(call.Expression) && call.Expression.Text() == "structuredClone" &&
+			resolvesToDefaultLib(ctx, call.Expression) &&
+			call.Arguments != nil && len(call.Arguments.Nodes) >= 1 {
+			return mapValueTypeNodeOfReceiver(ctx, call.Arguments.Nodes[0])
+		}
+		return nil
+	}
+	if !ast.IsNewExpression(initializer) {
+		return nil
+	}
+	newExpr := initializer.AsNewExpression()
+	if !ast.IsIdentifier(newExpr.Expression) ||
+		(newExpr.Expression.Text() != "Map" && newExpr.Expression.Text() != "WeakMap") ||
+		!resolvesToDefaultLib(ctx, newExpr.Expression) {
+		return nil
+	}
+	// `new Map<K, V>(…)` / `new WeakMap<K, V>(…)` spells V at the
+	// construction itself
+	if newExpr.TypeArguments != nil && len(newExpr.TypeArguments.Nodes) == 2 {
+		return newExpr.TypeArguments.Nodes[1]
+	}
+	if newExpr.Arguments == nil || len(newExpr.Arguments.Nodes) != 1 {
+		return nil
+	}
+	return mapValueTypeNodeOfSource(ctx, newExpr.Arguments.Nodes[0])
+}
+
+// mapValueTypeArgument is V from a type node spelling `Map<K, V>`, and
+// nil from anything else.
+func mapValueTypeArgument(typeNode *ast.Node) *ast.Node {
+	if !ast.IsTypeReferenceNode(typeNode) {
+		return nil
+	}
+	typeRef := typeNode.AsTypeReferenceNode()
+	if !ast.IsIdentifier(typeRef.TypeName) {
+		return nil
+	}
+	name := typeRef.TypeName.Text()
+	// WeakMap states the same two-argument `<K, V>` discipline: its get
+	// walks [[WeakMapData]] and answers the matching record's [[Value]]
+	// (sec-weakmap.prototype.get), so a stated V binds every stored
+	// value exactly as Map's does — only the key identity rule differs,
+	// and V is not about keys
+	if name != "Map" && name != "ReadonlyMap" && name != "WeakMap" {
+		return nil
+	}
+	if typeRef.TypeArguments == nil || len(typeRef.TypeArguments.Nodes) != 2 {
+		return nil
+	}
+	return typeRef.TypeArguments.Nodes[1]
+}
+
+// mapValueTypeNodeOfSource is V from the expression a Map constructor
+// was handed — the second component of what the source iterates.
+//
+// `Object.entries(record)` yields `[key, value]` pairs whose value is
+// the record's own value type (sec-object.entries walks the record's own
+// enumerable string-keyed properties), so a record declared
+// `Record<K, V>` states V directly. Any other source states V through
+// its own declared element type: an array of pairs `[K, V][]` has a
+// two-slot tuple element, and that tuple's second slot is V.
+func mapValueTypeNodeOfSource(ctx *FlowContext, source *ast.Node) *ast.Node {
+	if ast.IsCallExpression(source) {
+		call := source.AsCallExpression()
+		if !ast.IsPropertyAccessExpression(call.Expression) {
+			return nil
+		}
+		pa := call.Expression.AsPropertyAccessExpression()
+		if !ast.IsIdentifier(pa.Expression) || pa.Expression.Text() != "Object" ||
+			pa.Name().Text() != "entries" || call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+			return nil
+		}
+		recordType := declaredTypeNodeOfReceiver(ctx, call.Arguments.Nodes[0])
+		if recordType == nil || !ast.IsTypeReferenceNode(recordType) {
+			return nil
+		}
+		recordRef := recordType.AsTypeReferenceNode()
+		if !ast.IsIdentifier(recordRef.TypeName) || recordRef.TypeName.Text() != "Record" ||
+			recordRef.TypeArguments == nil || len(recordRef.TypeArguments.Nodes) != 2 {
+			return nil
+		}
+		return recordRef.TypeArguments.Nodes[1]
+	}
+	elementType := declaredTypeNodeOfReceiver(ctx, source)
+	if elementType == nil || !ast.IsArrayTypeNode(elementType) {
+		return nil
+	}
+	pairType := elementType.AsArrayTypeNode().ElementType
+	if pairType == nil || !ast.IsTupleTypeNode(pairType) {
+		return nil
+	}
+	elements := pairType.AsTupleTypeNode().Elements
+	if elements == nil || len(elements.Nodes) != 2 {
+		return nil
+	}
+	// a labelled slot (`[key: K, value: V]`) states the same type behind
+	// its name, so the member's own type is what is read
+	value := elements.Nodes[1]
+	if ast.IsNamedTupleMember(value) {
+		return value.AsNamedTupleMember().Type
+	}
+	return value
+}
+
 // MapValueAnnotation is mapValueAnnotation in the TS source: `x.get(k)`
-// where x's DECLARED type node spells `Map<K, V>` with V a readable
-// annotation: the read answers V's stated set, or absent (a get can
-// miss). tsc's own generic discipline is what makes every stored
-// value wear V at its write site, so the claim carries LIBRARY grade.
-// The type NODE is read rather than the resolved type because
-// instantiation erases the alias the annotation reader needs. The
-// receiver is whatever the checker resolves to a declaration spelling
-// that node — a name, `this.cache`, or a longer chain all read the
-// same way.
-func MapValueAnnotation(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractValue {
+// where x's receiver states `Map<K, V>` with V a readable annotation:
+// the read answers V's stated set, or absent (a get can miss). tsc's own
+// generic discipline is what makes every stored value wear V at its
+// write site, so the claim carries LIBRARY grade.
+// A type NODE is read rather than the resolved type because
+// instantiation erases the alias the annotation reader needs, and
+// mapValueTypeNodeOfReceiver is what finds the node stating V — from
+// the receiver's own declaration where it spells one, and from the
+// construction that built it where it does not. The receiver is
+// whatever the checker resolves to such a declaration — a name,
+// `this.cache`, or a longer chain all read the same way.
+//
+// keyEstablished drops the absence. `get` returns *undefined* only
+// when its walk of [[MapData]] finds no entry whose key SameValue-
+// matches (sec-map.prototype.get); `has` walks that same list with
+// that same test and returns *true* exactly when one does
+// (sec-map.prototype.has). So under a standing `m.has(k)` for the same
+// key, the miss branch of `get` is unreachable and the read answers
+// V's stated set with nothing absent in it. The caller decides whether
+// such a guard stands — KeyPresenceEstablishedFor — because the
+// standing is an environment fact and this reader sees only syntax.
+// CheckMapValueWrite judges a `m.set(k, v)` WRITE against the value
+// type the receiver's own `Map<K, V>` states — the other half of the
+// generic discipline MapValueAnnotation reads.
+//
+// The two sides are one fact. MapValueAnnotation's `get` reading is
+// sound only BECAUSE nothing enters a `Map<K, V>` without wearing V at
+// its write site; that is tsc's own guarantee for the TYPE, and it is
+// exactly what a refinement set adds a real obligation to. `Map<string,
+// Age>` states that every stored value is an Age, so `m.set("x", 200)`
+// stores a value the declaration forbids — and reading it back later
+// through the `get` side would hand out a "proven Age" of 200. Judging
+// only the read side and never the write is what let that through: the
+// value was evaluated for its effects and then dropped unjudged.
+//
+// The receiver's value-type node is found the same way the read side
+// finds it (mapValueTypeNodeOfReceiver — a written-out annotation, a
+// construction's own type argument, or the source a construction was
+// handed), so a map with no spelled V states no obligation and nothing
+// is judged, exactly as the read side answers nothing for one.
+func CheckMapValueWrite(ctx *FlowContext, e *ast.Node, written abstractdomain.AbstractValue, at *ast.Node) {
+	call := e.AsCallExpression()
+	if !ast.IsPropertyAccessExpression(call.Expression) {
+		return
+	}
+	pa := call.Expression.AsPropertyAccessExpression()
+	if pa.Name().Text() != "set" || call.Arguments == nil || len(call.Arguments.Nodes) != 2 {
+		return
+	}
+	valueTypeNode := mapValueTypeNodeOfReceiver(ctx, pa.Expression)
+	if valueTypeNode == nil {
+		return
+	}
+	read := annotations.AnnotationOfType(ctx.P, valueTypeNode, ctx.Registry, ctx.Objects)
+	if read.Stated == nil || read.Unsupported != "" {
+		return
+	}
+	CheckAssignability(ctx, written, *read.Stated, at, "the stored value", nil)
+}
+
+// MapStatedValueOfGetOrInsert is the getOrInsert side of the one
+// `Map<K, V>` fact the two functions around it read and judge: the
+// call answers the held value or inserts its default, and BOTH wear
+// the receiver's stated V — the held value entered wearing V at its
+// own write (CheckMapValueWrite's doc on why the read side rests on
+// the write side), and the default is judged against V here, at ITS
+// write. Answers V's stated set for the caller to join with the
+// default's own value; nil where the receiver spells no V, which is
+// also when nothing is judged — the same silence both siblings keep.
+func MapStatedValueOfGetOrInsert(ctx *FlowContext, receiverExpression *ast.Node,
+	inserted abstractdomain.AbstractValue, at *ast.Node) *abstractdomain.AbstractValue {
+	if receiverExpression == nil {
+		return nil
+	}
+	valueTypeNode := mapValueTypeNodeOfReceiver(ctx, receiverExpression)
+	if valueTypeNode == nil {
+		return nil
+	}
+	read := annotations.AnnotationOfType(ctx.P, valueTypeNode, ctx.Registry, ctx.Objects)
+	if read.Stated == nil || read.Unsupported != "" || read.Stated.Kind != annotations.DeclaredSet {
+		return nil
+	}
+	CheckAssignability(ctx, inserted, *read.Stated, at, "the stored value", nil)
+	stated := abstractdomain.AtTrustLevel(
+		abstractdomain.KnownSet(*read.Stated.Set, read.Stated.Temporal, abstractdomain.TrustProved, setKindTagOf(read.Stated.KindTag)),
+		abstractdomain.TrustLibrary,
+	)
+	return &stated
+}
+
+func MapValueAnnotation(ctx *FlowContext, e *ast.Node, keyEstablished bool) *abstractdomain.AbstractValue {
 	call := e.AsCallExpression()
 	if !ast.IsPropertyAccessExpression(call.Expression) {
 		return nil
@@ -192,32 +434,27 @@ func MapValueAnnotation(ctx *FlowContext, e *ast.Node) *abstractdomain.AbstractV
 	if pa.Name().Text() != "get" || argCount != 1 {
 		return nil
 	}
-	typeNode := declaredTypeNodeOfReceiver(ctx, pa.Expression)
-	if typeNode == nil || !ast.IsTypeReferenceNode(typeNode) {
+	valueTypeNode := mapValueTypeNodeOfReceiver(ctx, pa.Expression)
+	if valueTypeNode == nil {
 		return nil
 	}
-	typeRef := typeNode.AsTypeReferenceNode()
-	if !ast.IsIdentifier(typeRef.TypeName) {
-		return nil
-	}
-	name := typeRef.TypeName.Text()
-	if (name != "Map" && name != "ReadonlyMap") || typeRef.TypeArguments == nil || len(typeRef.TypeArguments.Nodes) != 2 {
-		return nil
-	}
-	read := annotations.AnnotationOfType(ctx.P, typeRef.TypeArguments.Nodes[1], ctx.Registry, ctx.Objects)
+	read := annotations.AnnotationOfType(ctx.P, valueTypeNode, ctx.Registry, ctx.Objects)
 	if read.Stated == nil || read.Unsupported != "" {
 		return nil
 	}
 	if read.Stated.Kind != annotations.DeclaredSet {
 		return nil
 	}
-	out := abstractdomain.PossiblyUndefined(
-		abstractdomain.AtTrustLevel(
-			abstractdomain.KnownSet(*read.Stated.Set, read.Stated.Temporal, abstractdomain.TrustProved, setKindTagOf(read.Stated.KindTag)),
-			abstractdomain.TrustLibrary,
-		),
-		"", false, false,
+	stated := abstractdomain.AtTrustLevel(
+		abstractdomain.KnownSet(*read.Stated.Set, read.Stated.Temporal, abstractdomain.TrustProved, setKindTagOf(read.Stated.KindTag)),
+		abstractdomain.TrustLibrary,
 	)
+	if keyEstablished {
+		// the guard proved the entry present, so `get`'s undefined branch
+		// never runs — V's stated set is the whole answer
+		return &stated
+	}
+	out := abstractdomain.PossiblyUndefined(stated, "", false, false)
 	return &out
 }
 
@@ -273,10 +510,12 @@ func DeclaredReturnTypeGround(ctx *FlowContext, declaration *ast.Node) *abstract
 	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil || declaration == nil {
 		return nil
 	}
+	tracing.CountBy("host.signatureFromDeclaration", 1)
 	signature := ctx.P.Checker.GetSignatureFromDeclaration(declaration)
 	if signature == nil {
 		return nil
 	}
+	tracing.CountBy("host.returnTypeOfSignature", 1)
 	returnType := ctx.P.Checker.GetReturnTypeOfSignature(signature)
 	if returnType == nil {
 		return nil

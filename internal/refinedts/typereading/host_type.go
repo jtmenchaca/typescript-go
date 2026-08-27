@@ -19,6 +19,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 const absentFlags = checker.TypeFlagsUndefined | checker.TypeFlagsNull | checker.TypeFlagsVoid
@@ -81,6 +82,7 @@ func checkerTypeStringSafe(c *checker.Checker, t *checker.Type) (spelling string
 			spelling = "<unstringable>"
 		}
 	}()
+	tracing.CountBy("host.typeToString", 1)
 	return c.TypeToString(t)
 }
 
@@ -165,6 +167,7 @@ func readHostTypeUncachedBody(c *checker.Checker, t *checker.Type, at *ast.Node,
 		return abstractdomain.KnownSet(set, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone), true
 	}
 	if (flags&(checker.TypeFlagsTypeParameter|checker.TypeFlagsConditional|checker.TypeFlagsIndexedAccess|checker.TypeFlagsSubstitution)) != 0 && depth < hostTypeDepthLimit {
+		tracing.CountBy("host.constraintOfType", 1)
 		constrained := c.GetConstraintOfType(t)
 		if constrained == nil || constrained == t {
 			return abstractdomain.AbstractValue{}, false
@@ -250,6 +253,8 @@ func readHostTypeUncachedBody(c *checker.Checker, t *checker.Type, at *ast.Node,
 	// the two, so the same value read nothing depending on which
 	// branch reached it first. One limit, one answer.
 	if (flags&(checker.TypeFlagsObject|checker.TypeFlagsIntersection)) != 0 && depth < hostTypeDepthLimit {
+		tracing.CountBy("host.callSignatures", 1)
+		tracing.CountBy("host.constructSignatures", 1)
 		if len(c.GetCallSignatures(t)) > 0 || len(c.GetConstructSignatures(t)) > 0 {
 			return abstractdomain.HostFunction, true
 		}
@@ -287,6 +292,7 @@ func readHostTypeUncachedBody(c *checker.Checker, t *checker.Type, at *ast.Node,
 				}
 			}
 			if allRequired {
+				tracing.CountBy("host.typeArguments", 1)
 				slots := c.GetTypeArguments(t)
 				if len(slots) == len(elementFlags) {
 					items := make([]abstractdomain.AbstractValue, len(slots))
@@ -309,7 +315,9 @@ func readHostTypeUncachedBody(c *checker.Checker, t *checker.Type, at *ast.Node,
 			// general array-like branch's star reading below, the same
 			// answer it always gave a tuple before this branch existed
 		}
+		tracing.CountBy("host.isArrayLikeType", 1)
 		if c.IsArrayLikeType(t) && (t.ObjectFlags()&checker.ObjectFlagsReference) != 0 {
+			tracing.CountBy("host.typeArguments", 1)
 			slots := c.GetTypeArguments(t)
 			if len(slots) == 0 {
 				return abstractdomain.AbstractValue{}, false
@@ -333,6 +341,27 @@ func readHostTypeUncachedBody(c *checker.Checker, t *checker.Type, at *ast.Node,
 			}
 			return StarOfElement(element)
 		}
+		// A default-library Map/Set/WeakMap/WeakSet type reads as the
+		// COLLECTION kind the domain spells, not as the structural record
+		// its prototype members would otherwise build. The member walk
+		// below would read `get`/`set`/`has`/`size` off `Map<K, V>` and
+		// hand back a KindObject — a value that answers `instanceof Map`
+		// nothing, so a refuted `x instanceof Map` could not drop the arm
+		// (narrowing/apply_narrowing.go's wearsBrand reads the collection
+		// kind), and an element read over the surviving union stayed
+		// unpinned. The collection is INCOMPLETE with no entries: a type
+		// names no entry, only the flavor, which is exactly what
+		// declared_value.go already builds for a collection object key —
+		// a `has`/`get` miss stays unanswered on an incomplete record,
+		// while typeof, truthiness, and the sort answer off the kind.
+		if flavor, ok := defaultLibCollectionFlavor(c, t); ok {
+			return abstractdomain.AbstractValue{
+				Kind:             abstractdomain.KindCollection,
+				CollectionFlavor: flavor,
+				Entries:          nil,
+				Complete:         false,
+			}, true
+		}
 		// A lib-declared record (Buffer, IncomingMessage, Server) reads
 		// the same way any other record does: each member the reader can
 		// spell is as true of a host object as of a user one, and the
@@ -340,10 +369,31 @@ func readHostTypeUncachedBody(c *checker.Checker, t *checker.Type, at *ast.Node,
 		// does NOT name carries a claim. What the lib shapes really cost
 		// is their SIZE, and the member budget below is what bounds that
 		// — the declaring file is not the thing that made them expensive.
+		tracing.CountBy("host.propertiesOfType", 1)
 		members := c.GetPropertiesOfType(t)
 		// no member at all leaves nothing to seed — the record answers
 		// nothing because it states nothing, not because a gate cut it.
+		//
+		// EXCEPT an INDEX-SIGNATURE type (`{ [k: string]: unknown }`,
+		// `Record<string, V>`), which names no member but does state that
+		// the value is an ordinary object — one carrying Object.prototype,
+		// where a bare `object` would also admit Object.create(null) and
+		// its empty prototype chain. That is a real claim, and the reads
+		// that need it are the inherited-member ones: `"toString" in o`
+		// answers true off the prototype chain (HasProperty,
+		// sec-relational-operators-runtime-semantics-evaluation), which
+		// walk/binary_comparison.go's ReadInKeyword decides through
+		// ObjectPrototypeFunctionKeys — but only for a KindObject
+		// receiver, so refusing here left that read unpinned. The object
+		// is INCOMPLETE and keyless: it names no key, so no key read
+		// gains an answer from it, and the open-map absence gates
+		// (element_access.go's OpenMapAt) still see the same type they
+		// always did.
 		if len(members) == 0 {
+			tracing.CountBy("host.indexInfosOfType", 1)
+			if len(c.GetIndexInfosOfType(t)) > 0 {
+				return abstractdomain.KnownObject(nil, nil, false, abstractdomain.TrustProved, false), true
+			}
 			return abstractdomain.AbstractValue{}, false
 		}
 		// A wide record answers its FIRST members rather than refusing
@@ -369,6 +419,7 @@ func readHostTypeUncachedBody(c *checker.Checker, t *checker.Type, at *ast.Node,
 				site = at
 				*usedAt = true
 			}
+			tracing.CountBy("host.typeOfSymbolAtLocation", 1)
 			memberType := c.GetTypeOfSymbolAtLocation(member, site)
 			if memberType == nil {
 				continue
@@ -430,6 +481,35 @@ func enumDeclarationOf(t *checker.Type) *ast.EnumDeclaration {
 		}
 	}
 	return nil
+}
+
+// defaultLibCollectionFlavor is the collection flavor a type names when
+// it IS the default library's Map, Set, WeakMap, or WeakSet -- and false
+// for every other type. The name alone does not answer: a user-declared
+// `class Map` states its own members and is read as the record it is,
+// so the symbol must declare ENTIRELY in the default library, the same
+// gate narrowing/instanceof_narrowing.go's ambientConstructor keeps
+// before it lets `instanceof` prove anything.
+//
+// A weak collection reads as its flavor exactly like the strong one:
+// the kind carries flavor, entries, and completeness, and an entryless
+// incomplete record is a true claim about both.
+func defaultLibCollectionFlavor(c *checker.Checker, t *checker.Type) (abstractdomain.Flavor, bool) {
+	symbol := t.Symbol()
+	if symbol == nil {
+		return "", false
+	}
+	tracing.CountBy("host.symbolInDefaultLib", 1)
+	if !c.SymbolEntirelyInDefaultLib(symbol) {
+		return "", false
+	}
+	switch symbol.Name {
+	case "Map", "WeakMap":
+		return abstractdomain.FlavorMap, true
+	case "Set", "WeakSet":
+		return abstractdomain.FlavorSet, true
+	}
+	return "", false
 }
 
 // sortGroundOf is the widest reading of a type the reader could not

@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/jsnum"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // ConstChainDepth is how many const-to-const links the resolver
@@ -32,8 +33,10 @@ const ConstChainDepth = 8
 // package per PORT.md (no ready-made wrapper yet;
 // service/program_resolution.ts is not ported).
 func constChainSymbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := c.GetSymbolAtLocation(node)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		symbol = c.GetAliasedSymbol(symbol)
 	}
 	return symbol

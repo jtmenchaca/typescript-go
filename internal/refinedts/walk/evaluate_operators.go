@@ -105,7 +105,15 @@ func ReadUnary(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.AbstractV
 					return parsed, true
 				}
 			}
-			return abstractdomain.UnknownOver([]abstractdomain.AbstractValue{operand}), true
+			unknown := abstractdomain.UnknownOver([]abstractdomain.AbstractValue{operand})
+			// UnknownOver answers a bare unknown for a plain (non-opaque)
+			// operand — the shape this file names above: an object operand
+			// still needs the ToPrimitive grammar this reader does not
+			// carry, so the unary `+` cannot answer without it
+			if unknown.Kind == abstractdomain.KindUnknown && !unknown.Opaque && unknown.ResidueReason == "" {
+				unknown.ResidueReason = "unary + is ToNumber, which needs ToPrimitive on an object operand — a grammar this reader does not carry"
+			}
+			return unknown, true
 		}
 	}
 	if stepped, ok := ReadStepUnary(ctx, env, e); ok {

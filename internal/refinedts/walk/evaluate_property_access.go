@@ -70,6 +70,22 @@ func meetHeldPlaceEntry(ctx *FlowContext, env Env, e *ast.Node, answer *abstract
 	if answer == nil {
 		return &held
 	}
+	// MeetKnown's own unknown/unknown case answers whichever side is
+	// NOT the first argument, with no regard for which side named a
+	// gate — a reader that composed its own ResidueOf sentence
+	// (ReadObjectKeyAccess's union-receiver arm, `s.r` on `!("r" in s)`'s
+	// false side) lost that sentence here whenever the dotted place-value
+	// entry it met against was a bare, reason-less unknown (the ordinary
+	// shape for a path the narrowing proof could not turn into a set —
+	// object_key_access.go's own comment on this). Both sides are still
+	// Unknown either way, so keeping the reader's own reason changes no
+	// determination — it only lets the surviving decline sentence name
+	// the gate that actually fired, instead of falling to the position's
+	// own generic "the walk holds nothing that pins this value".
+	if answer.Kind == abstractdomain.KindUnknown && answer.ResidueReason != "" &&
+		held.Kind == abstractdomain.KindUnknown && held.ResidueReason == "" {
+		return answer
+	}
 	out := abstractdomain.MeetKnown(*answer, held)
 	// a place-value entry is built from the CONDITION alone (comparison_leaf.go's
 	// place-shaped narrowing tree) with no knowledge of the receiver's own
@@ -118,6 +134,16 @@ func ReadPropertyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain.
 	}
 	if globalConstant := ReadGlobalConstantAccess(ctx, e); globalConstant != nil {
 		return globalConstant
+	}
+	// `process.env.<KEY>` — no @types/node resolves `process` in this
+	// program (global_constant_access.go's doc), so the read is
+	// recognized syntactically, ahead of the object-key/place-value
+	// readers below (which have no receiver shape for it — `process`
+	// is neither `this` nor a tracked object — and would otherwise
+	// leave it to the terminal host-type fallback, whose ReadHostType
+	// call finds no symbol at all to read a type from).
+	if processEnv := ReadNodeProcessEnvAccess(ctx, env, e); processEnv != nil {
+		return processEnv
 	}
 	// `ClassName.field` — a static field's own invariant
 	// (class_static_field_invariants.go), the constructor-object twin
@@ -367,7 +393,7 @@ func readLengthOrSizeAccess(ctx *FlowContext, env Env, e *ast.Node, pa *ast.Prop
 	// uniformly — a bare residue here still gives that meet something
 	// to narrow when a guard recorded one (A15.seed.boundary's
 	// `id.length <= 150` on an otherwise-unbounded string receiver).
-	out := silence.Residue()
+	out := silence.ResidueOf("the receiver's own shape states no count — none of the sequence, collection, or object-star forms this reader recognizes matched it")
 	return &out
 }
 

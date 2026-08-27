@@ -44,6 +44,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // generatorStatedPositions reads the yield and return positions a
@@ -83,7 +84,10 @@ func generatorStatedPositions(
 	if !generatorReturnTypeNames[nameText] && nameText != "Iterable" && nameText != "AsyncIterable" {
 		return nil, nil, nil
 	}
-	if !p.Checker.SymbolInDefaultLib(p.Checker.GetSymbolAtLocation(name)) {
+	tracing.CountBy("host.symbolAtLocation", 1)
+	symbol := p.Checker.GetSymbolAtLocation(name)
+	tracing.CountBy("host.symbolInDefaultLib", 1)
+	if !p.Checker.SymbolInDefaultLib(symbol) {
 		return nil, nil, nil
 	}
 	if reference.TypeArguments == nil || len(reference.TypeArguments.Nodes) == 0 {
@@ -202,6 +206,13 @@ const maxAliasChainDepth = 8
 // AbstractValueOfDeclared(*ctx.YieldResumeStated); nil, the one syntax
 // table's decline.
 func CheckYieldedValue(ctx *FlowContext, env Env, e *ast.Node) {
+	// a yield suspends the generator body exactly as an await suspends
+	// an async function (sec-generatoryield hands control back to
+	// whoever called next(); this body resumes only on a later call) —
+	// the same job boundary EvaluateAwait's own drop guards
+	// (cast_and_await.go), so a `m.has(k)` fact recorded before the
+	// yield cannot answer a `m.get(k)` read after it either.
+	DropAllKeyPresenceFacts(env)
 	y := e.AsYieldExpression()
 	if y.AsteriskToken != nil {
 		if y.Expression == nil {

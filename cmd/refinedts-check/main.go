@@ -29,6 +29,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/service"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/walk"
@@ -53,6 +54,24 @@ func (d *diagnoseFlagValue) Set(value string) error {
 // optional interface): a bare `-diagnose` (no `=value`) then calls
 // Set("true") instead of failing as a flag that requires a value.
 func (d *diagnoseFlagValue) IsBoolFlag() bool { return true }
+
+// traceTimeFlagValue is -trace-time's custom flag.Value, mirroring
+// diagnoseFlagValue exactly: a bare `-trace-time` parses as "true"
+// (timing on, report to stderr); `-trace-time=<file>` carries the
+// destination path through unchanged (timing on, report to <file>).
+type traceTimeFlagValue string
+
+func (t *traceTimeFlagValue) String() string { return string(*t) }
+
+func (t *traceTimeFlagValue) Set(value string) error {
+	*t = traceTimeFlagValue(value)
+	return nil
+}
+
+// IsBoolFlag is the flag package's own hook: a bare `-trace-time` (no
+// `=value`) then calls Set("true") instead of failing as a flag that
+// requires a value.
+func (t *traceTimeFlagValue) IsBoolFlag() bool { return true }
 
 func main() {
 	// the sweep's live set is the program + facts; collecting at every
@@ -84,10 +103,25 @@ func main() {
 		"file holding newline-separated .ts paths to check (joins any positional args)")
 	wallFlag := flag.Bool("wall", false,
 		"print total wall time and file count to stderr when done")
-	traceFlag := flag.Bool("trace", false,
-		"record where refinement time goes and print the attribution report to stderr")
-	traceOutFlag := flag.String("trace-out", "",
-		"write the -trace report to this file instead of stderr")
+	// refusal shims for the four renamed/folded flags — checked right
+	// after flag.Parse(), before any other flag handling, so a caller
+	// using the old spelling gets pointed at the new one instead of
+	// silently running with the wrong knob.
+	oldTraceFlag := flag.Bool("trace", false, "removed: use -trace-time")
+	oldTraceOutFlag := flag.String("trace-out", "", "removed: use -trace-time=<file>")
+	oldExplainFlag := flag.String("explain", "", "removed: use -trace-verdict")
+	oldExplainJSONFlag := flag.Bool("explain-json", false, "removed: use -trace-verdict <path>:<line>:json")
+	// the two tracing instruments are named by what they trace — time,
+	// or a position's verdict — and each flag's value carries its own
+	// options (destination for time, format for verdict), so neither
+	// needs a companion flag.
+	var traceTimeFlag traceTimeFlagValue
+	flag.Var(&traceTimeFlag, "trace-time",
+		"record where refinement time goes and print the attribution report to stderr; "+
+			"-trace-time=<file> writes the report there instead")
+	traceVerdictFlag := flag.String("trace-verdict", "",
+		"emit the derivation trace for every judged position on <path>:<line> (packages/tests/DERIVATION-TRACE.md); "+
+			"a trailing :json prints schema-valid JSON (packages/tests/diagnostics/trace.schema.json) instead of the rendered tree")
 	cpuProfileFlag := flag.String("cpuprofile", "",
 		"write a pprof CPU profile to this file (exact attribution, no tracing overhead)")
 	memProfileFlag := flag.String("memprofile", "",
@@ -111,6 +145,22 @@ func main() {
 		"write a determinism-diagnosis trace to stderr: bare -diagnose captures every event; "+
 			"-diagnose=walk.entryEnv,walk.contract captures only events whose name starts with one of these comma-separated prefixes")
 	flag.Parse()
+	if *oldTraceFlag {
+		fmt.Fprintln(os.Stderr, "flag -trace was renamed: use -trace-time")
+		os.Exit(2)
+	}
+	if *oldTraceOutFlag != "" {
+		fmt.Fprintln(os.Stderr, "flag -trace-out was folded in: use -trace-time=<file>")
+		os.Exit(2)
+	}
+	if *oldExplainFlag != "" {
+		fmt.Fprintln(os.Stderr, "flag -explain was renamed: use -trace-verdict <path>:<line>")
+		os.Exit(2)
+	}
+	if *oldExplainJSONFlag {
+		fmt.Fprintln(os.Stderr, "flag -explain-json was folded in: use -trace-verdict <path>:<line>:json")
+		os.Exit(2)
+	}
 	diagnose.SetCapture(string(diagnoseFlag))
 	files := flag.Args()
 	if *listFlag != "" {
@@ -134,7 +184,7 @@ func main() {
 		os.Exit(2)
 	}
 	if *exportFactFlag == "" && len(files) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] [-list files.txt] [-wall] [-trace] [-trace-out path] [-diagnose[=prefix,prefix,...]] <file.ts> [...]")
+		fmt.Fprintln(os.Stderr, "usage: refinedts-check [-surface z.ts] [-kernel dylib] [-list files.txt] [-wall] [-trace-time[=path]] [-diagnose[=prefix,prefix,...]] <file.ts> [...]")
 		fmt.Fprintln(os.Stderr, "       refinedts-check -export-fact <file.ts> [-o path] [-producer-py path]")
 		os.Exit(2)
 	}
@@ -180,9 +230,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, line)
 		})
 	}
-	if *traceFlag {
-		if *traceOutFlag != "" {
-			tracing.SetWriteTo(*traceOutFlag)
+	// "" → tracing off; "true" → tracing on, report to stderr; any other
+	// value → tracing on, report to that path.
+	traceTimeValue := string(traceTimeFlag)
+	traceTimeOn := traceTimeValue != ""
+	if traceTimeOn {
+		if traceTimeValue != "true" {
+			tracing.SetWriteTo(traceTimeValue)
 		}
 		tracing.TraceStart(tracing.GrainStep)
 	}
@@ -203,6 +257,34 @@ func main() {
 			os.Exit(2)
 		}
 		stopProfile = pprof.StopCPUProfile
+	}
+
+	// -trace-verdict records the derivation the walk already performs for
+	// every judged position on the requested line. Started before
+	// CheckFiles so the per-entry workers adopt the recorder; stopped
+	// after, so the traces are complete when they print. A trailing
+	// ":json" is this flag's OWN format suffix, parsed here and stripped
+	// before the request reaches service.ParseExplainRequest unchanged.
+	traceVerdictValue := *traceVerdictFlag
+	verdictJSON := false
+	if strings.HasSuffix(traceVerdictValue, ":json") {
+		verdictJSON = true
+		traceVerdictValue = strings.TrimSuffix(traceVerdictValue, ":json")
+	}
+	stopExplain := func() {}
+	if traceVerdictValue != "" {
+		explainPath, explainLine, parsed := service.ParseExplainRequest(traceVerdictValue)
+		if !parsed {
+			fmt.Fprintln(os.Stderr, "usage: refinedts-check -trace-verdict <path>:<line>[:json] <file.ts>")
+			os.Exit(2)
+		}
+		stopExplain = service.BeginExplain(explainPath, explainLine)
+		// durationNs rides the EXISTING timing flag: -trace-time passed
+		// together with -trace-verdict fills it, -trace-verdict alone
+		// leaves it absent. Two runs of one position then differ only
+		// when the caller asked for wall figures, which is what keeps an
+		// untimed trace byte-comparable across adapters.
+		derivation.SetTiming(traceTimeOn)
 	}
 
 	reported := false
@@ -272,6 +354,19 @@ func main() {
 				file, e.MarkerLine, codeSuffix, e.Line)
 		}
 	}
+	if traceVerdictValue != "" {
+		stopExplain()
+		if verdictJSON {
+			encoded, err := service.ExplainJSON()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			fmt.Fprintln(os.Stdout, encoded)
+		} else {
+			fmt.Fprint(os.Stdout, service.ExplainText())
+		}
+	}
 	if *wallFlag {
 		fmt.Fprintf(os.Stderr, "WALL %d ms  %d files\n",
 			time.Since(startedAt).Milliseconds(), len(files))
@@ -299,12 +394,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "  %8.0f ms  %s\n", w.ms, filepath.Base(w.path))
 		}
 	}
-	if *traceFlag {
+	if traceTimeOn {
 		tracing.TraceStop()
 		tracing.EmitTraceReport()
 		fmt.Fprintln(os.Stderr, kernelbridge.QuestionCostReport())
 	}
-	if *detailFlag && !*traceFlag {
+	if *detailFlag && !traceTimeOn {
 		fmt.Fprintln(os.Stderr, tracing.DetailReportText())
 	}
 	stopProfile()

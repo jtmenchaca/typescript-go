@@ -12,18 +12,23 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // resolvesToDefaultLib is resolvesToDefaultLib in the TS source
 // (service/program_resolution.ts): does this identifier resolve to a
 // declaration in a DEFAULT library file (the global Number, Math, …)?
 func resolvesToDefaultLib(c *checker.Checker, node *ast.Node) bool {
+	tracing.CountBy("host.symbolAtLocation", 1)
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	return c.SymbolInDefaultLib(c.GetSymbolAtLocation(node))
 }
 
-// ArrayShapeLeaf is arrayShapeLeaf in the TS source: Array.isArray or
-// `[…].includes(x)` — (BranchNarrowings{}, false) when the call is
-// neither, so the caller can try the next recognizer.
+// ArrayShapeLeaf is arrayShapeLeaf in the TS source: Array.isArray, or
+// a literal-list membership test in either of its two spellings
+// (`[…].includes(x)`, `new Set([…]).has(x)`) — (BranchNarrowings{},
+// false) when the call is none of those, so the caller can try the next
+// recognizer.
 func ArrayShapeLeaf(c *checker.Checker, e *ast.Node, isTracked func(name string) bool) (BranchNarrowings, bool) {
 	call := e.AsCallExpression()
 	// `Array.isArray(u)` held TRUE proves an Array exotic object,
@@ -44,12 +49,27 @@ func ArrayShapeLeaf(c *checker.Checker, e *ast.Node, isTracked func(name string)
 					nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone,
 				)
 				return BranchNarrowings{
-					WhenTrue: []Narrowed{{
-						Binding:  tested.Binding,
-						Path:     append(append([]string{}, tested.Path...), "length"),
-						Shape:    lengthShape,
-						HasShape: true,
-					}},
+					WhenTrue: []Narrowed{
+						// the BRAND on the tested place itself: held, the
+						// value IS an Array exotic object, so a kind union
+						// keeps only the arms one could be
+						// (Narrowed.SequenceBrand). Without this row the
+						// guard stated only the length, and a value declared
+						// `T[] | number` kept its number arm through the
+						// test — an element read off it then had no sequence
+						// to index and pinned no position.
+						{
+							Binding:       tested.Binding,
+							Path:          append([]string{}, tested.Path...),
+							SequenceBrand: true,
+						},
+						{
+							Binding:  tested.Binding,
+							Path:     append(append([]string{}, tested.Path...), "length"),
+							Shape:    lengthShape,
+							HasShape: true,
+						},
+					},
 				}, true
 			}
 			return BranchNarrowings{}, false
@@ -62,7 +82,7 @@ func ArrayShapeLeaf(c *checker.Checker, e *ast.Node, isTracked func(name string)
 	// held FALSE is answered by the kernel's Or-of-Eq/EqSeq fold
 	// through leafTreeOf/includesMembershipTree — the real-line
 	// complement of the same members, weak, wherever the fold applies
-	if includes, ok := includesReceiverOf(call); ok {
+	if includes, ok := includesReceiverOf(c, call); ok {
 		members, words, readable := includesMembersOf(includes)
 		tested := dataflowfacts.TrackedPlaceOfWith(c, call.Arguments.Nodes[0], isTracked)
 		// one sort per list: a mixed list pins nothing (the tuple layer
@@ -91,20 +111,51 @@ func ArrayShapeLeaf(c *checker.Checker, e *ast.Node, isTracked func(name string)
 	return BranchNarrowings{}, false
 }
 
-// includesReceiverOf reads `[...].includes(x)`'s array-literal receiver
-// — (nil, false) when e is not that call shape at all (wrong method
-// name, no literal-array receiver, not exactly one argument).
-func includesReceiverOf(call *ast.CallExpression) (*ast.Node, bool) {
+// includesReceiverOf reads the ARRAY LITERAL whose members a membership
+// test asks about — (nil, false) when e is not such a call at all.
+//
+// Two spellings ask the same question of the same literal list, and
+// both are read here so the whenTrue pin and the kernel whenFalse fold
+// treat them identically.
+//
+//   - `[1, 2].includes(x)` — the literal is the receiver
+//     (sec-array.prototype.includes).
+//   - `new Set([1, 2]).has(x)` — the literal is the Set constructor's
+//     argument. A freshly built Set holds exactly the members the
+//     literal spells (sec-set-iterable adds each item of the iterable),
+//     and `has` answers membership over that same list
+//     (sec-set.prototype.has: SameValue against each [[SetData]] entry,
+//     after CanonicalizeKeyedCollectionKey folds -0 to +0 — which is
+//     SameValueZero, the same equality `includes` uses). The Set is
+//     built at the test and dropped after it, so nothing can have
+//     changed its members between construction and question.
+func includesReceiverOf(c *checker.Checker, call *ast.CallExpression) (*ast.Node, bool) {
 	if !ast.IsPropertyAccessExpression(call.Expression) {
 		return nil, false
 	}
 	propAccess := call.Expression.AsPropertyAccessExpression()
-	if propAccess.Name().Text() != "includes" ||
-		!ast.IsArrayLiteralExpression(propAccess.Expression) ||
-		call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
+	if call.Arguments == nil || len(call.Arguments.Nodes) != 1 {
 		return nil, false
 	}
-	return propAccess.Expression, true
+	if propAccess.Name().Text() == "includes" && ast.IsArrayLiteralExpression(propAccess.Expression) {
+		return propAccess.Expression, true
+	}
+	if propAccess.Name().Text() == "has" && ast.IsNewExpression(propAccess.Expression) {
+		newExpr := propAccess.Expression.AsNewExpression()
+		// the built-in Set, never a class of the same name that a file
+		// declares for itself — a user Set's `has` decides membership by
+		// whatever its own body does
+		if !ast.IsIdentifier(newExpr.Expression) || newExpr.Expression.Text() != "Set" ||
+			!resolvesToDefaultLib(c, newExpr.Expression) {
+			return nil, false
+		}
+		if newExpr.Arguments == nil || len(newExpr.Arguments.Nodes) != 1 ||
+			!ast.IsArrayLiteralExpression(newExpr.Arguments.Nodes[0]) {
+			return nil, false
+		}
+		return newExpr.Arguments.Nodes[0], true
+	}
+	return nil, false
 }
 
 // includesMembersOf reads a literal array's elements as one sort of
@@ -134,8 +185,9 @@ func includesMembersOf(receiver *ast.Node) (members []float64, words []string, r
 	return members, words, readable
 }
 
-// IncludesMembershipTree is includesMembershipTree in the TS source:
-// `[...].includes(x)` lowered to the kernel's own Or-of-Eq/EqSeq
+// IncludesMembershipTree is includesMembershipTree in the TS source: a
+// literal-list membership test — `[...].includes(x)` or
+// `new Set([...]).has(x)` — lowered to the kernel's own Or-of-Eq/EqSeq
 // tree on the PLACE x — the same recognition includesReceiverOf /
 // includesMembersOf use for the whenTrue pin above, folded so the
 // general ask loop (condition_analysis.go) can also answer whenFalse:
@@ -153,7 +205,7 @@ func IncludesMembershipTree(
 		return Other
 	}
 	call := e.AsCallExpression()
-	receiver, ok := includesReceiverOf(call)
+	receiver, ok := includesReceiverOf(c, call)
 	if !ok {
 		return Other
 	}
@@ -230,8 +282,11 @@ func ArrayShapeReason(e *ast.Node) (said string, unsupported bool, ok bool) {
 		propAccess.Name().Text() != "isArray" {
 		return "", false, false
 	}
-	// the recognizer does not read this test yet — a kind union
-	// keeps every arm through it, held or refuted
-	return "an Array.isArray test is not read — a kind union " +
-		"keeps every arm through it", true, true
+	// HELD on a tracked place the test IS read — ArrayShapeLeaf emits
+	// the brand row and the length row. This sentence is what remains:
+	// the argument is not a place this walk tracks, or the test is
+	// REFUTED, which proves only "not an Array" and names no arm to
+	// drop, since the tuple layer does not tell a string from an array.
+	return "the Array.isArray test narrows nothing here — its argument " +
+		"is not a tracked place, or the test is refuted, which names no arm to drop", true, true
 }

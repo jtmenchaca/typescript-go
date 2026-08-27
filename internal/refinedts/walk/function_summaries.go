@@ -501,6 +501,7 @@ func recoverPureBody(ctx *FlowContext, call *ast.Node, contract FunctionContract
 	if calleeName == nil {
 		return silence.Residue()
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(calleeName)
 	if symbol == nil {
 		return silence.Residue()

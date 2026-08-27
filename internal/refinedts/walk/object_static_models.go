@@ -357,8 +357,25 @@ func readObjectStaticMethods(site MethodCallSite) *abstractdomain.AbstractValue 
 					}
 				}
 				keys := setObjectKey(append([]abstractdomain.ObjectKey{}, held.Keys...), key, written)
+				// COMPLETENESS DROPS FOR ONE MISSING FACT: ENUMERABILITY.
+				// The write itself names exactly one key, so a receiver
+				// whose key set was already whole still has a whole key
+				// set afterward. What the domain cannot carry is the
+				// descriptor's `enumerable` bit, and that bit is the whole
+				// question Object.keys asks — EnumerableOwnProperties
+				// (sec-enumerableownproperties) lists own keys whose
+				// descriptor is enumerable, so a key defined with
+				// `enumerable: false` is present to a lookup and ABSENT
+				// from the listing. Keeping Complete here would let
+				// Object.keys count this key as one of its own, which is
+				// a wrong answer for exactly the shape this arm exists to
+				// model. The fix is an enumerability mark on ObjectKey,
+				// which the domain does not have; until it does, the
+				// record is honestly incomplete about which of its keys
+				// the listing sees.
 				UpdateTrackedEnv(ctx.Aliases, env, targetName, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
-				out := silence.Residue()
+				out := silence.ResidueOf("Object.defineProperty states an `enumerable` bit the walk " +
+					"carries no place for, so which of the object's keys a key listing sees isn't named")
 				return &out
 			}
 			if isReflectReceiver && method == "set" && hasKey && held.Kind == abstractdomain.KindObject && len(arguments) >= 3 {

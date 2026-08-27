@@ -7,6 +7,11 @@
 // property, once the prototype chain reaches null, returns undefined)
 // — so every wrapper these sites build must carry AbsentFlavorUndefOnly,
 // not the pre-flavor conflated claim.
+//
+// The proved-in-bounds site wraps only where the SHAPE CHANNEL does:
+// element_in_bounds.go's UncheckedIndexedAccessHonored reads the
+// project's noUncheckedIndexedAccess, so that arm is pinned on both
+// sides of the flag — wrapped with it on, the bare element with it off.
 package walk
 
 import (
@@ -136,23 +141,34 @@ func TestElementAccessOf_ObjectStarElementReadIsUndefOnly(t *testing.T) {
 	}
 }
 
-// TestInBoundsElementOf_ProvedInBoundsHoleReadIsUndefOnly pins
-// element_in_bounds.go's proved-in-bounds arm: an array (not string)
-// receiver whose index is proved under the length still wears the
-// absence, because the length can count holes.
-func TestInBoundsElementOf_ProvedInBoundsHoleReadIsUndefOnly(t *testing.T) {
-	p := entryEnvTestProgram(t, "function f(i: number) { const xs = 0; xs[i]; }\n")
+// provedInBoundsHoleRead runs element_in_bounds.go's proved-in-bounds
+// arm over the given program: a repetition receiver with a raised
+// counting floor of 1, read at index 0, which sits strictly under it
+// (window.Hi=0 < rep.Lo=1) — the underFloor arm, the simplest way to
+// reach "proved in bounds" without a length ledger row.
+func provedInBoundsHoleRead(t *testing.T, p *program.CheckerProgram) *abstractdomain.AbstractValue {
+	t.Helper()
 	node := elementAccessNodeOf(t, p, "f")
 	ctx := elementAccessAbsentFlavorContext(p, nil)
 	env := NewEnv()
-	// a raised counting floor of 1: index 0 sits strictly under it
-	// (window.Hi=0 < rep.Lo=1), the underFloor arm — the simplest way
-	// to reach "proved in bounds" without a length ledger row.
 	two := 2
 	rep := refinementsets.Repetition(refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{5})), 1, &two)
 	receiver := abstractdomain.KnownSet(rep, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
 	index := abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
-	got := InBoundsElementOf(InBoundsElementOfParams{Ctx: ctx, Env: env, Expression: node, Receiver: receiver, Index: index})
+	return InBoundsElementOf(InBoundsElementOfParams{Ctx: ctx, Env: env, Expression: node, Receiver: receiver, Index: index})
+}
+
+// TestInBoundsElementOf_ProvedInBoundsHoleReadIsUndefOnly pins
+// element_in_bounds.go's proved-in-bounds arm WITH
+// noUncheckedIndexedAccess ON: an array (not string) receiver whose
+// index is proved under the length still wears the absence, because
+// the length can count holes — and with the flag on the shape channel
+// answers `T | undefined` at the same read, so the two layers agree.
+func TestInBoundsElementOf_ProvedInBoundsHoleReadIsUndefOnly(t *testing.T) {
+	p := entryEnvTestProgramWithOptions(t,
+		"function f(i: number) { const xs = 0; xs[i]; }\n",
+		`"noUncheckedIndexedAccess": true`)
+	got := provedInBoundsHoleRead(t, p)
 	if got == nil {
 		t.Fatalf("InBoundsElementOf(proved in bounds) = nil, want a wrapped result")
 	}
@@ -161,6 +177,26 @@ func TestInBoundsElementOf_ProvedInBoundsHoleReadIsUndefOnly(t *testing.T) {
 	}
 	if got.AbsentSide != abstractdomain.AbsentFlavorUndefOnly {
 		t.Errorf("InBoundsElementOf(proved in bounds).AbsentSide = %v, want AbsentFlavorUndefOnly", got.AbsentSide)
+	}
+}
+
+// TestInBoundsElementOf_ProvedInBoundsHoleReadKeepsElementWithoutTheFlag
+// pins the other side of UncheckedIndexedAccessHonored's gate. tsc's
+// `strict` does not imply noUncheckedIndexedAccess, so the common case
+// — every project that does not name it — leaves the shape channel
+// answering `T` at an indexed read. Wrapping anyway would make the
+// refinement layer refuse values the host has already accepted
+// (`arr.length > 0` then `arr[0]` into an Age position), so the
+// absence rides only where the host puts one and the read answers the
+// element outright.
+func TestInBoundsElementOf_ProvedInBoundsHoleReadKeepsElementWithoutTheFlag(t *testing.T) {
+	p := entryEnvTestProgram(t, "function f(i: number) { const xs = 0; xs[i]; }\n")
+	got := provedInBoundsHoleRead(t, p)
+	if got == nil {
+		t.Fatalf("InBoundsElementOf(proved in bounds, flag off) = nil, want the element")
+	}
+	if got.Kind != abstractdomain.KindSet {
+		t.Fatalf("InBoundsElementOf(proved in bounds, flag off).Kind = %v, want KindSet — no maybe wrapper", got.Kind)
 	}
 }
 

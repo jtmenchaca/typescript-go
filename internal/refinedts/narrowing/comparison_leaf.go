@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 var comparisonOps = map[ast.Kind]struct{}{
@@ -154,7 +155,11 @@ func ComparisonLeaf(
 			if *stringSide == "" {
 				stringTyped := false
 				for _, side := range []*ast.Node{left, right} {
-					if onPlace(side) && (c.GetTypeAtLocation(side).Flags()&checker.TypeFlagsStringLike) != 0 {
+					if !onPlace(side) {
+						continue
+					}
+					tracing.CountBy("host.typeAtLocation.direct", 1)
+					if (c.GetTypeAtLocation(side).Flags() & checker.TypeFlagsStringLike) != 0 {
 						stringTyped = true
 						break
 					}
@@ -236,7 +241,11 @@ func ComparisonLeaf(
 		} else if onPlace(right) {
 			placeSide = right
 		}
-		if placeSide == nil || (c.GetTypeAtLocation(placeSide).Flags()&checker.TypeFlagsNumberLike) == 0 {
+		if placeSide == nil {
+			return Other
+		}
+		tracing.CountBy("host.typeAtLocation.direct", 1)
+		if (c.GetTypeAtLocation(placeSide).Flags() & checker.TypeFlagsNumberLike) == 0 {
 			return Other
 		}
 		if op == ast.KindEqualsEqualsToken {

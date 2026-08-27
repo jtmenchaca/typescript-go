@@ -26,6 +26,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
@@ -60,6 +61,34 @@ func CheckAssignability(
 		reported := new(bool)
 		judging = withAssignabilityDiagnosis(judging, known, target, what, reported)
 		defer logAssignabilityVerdict(known, target, what, reported)
+	}
+	// THE JUDGE SEAM of the derivation trace (DERIVATION-TRACE.md,
+	// "Threading: dispatchers, not readers"). Every obligation in the
+	// program ends here, so this is where one judged position's trace
+	// begins: the root span names the position and the whole derivation
+	// nests under it. Off is one atomic load; on is per POSITION —
+	// only the line -explain asked about opens a root.
+	if derivation.Active() {
+		if recorder := derivation.CurrentRecorder(); recorder != nil &&
+			recorder.WantsLine(derivation.LineOf(node)) {
+			root := derivation.BeginNode("checkAssignability", node)
+			derivation.SetPosition(derivation.PositionOf(node))
+			// the expression walk that produced this value already closed
+			// its own traces before the judge opened — they are the judged
+			// position's sub-reads by derivation, so the judge reclaims
+			// every one whose range sits inside its own node
+			derivation.AbsorbInto(derivation.Range(node))
+			// and the guard that proved what this position carries hangs
+			// beside them: an ANSWERED trace has to show the guard fact
+			// MEETING the read, not just the set the read came out with
+			for _, place := range PlacesReadIn(node) {
+				derivation.AttachGuard(place)
+			}
+			// the judge answers unless something below declines: the 7002
+			// paths call declineJudgment, which flips this to declined
+			root.Answer(spellDeclared(&target))
+			defer root.End()
+		}
 	}
 	if !tracing.Recording(tracing.GrainStep) {
 		CheckAssignabilityAgainst(judging, known, target, node, what, positionType)
@@ -215,6 +244,16 @@ func CheckAssignabilityOfArm(
 		if known.ResidueReason != "" {
 			messageText = known.ResidueReason
 		}
+		// THE DECLINE HELPER, adopted at the judge's generic undetermined
+		// site — the highest-frequency 7002-family sentence in the tree.
+		// The reader's own first-blocker sentence is the gate; the judged
+		// node is the operand; what it held is the value the walk carried
+		// here. When a trace is running the printed sentence IS the
+		// projection of this span, so the two cannot drift; with no trace
+		// the site prints exactly what it printed before.
+		if projected := DeclineSentence(declineGateOf(known), node, spellUnknownHeld(known)); projected != "" {
+			messageText = projected
+		}
 		if ContainsPow(node) {
 			messageText = PowAlert(node, target)
 		}
@@ -232,6 +271,14 @@ func CheckAssignabilityOfArm(
 	}
 	if target.Kind == annotations.DeclaredObjectArray {
 		CheckObjectArrayTarget(ctx, known, target, node, what)
+		return
+	}
+	// a TUPLE target judges the ARITY and then each slot at its own
+	// statement — placed here, beside the object-array arm, because both
+	// are sequence-shaped targets whose own count is part of the claim
+	// and neither is answerable by the scalar membership road below.
+	if target.Kind == annotations.DeclaredTuple {
+		CheckTupleTarget(ctx, known, target, node, what)
 		return
 	}
 	if target.Kind == annotations.DeclaredPossiblyUndefined {

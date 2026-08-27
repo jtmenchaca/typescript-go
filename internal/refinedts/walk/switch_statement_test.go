@@ -10,6 +10,8 @@ import (
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/parser"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
@@ -139,5 +141,43 @@ func TestSwitchLabelValues_NumbersOneStringSeveralStringsMixed(t *testing.T) {
 	_, ok = SwitchLabelValues(nil)
 	if ok {
 		t.Errorf("SwitchLabelValues([]) ok = true, want false")
+	}
+}
+
+// TestAnalyzeSwitchStatement_TypeofDiscriminantCaseBodyRecordsAWrittenTouch
+// pins A12.guard.arm's own gap: `switch (typeof v)` narrows a NAMED
+// discriminant place (SwitchKeyOfKnown, the identifier branch this file
+// already handles) but never the typeof-wrapped operand's own binding —
+// GroundOfTypeofWord's ground is a SORT, not the strict-equality key
+// this reader's exact-scrutinee narrowing keys on. `v` inside the
+// "number" case body is therefore left exactly as unbound as the switch
+// found it. AnalyzeSwitchStatement now records that as a WRITTEN touch
+// on `v`, naming the case clause, so a later read of `v` inside the case
+// body names the switch instead of falling to a bare residue with no
+// mutation to point at.
+func TestAnalyzeSwitchStatement_TypeofDiscriminantCaseBodyRecordsAWrittenTouch(t *testing.T) {
+	_, closer := derivation.BeginRecording("ts", "f.ts:1", 0)
+	defer closer()
+
+	p := entryEnvTestProgram(t, "function f(v: unknown): void {\n"+
+		"  switch (typeof v) {\n"+
+		"    case \"number\":\n"+
+		"      v;\n"+
+		"      break;\n"+
+		"    default:\n"+
+		"      break;\n"+
+		"  }\n"+
+		"}\n")
+	var diagnostics []assignability.RefinementDiagnostic
+	ctx := compoundAssignContext(p, nil, &diagnostics, nil)
+	env := NewEnv()
+	env.Set("v", abstractdomain.Unknown)
+	statements := compoundAssignFunctionStatements(t, p, "f")
+	AnalyzeStatements(ctx, env, statements, nil)
+
+	if touch := derivation.LastTouchOf("v"); touch == "" {
+		t.Fatal("LastTouchOf(v) is empty, want the switch's case clause recorded as a written touch")
+	} else if touch == "written" {
+		t.Fatal(`LastTouchOf(v) = "written" with no site named — want the case clause's own construct/range`)
 	}
 }

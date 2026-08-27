@@ -27,6 +27,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -59,12 +60,14 @@ func structuralIterableElementType(c *checker.Checker, t *checker.Type) *checker
 	if symbol == nil || !structuralIterableNames[symbol.Name] {
 		return nil
 	}
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	if !c.SymbolInDefaultLib(symbol) {
 		return nil
 	}
 	if (t.ObjectFlags() & checker.ObjectFlagsReference) == 0 {
 		return nil
 	}
+	tracing.CountBy("host.typeArguments", 1)
 	arguments := c.GetTypeArguments(t)
 	if len(arguments) == 0 {
 		return nil
@@ -449,8 +452,14 @@ func SolveLoop(ctx *FlowContext, env Env, loop *ast.Node, result *annotations.De
 			// type is the element test: no other type is `number`.
 			t := typereading.TypeAtLocation(ctx.P.Checker, forInOf.Expression)
 			if t != nil {
-				if element := ctx.P.Checker.GetElementTypeOfArrayType(t); element != nil &&
-					element == ctx.P.Checker.GetNumberType() {
+				tracing.CountBy("host.elementTypeOfArrayType", 1)
+				element := ctx.P.Checker.GetElementTypeOfArrayType(t)
+				isNumberElement := false
+				if element != nil {
+					tracing.CountBy("host.numberType", 1)
+					isNumberElement = element == ctx.P.Checker.GetNumberType()
+				}
+				if isNumberElement {
 					// the ARRAY's own static type is a claim tsc already
 					// checked (a declared/inferred `number[]`, whatever
 					// declaration produced it) — the same standing

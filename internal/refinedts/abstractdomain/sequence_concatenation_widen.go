@@ -44,4 +44,36 @@
 // the third round of growth.
 package abstractdomain
 
+import "github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+
 const sequenceConcatenationWidenBound = 64
+
+// widenPastConcatenationBound answers the string ground for a join
+// whose either operand already carries more sequence-form nodes than
+// the bound above, and (false) for every other pair — the join then
+// proceeds normally.
+//
+// JoinKnown calls this FIRST, after its identity check and before any
+// arm that constructs. Order is the whole point: an arm that builds a
+// term out of these operands — the repetition/list join, the union
+// builders, the absorption arms — grows exactly what the bound exists
+// to stop growing, so a late check lets the growth happen and never
+// fires. The identity case is exempt because it builds nothing: it
+// hands back the operand it was given.
+//
+// Either operand alone is enough. The bound asks whether the join
+// would carry a term this large forward, and a too-deep side makes
+// that true whichever side it is; both orders answer the same ground,
+// so the widening does not depend on argument order.
+func widenPastConcatenationBound(a, b AbstractValue, grade TrustLevel) (AbstractValue, bool) {
+	for _, side := range [2]AbstractValue{a, b} {
+		set, isSet := SetOfKnown(side)
+		if !isSet || !refinementsets.StatesSequence(set) {
+			continue
+		}
+		if refinementsets.SequenceNestingDepth(set) > sequenceConcatenationWidenBound {
+			return KnownSet(refinementsets.Strings, nil, grade, SetKindTagNone), true
+		}
+	}
+	return AbstractValue{}, false
+}

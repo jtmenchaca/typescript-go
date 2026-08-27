@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -273,8 +274,10 @@ func DeclaredTypePredicateOf(c *checker.Checker, callee *ast.Node) *ast.Node {
 	for ast.IsParenthesizedExpression(cursor) {
 		cursor = cursor.AsParenthesizedExpression().Expression
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := c.GetSymbolAtLocation(cursor)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		aliased := func() (result *ast.Symbol) {
 			defer func() {
 				if recover() != nil {
@@ -362,6 +365,7 @@ func declaredPredicatePosition(c *checker.Checker, callee *ast.Node, fn *ast.Nod
 	for ast.IsParenthesizedExpression(cursor) {
 		cursor = cursor.AsParenthesizedExpression().Expression
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	if symbol := c.GetSymbolAtLocation(cursor); symbol != nil {
 		for _, declaration := range symbol.Declarations {
 			candidates = append(candidates, parametersOf(declaration))

@@ -22,6 +22,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 type hostTypeMemoKey struct {
@@ -85,12 +86,15 @@ func readHostTypeMemoized(c *checker.Checker, t *checker.Type, at *ast.Node, dep
 	}
 	hostTypeMemoMu.Unlock()
 	if hit {
+		tracing.CountBy("host.readHostType.hit", 1)
 		return row.known, row.ok
 	}
 	if siteHit {
+		tracing.CountBy("host.readHostType.hit", 1)
 		*usedAt = true
 		return siteRow.known, siteRow.ok
 	}
+	tracing.CountBy("host.readHostType.ask", 1)
 	inner := false
 	known, ok := readHostTypeUncached(c, t, at, depth, &inner)
 	if inner {

@@ -11,6 +11,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/walk"
 )
 
@@ -71,7 +72,12 @@ func FlowAnswerAt(
 				break
 			}
 		}
-		if isParameter && !LiteralBearingType(p, p.Checker.GetTypeAtLocation(token), 0, map[*checker.Type]bool{}, token) {
+		literalBearing := true
+		if isParameter {
+			tracing.CountBy("host.typeAtLocation.direct", 1)
+			literalBearing = LiteralBearingType(p, p.Checker.GetTypeAtLocation(token), 0, map[*checker.Type]bool{}, token)
+		}
+		if isParameter && !literalBearing {
 			return walk.No(walk.Unknown{
 				Why:  "noted",
 				Said: "the type states no refinement to read",

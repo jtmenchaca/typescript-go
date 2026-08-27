@@ -34,6 +34,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // readSchemaRuntimeCall is readSchemaRuntimeCall in the TS source.
@@ -104,6 +105,7 @@ func readSchemaRuntimeCall(site MethodCallSite) *abstractdomain.AbstractValue {
 		}
 		outcome, hasOutcome := EvaluateParseOutcome(receiverExpression, argumentKnown, ParseEvalTools{
 			ResolveConst: func(id *ast.Node) *ast.Node {
+				tracing.CountBy("host.symbolAtLocation", 1)
 				symbol := ctx.P.Checker.GetSymbolAtLocation(id)
 				if symbol == nil || symbol.ValueDeclaration == nil {
 					return nil
@@ -292,7 +294,11 @@ func readSchemaRuntimeCall(site MethodCallSite) *abstractdomain.AbstractValue {
 						}
 					}
 					if carried {
-						out := abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false)
+						// only the collection KEYS' values changed — which
+						// keys the parse produces is the same question
+						// WornOfObject just answered, so its completeness
+						// rides rather than being dropped here
+						out := abstractdomain.KnownObject(keys, nil, stated.Complete, abstractdomain.TrustProved, false)
 						return &out
 					}
 				}

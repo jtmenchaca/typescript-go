@@ -26,6 +26,7 @@ package service
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // SymbolAt is symbolAt in the TS source: the symbol behind a node,
@@ -33,8 +34,10 @@ import (
 // declaration in the exporting file, so registries keyed by
 // declaration symbols answer for imported names too.
 func SymbolAt(p *program.CheckerProgram, node *ast.Node) *ast.Symbol {
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := p.Checker.GetSymbolAtLocation(node)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		symbol = p.Checker.GetAliasedSymbol(symbol)
 	}
 	return symbol
@@ -58,7 +61,10 @@ func UserSourceFiles(p *program.CheckerProgram) []*ast.SourceFile {
 // this identifier resolve to a declaration in a DEFAULT library file
 // (the global Number, Math, …)? Symbols, never names.
 func ResolvesToDefaultLib(p *program.CheckerProgram, node *ast.Node) bool {
-	return p.Checker.SymbolInDefaultLib(p.Checker.GetSymbolAtLocation(node))
+	tracing.CountBy("host.symbolAtLocation", 1)
+	symbol := p.Checker.GetSymbolAtLocation(node)
+	tracing.CountBy("host.symbolInDefaultLib", 1)
+	return p.Checker.SymbolInDefaultLib(symbol)
 }
 
 // SymbolEntirelyInDefaultLib is symbolEntirelyInDefaultLib in the TS
@@ -69,5 +75,6 @@ func SymbolEntirelyInDefaultLib(p *program.CheckerProgram, symbol *ast.Symbol) b
 	if symbol == nil {
 		return false
 	}
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	return p.Checker.SymbolEntirelyInDefaultLib(symbol)
 }

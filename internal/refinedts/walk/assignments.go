@@ -19,14 +19,32 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
 // WriteBinding binds a written value: a declared binding judges every
 // write against its stated set — the declared type is the invariant.
 func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.AbstractValue, at *ast.Node, what string) {
+	// THE BINDING LEDGER SEAM (DERIVATION-TRACE.md, the binding ledger).
+	// Every environment write remembers the span subtree that produced the
+	// written value, keyed by the place written, so a later read that
+	// stops at this bare name can reclaim it into the trace's `chain`.
+	// Recorded BEFORE the write's own judgment opens a span, so the
+	// remembered subtree is the producer and not the judge of it.
+	if derivation.Active() {
+		derivation.RecordBinding(name, derivation.Range(at))
+		// THE LAST-TOUCH LEDGER SEAM (DERIVATION-TRACE.md, last-touch),
+		// alongside the binding ledger's own record above: this write
+		// touches `name` as WRITTEN, keyed to the same at/range the
+		// binding ledger reads — a leaf that stops at this name and has
+		// no producing subtree to chain (a write with no span behind it)
+		// still says a write, not nothing, moved it last.
+		derivation.RecordTouch(name, derivation.TouchWritten, derivation.Construct(at), derivation.Range(at))
+	}
 	stated, hasStated := ctx.Declared[name]
 	if hasStated {
 		CheckAssignability(ctx, value, *stated, at, what, nil)
@@ -36,7 +54,37 @@ func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.A
 		// restating the write's own fire one line later. An admitted
 		// write is unchanged by the meet (it was already inside), so no
 		// exactness is lost on the silent path.
-		if stated.Kind == annotations.DeclaredSet && stated.Set != nil && stated.Temporal != nil &&
+		//
+		// THE SAME LAW FOR A TUPLE DECLARATION. A value whose own length
+		// the declaration refuses (`const p: [number, number] = xs`,
+		// where xs is an unbounded `number[]`) has just fired at the
+		// write; keeping the written value would let the following read
+		// (`return p`) re-judge the SAME length against the SAME tuple
+		// and fire again, one line down. The binding keeps the DECLARED
+		// tuple instead.
+		//
+		// Only where the length DISAGREES: a value that already carries
+		// the declared count is the sharper claim (its slots may hold
+		// exact values the declaration only bounds), and replacing it
+		// would throw that away on the silent path — the same exactness
+		// the KindSet arm below preserves by meeting rather than
+		// overwriting.
+		//
+		// TWO SPELLINGS carry the count. A per-slot KindList states it as
+		// its item count, and an all-numeric literal states it more
+		// compactly as a flat exact array — array_literal.go answers
+		// `[10, 20]` with KnownValues(PrimitiveArray) whenever every
+		// position holds a single number, and never builds a KindList
+		// for it. Reading only the KindList spelling replaced that exact
+		// written value with the declaration's set-shaped slots, and a
+		// later join of the two spellings (the ternary in
+		// ternary_spread_nullable_tuple_test.go) has no arm and answers
+		// nothing.
+		if stated.Kind == annotations.DeclaredTuple {
+			if !exactSequenceOfLength(value, len(stated.Slots)) {
+				value = AbstractValueOfDeclared(*stated)
+			}
+		} else if stated.Kind == annotations.DeclaredSet && stated.Set != nil && stated.Temporal != nil &&
 			value.Kind == abstractdomain.KindSet && value.SetKindTag == abstractdomain.SetKindTagNone {
 			// the same law for a TEMPORAL declaration: MeetKnown's set-meet
 			// arm cannot combine bounded temporal riders, so the binding
@@ -106,6 +154,29 @@ func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.A
 			declared := abstractdomain.KnownSet(*stated.Set, nil, abstractdomain.TrustLevelOf(value), abstractdomain.SetKindTagNone)
 			value = abstractdomain.MeetKnown(*value.Inner, declared)
 		}
+		// THE SAME LAW FOR A POSSIBLY-ABSENT WRITE. A declared target
+		// that is a plain DeclaredSet (not DeclaredPossiblyUndefined)
+		// admits no absence at all — RefutePossiblyAbsent (via
+		// CheckAssignability above) already reported the refusal for
+		// KindPossiblyUndefined/KindUndef/KindNull knowledge here.
+		// Keeping the absent-carrying value would let the following
+		// read (`return n;`) re-judge the SAME possibly-absent claim
+		// against the SAME declared target and re-fire — the second
+		// error TESTING-TENETS rules against (A5.sink.assign). The
+		// binding keeps the declared set itself (KindUndef/KindNull
+		// carry no other information) or the meet of the wrapper's
+		// present half with the declared set (KindPossiblyUndefined) —
+		// MeetKnown's own KindPossiblyUndefined arm already strips the
+		// wrapper against a non-maybe target.
+		if stated.Kind == annotations.DeclaredSet && stated.Set != nil {
+			declared := abstractdomain.KnownSet(*stated.Set, stated.Temporal, abstractdomain.TrustLevelOf(value), abstractdomain.SetKindTagNone)
+			switch value.Kind {
+			case abstractdomain.KindUndef, abstractdomain.KindNull:
+				value = declared
+			case abstractdomain.KindPossiblyUndefined:
+				value = abstractdomain.MeetKnown(value, declared)
+			}
+		}
 	}
 	// the write invalidates every difference row rooted at this name —
 	// the row spoke about the value that just moved
@@ -114,6 +185,27 @@ func WriteBinding(ctx *FlowContext, env Env, name string, value abstractdomain.A
 	// guard recorded): the path spoke about the value that just moved
 	ForgetPlaceEntriesEnv(env, name)
 	env.Set(name, value)
+}
+
+// exactSequenceOfLength is whether a written value already states this
+// many positions, one exact claim apiece — the reading that makes it at
+// least as sharp as a tuple declaration of the same count.
+//
+// The walk spells such a value two ways and both count here. A KindList
+// carries one AbstractValue per slot. A KindValues tagged PrimitiveArray
+// is the FLAT spelling an all-numeric array literal takes
+// (array_literal.go's `flat` arm): one float per position, same count,
+// same per-position exactness, fewer allocations. A value in either
+// spelling is kept at the binding; anything else takes the declared
+// tuple.
+func exactSequenceOfLength(value abstractdomain.AbstractValue, slots int) bool {
+	if value.Kind == abstractdomain.KindList {
+		return len(value.Items) == slots
+	}
+	if value.Kind == abstractdomain.KindValues && value.KindTag == abstractdomain.PrimitiveArray {
+		return len(value.Values) == slots
+	}
+	return false
 }
 
 // plainOneOfWords is the words a set states when it states exactly a
@@ -289,6 +381,7 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 	// escaped this scope (a parameter, a captured name) is left alone:
 	// the checker cannot see who else writes it.
 	if !hasHeld || held.Kind == abstractdomain.KindUnknown {
+		tracing.CountBy("host.symbolAtLocation", 1)
 		symbol := ctx.P.Checker.GetSymbolAtLocation(pae.Expression)
 		var declaration *ast.Node
 		if symbol != nil {
@@ -309,6 +402,7 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 		}
 		shape := typereading.TypeAtLocation(ctx.P.Checker, pae.Expression)
 		keys := []abstractdomain.ObjectKey{}
+		tracing.CountBy("host.propertiesOfType", 1)
 		for _, member := range ctx.P.Checker.GetPropertiesOfType(shape) {
 			keys = append(keys, abstractdomain.ObjectKey{Name: member.Name, Value: silence.Residue()})
 		}
@@ -329,6 +423,24 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 		}
 		env.Set(name, abstractdomain.KnownObject(keys, nil, false, abstractdomain.TrustProved, false))
 		return
+	}
+	// `arr.length = n` on a tracked array. The length is not an
+	// ordinary key: the store runs ArraySetLength (sec-arraysetlength),
+	// which for a shorter length deletes every index at or above it and
+	// leaves the earlier slots untouched. That is a truncation of the
+	// tracked array, and the reader states which lengths it claims —
+	// anything else falls through to the havoc below.
+	//
+	// BOTH array shapes reach the reader: a per-slot KindList, and the
+	// PrimitiveArray-tagged KindValues a homogeneous exact literal
+	// collapses to (writeListLengthExactly's own banner). Gating on
+	// KindList alone sent every plain `number[]` literal straight to the
+	// havoc below, which discarded the array the truncation had just
+	// pinned exactly.
+	if pae.Name().Text() == "length" {
+		if writeListLengthExactly(ctx, env, name, held, value) {
+			return
+		}
 	}
 	if held.Kind != abstractdomain.KindObject {
 		HavocEnv(ctx.Aliases, env, name)
@@ -353,9 +465,11 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 				// the key's DECLARED type comes from its property symbol —
 				// the assignment expression's own type is contaminated by
 				// the right side (an `any` write reads back as any)
+				tracing.CountBy("host.symbolAtLocation", 1)
 				propertySymbol := ctx.P.Checker.GetSymbolAtLocation(target)
 				var positionType *checker.Type
 				if propertySymbol != nil {
+					tracing.CountBy("host.typeOfSymbolAtLocation", 1)
 					positionType = ctx.P.Checker.GetTypeOfSymbolAtLocation(propertySymbol, target)
 				}
 				CheckAssignability(
@@ -373,6 +487,7 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 		// state one — a class field typed by an annotation alias
 		// (`hours: Hours = 0`) is an invariant on every write to it, the
 		// same rule an annotated binding carries
+		tracing.CountBy("host.symbolAtLocation", 1)
 		propertySymbol := ctx.P.Checker.GetSymbolAtLocation(target)
 		var declaration *ast.Node
 		if propertySymbol != nil {
@@ -387,6 +502,7 @@ func WriteProperty(ctx *FlowContext, env Env, target *ast.Node, value abstractdo
 			if result.Stated != nil {
 				var positionType *checker.Type
 				if propertySymbol != nil {
+					tracing.CountBy("host.typeOfSymbolAtLocation", 1)
 					positionType = ctx.P.Checker.GetTypeOfSymbolAtLocation(propertySymbol, target)
 				}
 				CheckAssignability(
@@ -562,7 +678,9 @@ func embeddedReferences(ctx *FlowContext, e *ast.Node, into *[]string) {
 				// is the checker's own safe equivalent (already used the
 				// same way in typereading/host_type.go).
 				sharesStructure := false
+				tracing.CountBy("host.propertiesOfType", 1)
 				for _, member := range ctx.P.Checker.GetPropertiesOfType(t) {
+					tracing.CountBy("host.typeOfSymbolAtLocation", 1)
 					if dataflowfacts.ReferenceType(ctx.P.Checker.GetTypeOfSymbolAtLocation(member, sa.Expression)) {
 						sharesStructure = true
 						break

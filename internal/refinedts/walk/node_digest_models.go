@@ -29,6 +29,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -333,7 +334,9 @@ func ReadNodeDigestConstruction(ctx *FlowContext, env Env, e *ast.Node) *abstrac
 	if !nodeDigestFactories[callee.Text()] {
 		return nil
 	}
-	if !declaredInNodeTypes(ctx.P.Checker.GetSymbolAtLocation(call.Expression)) {
+	tracing.CountBy("host.symbolAtLocation", 1)
+	symbol := ctx.P.Checker.GetSymbolAtLocation(call.Expression)
+	if !declaredInNodeTypes(symbol) {
 		return nil
 	}
 	// the arguments still run

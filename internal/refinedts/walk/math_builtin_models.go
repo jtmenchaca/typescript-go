@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -63,8 +64,14 @@ func readMathBuiltin(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 	if (name == "min" || name == "max") && len(arguments) == 1 && ast.IsSpreadElement(arguments[0]) {
 		source := arguments[0].AsSpreadElement().Expression
 		if t := typereading.TypeAtLocation(ctx.P.Checker, source); t != nil {
-			if element := ctx.P.Checker.GetElementTypeOfArrayType(t); element != nil &&
-				element == ctx.P.Checker.GetNumberType() {
+			tracing.CountBy("host.elementTypeOfArrayType", 1)
+			element := ctx.P.Checker.GetElementTypeOfArrayType(t)
+			isNumberElement := false
+			if element != nil {
+				tracing.CountBy("host.numberType", 1)
+				isNumberElement = element == ctx.P.Checker.GetNumberType()
+			}
+			if isNumberElement {
 				out := abstractdomain.AtTrustLevel(
 					abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.Numbers, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)),
 					abstractdomain.TrustLibrary,

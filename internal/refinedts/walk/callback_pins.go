@@ -38,13 +38,25 @@ import (
 // result slot has not got, and `forEach` answers nothing. So a name
 // added here needs a case in the statement switch, and a case in the
 // return entry only if what it answers is a scalar.
+// `reduceRight` is the one name here the statement switch does NOT
+// have a case for, and that is deliberate rather than the drift the
+// paragraph above warns about. The switch reaches its `reduce` case
+// through reduceCallExpressionOf (ir_callback_shapes.go), which matches
+// the property name "reduce" LITERALLY — so reduceRight is invisible to
+// the lowering route no matter what this table says, and adding it here
+// cannot silently change what that route does. The walk route models
+// the descending fold exactly (callback_outcome.go's reduceOutcome
+// takes the direction as a flag); the lowering route would need a
+// descending traversal its array vocabulary does not spell yet, and it
+// declines rather than lower an ascending one under the other name.
 var ArrayCallbackMethods = map[string]struct{}{
-	"map":     {},
-	"filter":  {},
-	"reduce":  {},
-	"forEach": {},
-	"flatMap": {},
-	"find":    {},
+	"map":         {},
+	"filter":      {},
+	"reduce":      {},
+	"reduceRight": {},
+	"forEach":     {},
+	"flatMap":     {},
+	"find":        {},
 }
 
 // BindParameter seeds a parameter's names from an argument's

@@ -5,18 +5,36 @@
 package narrowing
 
 import (
+	"math"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // ConstCopy is one `const x = <tracked place>` pair a function
-// declares.
+// declares — and, with a non-zero Shift, one `const x = <place> ± k`
+// pair, which is the same fact displaced along the line.
 type ConstCopy struct {
 	Name  string
 	Place dataflowfacts.TrackedPlace
+	// Shift is what the binding adds to the place: x === place + Shift
+	// on every run. Zero for a plain copy, so every existing reader that
+	// ignores this field keeps reading exactly the pairs it always did.
+	Shift float64
+	// ShiftExpression is the constant side of a shift this file could not
+	// read as a number itself — `const REFERENCE = new Date(…).getTime()`
+	// names one number on every run, but not one this syntactic reader
+	// can fold. The WALK can: it evaluates the expression and supplies
+	// the value, which is why the field carries the node rather than a
+	// number. Nil when Shift above is already the whole answer.
+	//
+	// ShiftNegated says the expression is SUBTRACTED from the place, so
+	// the walk's value is negated before it becomes the shift.
+	ShiftExpression *ast.Node
+	ShiftNegated    bool
 }
 
 // constCopiesMu guards constCopiesCache: every `const x = <tracked
@@ -64,6 +82,9 @@ func ConstCopiesOf(c *checker.Checker, fn *ast.Node) []ConstCopy {
 				place := dataflowfacts.TrackedPlaceOfWith(c, varDecl.Initializer, func(string) bool { return true })
 				if place != nil {
 					copies = append(copies, ConstCopy{Name: node.Name().Text(), Place: *place})
+				} else if shifted, ok := shiftedPlaceOf(c, varDecl.Initializer); ok {
+					shifted.Name = node.Name().Text()
+					copies = append(copies, shifted)
 				}
 			}
 		}
@@ -75,6 +96,83 @@ func ConstCopiesOf(c *checker.Checker, fn *ast.Node) []ConstCopy {
 	constCopiesCache[fn] = copies
 	constCopiesMu.Unlock()
 	return copies
+}
+
+// shiftedPlaceOf reads `<place> - k` and `<place> + k` — an initializer
+// that is one place displaced by a compile-time constant — and answers
+// the place with the SHIFT the binding adds to it: `d.getTime() - REF`
+// answers (d.getTime(), -REF), because the binding equals the place
+// plus that amount on every run.
+//
+// The shift has to be EXACT to be worth anything, and it is: a guard's
+// window is carried across the shift by adding the same constant to
+// each endpoint, so the endpoints have to land where the runtime
+// subtraction lands. The caller (ShiftedForms) refuses any shift that
+// is not finite, and the endpoint arithmetic it does is the same double
+// arithmetic the program itself runs.
+//
+// Only `k + place` and `place ± k` are read. `k - place` is a
+// REFLECTION, not a shift — it flips the order of the endpoints — and
+// this reader states nothing about it rather than getting it backwards.
+func shiftedPlaceOf(c *checker.Checker, e *ast.Node) (ConstCopy, bool) {
+	bare := Peeled(e)
+	if !ast.IsBinaryExpression(bare) {
+		return ConstCopy{}, false
+	}
+	bin := bare.AsBinaryExpression()
+	op := bin.OperatorToken.Kind
+	if op != ast.KindMinusToken && op != ast.KindPlusToken {
+		return ConstCopy{}, false
+	}
+	anyName := func(string) bool { return true }
+	// the constant side: a number this reader folds itself, or — for a
+	// const whose initializer is computed (`new Date(…).getTime()`) — the
+	// EXPRESSION, handed to the walk, which evaluates what syntax cannot
+	constantSide := func(side *ast.Node, negated bool) (ConstCopy, bool) {
+		if value, ok := LiteralOf(side); ok && !math.IsInf(value, 0) && !math.IsNaN(value) {
+			if negated {
+				value = -value
+			}
+			return ConstCopy{Shift: value}, true
+		}
+		if ast.IsIdentifier(side) {
+			if value, ok := dataflowfacts.ConstChainNumber(c, side); ok && !math.IsInf(value, 0) && !math.IsNaN(value) {
+				if negated {
+					value = -value
+				}
+				return ConstCopy{Shift: value}, true
+			}
+			// a const the syntactic resolver cannot fold: the walk gets the
+			// node. Only a CONST binding qualifies — a let or a parameter
+			// can move between the binding and the guard, and then the two
+			// reads are not the same number at all.
+			if _, isConst := dataflowfacts.ConstInitializerOf(c, side); isConst {
+				return ConstCopy{ShiftExpression: side, ShiftNegated: negated}, true
+			}
+		}
+		return ConstCopy{}, false
+	}
+	// `place - k` and `place + k`
+	if place := dataflowfacts.TrackedPlaceOfWith(c, bin.Left, anyName); place != nil {
+		copy, ok := constantSide(bin.Right, op == ast.KindMinusToken)
+		if !ok {
+			return ConstCopy{}, false
+		}
+		copy.Place = *place
+		return copy, true
+	}
+	// `k + place` — addition only; `k - place` reflects and is refused
+	if op == ast.KindPlusToken {
+		if place := dataflowfacts.TrackedPlaceOfWith(c, bin.Right, anyName); place != nil {
+			copy, ok := constantSide(bin.Left, false)
+			if !ok {
+				return ConstCopy{}, false
+			}
+			copy.Place = *place
+			return copy, true
+		}
+	}
+	return ConstCopy{}, false
 }
 
 // BoundConditionInitializer is boundConditionInitializer in the TS
@@ -89,6 +187,7 @@ func BoundConditionInitializer(c *checker.Checker, e *ast.Node) *ast.Node {
 	if !ast.IsIdentifier(e) {
 		return nil
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := c.GetSymbolAtLocation(e)
 	if symbol == nil {
 		return nil
@@ -205,6 +304,22 @@ func ResolveBoundCondition(c *checker.Checker, e *ast.Node) (ResolvedCondition, 
 // function, or the source's root written in it — and the caller in
 // walk/assume_condition.go then applies no additional copy narrowings.
 func CopyBindingsOf(c *checker.Checker, site *ast.Node, source dataflowfacts.TrackedPlace) []string {
+	var names []string
+	for _, copy := range CopyBindingsWithShiftOf(c, site, source) {
+		// a PLAIN copy only: a shift, whether already a number or still an
+		// expression for the walk to evaluate, is a different fact
+		if copy.Shift == 0 && copy.ShiftExpression == nil {
+			names = append(names, copy.Name)
+		}
+	}
+	return names
+}
+
+// CopyBindingsWithShiftOf is CopyBindingsOf keeping each copy's SHIFT:
+// `const off = d.getTime() - REF` rides the place's narrowings too, with
+// every endpoint moved by -REF. A plain copy comes back with shift 0,
+// which is what CopyBindingsOf above filters for.
+func CopyBindingsWithShiftOf(c *checker.Checker, site *ast.Node, source dataflowfacts.TrackedPlace) []ConstCopy {
 	if len(source.Path) == 0 {
 		return nil
 	}
@@ -216,16 +331,16 @@ func CopyBindingsOf(c *checker.Checker, site *ast.Node, source dataflowfacts.Tra
 	if _, isWritten := written[source.Binding]; isWritten {
 		return nil
 	}
-	var names []string
+	var found []ConstCopy
 	for _, copy := range ConstCopiesOf(c, fn) {
 		if _, isWritten := written[copy.Name]; isWritten {
 			continue
 		}
 		if dataflowfacts.SameTrackedPlace(copy.Place, source) {
-			names = append(names, copy.Name)
+			found = append(found, copy)
 		}
 	}
-	return names
+	return found
 }
 
 // CopySourcePlaceOf is copySourcePlaceOf in the TS source: the PLACE

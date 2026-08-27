@@ -5,6 +5,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 /* ── the stable symbol key ───────────────────────────────────────── */
@@ -117,13 +118,25 @@ func symbolConstructionCall(c *checker.Checker, e *ast.Node) bool {
 	}
 	if ast.IsPropertyAccessExpression(call.Expression) {
 		access := call.Expression.AsPropertyAccessExpression()
-		return access.QuestionDotToken == nil &&
+		cheapConditionsPass := access.QuestionDotToken == nil &&
 			ast.IsIdentifier(access.Expression) && access.Expression.Text() == "Symbol" &&
-			ast.IsIdentifier(access.Name()) && access.Name().Text() == "for" &&
-			c.SymbolInDefaultLib(c.GetSymbolAtLocation(access.Expression))
+			ast.IsIdentifier(access.Name()) && access.Name().Text() == "for"
+		resolvesDefaultLib := false
+		if cheapConditionsPass {
+			tracing.CountBy("host.symbolAtLocation", 1)
+			tracing.CountBy("host.symbolInDefaultLib", 1)
+			resolvesDefaultLib = c.SymbolInDefaultLib(c.GetSymbolAtLocation(access.Expression))
+		}
+		return cheapConditionsPass && resolvesDefaultLib
 	}
-	return ast.IsIdentifier(call.Expression) && call.Expression.Text() == "Symbol" &&
-		c.SymbolInDefaultLib(c.GetSymbolAtLocation(call.Expression))
+	identifierIsSymbol := ast.IsIdentifier(call.Expression) && call.Expression.Text() == "Symbol"
+	resolvesDefaultLib := false
+	if identifierIsSymbol {
+		tracing.CountBy("host.symbolAtLocation", 1)
+		tracing.CountBy("host.symbolInDefaultLib", 1)
+		resolvesDefaultLib = c.SymbolInDefaultLib(c.GetSymbolAtLocation(call.Expression))
+	}
+	return identifierIsSymbol && resolvesDefaultLib
 }
 
 // SymbolKeyedFieldName reads the field name behind a whole ELEMENT

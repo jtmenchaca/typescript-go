@@ -40,6 +40,7 @@ func ImportedUserFiles(p *program.CheckerProgram, file *ast.SourceFile) []*ast.S
 		if specifier == nil || !ast.IsStringLiteral(specifier) {
 			continue
 		}
+		tracing.CountBy("host.symbolAtLocation", 1)
 		symbol := p.Checker.GetSymbolAtLocation(specifier)
 		if symbol == nil {
 			continue

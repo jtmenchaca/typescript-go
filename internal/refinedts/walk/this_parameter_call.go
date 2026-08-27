@@ -32,6 +32,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // ThisParameterCallResult recognizes `<callee>.call(thisArg, ...rest)`
@@ -265,6 +266,7 @@ func thisParameterCallBindKnown(ctx *FlowContext, env Env, receiver *ast.Node, s
 	// InlineContractBody's own Inlining set enforces, so this walk
 	// terminates rather than recursing on the checker's own call
 	// stack.
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(receiver)
 	if symbol != nil {
 		inlining := ctx.Inlining

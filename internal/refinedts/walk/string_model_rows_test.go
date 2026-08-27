@@ -62,13 +62,32 @@ func TestStringModelRows_TrimLeftAndTrimRightComputeTheirAnnexBTargets(t *testin
 	}
 }
 
-func TestStringModelRows_TheCaseMappingsKeepTheirASCIIGate(t *testing.T) {
-	// "ß" uppercases to "SS" under Default Case Conversion; Go's simple
-	// mapping disagrees, so the row must decline outside ASCII
-	if _, ok := exactZeroArgStringRow("toUpperCase", "stra\U000000DFe"); ok {
-		t.Errorf("exactZeroArgStringRow(toUpperCase, non-ASCII) ok = true, want false — the ASCII gate")
+// TestStringModelRows_TheCaseMappingsFoldTheUnconditionalSpecialCasing
+// pins what replaced the earlier ASCII gate. sec-string.prototype.
+// tolowercase (which sec-string.prototype.touppercase defers to) says
+// the result "must be derived according to the locale-insensitive case
+// mappings in the Unicode Character Database … not only the file
+// UnicodeData.txt, but also all locale-insensitive mappings in the file
+// SpecialCasing.txt". string_method_models_case.go transcribes exactly
+// that pair — the simple 1:1 mapping plus the UNCONDITIONAL
+// SpecialCasing rows — so a non-ASCII receiver no longer declines
+// wholesale. Only the CONTEXT/LANGUAGE-sensitive section (Greek final
+// sigma, the Turkic/Lithuanian/Azeri dotted-I) is untranscribed, and
+// hasConditionalCasing declines on those code points instead.
+func TestStringModelRows_TheCaseMappingsFoldTheUnconditionalSpecialCasing(t *testing.T) {
+	// SpecialCasing.txt line 69: 00DF; 00DF; 0053 0073; 0053 0053 —
+	// unconditional, so "ß" uppercases to "SS" and the row answers it
+	got, ok := exactZeroArgStringRow("toUpperCase", "stra\U000000DFe")
+	if !ok || got != "STRASSE" {
+		t.Errorf(`exactZeroArgStringRow("toUpperCase", "straße") = %q, %v, want "STRASSE", true`, got, ok)
 	}
-	got, ok := exactZeroArgStringRow("toUpperCase", "ab")
+	// the conditional section still declines: U+03A3 (Greek capital
+	// sigma) lowercases to a final or medial sigma by CONTEXT, which
+	// this transcription does not carry
+	if _, ok := exactZeroArgStringRow("toLowerCase", "\U000003A3"); ok {
+		t.Errorf("exactZeroArgStringRow(toLowerCase, U+03A3) ok = true, want false — the conditional-casing decline")
+	}
+	got, ok = exactZeroArgStringRow("toUpperCase", "ab")
 	if !ok || got != "AB" {
 		t.Errorf(`exactZeroArgStringRow("toUpperCase", "ab") = %q, %v, want "AB", true`, got, ok)
 	}

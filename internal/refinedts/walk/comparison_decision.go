@@ -251,7 +251,8 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 			other = b
 		}
 		if other.Kind == abstractdomain.KindValues || other.Kind == abstractdomain.KindObject ||
-			other.Kind == abstractdomain.KindList || other.Kind == abstractdomain.KindArrayHoles {
+			other.Kind == abstractdomain.KindList || other.Kind == abstractdomain.KindArrayHoles ||
+			other.Kind == abstractdomain.KindSet {
 			// sec-isstrictlyequal step 1: SameType(absent, non-absent)
 			// is false -> IsStrictlyEqual false, so === is false and
 			// !== is true regardless of strict/loose — a non-absent
@@ -259,9 +260,21 @@ func CompareKnown(ctx *FlowContext, op ComparisonOp, strict bool, a, b abstractd
 			// IsLooselyEqual's own null/undefined steps (2-3) only
 			// fire when the OTHER side is itself null or undefined, so
 			// the loose reading agrees with the strict one here too
+			//
+			// A KindSet belongs in this list for exactly the reason
+			// KindValues does: a refined set is a set of NUMBERS or
+			// STRINGS (setSortOfForms answers only those two sorts, and
+			// absence is never a form) — it carries no undefined and no
+			// null member at all, so SameType against an absent side is
+			// false on every run. Absence rides the PossiblyUndefined
+			// WRAPPER, never the set inside it, and a wrapper still falls
+			// through undecided by the exact-kind gate above. Without this
+			// arm `y === undefined` on a plainly-typed `y: number` — the
+			// most ordinary vacuous absence guard there is — decided
+			// nothing.
 			return boolAt(op == CompareNe)
 		}
-		return silence.ResidueOf("the non-absent side is not a plain value, object, list, or array — a wrapper or unresolved kind has no equality row against null or undefined here")
+		return silence.ResidueOf("the non-absent side is not a plain value, set, object, list, or array — a wrapper or unresolved kind has no equality row against null or undefined here")
 	}
 	// a SET side against one exact number: the kernel's narrow claims
 	// meet the set, and an EMPTY arm decides the comparison outright —

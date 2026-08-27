@@ -38,6 +38,40 @@ func ReadObjectKeyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain
 			return threaded
 		}
 	}
+	// a PLAIN (non-optional) key read off a MAYBE receiver reads the
+	// PRESENT side, with no wrapper on the result.
+	//
+	// sec-property-accessors: `MemberExpression . IdentifierName`
+	// evaluates through EvaluatePropertyAccessWithIdentifierKey, whose
+	// step 3 is "? RequireObjectCoercible(baseValue)" ahead of the
+	// [[Get]]. sec-requireobjectcoercible's table throws a TypeError for
+	// undefined and for null. So the absent side never yields a value at
+	// this read AT ALL — it leaves through the throw — and the only side
+	// that reaches the property is the present one. Wrapping the result
+	// in a maybe would state that the read can answer undefined, which
+	// this access can never do; and answering nothing (the behaviour this
+	// arm replaces) left `o!.a` and `(o as {a: number}).a` undetermined
+	// even where the present side is exactly known.
+	//
+	// The optional-chain arm above keeps its precedence: `o?.a` DOES
+	// short-circuit to undefined rather than throwing, so it wears the
+	// wrapper and this arm is not reached for it.
+	//
+	// The peel is deliberately NARROW — a present side that is a known
+	// object ALREADY CARRYING the named key. That is the whole case this
+	// arm exists for, and stopping there keeps every other maybe-wrapped
+	// receiver falling through to the readers that already own it: an
+	// element/hole read whose wrapper is a claim about the RESULT rather
+	// than the receiver (element_in_bounds.go's proved-in-bounds arm,
+	// where the length can count holes) must keep its wrapper, and a
+	// broader peel silently took it.
+	if receiver.Kind == abstractdomain.KindPossiblyUndefined && receiver.Inner != nil {
+		if present := *receiver.Inner; present.Kind == abstractdomain.KindObject {
+			if _, carriesKey := objectKeyIndex(present, pa.Name().Text()); carriesKey {
+				receiver = present
+			}
+		}
+	}
 	// a FUNCTION's own data properties: length is its arity (a
 	// nonnegative integer) and name a string
 	// (sec-function-instances) — everything else stays unclaimed
@@ -99,7 +133,31 @@ func ReadObjectKeyAccess(ctx *FlowContext, env Env, e *ast.Node) *abstractdomain
 		if web := WebPropertyRead(ctx.P, e); web != nil {
 			return web
 		}
-		out := silence.Residue()
+		out := silence.ResidueOf("the receiver's key set is not proven complete, so a name outside its known keys is neither proven present nor proven absent")
+		return &out
+	}
+	// a SORT UNION receiver whose own residue already names why it is a
+	// union of arms rather than one shape (JSON.parse's own grammar
+	// claim on unpinned text, coercion_models_json.go's anyJSONValue) —
+	// a key read off it inherits that same reason: the read cannot pick
+	// a key set until one arm is picked, and the receiver already states
+	// why none was.
+	if receiver.Kind == abstractdomain.KindKindUnion && receiver.ResidueReason != "" {
+		out := silence.ResidueOf(receiver.ResidueReason)
+		return &out
+	}
+	// a SORT UNION receiver with no residue of its own (a discriminated
+	// object type after `"r" in s` or its negation): the guard's absence
+	// proof for this key lands as a dotted place-value entry, not a
+	// rebuild of the union itself — apply_narrowing.go's narrowAt only
+	// turns a Definedness("undefined") test into Undef when the place
+	// already held the PossiblyUndefined or Undef wrapper; a bare unknown
+	// dotted entry (the ordinary starting state for a path no root
+	// absorbed) is handed back unchanged. So the guard is real but
+	// nothing here converts it into a set at this key, and the union
+	// receiver itself carries no key to fall back on either.
+	if receiver.Kind == abstractdomain.KindKindUnion {
+		out := silence.ResidueOf("the receiver's key set is not proven complete, so a name outside its known keys is neither proven present nor proven absent")
 		return &out
 	}
 	// a key read THROUGH an object-bounded T wears the key's own

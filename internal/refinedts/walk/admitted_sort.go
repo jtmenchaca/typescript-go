@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -100,6 +101,7 @@ func CheckAdmittedSort(
 	// reached it through an unchecked channel (a cast, an any)
 	contextual := positionType
 	if contextual == nil && ast.IsExpressionNode(node) {
+		tracing.CountBy("host.contextualType", 1)
 		contextual = ctx.P.Checker.GetContextualType(node, checker.ContextFlagsNone)
 	}
 	var admitted map[primitives.Sort]bool

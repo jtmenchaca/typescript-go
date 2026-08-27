@@ -26,6 +26,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
@@ -119,6 +120,7 @@ func AnswerFlowAt(
 		return No(Unknown{Why: "kernel-not-loaded"})
 	}
 
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := p.Checker.GetSymbolAtLocation(token)
 	var declaration *ast.Node
 	if symbol != nil && len(symbol.Declarations) > 0 {

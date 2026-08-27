@@ -40,6 +40,37 @@ func joinCommaSpace(parts []string) string {
 	return out
 }
 
+// sortAdmittedByGround reports whether an item that pins no exact value
+// is nonetheless a member of a GROUND element window — one AddsNothingSet
+// already found to restate a sort and narrow nothing. Such a window
+// admits every value of its own sort, so the only question left is
+// whether the item speaks that sort: a number-sorted item against the
+// numeric whole line, a string-sorted item against the star of every
+// string. The absent value is not a member of either (no scalar refined
+// set admits it), and the maybe wrapper is what carries it, so a wrapped
+// item answers no here and stays undecided for the caller.
+//
+// ClaimSortBoolean reads as a member of the numeric ground: a boolean's
+// words ARE the numeric ground's own values in this domain (KindOfClaim's
+// number/boolean conflation, typeof_words.go), which is the same bucketing
+// the sort union already uses.
+func sortAdmittedByGround(item abstractdomain.AbstractValue, ground refinementsets.RefinedSet) bool {
+	if item.Kind == abstractdomain.KindPossiblyUndefined ||
+		item.Kind == abstractdomain.KindUndef || item.Kind == abstractdomain.KindNull {
+		return false
+	}
+	itemSort := abstractdomain.KindOfClaim(item)
+	if itemSort == abstractdomain.ClaimSortBoolean {
+		itemSort = abstractdomain.ClaimSortNumber
+	}
+	if itemSort != abstractdomain.ClaimSortNumber && itemSort != abstractdomain.ClaimSortString {
+		return false
+	}
+	groundSort := abstractdomain.KindOfClaim(
+		abstractdomain.KnownSet(ground, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone))
+	return groundSort == itemSort
+}
+
 // CheckListOrStructured is checkListOrStructured in the TS source:
 // an exact list against a repetition-shaped statement, then a nested
 // sequence / Map / Set / promise / date / regex that the tuple layer
@@ -102,6 +133,23 @@ func CheckListOrStructured(
 							refinementsets.FormatForDiagnostics(window.Element)+"'",
 					))
 					return true
+				}
+				// an item that is not one exact value poses no tuple
+				// question, but a window that ADDS NOTHING beyond the
+				// element's own host-type ground still admits it: `number[]`'s
+				// star(Numbers) restates the sort and narrows nothing, so any
+				// number-sorted item is a member on every run — the identical
+				// reading the hole arm just above takes, and the one
+				// check_assignability.go's KindUnknown arm already gives
+				// unknown knowledge. Without this, a list whose items are
+				// plain sort grounds (`const [, , ...rest] = arr` off a
+				// `[number, number, number]` parameter, whose items are the
+				// tuple's own unpinned `number`s) left a position undetermined
+				// against a target that admits every value it can hold.
+				if item.Kind != abstractdomain.KindValues && AddsNothingSet(window.Element) {
+					if sortAdmittedByGround(item, window.Element) {
+						continue
+					}
 				}
 				var tuple []float64
 				hasTuple := false

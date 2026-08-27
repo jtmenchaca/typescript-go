@@ -17,6 +17,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // ReadOnlyArrayMethods is the array methods that read without writing —
@@ -181,6 +182,7 @@ func ReferenceTyped(c *checker.Checker, node *ast.Node) bool {
 		return *syntactic
 	}
 	if ast.IsIdentifier(node) {
+		tracing.CountBy("host.symbolAtLocation", 1)
 		symbol := c.GetSymbolAtLocation(node)
 		if symbol != nil {
 			symbolReferenceSortMu.Lock()
@@ -191,8 +193,10 @@ func ReferenceTyped(c *checker.Checker, node *ast.Node) bool {
 			}
 			var t *checker.Type
 			if symbol.ValueDeclaration != nil {
+				tracing.CountBy("host.typeOfSymbolAtLocation", 1)
 				t = c.GetTypeOfSymbolAtLocation(symbol, symbol.ValueDeclaration)
 			} else {
+				tracing.CountBy("host.typeAtLocation.direct", 1)
 				t = c.GetTypeAtLocation(node)
 			}
 			answer := ReferenceType(t)
@@ -202,6 +206,7 @@ func ReferenceTyped(c *checker.Checker, node *ast.Node) bool {
 			return answer
 		}
 	}
+	tracing.CountBy("host.typeAtLocation.direct", 1)
 	return ReferenceType(c.GetTypeAtLocation(node))
 }
 

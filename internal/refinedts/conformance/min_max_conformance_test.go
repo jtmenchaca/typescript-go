@@ -39,11 +39,11 @@
 //          the same question sharply when the operand is spelled as a
 //          OneOf set. Asserted as a decline below with the kernel's
 //          answer recorded beside it.
-//   gap-2  Math.min() / Math.max() with ZERO arguments answers
-//          silence.Residue() (:324). The spec pins them: max() is -∞
-//          (step 3, the initial `highest`, with no argument to change
-//          it) and min() is +∞. Both are exact, and both are declined.
-//          A pure adapter gap — no kernel question is even needed.
+//   gap-2  CLOSED. Math.min() / Math.max() with ZERO arguments answer
+//          the spec's own initial values: max() is -∞ (step 3, the
+//          initial `highest`, with no argument to change it) and min()
+//          is +∞. Both exact, answered ahead of the kernel gate in
+//          math_transfer.go — no kernel question is even needed.
 //
 // THE SCRUTINY CLASS — flagged loudly.
 //
@@ -279,8 +279,9 @@ func TestMinMaxReturnsTheSpecsNaNOnANaNArgument(t *testing.T) {
 }
 
 // TestMinMaxDeclinesOnAMultiValueWordAndOnNoArguments is the
-// DETERMINATION-GAP half: gap-1 and gap-2, asserted as declines. A row
-// that starts answering fails here and forces the ledger current.
+// DETERMINATION-GAP half: gap-1 asserted as a decline, gap-2 asserted
+// as the spec's exact answer now that it is closed. A row that changes
+// its answer fails here and forces the ledger current.
 func TestMinMaxDeclinesOnAMultiValueWordAndOnNoArguments(t *testing.T) {
 	kernel := arithmeticKernel(t)
 
@@ -308,17 +309,25 @@ func TestMinMaxDeclinesOnAMultiValueWordAndOnNoArguments(t *testing.T) {
 		}
 	}
 
-	// gap-2: zero arguments. The spec pins max() = -inf and min() = +inf
-	// (step 3 in each, with no argument to change the initial value);
-	// the adapter answers silence.
+	// gap-2, closed: zero arguments. The spec pins max() = -inf and
+	// min() = +inf (step 3 in each, with no argument to change the
+	// initial value); the adapter answers those exact values.
 	for _, op := range minMaxOps {
 		answer, matched := walk.TransferMathCall(op.name, nil)
 		if !matched {
 			t.Fatalf("TransferMathCall(%q) is not transferred at all", op.name)
 		}
-		if !declined(answer) {
-			t.Errorf("gap-2: Math.%s() with no arguments now determines something (%v) — the determination gap closed and this file's ledger is stale",
-				op.name, answer.Kind)
+		want := math.Inf(-1)
+		if op.name == "min" {
+			want = math.Inf(1)
+		}
+		value, pinned := answeredExactly(answer)
+		if !pinned {
+			t.Errorf("Math.%s() with no arguments answered %v, want the spec's exact %v (sec-math.%s step 3)",
+				op.name, answer.Kind, want, op.name)
+		} else if !sameFloatBits(value, want) {
+			t.Errorf("Math.%s() = %v, want the spec's initial %v (sec-math.%s step 3)",
+				op.name, value, want, op.name)
 		}
 	}
 }

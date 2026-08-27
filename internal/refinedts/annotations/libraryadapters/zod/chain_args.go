@@ -18,11 +18,14 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/jsnum"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := c.GetSymbolAtLocation(node)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		symbol = c.GetAliasedSymbol(symbol)
 	}
 	return symbol

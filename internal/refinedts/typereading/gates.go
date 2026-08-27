@@ -7,6 +7,7 @@ package typereading
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // ArrivedUnchecked is arrivedUnchecked in the TS source.
@@ -44,6 +45,7 @@ func UncheckedDeclaration(c *checker.Checker, declaration *ast.Node, depth int) 
 	if depth >= 4 || !ast.IsIdentifier(variableDeclaration.Initializer) {
 		return false
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	source := c.GetSymbolAtLocation(variableDeclaration.Initializer)
 	if source == nil || source.ValueDeclaration == nil {
 		return false

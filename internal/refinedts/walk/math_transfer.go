@@ -382,8 +382,25 @@ func mathImage(name string, rawArgs []abstractdomain.AbstractValue) (abstractdom
 	}
 	switch name {
 	case "min", "max":
+		// NO ARGUMENTS is exact, and it is exact without asking anything:
+		// sec-math.max sets _highest_ to -∞ (step 3), runs its loop over
+		// an empty _coerced_ zero times, and returns that -∞ (step 5).
+		// sec-math.min is the mirror — _lowest_ starts at +∞ and comes
+		// back untouched. Neither depends on the kernel or on any
+		// operand, so this answers ahead of the kernel gate below, which
+		// previously swallowed the case into the same decline a missing
+		// kernel takes.
+		if len(args) == 0 {
+			empty := math.Inf(-1)
+			if name == "min" {
+				empty = math.Inf(1)
+			}
+			return abstractdomain.KnownValues(
+				[]float64{empty}, abstractdomain.PrimitiveNumber, abstractdomain.TrustSpec,
+			), true
+		}
 		kernel := currentTransferKernel()
-		if len(args) == 0 || kernel == nil {
+		if kernel == nil {
 			return silence.Residue(), true
 		}
 		// the KERNEL answers first (TransferOpMin/TransferOpMax fold

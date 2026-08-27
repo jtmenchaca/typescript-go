@@ -15,6 +15,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/nameresolution"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // ReadTypeNode is readTypeNode in the TS source.
@@ -59,6 +60,41 @@ func ReadTypeNode(c *checker.Checker, node *ast.Node, at *ast.Node, depth int) (
 			return abstractdomain.AbstractValue{}, false
 		}
 		return StarOfElement(inner)
+	}
+	// a TUPLE type node — `[Age, Wide]` — states each position's own
+	// type at an exact length, which is a strictly stronger claim than
+	// the array node's star above: the slots may disagree, and reading
+	// them per-position keeps that. The host reader already makes this
+	// distinction on the RESOLVED side (host_type.go's IsTupleType
+	// branch, which reads a required-element tuple positionally before
+	// falling to the joined star); this is the SYNTAX side of the same
+	// rule, and it matters because a written alias like `Age` resolves
+	// to its refined set here while the host reader only ever sees the
+	// underlying `number` a branded alias erases to.
+	//
+	// Only the all-required form, exactly as the host branch gates it:
+	// an optional (`T?`), rest (`...T[]`), or named slot costs the
+	// exact position-to-length pairing this reading depends on, and
+	// such a tuple falls through to the host road rather than being
+	// read here with a length it does not have.
+	if ast.IsTupleTypeNode(node) {
+		elements := node.AsTupleTypeNode().Elements
+		if elements == nil || len(elements.Nodes) == 0 {
+			return abstractdomain.AbstractValue{}, false
+		}
+		items := make([]abstractdomain.AbstractValue, 0, len(elements.Nodes))
+		for _, element := range elements.Nodes {
+			if ast.IsOptionalTypeNode(element) || ast.IsRestTypeNode(element) ||
+				ast.IsNamedTupleMember(element) {
+				return abstractdomain.AbstractValue{}, false
+			}
+			inner, ok := ReadTypeNode(c, element, at, depth+1)
+			if !ok {
+				return abstractdomain.AbstractValue{}, false
+			}
+			items = append(items, inner)
+		}
+		return abstractdomain.KnownList(items, abstractdomain.TrustProved), true
 	}
 	if ast.IsTypeReferenceNode(node) {
 		typeName := node.AsTypeReferenceNode().TypeName
@@ -187,7 +223,9 @@ func membersOf(c *checker.Checker, node *ast.Node) []*ast.Node {
 	}
 	if ast.IsTypeReferenceNode(node) {
 		typeName := node.AsTypeReferenceNode().TypeName
+		tracing.CountBy("host.symbolAtLocation", 1)
 		symbol := c.GetSymbolAtLocation(typeName)
+		tracing.CountBy("host.symbolInDefaultLib", 1)
 		if c.SymbolInDefaultLib(symbol) {
 			return nil
 		}
@@ -230,9 +268,11 @@ func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
 			"node", node.Text(), "road", "binder", "found", true)
 		return s
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := c.GetSymbolAtLocation(node)
 	followedAlias := false
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		symbol = c.GetAliasedSymbol(symbol)
 		followedAlias = true
 	}

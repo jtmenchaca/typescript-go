@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
@@ -73,6 +74,74 @@ func InitialStateOfPlainParameter(p *program.CheckerProgram, parameter *ast.Node
 		return abstractdomain.AtTrustLevel(held, abstractdomain.TrustSpec)
 	}
 	return unread()
+}
+
+// statedParameterSeed is what a parameter carrying a STATED annotation
+// enters its body holding: the declared reading, sharpened at any tuple
+// slot the host reads more exactly.
+//
+// The two roads are otherwise separate seeds and BindEntryEnv picks
+// one, which is what made a tuple annotation a regression when the
+// annotation road learned to read tuples at all: `item: [10, 20] | null`
+// used to fall to the unstated road (the union arm bailed at the
+// unreadable tuple branch) and got the host's exact
+// PossiblyUndefined(KnownList[10, 20]); once the annotation road stated
+// it, the stated branch took over and handed the body a list of
+// set-shaped slots instead. SharpenedTupleSeed puts the host's exact
+// slots back without giving up what only the annotation road sees (a
+// refined alias's window at a slot the host erases to bare `number`).
+//
+// The host read is asked only where the declaration actually carries a
+// tuple, so no other parameter pays for it.
+func statedParameterSeed(
+	p *program.CheckerProgram,
+	parameter *ast.Node,
+	stated annotations.DeclaredRefinement,
+) abstractdomain.AbstractValue {
+	declared := AbstractValueOfDeclared(stated)
+	if !statesTuple(stated) {
+		return declared
+	}
+	decl := parameter.AsParameterDeclaration()
+	// the `at` node ReadDeclaredType resolves the host type from must be
+	// the parameter's own NAME, and only an identifier names one place —
+	// the same gate InitialStateOfPlainParameter keeps before making this
+	// identical call. A destructured parameter keeps the declared
+	// reading; its leaves are read per-name by ReadDestructuring anyway.
+	if decl.Type == nil || decl.Name() == nil || !ast.IsIdentifier(decl.Name()) {
+		return declared
+	}
+	fromHost, hostOk := typereading.ReadDeclaredType(p.Checker, decl.Type, decl.Name())
+	// A WRAPPED tuple (`[10, 20] | null`) takes the host's reading
+	// wholesale: the host builds the exact per-slot list BEHIND the
+	// absence wrapper in the one shape the `!= null` narrowing already
+	// strips (the behavior ternary_spread_nullable_tuple_test.go pins).
+	// Recomposing the wrapper around sharpened slots built a value that
+	// narrowing did not recognize — measured: the guard stopped
+	// stripping it and the spread went undetermined. Only the PLAIN
+	// tuple annotation composes the two roads, where no wrapper is in
+	// play and the annotation road's refined-alias windows are the half
+	// the host cannot see.
+	if stated.Kind == annotations.DeclaredPossiblyUndefined {
+		if hostOk {
+			return fromHost
+		}
+		return declared
+	}
+	return SharpenedTupleSeed(declared, fromHost, hostOk)
+}
+
+// statesTuple is whether a declared statement carries a tuple at its
+// top — directly, or behind the absence wrapper a `tuple | null`
+// position states.
+func statesTuple(stated annotations.DeclaredRefinement) bool {
+	if stated.Kind == annotations.DeclaredTuple {
+		return true
+	}
+	if stated.Kind == annotations.DeclaredPossiblyUndefined && stated.Inner != nil {
+		return statesTuple(*stated.Inner)
+	}
+	return false
 }
 
 // entryStateMeet is the entry state a parameter with BOTH a call-site
@@ -247,6 +316,21 @@ func BindEntryEnv(input BindEntryEnvInput) {
 		input.Env.Set(name, held)
 		diagnose.LogIf(diagnose.EventOn("walk.entryEnv"), "walk.entryEnv", "param", name, "value", spellValue(held))
 	}
+	// THE LAST-TOUCH SITE SEAM for the ENTRY binding itself: a plain
+	// parameter with no declared refinement (`v: unknown`, `v` with no
+	// annotation the host reads) enters its body a bare unknown with no
+	// reader's sentence attached — the declaration IS the write that
+	// produced that unbounded value, so it is recorded here rather than
+	// left for a later read to find nothing on the ledger and fall to a
+	// bare residue with no mutation to name.
+	bindParam := func(parameter *ast.Node, name string, held abstractdomain.AbstractValue) {
+		if held.Kind == abstractdomain.KindUnknown && !held.Opaque && held.ResidueReason == "" && derivation.Active() {
+			closeSite := derivation.TouchSite(derivation.Construct(parameter), derivation.Range(parameter))
+			derivation.RecordTouchFromSite(name, derivation.TouchWritten)
+			closeSite()
+		}
+		bind(name, held)
+	}
 	for i, parameter := range input.Parameters {
 		var stated *annotations.DeclaredRefinement
 		if input.StatedParams != nil && i < len(input.StatedParams) {
@@ -259,7 +343,7 @@ func BindEntryEnv(input BindEntryEnvInput) {
 			// pattern with its own written annotation reads through it
 			// alone, with no join lookup at all.
 			if stated != nil {
-				source := AbstractValueOfDeclared(*stated)
+				source := statedParameterSeed(input.P, parameter, *stated)
 				ReadDestructuring(decl.Name(), source, func(name string, held abstractdomain.AbstractValue, at *ast.Node) {
 					bind(name, silence.SeededBinding(input.P.Checker, held, at))
 				})
@@ -286,7 +370,7 @@ func BindEntryEnv(input BindEntryEnvInput) {
 		}
 		name := decl.Name().Text()
 		if stated != nil {
-			declaredValue := AbstractValueOfDeclared(*stated)
+			declaredValue := statedParameterSeed(input.P, parameter, *stated)
 			// a STATED annotation is a CEILING, never a floor: where a
 			// call-site join also reaches this parameter, the entry
 			// value is the MEET of the two (entryStateMeet, the same
@@ -334,6 +418,6 @@ func BindEntryEnv(input BindEntryEnvInput) {
 		if name == "this" {
 			continue
 		}
-		bind(name, InitialStateOfPlainParameter(input.P, parameter))
+		bindParam(parameter, name, InitialStateOfPlainParameter(input.P, parameter))
 	}
 }

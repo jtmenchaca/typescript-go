@@ -5,6 +5,7 @@
 package walk
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -12,6 +13,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/compiler"
 	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/vfs/vfstest"
@@ -23,10 +25,22 @@ import (
 // canonical recipe). No surface stand-in is needed here.
 func entryEnvTestProgram(t *testing.T, entrySource string) *program.CheckerProgram {
 	t.Helper()
+	return entryEnvTestProgramWithOptions(t, entrySource, "")
+}
+
+// entryEnvTestProgramWithOptions is entryEnvTestProgram with the
+// tsconfig's compilerOptions body spelled by the caller — the flag
+// gates a walk answer (element_in_bounds.go reads
+// noUncheckedIndexedAccess), so a test of that answer has to state the
+// project the answer belongs to. optionsBody is the comma-separated
+// interior of the compilerOptions object; "" is the empty object
+// entryEnvTestProgram has always used.
+func entryEnvTestProgramWithOptions(t *testing.T, entrySource string, optionsBody string) *program.CheckerProgram {
+	t.Helper()
 	fs := vfstest.FromMap(map[string]string{
 		"/main.ts": entrySource,
 		"/tsconfig.json": `{
-			"compilerOptions": {},
+			"compilerOptions": {` + optionsBody + `},
 			"files": ["main.ts"]
 		}`,
 	}, false /*useCaseSensitiveFileNames*/)
@@ -143,5 +157,45 @@ func TestBindEntryEnv_AnExportedAnyParameterIsOpaque(t *testing.T) {
 	}
 	if !held.Opaque {
 		t.Errorf("held.Opaque = false, want true")
+	}
+}
+
+// TestBindEntryEnv_APlainUnknownParameterRecordsAWrittenTouch pins the
+// entry-binding chokepoint (A12.sink.assign's own gap): a plain
+// `v: unknown` parameter enters its body a bare unknown with no
+// reader's sentence attached, and nothing ever narrows it before a read
+// — so the read finds no last-touch record and falls back to the bare
+// "the walk holds nothing that pins this value" alert, naming the
+// reader and nothing about why. BindEntryEnv's own bindParam now
+// records the declaration itself as the write that produced that
+// unbounded value, while a Recorder is active, so a later read can name
+// it instead.
+func TestBindEntryEnv_APlainUnknownParameterRecordsAWrittenTouch(t *testing.T) {
+	_, closer := derivation.BeginRecording("ts", "f.ts:1", 0)
+	defer closer()
+
+	p := entryEnvTestProgram(t, "function f(v: unknown) { v; }\n")
+	fn := entryEnvFunctionNamed(t, p, "f")
+	env := NewEnv()
+	BindEntryEnv(BindEntryEnvInput{
+		P:                     p,
+		Env:                   env,
+		Parameters:            fn.AsFunctionDeclaration().Parameters.Nodes,
+		StatedParams:          nil,
+		CallSiteInitialStates: nil,
+	})
+	held, ok := env.Get("v")
+	if !ok || held.Kind != abstractdomain.KindUnknown || held.Opaque || held.ResidueReason != "" {
+		t.Fatalf("env[v] = %+v, %v, want a bare unopaque unknown with no residue of its own", held, ok)
+	}
+	// The seed names its own site — the parameter declaration and its
+	// range — rather than the bare kind word, which is what lets a later
+	// read of `v` say WHERE the unbounded value came from.
+	touch := derivation.LastTouchOf("v")
+	if !strings.HasPrefix(touch, "written by v: unknown  @") {
+		t.Fatalf("LastTouchOf(v) = %q, want the written kind naming the parameter declaration", touch)
+	}
+	if !strings.Contains(touch, ":1:12-1:22") {
+		t.Fatalf("LastTouchOf(v) = %q, want the parameter declaration's own range", touch)
 	}
 }

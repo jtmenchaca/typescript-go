@@ -12,8 +12,10 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -166,14 +168,33 @@ func readUnmodeledMethod(site MethodCallSite) abstractdomain.AbstractValue {
 		// root's reference moves with it. ONE resolver decides what a
 		// write through an expression forgets (finding 14):
 		// forgetThrough, the same one assignment targets use.
-		ForgetThrough(ctx, env, receiverExpression)
+		//
+		// THE LAST-TOUCH SITE SEAM: this is the one call site that holds
+		// the mutating node — the whole method call `e`, e.g. `o.xs.push(v)`
+		// — so it names the site before ForgetThrough reaches HavocEnv,
+		// and every chokepoint HavocEnv calls picks it up.
+		if derivation.Active() {
+			closeSite := derivation.TouchSite(derivation.Construct(e), derivation.Range(e))
+			ForgetThrough(ctx, env, receiverExpression)
+			closeSite()
+		} else {
+			ForgetThrough(ctx, env, receiverExpression)
+		}
 	}
 	for _, argument := range arguments {
 		evaluateExpression(ctx, env, argument)
 		// the method may keep and write a reference argument
 		if ast.IsIdentifier(argument) {
 			if _, ok := env.Get(argument.Text()); ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
-				HavocEnv(ctx.Aliases, env, argument.Text())
+				// THE LAST-TOUCH SITE SEAM: the whole method call `e` is what
+				// may have written through this handed reference.
+				if derivation.Active() {
+					closeSite := derivation.TouchSite(derivation.Construct(e), derivation.Range(e))
+					HavocEnv(ctx.Aliases, env, argument.Text())
+					closeSite()
+				} else {
+					HavocEnv(ctx.Aliases, env, argument.Text())
+				}
 			}
 		}
 	}
@@ -230,5 +251,6 @@ func isCallableArgument(ctx *FlowContext, argument *ast.Node) (result bool) {
 	if (t.Flags() & checker.TypeFlagsAny) != 0 {
 		return true
 	}
+	tracing.CountBy("host.callSignatures", 1)
 	return len(ctx.P.Checker.GetCallSignatures(t)) > 0
 }

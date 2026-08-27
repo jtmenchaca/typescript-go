@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // MapOutcome is map / flatMap over an exact sequence or a star
@@ -220,6 +221,7 @@ func FilterOutcome(walk *CallbackWalk) abstractdomain.AbstractValue {
 			receiverExpression = call.AsCallExpression().Expression.AsPropertyAccessExpression().Expression
 		}
 		if receiverExpression != nil && ast.IsIdentifier(receiverExpression) {
+			tracing.CountBy("host.symbolAtLocation", 1)
 			symbol := ctx.P.Checker.GetSymbolAtLocation(receiverExpression)
 			var declaration *ast.Node
 			if symbol != nil {

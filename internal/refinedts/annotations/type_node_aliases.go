@@ -398,6 +398,64 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 		}
 		return annotationOfType(p, aliasDecl.Type, registry, objects, inner), true
 	}
+	// a CLASS used as a type (`p: Person`): the instance's own DATA
+	// fields state the position -- each field's declared type read
+	// through this SAME function, member-wise, exactly as a `{ port:
+	// Port }` type literal's members read above (annotationOfTypeSets'
+	// IsTypeLiteralNode arm). A class field's type is written the
+	// identical way an interface member's is (a refined alias like
+	// `Age` erases to bare `number` under the CHECKER's resolved type
+	// -- typereading/host_type.go's own route -- so only this
+	// annotation-compiler road recovers it), and this is the one place
+	// that road reaches a class's own members: typereading's syntax
+	// adapter (typereading/type_node.go's membersOf) reads an
+	// interface's and a type-alias-of-literal's members but never a
+	// class's, so a class-typed position fell to the host road alone
+	// and lost every refined field the same way any other declaration
+	// would.
+	//
+	// TWO SPELLINGS OF ONE FIELD, folded into one key list: an ordinary
+	// PropertyDeclaration (`age: Age;`) and a CONSTRUCTOR PARAMETER
+	// PROPERTY (`constructor(public age: Age) {}`), which declares a
+	// field with no property declaration at all. Property declarations
+	// are read first, in member order; a constructor's parameter
+	// properties are read after, in parameter order, and a name already
+	// claimed by a property declaration is not read twice (the same
+	// precedence walk/ir_bundle_params.go's ClassBundleFields keeps for
+	// the coarser kernel-bundle reading of the same two spellings).
+	//
+	// DECLINES rather than reading a partial shape: a class carrying
+	// its own TYPE PARAMETERS (the fields' annotations are not
+	// necessarily what any one instantiation actually holds), or a
+	// reference applying TYPE ARGUMENTS of its own (`Box<number>` --
+	// nothing here substitutes them into the field types) -- both
+	// leave the position plain TypeScript rather than a shape this
+	// reading cannot back.
+	//
+	// STATIC members, methods, and accessors are not data fields and
+	// contribute no key -- exactly ClassFieldsOf's own filter. A
+	// PRIVATE or `#`-named field still states its own key: the
+	// question here is what an instance's OWN text says the field
+	// holds, not who outside the class may read it.
+	if declaration != nil && ast.IsClassLike(declaration) {
+		classData := declaration.ClassLikeData()
+		typeArgs := typeNode.AsTypeReferenceNode().TypeArguments
+		if classData.TypeParameters != nil && len(classData.TypeParameters.Nodes) > 0 {
+			return AnnotationOfTypeResult{}, true
+		}
+		if typeArgs != nil && len(typeArgs.Nodes) > 0 {
+			return AnnotationOfTypeResult{}, true
+		}
+		keys, ok := classFieldKeys(p, classData, registry, objects, bindings)
+		if !ok {
+			return AnnotationOfTypeResult{}, true
+		}
+		if diagnose.EventOn("annotations.typeNode") {
+			diagnose.Log("annotations.typeNode",
+				"text", diagnose.NodeText(typeNode), "path", "class-resolved", "resolvedBy", aliasResolvedBy)
+		}
+		return AnnotationOfTypeResult{Stated: &DeclaredRefinement{Kind: DeclaredObject, Object: &ObjectAnnotation{Keys: keys}}}, true
+	}
 	// a TS ENUM used as a type: the members are the values -- string
 	// initializers, numeric initializers, and the auto-increment
 	// defaults -- so the position states their union
@@ -522,4 +580,199 @@ func annotationOfTypeAliases(p *program.CheckerProgram, typeNode *ast.Node, regi
 			"text", diagnose.NodeText(typeNode), "path", "plain-typescript", "resolvedBy", aliasResolvedBy)
 	}
 	return AnnotationOfTypeResult{}, true
+}
+
+// classFieldKeys is a class-like declaration's own DATA fields, read
+// as ObjectKeySpecs the same way annotationOfTypeSets' IsTypeLiteralNode
+// arm reads a `{ port: Port }` literal's members -- each field's type
+// node through annotationOfType, member-wise, so a refined alias (Age)
+// resolves exactly as it would at any other position.
+//
+// Two spellings fold into one key list, property declarations first in
+// member order, then constructor parameter properties in parameter
+// order, a name the property declarations already claimed never read
+// twice -- the same precedence ClassBundleFields keeps for the
+// kernel-bundle reading of the same two spellings (ir_bundle_params.go).
+//
+// (false) only where some field this reading DOES see cannot be
+// stated at all: a computed name (other than nothing this reader
+// spells), a binding-pattern parameter property, or a member whose
+// type reads as plain TypeScript or an unsupported statement. A class
+// carrying such a field states nothing here, exactly as an interface
+// or a type literal with one plain-TS member states nothing --
+// reading the OTHER fields and leaving this one silently absent would
+// draw a key set the class does not actually have.
+func classFieldKeys(
+	p *program.CheckerProgram,
+	classData *ast.ClassLikeBase,
+	registry AnnotationRegistry,
+	objects ObjectRegistry,
+	bindings map[*ast.Symbol]*DeclaredRefinement,
+) ([]ObjectKeySpec, bool) {
+	var keys []ObjectKeySpec
+	seen := map[string]struct{}{}
+	for _, member := range classData.Members.Nodes {
+		if !ast.IsPropertyDeclaration(member) {
+			continue
+		}
+		if ast.GetCombinedModifierFlags(member)&ast.ModifierFlagsStatic != 0 {
+			continue
+		}
+		declaration := member.AsPropertyDeclaration()
+		name := declaration.Name()
+		if name == nil || (!ast.IsIdentifier(name) && !ast.IsPrivateIdentifier(name)) {
+			// a computed name states no key this reading can spell
+			return nil, false
+		}
+		if declaration.Type == nil {
+			// no annotation at all: the field's own initializer alone
+			// states nothing a signature-position reading can back
+			return nil, false
+		}
+		text := name.Text()
+		if _, already := seen[text]; already {
+			continue
+		}
+		seen[text] = struct{}{}
+		key, ok := classFieldKeySpec(p, text, declaration.Type, declaration.PostfixToken != nil, registry, objects, bindings)
+		if !ok {
+			return nil, false
+		}
+		keys = append(keys, key)
+	}
+	for _, member := range classData.Members.Nodes {
+		if !ast.IsConstructorDeclaration(member) {
+			continue
+		}
+		for _, parameter := range member.Parameters() {
+			const declaresField = ast.ModifierFlagsAccessibilityModifier | ast.ModifierFlagsReadonly
+			if parameter.ModifierFlags()&declaresField == 0 {
+				continue
+			}
+			pd := parameter.AsParameterDeclaration()
+			name := pd.Name()
+			if name == nil || (!ast.IsIdentifier(name) && !ast.IsPrivateIdentifier(name)) {
+				// a binding-pattern parameter property (TypeScript itself
+				// refuses this) states no key this reading can spell
+				return nil, false
+			}
+			text := name.Text()
+			if _, already := seen[text]; already {
+				// a property declaration already claimed this name -- the
+				// declared member wins, matching ClassBundleFields' own
+				// precedence
+				continue
+			}
+			seen[text] = struct{}{}
+			if pd.Type == nil {
+				return nil, false
+			}
+			key, ok := classFieldKeySpec(p, text, pd.Type, pd.QuestionToken != nil, registry, objects, bindings)
+			if !ok {
+				return nil, false
+			}
+			keys = append(keys, key)
+		}
+		// a class body holds at most one constructor with a body; an
+		// overload signature declares no parameter properties
+		break
+	}
+	// GET ACCESSORS read as a key too, best-effort: an accessor's own
+	// written return type states what a read through it holds, the
+	// same claim a data field's own annotation states. Unlike a data
+	// field or a parameter property, a getter whose return type this
+	// reading cannot state does NOT decline the whole class -- the
+	// getter's own name simply does not enter Keys, exactly as an
+	// unreadable getter left it before this reading existed
+	// (ReadObjectKeyAccess's incomplete-object fallback still answers
+	// that one property, unshadowed). Declining the whole class over
+	// one opaque getter would cost every OTHER field's determination
+	// for a shape this reading has no obligation to complete.
+	//
+	// This is WHY an accessor pair must not shadow the object model at
+	// all where a getter's return type IS readable: without an entry
+	// here, `p.age` on a class-typed parameter falls to
+	// ReadObjectKeyAccess's incomplete-object branch, which answers a
+	// bare, reason-carrying residue that (by returning non-nil) blocks
+	// ReadPropertyAccess's own later fallback to the resolved TYPE at
+	// the access -- the fallback that used to answer `p.age` as plain
+	// `number` before any class object existed for `p` at all. Giving
+	// the getter its own stated entry is what keeps that read at least
+	// as precise as it was, and sharper where Age is the getter's own
+	// written return type.
+	for _, member := range classData.Members.Nodes {
+		if !ast.IsGetAccessorDeclaration(member) {
+			continue
+		}
+		if ast.GetCombinedModifierFlags(member)&ast.ModifierFlagsStatic != 0 {
+			continue
+		}
+		ga := member.AsGetAccessorDeclaration()
+		name := ga.Name()
+		if name == nil || (!ast.IsIdentifier(name) && !ast.IsPrivateIdentifier(name)) {
+			continue
+		}
+		text := name.Text()
+		if _, already := seen[text]; already {
+			continue
+		}
+		if ga.Type == nil {
+			continue
+		}
+		key, ok := classFieldKeySpec(p, text, ga.Type, false, registry, objects, bindings)
+		if !ok {
+			continue
+		}
+		seen[text] = struct{}{}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil, false
+	}
+	return keys, true
+}
+
+// classFieldKeySpec reads one field's own declared type into an
+// ObjectKeySpec, the identical shape annotationOfTypeSets' type-literal
+// arm builds for an interface member: a SET or OBJECT statement wears
+// the key's own MayBeAbsent, everything else (a variable, plain
+// TypeScript, an unsupported statement) declines the whole class read.
+func classFieldKeySpec(
+	p *program.CheckerProgram,
+	name string,
+	typeNode *ast.Node,
+	optional bool,
+	registry AnnotationRegistry,
+	objects ObjectRegistry,
+	bindings map[*ast.Symbol]*DeclaredRefinement,
+) (ObjectKeySpec, bool) {
+	read := annotationOfType(p, typeNode, registry, objects, bindings)
+	if read.Stated == nil {
+		return ObjectKeySpec{}, false
+	}
+	stated := read.Stated
+	inner := stated
+	if stated.Kind == DeclaredPossiblyUndefined {
+		inner = stated.Inner
+	}
+	var value ObjectKeyValue
+	hasValue := false
+	if inner.Kind == DeclaredSet {
+		value = ObjectKeyValue{Kind: KeyValueSet, Set: inner.Set, KindTag: inner.KindTag}
+		hasValue = true
+	} else if inner.Kind == DeclaredObject {
+		value = ObjectKeyValue{Kind: KeyValueObject, Object: inner.Object}
+		hasValue = true
+	}
+	if !hasValue {
+		return ObjectKeySpec{}, false
+	}
+	absent := optional || stated.Kind == DeclaredPossiblyUndefined
+	var count refinementsets.RefinedSet
+	if absent {
+		count = refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{0, 1}))
+	} else {
+		count = refinementsets.MakeRefinedSet(refinementsets.OneOf([]float64{1}))
+	}
+	return ObjectKeySpec{Name: name, Count: setPtr(count), MayBeAbsent: absent, At: typeNode, Value: value}, true
 }

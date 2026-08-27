@@ -61,6 +61,21 @@ func analyzeFunctionBody(outer *FlowContext, contract *FunctionContract, callSit
 	}
 
 	env := NewEnv()
+	// `var` HOISTS its binding to this function's entry — every var
+	// name anywhere in the body (nested blocks included, nested
+	// functions excluded) exists from the first statement on, holding
+	// `undefined` until its own assignment statement runs. Seeding it
+	// here, before parameters bind, means a same-named parameter
+	// (which real JS also hoists `var` under, keeping the parameter's
+	// value) simply overwrites this seed below, and a read that
+	// reaches an env slot the ordinary walk order has not yet written
+	// answers absent rather than falling through to the declaration's
+	// own inferred type (UntrackedIdentifier's last-reader path,
+	// correct for a genuinely untracked closed-over name, wrong for a
+	// binding this very function already owns).
+	for name := range HoistedVarNames(body) {
+		env.Set(name, abstractdomain.Undef)
+	}
 	parameters := contract.Declaration.Parameters()
 	for i, parameter := range parameters {
 		decl := parameter.AsParameterDeclaration()

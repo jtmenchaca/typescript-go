@@ -35,6 +35,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 /* ── recognition: the literal's method rows ──────────────────────── */
@@ -188,6 +189,7 @@ func calleePropertyInLiteral(ctx *FlowContext, callee *ast.Node) bool {
 	if name == nil || !ast.IsIdentifier(name) {
 		return false
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(name)
 	if symbol == nil || symbol.ValueDeclaration == nil {
 		return false
@@ -233,6 +235,7 @@ func ObjectLiteralMethodWalkCall(
 	if calleeName == nil || !ast.IsIdentifier(calleeName) {
 		return abstractdomain.AbstractValue{}, false
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(calleeName)
 	if symbol == nil {
 		return abstractdomain.AbstractValue{}, false

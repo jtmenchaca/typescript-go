@@ -190,6 +190,13 @@ func ReadIndexedWrite(ctx *FlowContext, env Env, e *ast.Node) (abstractdomain.Ab
 			return value, true
 		}
 	}
+	// a PER-SLOT list receiver — the shape a tuple-typed binding wears,
+	// one AbstractValue per position rather than the bare number the
+	// KindValues arm above reads. One exact in-range index replaces that
+	// one slot and leaves the rest (list_slot_write.go states why).
+	if writeListSlotExactly(ctx, env, name, receiver, index, value) {
+		return value, true
+	}
 	HavocEnv(ctx.Aliases, env, name)
 	return value, true
 }

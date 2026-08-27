@@ -8,6 +8,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -85,6 +86,7 @@ func AfterReaders(
 	if ast.IsIdentifier(at) && typereading.ArrivedUnchecked(c, at) {
 		return held
 	}
+	tracing.CountBy("host.typeAtLocation.direct", 1)
 	seeded, ok := typereading.ReadHostType(c, c.GetTypeAtLocation(at), at, 0)
 	if !ok {
 		return held

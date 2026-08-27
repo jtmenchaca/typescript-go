@@ -13,6 +13,7 @@ package walk
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // BoundFunction is a partial application made by `f.bind(thisArg,
@@ -115,6 +116,7 @@ func StoredBoundFunctionOf(ctx *FlowContext, expression *ast.Node) *BoundFunctio
 	if !ast.IsIdentifier(expression) {
 		return nil
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(expression)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
 		aliased := func() (result *ast.Symbol) {
@@ -123,6 +125,7 @@ func StoredBoundFunctionOf(ctx *FlowContext, expression *ast.Node) *BoundFunctio
 					result = nil
 				}
 			}()
+			tracing.CountBy("host.aliasedSymbol", 1)
 			return ctx.P.Checker.GetAliasedSymbol(symbol)
 		}()
 		if aliased == nil {

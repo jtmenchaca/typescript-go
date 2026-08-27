@@ -110,8 +110,47 @@ func ElementOf(iterable abstractdomain.AbstractValue) abstractdomain.AbstractVal
 	// here for an element read — without it CheckPossiblyNaN cannot
 	// tell this claim apart from AfterReaders' own ungraded fallback
 	// seed (nan_wrapper.go's two-case split).
-	if iterable.Kind != abstractdomain.KindUnknown && iterable.Grade != "" {
+	//
+	// A COLLECTION IS NOT A SCALAR, and this arm is about a scalar. A
+	// `Set<Age>`/`Map<K, V>` parameter arrives as a graded
+	// KindCollection with no entries the walk watched, and reading it
+	// through this arm answers THE SET ITSELF as the loop's element —
+	// `for (const x of s)` then binds x to the collection, and a
+	// return of x into a scalar position refutes as "a returned value
+	// is an object". Its element is stated elsewhere and better: the
+	// declared type argument, which declaredCollectionElement
+	// (iteration_elements.go) reads at library grade. That reader runs
+	// from the loop head only when this function leaves the element
+	// UNKNOWN (loop_fixpoint.go gates the IterationElement call on
+	// exactly that), so answering here is what kept it from being
+	// asked at all.
+	//
+	// The same holds for the other structured kinds with their own
+	// element readings — an object, a promise, a date, a regex: none
+	// of them has "the whole value" as a position's contents, and each
+	// either states its element through its own reader or states none.
+	if iterable.Kind != abstractdomain.KindUnknown && iterable.Grade != "" &&
+		!isStructuredIterableShape(iterable.Kind) {
 		return iterable
 	}
 	return silence.ResidueOf("the iteration element reader holds no model for this iterable's shape")
+}
+
+// isStructuredIterableShape names the kinds whose element is NOT the
+// value itself — every structured shape whose positions hold something
+// other than the whole. The graded-scalar arm above excludes them so
+// each reaches its own element reading (or none) rather than answering
+// the container where an element was asked for.
+//
+// The sequence kinds are absent because the arms ABOVE that one
+// already answer them exactly — a set's repetition arms, a values
+// tuple's join, an array-holes undefined, a list's item join — so they
+// never reach the scalar arm to be excluded from it.
+func isStructuredIterableShape(kind abstractdomain.Kind) bool {
+	switch kind {
+	case abstractdomain.KindCollection, abstractdomain.KindObject,
+		abstractdomain.KindPromise, abstractdomain.KindDate, abstractdomain.KindRegex:
+		return true
+	}
+	return false
 }

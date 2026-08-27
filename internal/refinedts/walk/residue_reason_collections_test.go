@@ -274,13 +274,16 @@ func TestCheckAssignability_CollectionModels_GetOrInsertMaybePresentNamesItsOwnR
 
 // TestCheckAssignability_CollectionModels_GetOrInsertUnreadableKeyNamesItsOwnReader
 // pins collection_models.go's getOrInsert arm: a key that isn't one
-// primitive exact value still writes the collection, but the
-// inserted-or-held value isn't named. (This row passed the gate as
-// originally written — a source-level pin, unlike its five siblings
-// above — left unchanged.)
+// primitive exact value still writes the collection, and where the
+// receiver also spells NO value type there is nothing to name the
+// inserted-or-held value with — the residue names that. A receiver
+// that DOES spell `Map<K, V>` answers V's stated set joined with the
+// default instead (MapStatedValueOfGetOrInsert;
+// A8.xfer.getorinsert's own e2e pin), so this pin's map deliberately
+// states no V.
 func TestCheckAssignability_CollectionModels_GetOrInsertUnreadableKeyNamesItsOwnReader(t *testing.T) {
 	residueReasonExpectSentence(t, "function f(k: object): void {\n"+
-		"  const m = new Map<object, number>();\n"+
+		"  const m = new Map();\n"+
 		"  let age = m.getOrInsert(k, 1);\n"+
 		"  age;\n"+
 		"}\n", "inserted-or-held value isn't named")
@@ -288,8 +291,10 @@ func TestCheckAssignability_CollectionModels_GetOrInsertUnreadableKeyNamesItsOwn
 
 // TestCheckAssignability_CollectionModels_DeleteIncompleteMissNamesItsOwnReader
 // pins collection_models.go's write-dispatch `.delete` arm DIRECTLY: a
-// delete miss on a record the walk cannot prove complete names its own
-// reason rather than claiming a definite miss.
+// delete miss on a record the walk cannot prove complete answers the
+// boolean GROUND {0, 1} — `delete` returns *true* or *false* on every
+// run (sec-map.prototype.delete), so the sort is determined even
+// though the incomplete record leaves WHICH boolean unpinned.
 //
 // The source-level pin reached comparison_decision.go's own
 // kernel-declined sentence instead, the same wrong-site-first failure
@@ -310,13 +315,13 @@ func TestCheckAssignability_CollectionModels_DeleteIncompleteMissNamesItsOwnRead
 	}
 	got := readCollectionMethods(site)
 	if got == nil {
-		t.Fatalf("readCollectionMethods(s.delete(\"k\")) = nil, want the incomplete-miss residue")
+		t.Fatalf("readCollectionMethods(s.delete(\"k\")) = nil, want the boolean ground")
 	}
-	if got.Kind != abstractdomain.KindUnknown {
-		t.Fatalf("readCollectionMethods(s.delete(\"k\")) = %+v, want KindUnknown", *got)
+	if got.Kind != abstractdomain.KindValues || got.KindTag != abstractdomain.PrimitiveBoolean {
+		t.Fatalf("readCollectionMethods(s.delete(\"k\")) = %+v, want the boolean ground {0, 1}", *got)
 	}
-	if !strings.Contains(got.ResidueReason, "deleted or set this exact key too") {
-		t.Errorf("ResidueReason = %q, want it to name the incomplete-record reason", got.ResidueReason)
+	if len(got.Values) != 2 || got.Values[0] != 0 || got.Values[1] != 1 {
+		t.Errorf("Values = %v, want {0, 1}", got.Values)
 	}
 }
 

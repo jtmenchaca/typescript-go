@@ -7,6 +7,8 @@
 package narrowing
 
 import (
+	"math"
+
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -18,6 +20,110 @@ import (
 // rebuilds the object around that key.
 func ApplyNarrowed(known abstractdomain.AbstractValue, n Narrowed) abstractdomain.AbstractValue {
 	return narrowAt(known, n.Path, n)
+}
+
+// ShiftedNarrowed moves a narrowing along the line by a constant: the
+// claim proved of a place becomes the claim of `place + shift`, which
+// is what a `const off = place - k` binding holds. Answers
+// (Narrowed{}, false) where the displacement cannot be stated exactly —
+// and then the caller states nothing, which is always sound.
+//
+// EXACTNESS is the whole gate. A window carried across a shift is only
+// the window it claims to be when each moved endpoint is the exact real
+// sum; where the double addition rounds, the moved endpoint names a
+// different number than the runtime subtraction produces, and a claim
+// built on it could exclude a value the run actually takes. So each
+// endpoint is moved and then CHECKED by moving it back: only a
+// round-trip that returns the original number is exact, and any endpoint
+// failing it refuses the whole narrowing rather than weakening one form.
+//
+// Only the ORDER forms and exact tuples move. `integer` is preserved
+// only for an integral shift (an integer plus an integer is an integer;
+// a fractional shift makes it false). Everything else — multiples,
+// sequence and pattern forms, shape and word claims — states nothing
+// under displacement here and refuses.
+func ShiftedNarrowed(n Narrowed, shift float64) (Narrowed, bool) {
+	if shift == 0 {
+		return n, true
+	}
+	if math.IsNaN(shift) || math.IsInf(shift, 0) {
+		return Narrowed{}, false
+	}
+	// only a pure SET claim displaces: definedness, truthiness, shapes,
+	// words and kinds all say nothing about a shifted number
+	if n.Definedness != "" || n.Truthiness != "" || n.ExcludesKind != "" ||
+		n.HasShape || n.HasWordSet || n.HasWordSetExcluded ||
+		n.HasExcludesBooleanWord || n.KeepAbsent || n.SequenceBrand || n.RefutedBrand != "" {
+		return Narrowed{}, false
+	}
+	if n.ExactSort != "" && n.ExactSort != abstractdomain.PrimitiveNumber {
+		return Narrowed{}, false
+	}
+	// moved is the exact displacement of x, or not-exact
+	moved := func(x float64) (float64, bool) {
+		if math.IsInf(x, 0) {
+			// an infinite endpoint states no bound at all; it is its own
+			// displacement and no rounding can happen to it
+			return x, true
+		}
+		y := x + shift
+		if math.IsNaN(y) || math.IsInf(y, 0) {
+			return 0, false
+		}
+		// the round trip: exact addition is invertible, a rounded one is not
+		if y-shift != x {
+			return 0, false
+		}
+		return y, true
+	}
+	out := n
+	out.Forms = nil
+	for _, form := range n.Forms {
+		switch form.Form {
+		case refinementsets.FormAtLeast, refinementsets.FormAbove,
+			refinementsets.FormAtMost, refinementsets.FormBelow:
+			a, ok := moved(form.A)
+			if !ok {
+				return Narrowed{}, false
+			}
+			shiftedForm := form
+			shiftedForm.A = a
+			out.Forms = append(out.Forms, shiftedForm)
+		case refinementsets.FormInteger:
+			// an integer displaced by an integer is an integer; by anything
+			// else the claim is simply false and cannot be carried
+			if shift != math.Trunc(shift) {
+				return Narrowed{}, false
+			}
+			out.Forms = append(out.Forms, form)
+		case refinementsets.FormOneOf:
+			words := make([]float64, 0, len(form.W))
+			for _, w := range form.W {
+				y, ok := moved(w)
+				if !ok {
+					return Narrowed{}, false
+				}
+				words = append(words, y)
+			}
+			shiftedForm := form
+			shiftedForm.W = words
+			out.Forms = append(out.Forms, shiftedForm)
+		default:
+			return Narrowed{}, false
+		}
+	}
+	if n.Exact != nil {
+		exact := make([]float64, 0, len(n.Exact))
+		for _, v := range n.Exact {
+			y, ok := moved(v)
+			if !ok {
+				return Narrowed{}, false
+			}
+			exact = append(exact, y)
+		}
+		out.Exact = exact
+	}
+	return out, true
 }
 
 // keepTruthy keeps only the truthy words of a finite list; NaN leaves
@@ -251,14 +357,50 @@ func meetShape(held, shape abstractdomain.AbstractValue) abstractdomain.Abstract
 		}
 		return shape
 	}
-	// an OPAQUE value already says everything this file determines, and
-	// a bare shape says less — the provenance stands, and reads through
-	// it stay determined
-	if present.Kind == abstractdomain.KindUnknown && present.Opaque {
-		return present
-	}
+	// an OPAQUE value carries no shape of its own — it is the "this file
+	// determines nothing sharper" placeholder, not a competing claim —
+	// so a type test's proof (a REAL runtime check the guard just ran)
+	// is strictly sharper than the placeholder and replaces it exactly
+	// as a bare unknown would. Discarding the shape here starved a
+	// `typeof x === "number"` guard on an opaque JSON.parse element read
+	// of its own proof: the guard is evidence the opaque marker never
+	// had, not a weaker guess a real external determination should
+	// out-rank.
 	if present.Kind == abstractdomain.KindUnknown {
 		return shape
+	}
+	// a POSSIBLY-NaN receiver met with a NUMBER-sorted shape: `typeof
+	// v === "number"` holding proves the run is NOT the NaN arm as
+	// surely as a comparison guard does (NaN answers "number" too —
+	// sec-typeof-operator — but the held wrapper's own NaN-or-Inner
+	// split is exactly what MeetKnown's KindPossiblyNaN arm already
+	// narrows on a real set), so the same meet applies here: the
+	// wrapper's inner claim meets the proved shape, dropping the NaN
+	// arm the shape itself does not carry (GroundOfTypeofWord's
+	// "number" answer IS admittedly PossiblyNaN, so this only fires
+	// for a non-number shape reaching a possibly-NaN receiver, or an
+	// inner claim MeetKnown can still sharpen). Falling through here
+	// left a `typeof` guard's own proof discarded in favor of an
+	// unposeable held wrapper — the same class of bug the OpDiv arm
+	// above was already fixed for.
+	if present.Kind == abstractdomain.KindPossiblyNaN {
+		// MeetKnown's own KindPossiblyNaN arm only fires when the OTHER
+		// side is a bare KindSet/KindValues — GroundOfTypeofWord's
+		// "number" answer is itself wrapped PossiblyNaN (typeof NaN is
+		// "number" too — sec-typeof-operator), so both sides arrive
+		// wrapped and MeetKnown's guard misses them, falling through to
+		// its unchanged bottom return. Unwrapping the proved shape here
+		// (when it is itself a NaN-admitting number ground) hands
+		// MeetKnown the bare set it already knows how to meet against a
+		// possibly-NaN receiver, and re-wraps the result the same way —
+		// the receiver's own NaN-or-not standing decides whether NaN
+		// survives, since the shape proves nothing about whether THIS
+		// particular NaN case is ruled out beyond what typeof already
+		// admits.
+		if shape.Kind == abstractdomain.KindPossiblyNaN && shape.Inner != nil {
+			return abstractdomain.PossiblyNaN(abstractdomain.MeetKnown(present, *shape.Inner))
+		}
+		return abstractdomain.MeetKnown(present, shape)
 	}
 	if present.Kind == abstractdomain.KindObject && shape.Kind == abstractdomain.KindObject && !present.Complete {
 		keys := append([]abstractdomain.ObjectKey{}, present.Keys...)
@@ -316,6 +458,166 @@ func excludeKind(known abstractdomain.AbstractValue, kind string) abstractdomain
 		return known
 	}
 	return abstractdomain.KindUnionOf(kept)
+}
+
+// keepSequenceArms is a held `Array.isArray(x)`: the value IS an Array
+// exotic object, so a kind union keeps only the arms that could be one
+// (Narrowed.SequenceBrand's own doc states which, and why a plain
+// string arm is among them). A value that is not a union at all passes
+// whole: the brand adds nothing to a single claim the walk already
+// holds, and refusing it here would discard a fact.
+//
+// Dropping every arm would leave nothing to answer with, which no
+// runtime value justifies — the union's own reading was then not one
+// this rule can classify, so the held value stands unchanged.
+func keepSequenceArms(known abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	if known.Kind == abstractdomain.KindPossiblyUndefined {
+		// isArray answers false for the absent value (step 1: not an
+		// Object), so holding proves presence — the wrapper comes off
+		// rather than being rebuilt around the narrowed inner
+		return keepSequenceArms(*known.Inner)
+	}
+	if known.Kind != abstractdomain.KindKindUnion {
+		return known
+	}
+	var kept []abstractdomain.AbstractValue
+	changed := false
+	for _, arm := range known.Arms {
+		if couldBeArray(arm) {
+			kept = append(kept, arm)
+		} else {
+			changed = true
+		}
+	}
+	if !changed || len(kept) == 0 {
+		return known
+	}
+	return abstractdomain.KindUnionOf(kept)
+}
+
+// dropRefutedBrandArms is a REFUTED `x instanceof C` for a
+// default-library C: the value's prototype chain does not carry
+// %C.prototype% (sec-instanceofoperator step 5 →
+// sec-ordinaryhasinstance's Repeat over [[GetPrototypeOf]], which
+// returns false exactly when the prototype never appears), so a kind
+// union drops the arms whose kind IS that brand and keeps every arm the
+// brand cannot decide.
+//
+// This is the symmetric half of keepSequenceArms, and it takes the same
+// two escapes: a value that is not a union passes whole (a refutation
+// removes no fact from a single claim the walk already holds), and a
+// reading that would drop EVERY arm leaves the value untouched — no
+// runtime value justifies an empty answer, so the union's reading was
+// then not one this rule can classify.
+//
+// Absence is deliberately NOT stripped here. `undefined instanceof Map`
+// answers false (sec-ordinaryhasinstance step 3: not an Object), so the
+// false arm ADMITS the absent value — the opposite of the held test,
+// where holding proves presence. A maybe-wrapped value keeps its
+// wrapper and its inner union is narrowed inside it.
+func dropRefutedBrandArms(known abstractdomain.AbstractValue, brand string) abstractdomain.AbstractValue {
+	if known.Kind == abstractdomain.KindPossiblyUndefined {
+		inner := dropRefutedBrandArms(*known.Inner, brand)
+		if abstractdomain.SameKnown(inner, *known.Inner) {
+			return known
+		}
+		return abstractdomain.PossiblyUndefined(inner, "", false, false)
+	}
+	if known.Kind != abstractdomain.KindKindUnion {
+		return known
+	}
+	var kept []abstractdomain.AbstractValue
+	changed := false
+	for _, arm := range known.Arms {
+		if wearsBrand(arm, brand) {
+			changed = true
+			continue
+		}
+		kept = append(kept, arm)
+	}
+	if !changed || len(kept) == 0 {
+		return known
+	}
+	return abstractdomain.KindUnionOf(kept)
+}
+
+// wearsBrand reports whether one union arm's kind IS the refuted
+// brand's — the only reading that lets the arm go. A Map-flavoured
+// collection is what `instanceof Map` decides; a Set-flavoured one is
+// what `instanceof Set` decides; the list kinds an Array value wears
+// answer `instanceof Array`; a date and a regex answer their own.
+// Every other arm — a set-shaped claim, a plain object, a scalar, an
+// unclassified reading — says nothing about its prototype chain here
+// and keeps its place, which is the answer that discards no runtime
+// value.
+func wearsBrand(arm abstractdomain.AbstractValue, brand string) bool {
+	switch brand {
+	case "Map":
+		return arm.Kind == abstractdomain.KindCollection && arm.CollectionFlavor == abstractdomain.FlavorMap
+	case "Set":
+		return arm.Kind == abstractdomain.KindCollection && arm.CollectionFlavor == abstractdomain.FlavorSet
+	case "Array":
+		// the graph kinds an Array value wears. A set-shaped SEQUENCE arm
+		// is NOT among them: strings and arrays share the tuple layer, so
+		// such an arm may be a string, which `instanceof Array` refutes
+		// nothing about — couldBeArray's own reading, read the other way.
+		return arm.Kind == abstractdomain.KindList || arm.Kind == abstractdomain.KindObjectStar ||
+			arm.Kind == abstractdomain.KindArrayHoles
+	case "Date":
+		return arm.Kind == abstractdomain.KindDate
+	case "RegExp":
+		return arm.Kind == abstractdomain.KindRegex
+	}
+	return false
+}
+
+// couldBeArray reports whether one union arm's claim admits an Array
+// exotic object. The graph kinds an array value wears say yes outright;
+// a set-shaped arm says yes exactly when its forms speak the SEQUENCE
+// layer, which strings and arrays share; every scalar-sorted arm says
+// no, since a scalar is not an Object (sec-isarray step 1). An arm the
+// reading cannot classify says yes — the answer that discards nothing.
+func couldBeArray(arm abstractdomain.AbstractValue) bool {
+	switch arm.Kind {
+	case abstractdomain.KindList, abstractdomain.KindObjectStar, abstractdomain.KindArrayHoles:
+		return true
+	case abstractdomain.KindValues:
+		return arm.KindTag == abstractdomain.PrimitiveArray || arm.KindTag == abstractdomain.PrimitiveString
+	case abstractdomain.KindSet:
+		if arm.SetKindTag != abstractdomain.SetKindTagNone {
+			return false
+		}
+		return abstractdomain.KindOfClaim(arm) != abstractdomain.ClaimSortNumber &&
+			abstractdomain.KindOfClaim(arm) != abstractdomain.ClaimSortBoolean
+	case abstractdomain.KindNaN, abstractdomain.KindBigints, abstractdomain.KindSymbol,
+		abstractdomain.KindUndef, abstractdomain.KindNull, abstractdomain.KindHostFunction,
+		abstractdomain.KindCollection, abstractdomain.KindPromise, abstractdomain.KindDate,
+		abstractdomain.KindRegex:
+		return false
+	case abstractdomain.KindObject:
+		// A keyed RECORD is never an array: the domain spells arrays as
+		// KindList/KindObjectStar/KindArrayHoles/KindValues(PrimitiveArray),
+		// and sec-isarray answers true only for an Array exotic object.
+		// Without this arm a JSON union's plain-object arm rode through
+		// `Array.isArray(x)`'s true side and the guarded return carried
+		// an object into an array-stated position.
+		return false
+	case abstractdomain.KindPossiblyNaN:
+		// a NUMBER arm beside its NaN possibility — the shape a plain
+		// `number` position wears (declared_value.go's IsNumberGround
+		// path wraps the ground set in PossiblyNaN). Both halves are
+		// numbers, and no number is an Object, so isArray answers false
+		// for the whole arm. Without this the wrapper fell to the
+		// default below and a declared `T[] | number` kept its number
+		// arm right through the guard, leaving the element read with an
+		// arm that states no position.
+		if arm.Inner == nil {
+			return true
+		}
+		return couldBeArray(*arm.Inner)
+	default:
+		return true
+	}
 }
 
 // unionOfWords is the union set spelling exactly these words.
@@ -539,6 +841,12 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 		}
 		if n.ExcludesKind != "" {
 			return excludeKind(known, n.ExcludesKind)
+		}
+		if n.SequenceBrand {
+			return keepSequenceArms(known)
+		}
+		if n.RefutedBrand != "" {
+			return dropRefutedBrandArms(known, n.RefutedBrand)
 		}
 		if n.HasShape {
 			return meetShape(known, n.Shape)
@@ -767,7 +1075,20 @@ func narrowAt(known abstractdomain.AbstractValue, path []string, n Narrowed) abs
 			}
 		}
 		if len(kept) > 0 && len(kept) != len(known.Arms) {
-			return narrowAt(abstractdomain.KindUnionOf(kept), path, n)
+			// the union's own Grade is the declaration-backed floor every
+			// arm was read at (entry_env.go's AtTrustLevel stamps the
+			// PARAMETER's outer value, never each arm) — carrying it onto
+			// the surviving arm here is what lets memberValueGraded's own
+			// receiver.Grade gate see it at the member read past this
+			// point. Dropping it here left a discriminant-narrowed arm's
+			// members indistinguishable from an unexamined AfterReaders
+			// seed (nan_wrapper.go's CheckPossiblyNaN ungraded skip), which
+			// silenced a real escape past the sink instead of reporting it.
+			survivor := abstractdomain.KindUnionOf(kept)
+			if known.Grade != "" {
+				survivor = abstractdomain.AtTrustLevel(survivor, known.Grade)
+			}
+			return narrowAt(survivor, path, n)
 		}
 		return known
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // NumberTestLeaf is numberTestLeaf in the TS source: `Number.isInteger(x)`
@@ -25,6 +26,7 @@ func NumberTestLeaf(c *checker.Checker, e *ast.Node, place dataflowfacts.Tracked
 			return Other
 		}
 		argument := call.Arguments.Nodes[0]
+		tracing.CountBy("host.typeAtLocation.direct", 1)
 		argumentType := c.GetTypeAtLocation(argument)
 		if (argumentType.Flags() & checker.TypeFlagsNumberLike) == 0 {
 			return Other

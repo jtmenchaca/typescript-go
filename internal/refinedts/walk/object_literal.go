@@ -15,6 +15,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -166,6 +167,7 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 			// below uses: a const literal never moves, so its keys
 			// are its keys
 			if spread.Kind == abstractdomain.KindUnknown && ast.IsIdentifier(sa.Expression) {
+				tracing.CountBy("host.symbolAtLocation", 1)
 				symbol := ctx.P.Checker.GetSymbolAtLocation(sa.Expression)
 				var declaration *ast.Node
 				if symbol != nil {
@@ -254,6 +256,7 @@ func EvaluateObjectLiteral(ctx *FlowContext, env Env, e *ast.Node) abstractdomai
 			// stored values
 			var source *ast.Node = sa.Expression
 			if ast.IsIdentifier(source) {
+				tracing.CountBy("host.symbolAtLocation", 1)
 				symbol := ctx.P.Checker.GetSymbolAtLocation(source)
 				var declaration *ast.Node
 				if symbol != nil {

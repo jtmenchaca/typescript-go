@@ -78,6 +78,7 @@ func CompileAnnotationFileFacts(
 				symbol := declaration.Symbol()
 				fromBinder := symbol != nil
 				if symbol == nil {
+					tracing.CountBy("host.symbolAtLocation", 1)
 					symbol = p.Checker.GetSymbolAtLocation(varDecl.Name())
 				}
 				if diagnose.EventOn("annotations.compile") {

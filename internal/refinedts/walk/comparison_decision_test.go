@@ -316,3 +316,52 @@ func TestCompareKnownUnboundedStringPairIsBoolGround(t *testing.T) {
 	guess := abstractdomain.KnownSet(refinementsets.Strings, nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)
 	wantBoolGround(t, CompareKnown(ctx, CompareEq, true, secret, guess), "secret === guess")
 }
+
+// TestA5_sink_dead_ANumericSetAgainstUndefinedIsDecided pins the
+// KindSet arm of the absent-side row (A5.sink.dead's own shape).
+//
+// sec-isstrictlyequal step 1: SameType(Undefined, Number) is false, so
+// === is false and !== true. A refined set is a set of NUMBERS or
+// STRINGS and carries no undefined and no null member at all — absence
+// rides the PossiblyUndefined WRAPPER, never the set inside it — so the
+// verdict is exact on every run, exactly as it is for a KindValues side.
+// Before this arm the row declined, and `y === undefined` on a plainly
+// numeric y decided nothing.
+func TestA5_sink_dead_ANumericSetAgainstUndefinedIsDecided(t *testing.T) {
+	ctx := &FlowContext{}
+	age := abstractdomain.KnownSet(
+		refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(0), refinementsets.AtMost(150)),
+		nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone,
+	)
+	wantFalse(t, CompareKnown(ctx, CompareEq, true, age, abstractdomain.Undef), "age === undefined")
+	wantTrue(t, CompareKnown(ctx, CompareNe, true, age, abstractdomain.Undef), "age !== undefined")
+	// the absent side on the LEFT reads the same way
+	wantFalse(t, CompareKnown(ctx, CompareEq, true, abstractdomain.Undef, age), "undefined === age")
+	// and null decides identically — SameType(Null, Number) is false too
+	wantFalse(t, CompareKnown(ctx, CompareEq, true, age, abstractdomain.Null), "age === null")
+}
+
+// TestA5_sink_dead_AStringSetAgainstUndefinedIsDecided is the string
+// twin of the row above — the same clause, the same reasoning, the
+// other sort a refined set can be grounded on.
+func TestA5_sink_dead_AStringSetAgainstUndefinedIsDecided(t *testing.T) {
+	ctx := &FlowContext{}
+	text := abstractdomain.KnownSet(refinementsets.Strings, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)
+	wantFalse(t, CompareKnown(ctx, CompareEq, true, text, abstractdomain.Undef), "text === undefined")
+	wantTrue(t, CompareKnown(ctx, CompareNe, true, text, abstractdomain.Undef), "text !== undefined")
+}
+
+// TestA5_sink_dead_AMaybeWrapperAgainstUndefinedStaysUndecided is the
+// GUARD on the arm above: the wrapper is the one value that genuinely
+// still admits absence, so it must fall through the exact-kind gate
+// undecided rather than being read through to the set inside it. A
+// wrapper deciding "not absent" here would be the unsound direction.
+func TestA5_sink_dead_AMaybeWrapperAgainstUndefinedStaysUndecided(t *testing.T) {
+	ctx := &FlowContext{}
+	age := abstractdomain.KnownSet(
+		refinementsets.MakeRefinedSet(refinementsets.Integer, refinementsets.AtLeast(0), refinementsets.AtMost(150)),
+		nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone,
+	)
+	maybe := abstractdomain.PossiblyUndefined(age, "", false, false)
+	wantUnknown(t, CompareKnown(ctx, CompareEq, true, maybe, abstractdomain.Undef), "maybe === undefined")
+}

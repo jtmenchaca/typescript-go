@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
@@ -53,6 +54,7 @@ func CalleeWords(callee *ast.Node) string {
 // determined more, and a walk that did not read it owes the
 // narrowing.
 func NarrowedSinceDeclaration(ctx *FlowContext, e *ast.Node) bool {
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(e)
 	if symbol == nil || symbol.ValueDeclaration == nil {
 		return false
@@ -65,7 +67,11 @@ func NarrowedSinceDeclaration(ctx *FlowContext, e *ast.Node) bool {
 	if occurrence == declared {
 		return false
 	}
-	return ctx.P.Checker.TypeToString(occurrence) != ctx.P.Checker.TypeToString(declared)
+	tracing.CountBy("host.typeToString", 1)
+	occurrenceStr := ctx.P.Checker.TypeToString(occurrence)
+	tracing.CountBy("host.typeToString", 1)
+	declaredStr := ctx.P.Checker.TypeToString(declared)
+	return occurrenceStr != declaredStr
 }
 
 // following is FOLLOWING in the TS source: module consts currently
@@ -100,11 +106,13 @@ var (
 // between calls, so only the opaque verdict (which nothing in the
 // file can improve) survives.
 func UntrackedIdentifier(ctx *FlowContext, e *ast.Node) abstractdomain.AbstractValue {
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(e)
 	if symbol == nil {
 		return silence.Residue()
 	}
 	if (symbol.Flags & ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		aliased := ctx.P.Checker.GetAliasedSymbol(symbol)
 		if aliased == nil {
 			return abstractdomain.Opaque // an alias into nothing — an unresolved module
@@ -178,6 +186,21 @@ func UntrackedIdentifier(ctx *FlowContext, e *ast.Node) abstractdomain.AbstractV
 				// existing decline sentence owns the wording.
 				if followed.Kind == abstractdomain.KindValues && followed.KindTag == abstractdomain.PrimitiveArray {
 					if !ConstArrayMutated(d, symbol.Name) {
+						return followed
+					}
+				} else if followed.Kind == abstractdomain.KindCollection {
+					// A BUILT Map or Set is the other mutable shape the
+					// alias-freedom argument does not cover on its own:
+					// `known.set(k, v)` changes the entries with no
+					// rebinding. It gets the array's own treatment —
+					// served when a file-level scan finds no mutation
+					// site for this name, and otherwise falling through
+					// to the last-reader path below, which names nothing
+					// itself. Only a COMPLETE record is served: an
+					// incomplete one already states that some entry may
+					// be unnamed, which is the very fact a follow across
+					// call boundaries cannot stand behind.
+					if followed.Complete && !ConstCollectionMutated(d, symbol.Name) {
 						return followed
 					}
 				} else {
@@ -453,11 +476,13 @@ func ExportedFunctionParameter(c *checker.Checker, declaration *ast.Node) bool {
 // computed expression) answers false — the function may live in this
 // very file.
 func BodilessCallee(ctx *FlowContext, callee *ast.Node) bool {
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(callee)
 	if symbol == nil {
 		return false
 	}
 	if (symbol.Flags & ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		aliased := ctx.P.Checker.GetAliasedSymbol(symbol)
 		if aliased == nil {
 			return true // an alias into nothing — an unresolved module
@@ -499,13 +524,17 @@ func BodilessCallee(ctx *FlowContext, callee *ast.Node) bool {
 // separates an unmodeled BUILT-IN (the checker's work) from a user's
 // ambient declaration (whose type is everything the file determines).
 func CalleeInDefaultLib(ctx *FlowContext, callee *ast.Node) bool {
-	return ctx.P.Checker.SymbolInDefaultLib(ctx.P.Checker.GetSymbolAtLocation(callee))
+	tracing.CountBy("host.symbolAtLocation", 1)
+	symbol := ctx.P.Checker.GetSymbolAtLocation(callee)
+	tracing.CountBy("host.symbolInDefaultLib", 1)
+	return ctx.P.Checker.SymbolInDefaultLib(symbol)
 }
 
 // CalleeInSurface is calleeInSurface in the TS source: whether the
 // callee is declared in the annotation surface — those calls are the
 // annotation reader's to answer, never this walk's.
 func CalleeInSurface(ctx *FlowContext, callee *ast.Node) bool {
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(callee)
 	if symbol == nil {
 		return false

@@ -172,3 +172,61 @@ func TestMeetHeldPlaceEntry_AnEmptyMeetFallsBackToTheReadersOwnAnswer(t *testing
 		t.Errorf("ReadPropertyAccess(xs.length) = %+v, want the receiver's own [0,3] window — the empty meet with Above(5) must fall back to it, not ride onward as a live-looking empty set", got.Set)
 	}
 }
+
+// TestMeetHeldPlaceEntry_AGatedAnswerSurvivesMeetingABareUnknownEntry pins
+// the A9.guard.member fix: `s.r` on the false arm of `!("r" in s)` — the
+// narrowing's absence proof for `s.r` lands as a bare, reason-less
+// place-value entry (object_key_access.go's own comment on this: a
+// negative `in` guard's proof does not turn into a set, so the dotted
+// entry is handed back unchanged). ReadObjectKeyAccess's union-receiver
+// arm answers its own ResidueOf-tagged unknown, naming why: "the
+// receiver's key set is not proven complete...". Before this fix,
+// abstractdomain.MeetKnown's own unknown/unknown case always answered
+// the SECOND argument (held, here the bare entry) with no regard for
+// which side actually named a gate, so the reader's sentence was
+// silently discarded and the position's decline fell back to the
+// generic "the walk holds nothing that pins this value" — a real
+// sentence lost for no reason, though the value stayed exactly as
+// undetermined either way.
+func TestMeetHeldPlaceEntry_AGatedAnswerSurvivesMeetingABareUnknownEntry(t *testing.T) {
+	gated := abstractdomain.AbstractValue{
+		Kind:          abstractdomain.KindUnknown,
+		ResidueReason: "the receiver's key set is not proven complete, so a name outside its known keys is neither proven present nor proven absent",
+	}
+	bareEntry := abstractdomain.Unknown
+
+	// the exact A9.guard.member shape: `s.r` on the false arm of
+	// `!("r" in s)` — the place-value memory holds a bare, reason-less
+	// unknown at "s.r" (the narrowing's own absence proof does not turn
+	// into a set), and the reader's answer (gated, above) is what
+	// meetHeldPlaceEntry must keep.
+	source := "function g(s: { kind: \"circle\"; r: number } | { kind: \"square\"; side: number }): void {\n" +
+		"  if (!(\"r\" in s)) {\n" +
+		"    s.r;\n" +
+		"  }\n" +
+		"}\n"
+	p := entryEnvTestProgram(t, source)
+	g := entryEnvFunctionNamed(t, p, "g")
+	accessNode := superArrayFirstNode(t, g.Body(), "the s.r read", func(node *ast.Node) bool {
+		if !ast.IsPropertyAccessExpression(node) {
+			return false
+		}
+		pa := node.AsPropertyAccessExpression()
+		return ast.IsIdentifier(pa.Expression) && pa.Expression.Text() == "s" && pa.Name().Text() == "r"
+	})
+	env := NewEnv()
+	env.Set("s.r", bareEntry)
+	ctx := &FlowContext{P: p}
+
+	got := meetHeldPlaceEntry(ctx, env, accessNode, &gated)
+	if got == nil {
+		t.Fatalf("meetHeldPlaceEntry = nil, want the gated unknown back")
+	}
+	if got.Kind != abstractdomain.KindUnknown {
+		t.Fatalf("meetHeldPlaceEntry.Kind = %v, want KindUnknown — this fix changes no determination", got.Kind)
+	}
+	if got.ResidueReason != gated.ResidueReason {
+		t.Errorf("meetHeldPlaceEntry.ResidueReason = %q, want the reader's own gate %q preserved over the bare place-value entry",
+			got.ResidueReason, gated.ResidueReason)
+	}
+}

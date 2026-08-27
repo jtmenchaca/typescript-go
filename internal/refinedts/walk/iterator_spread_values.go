@@ -31,6 +31,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // collectionSpreadItems is the item list iterating a BUILT collection
@@ -455,6 +456,31 @@ func readObjectGroupBy(site MethodCallSite) *abstractdomain.AbstractValue {
 		out := silence.Residue()
 		return &out
 	}
+	// THE ELEMENT SET WITHOUT THE ELEMENTS — the shape this model needs
+	// and the domain does not have. A source the walk holds as a
+	// REPETITION (an `Age[]` parameter, any sequence whose element set
+	// is stated but whose members were never watched) pins no key set:
+	// which groups exist depends on the callback's results over
+	// elements this walk never saw. But every element of every group is
+	// an element OF THE SOURCE — sec-groupby appends the very value it
+	// read from the iterable ("Append value to group.[[Elements]]"),
+	// and sec-object.groupby hands each group
+	// CreateArrayFromList(group.[[Elements]]), constructing, coercing
+	// and reordering nothing on the way. So the honest answer is an
+	// object whose EVERY key, present or not, holds a sequence over the
+	// source's own element set.
+	//
+	// THE NAMED GATE: KindObject states its keys one at a time (Keys,
+	// an ordered name/value slice) and has no per-object statement of
+	// what an UNNAMED key holds — the index-signature value slot the
+	// annotation layer reads for a declared `Record<K, V>`
+	// (element_access.go's IndexSignatureValueTypeAt) has no
+	// AbstractValue twin. Until KindObject carries one, this reader
+	// cannot state the group shape without naming keys it cannot know,
+	// so it declines rather than fabricate a key set. The cost is
+	// visible: a group's element then falls back to the host's own
+	// `number`, losing the refinement the source's element set already
+	// stated (A8.seed.library's groupByValueInside).
 	if !exact {
 		return decline()
 	}
@@ -547,6 +573,7 @@ func generatorFirstNextValue(ctx *FlowContext, call *ast.Node) (abstractdomain.A
 	}
 	var walkingKey *ast.Symbol
 	if name := declaration.Name(); name != nil {
+		tracing.CountBy("host.symbolAtLocation", 1)
 		walkingKey = ctx.P.Checker.GetSymbolAtLocation(name)
 	}
 	walking := ctx.Inlining

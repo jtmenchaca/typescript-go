@@ -23,10 +23,12 @@ package walk
 
 import (
 	"math"
+	"sort"
 	"sync"
 
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
@@ -36,7 +38,26 @@ import (
 // be the cross-sort reread (a "a" carried through `any` computing as
 // 97), so it degrades to unknown — the honest alert downstream, never
 // a number that the runtime's coercion contradicts.
+//
+// An absent operand (KindUndef/KindNull) IS numeric under ToNumber
+// (sec-tonumber steps 3-4: undefined pins exactly NaN, null pins
+// exactly +0) — reading it through unchanged left it a Kind neither
+// binaryImage's NaN check nor SetOfKnownForTransfer's KindValues/
+// KindSet/KindVariable arms recognize (IsNumericKind's own `Kind !=
+// KindValues` test passes it through as "numeric" without converting
+// it), so a cast-carried `undefined + 1` posed no question the
+// transfer could answer and landed undetermined instead of the
+// spec's pinned {NaN}. Converting here, before IsNumericKind's own
+// gate, makes both absent kinds read as the exact number ToNumber
+// specifies — the same exact-value shape every other pinned operand
+// already carries into binaryImage.
 func NumericOperand(k abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	if k.Kind == abstractdomain.KindUndef {
+		return abstractdomain.NaNValue
+	}
+	if k.Kind == abstractdomain.KindNull {
+		return abstractdomain.KnownValues([]float64{0}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	}
 	if abstractdomain.IsNumericKind(k) {
 		return k
 	}
@@ -236,6 +257,39 @@ func reachesEither(raw abstractdomain.AbstractValue, first, second float64) (boo
 // (the very float the runtime returns, the spec's NaN cells pinned);
 // certified endpoint bounds on ranges.
 func TransferBinary(op NumericOperator, rawA, rawB abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	// THE ARITHMETIC TRANSFER DISPATCH SEAM of the derivation trace: one
+	// span per operator image, naming the operator and what each operand
+	// held. The transfer is handed VALUES rather than a node, so the span
+	// inherits the range of the evaluateExpression span that called it —
+	// the sub-expression this transfer is the image of. Off is one atomic
+	// load inside Active().
+	if derivation.Active() {
+		return transferBinaryRecorded(op, rawA, rawB)
+	}
+	return transferBinaryOf(op, rawA, rawB)
+}
+
+// transferBinaryRecorded opens the transfer's span around
+// transferBinaryOf and states its answer or its decline.
+func transferBinaryRecorded(op NumericOperator, rawA, rawB abstractdomain.AbstractValue) abstractdomain.AbstractValue {
+	span := derivation.Begin("arithmeticTransfer", string(op), "")
+	image := transferBinaryOf(op, rawA, rawB)
+	if image.Kind == abstractdomain.KindUnknown {
+		gate := image.ResidueReason
+		if gate == "" {
+			gate = "the operator has no image for these operands"
+		}
+		span.Decline(gate, "", spellValue(rawA)+" "+string(op)+" "+spellValue(rawB))
+	} else {
+		span.Answer(spellValue(image))
+	}
+	span.End()
+	return image
+}
+
+// transferBinaryOf is TransferBinary's body once the derivation span is
+// handled.
+func transferBinaryOf(op NumericOperator, rawA, rawB abstractdomain.AbstractValue) abstractdomain.AbstractValue {
 	// NaN poisons every arithmetic operator (NaN-in, NaN-out), so a
 	// possibly-NaN operand makes a possibly-NaN result whose real
 	// half transfers as usual
@@ -311,17 +365,34 @@ func TransferBinary(op NumericOperator, rawA, rawB abstractdomain.AbstractValue)
 	// both operands HELD number-sorted knowledge the transfer could
 	// not tighten: the result is still a number or NaN — the sort's
 	// whole ground, held rather than dropped, so the position can say
-	// it states nothing beyond the type
+	// it states nothing beyond the type. Spelled as the explicit
+	// AtLeast(-Infinity) ray (never the bare zero-value RefinedSet{}) —
+	// a formless set fails OnOneTupleLayer downstream
+	// (nan_wrapper.go's checkPossiblyNaNSubset gate,
+	// refinement_forms.go's OnOneTupleLayer), so a checked position
+	// could never even POSE the subset question against it. Graded
+	// TrustSpec, not TrustProved, for the same reason the OpDiv arm
+	// above is: TrustProved collapses to an EMPTY Grade field
+	// (KnownSet's own TrustProved-means-unset rule), and an ungraded
+	// "adds nothing beyond the ground" wrapper is exactly the shape
+	// AfterReaders' own never-examined seed wears
+	// (silence/after_readers.go's typereading.NumberWithNaN)  — so
+	// nan_wrapper.go's CheckPossiblyNaN treats an ungraded wrapper as
+	// that seed and declines to 7002 rather than posing the subset
+	// question. A graded wrapper is unambiguously a DERIVED claim
+	// (this operator's own image), so it takes the subset path and
+	// can refute a sink too narrow for the whole ground.
 	if image.Kind == abstractdomain.KindUnknown {
 		held := func(k abstractdomain.AbstractValue) bool {
 			return (k.Kind == abstractdomain.KindSet && k.SetKindTag == abstractdomain.SetKindTagNone) ||
 				(k.Kind == abstractdomain.KindValues && k.KindTag == abstractdomain.PrimitiveNumber) ||
-				k.Kind == abstractdomain.KindNaN
+				k.Kind == abstractdomain.KindNaN ||
+				(k.Kind == abstractdomain.KindVariable && k.StarDepth == 0)
 		}
 		if held(rawA) && held(rawB) {
 			return abstractdomain.AtTrustLevel(
-				abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.RefinedSet{}, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone)),
-				abstractdomain.DerivedTrustLevel(abstractdomain.TrustProved, rawA, rawB),
+				abstractdomain.PossiblyNaN(abstractdomain.KnownSet(refinementsets.MakeRefinedSet(refinementsets.AtLeast(math.Inf(-1))), nil, abstractdomain.TrustSpec, abstractdomain.SetKindTagNone)),
+				abstractdomain.DerivedTrustLevel(abstractdomain.TrustSpec, rawA, rawB),
 			)
 		}
 	}
@@ -460,6 +531,23 @@ func binaryImage(op NumericOperator, rawA, rawB abstractdomain.AbstractValue) ab
 	if a.Kind == abstractdomain.KindNaN || b.Kind == abstractdomain.KindNaN {
 		return abstractdomain.AtTrustLevel(abstractdomain.NaNValue, grade)
 	}
+	// EXACT VALUES on both sides: the image is the UNION of the pairs'
+	// own images, and every pair is a singleton×singleton question the
+	// kernel already answers exactly on its verified rounder — the same
+	// question the conformance battery poses directly. So a scattered
+	// set (`{0, 1} * 200`), which the kernel's corner-reading transfer
+	// declines as ONE question, is asked one pair at a time and the
+	// answers union: exact `{0, 200}` out, every signed-zero and NaN
+	// cell spelled exactly as the kernel's own transfer spells it,
+	// because it IS the kernel's own transfer. A pair the kernel still
+	// declines drops the whole arm to the ordinary route below.
+	if a.Kind == abstractdomain.KindValues && a.KindTag == abstractdomain.PrimitiveNumber &&
+		b.Kind == abstractdomain.KindValues && b.KindTag == abstractdomain.PrimitiveNumber &&
+		len(a.Values) > 0 && len(b.Values) > 0 && (len(a.Values) > 1 || len(b.Values) > 1) {
+		if exact := pointwisePairImages(op, a, b, grade); exact != nil {
+			return *exact
+		}
+	}
 	kernel := currentTransferKernel()
 	if kernel == nil {
 		return silence.Residue()
@@ -475,6 +563,81 @@ func binaryImage(op NumericOperator, rawA, rawB abstractdomain.AbstractValue) ab
 		KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: opWire[op], A: A, B: B})),
 		grade,
 	)
+}
+
+// pointwisePairImages is the exact-values transfer: the union of the
+// kernel's own singleton×singleton images over every operand pair,
+// spelled exactly as the kernel spells them (signed zeros and NaN
+// cells included — no host arithmetic reimplements a cell). A NaN
+// image rides out as the possibly-NaN wrapper around the real
+// results; all-NaN answers the NaN value itself. Nil when the kernel
+// is absent or any pair's question comes back unreadable — the caller
+// then falls to the whole-set route, which answers or declines as it
+// always did.
+func pointwisePairImages(op NumericOperator, a, b abstractdomain.AbstractValue,
+	grade abstractdomain.TrustLevel) *abstractdomain.AbstractValue {
+	kernel := currentTransferKernel()
+	if kernel == nil {
+		return nil
+	}
+	values := make([]float64, 0, len(a.Values)*len(b.Values))
+	// keyed by bits, not value: -0 and 0 compare equal as floats, and
+	// the kernel's spelling distinguishes them
+	seen := map[uint64]struct{}{}
+	sawNaN := false
+	keep := func(z float64) {
+		if math.IsNaN(z) {
+			sawNaN = true
+			return
+		}
+		bits := math.Float64bits(z)
+		if _, held := seen[bits]; held {
+			return
+		}
+		seen[bits] = struct{}{}
+		values = append(values, z)
+	}
+	for _, x := range a.Values {
+		for _, y := range b.Values {
+			A, aOk := SetOfKnownForTransfer(abstractdomain.KnownValues([]float64{x}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved))
+			B, bOk := SetOfKnownForTransfer(abstractdomain.KnownValues([]float64{y}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved))
+			if !aOk || !bOk {
+				return nil
+			}
+			answer := OrUnknown(func() abstractdomain.AbstractValue {
+				return KnownOfAnswer(kernel.Transfer(kernelbridge.TransferQuestion{Op: opWire[op], A: A, B: B}))
+			})
+			switch answer.Kind {
+			case abstractdomain.KindNaN:
+				sawNaN = true
+			case abstractdomain.KindValues:
+				for _, z := range answer.Values {
+					keep(z)
+				}
+			case abstractdomain.KindPossiblyNaN:
+				sawNaN = true
+				if answer.Inner == nil || answer.Inner.Kind != abstractdomain.KindValues {
+					return nil
+				}
+				for _, z := range answer.Inner.Values {
+					keep(z)
+				}
+			default:
+				return nil
+			}
+		}
+	}
+	if len(values) == 0 {
+		out := abstractdomain.AtTrustLevel(abstractdomain.NaNValue, grade)
+		return &out
+	}
+	sort.Float64s(values)
+	exact := abstractdomain.KnownValues(values, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	if sawNaN {
+		exact = abstractdomain.PossiblyNaN(exact)
+	}
+	out := abstractdomain.AtTrustLevel(exact, grade)
+	return &out
 }
 
 // TransferNegate is transferNegate in the TS source.

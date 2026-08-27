@@ -20,6 +20,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
@@ -145,9 +146,34 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 			bare = *bare.Inner
 		}
 		if bare.Kind == abstractdomain.KindUnknown {
-			worn := AnnotationOfReturnType(ctx, e)
+			// A STANDING `m.has(k)` FOR THIS VERY KEY IS READ FIRST.
+			// Both readers below reach the same V, but they differ on the
+			// absence: AnnotationOfReturnType reads tsc's resolved
+			// signature, which spells `V | undefined` for every `.get`
+			// whatever the flow proved, and re-attaches that absence
+			// unconditionally. MapValueAnnotation is the reader that
+			// takes the guard into account — under a held `has(k)`,
+			// `get`'s miss branch never runs (sec-map.prototype.get and
+			// sec-map.prototype.has walk the same [[MapData]] with the
+			// same SameValue test), so V's stated set is the whole
+			// answer with nothing absent in it.
+			//
+			// Reading the resolved signature first therefore threw the
+			// guard's own fact away at every guarded read: the position
+			// came back maybe-absent, and `!` does not prove it away
+			// (cast_and_await.go keeps the wrapper through an assertion
+			// deliberately). So the guarded reading is asked first, and
+			// the resolved signature stays the fallback for every read
+			// with no guard standing behind it.
+			var worn *abstractdomain.AbstractValue
+			if KeyPresenceEstablishedFor(env, e) {
+				worn = MapValueAnnotation(ctx, e, true)
+			}
 			if worn == nil {
-				worn = MapValueAnnotation(ctx, e)
+				worn = AnnotationOfReturnType(ctx, e)
+			}
+			if worn == nil {
+				worn = MapValueAnnotation(ctx, e, false)
 			}
 			if worn != nil {
 				return *worn
@@ -260,6 +286,13 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 		for _, handed := range handedFunctions {
 			written := map[string]struct{}{}
 			AssignedNames(ctx.P.Checker, handed, written)
+			// THE LAST-TOUCH SITE SEAM: the handed function itself is what
+			// may write these names later, so it — not the outer call — is
+			// the mutating construct a last-touch leaf should name.
+			var closeSite func()
+			if derivation.Active() {
+				closeSite = derivation.TouchSite(derivation.Construct(handed), derivation.Range(handed))
+			}
 			for name := range written {
 				if _, ok := env.Get(name); ok {
 					HavocEnv(ctx.Aliases, env, name)
@@ -269,6 +302,9 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 				// place entries live under dotted keys) sweeps its entries
 				// — the handed function may run at any later time
 				ForgetPlaceEntriesEnv(env, name)
+			}
+			if closeSite != nil {
+				closeSite()
 			}
 		}
 	}
@@ -359,12 +395,23 @@ func EvaluateCallExpression(ctx *FlowContext, env Env, e *ast.Node) abstractdoma
 	// a body-less callee (an ambient declaration): reference
 	// arguments forget — the implementation is outside the checked
 	// world — and a stated result earns no knowledge
+	//
+	// THE LAST-TOUCH SITE SEAM: the whole call `e` is what may write
+	// through a handed reference here, exactly as the unmodeled-method
+	// route names its own call.
+	var closeArgSite func()
+	if derivation.Active() {
+		closeArgSite = derivation.TouchSite(derivation.Construct(e), derivation.Range(e))
+	}
 	for _, argument := range arguments {
 		if ast.IsIdentifier(argument) {
 			if _, ok := env.Get(argument.Text()); ok && dataflowfacts.ReferenceTyped(ctx.P.Checker, argument) {
 				HavocEnv(ctx.Aliases, env, argument.Text())
 			}
 		}
+	}
+	if closeArgSite != nil {
+		closeArgSite()
 	}
 	// …EXCEPT a generic whose result IS the variable: `identity<T>`
 	// or `first<T>(xs: T[]): T` links inputs to output by the type

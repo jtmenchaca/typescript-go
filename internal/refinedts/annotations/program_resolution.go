@@ -20,6 +20,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/nameresolution"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // symbolAt is symbolAt in the TS source (service/program_resolution.ts):
@@ -42,8 +43,10 @@ func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
 		}
 		return s
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := c.GetSymbolAtLocation(node)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		symbol = c.GetAliasedSymbol(symbol)
 	}
 	if diagnose.EventOn("annotations.symbolAt") {
@@ -57,5 +60,7 @@ func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
 // this identifier resolve to a declaration in a DEFAULT library file
 // (the global Number, Math, ...)? Symbols, never names.
 func resolvesToDefaultLib(c *checker.Checker, node *ast.Node) bool {
+	tracing.CountBy("host.symbolAtLocation", 1)
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	return c.SymbolInDefaultLib(c.GetSymbolAtLocation(node))
 }

@@ -29,6 +29,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/scanner"
 )
 
@@ -240,6 +241,7 @@ func PlaceKeyOf(c *checker.Checker, e *ast.Node) *PlaceKey {
 		if className == nil {
 			return nil
 		}
+		tracing.CountBy("host.symbolAtLocation", 1)
 		base := c.GetSymbolAtLocation(className)
 		if base == nil {
 			return nil
@@ -249,6 +251,7 @@ func PlaceKeyOf(c *checker.Checker, e *ast.Node) *PlaceKey {
 	if !ast.IsIdentifier(cursor) {
 		return nil
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	base := c.GetSymbolAtLocation(cursor)
 	if base == nil {
 		return nil
@@ -418,6 +421,27 @@ func IndexSegment(slot int) string {
 	return "[" + strconv.Itoa(slot) + "]"
 }
 
+// CallSegmentOf reads a path segment spelled as a no-argument CALL —
+// `getTime()` — and answers the method name it runs. Not-a-call for
+// every key and index segment: a key segment is a property name, and
+// no property name contains parentheses, so the two spellings can
+// never collide.
+func CallSegmentOf(segment string) (string, bool) {
+	if len(segment) < 3 || segment[len(segment)-2] != '(' || segment[len(segment)-1] != ')' {
+		return "", false
+	}
+	method := segment[:len(segment)-2]
+	if CallSegment(method) != segment {
+		return "", false
+	}
+	return method, true
+}
+
+// CallSegment spells a no-argument method call as a path segment.
+func CallSegment(method string) string {
+	return method + "()"
+}
+
 // sourceSpellingOf is a token's own text as the FILE spells it, from
 // the post-trivia token start to the node's end. `.Text()` is not
 // this: the scanner normalizes a numeric literal to its value text.
@@ -520,7 +544,72 @@ func TrackedPlaceOfWith(c *checker.Checker, e *ast.Node, isTracked func(name str
 			Path:    append(append([]string{}, inner.Path...), segment),
 		}
 	}
+	// a no-argument DATE READER on a place — `d.getTime()`,
+	// `d.getUTCFullYear()` — names a place of its own. Each of these
+	// methods is a pure function of the receiver's [[DateValue]] slot
+	// (sec-date.prototype.gettime step 3 returns that slot; every
+	// calendar getter reads it and nothing else), and [[DateValue]]
+	// moves only through a `setX` call. So two reads of the same
+	// spelling inside one scope answer the same number, which is
+	// exactly the premise a place carries: the guard's runtime
+	// comparison still binds the later read.
+	//
+	// The stability the place needs beyond that is the CALLERS' —
+	// every consumer already gates on FunctionWrites over the place's
+	// root, and a `setX` mutation travels through that root's own name.
+	if ast.IsCallExpression(e) {
+		call := e.AsCallExpression()
+		if call.Arguments != nil && len(call.Arguments.Nodes) > 0 {
+			return nil
+		}
+		if !ast.IsPropertyAccessExpression(call.Expression) {
+			return nil
+		}
+		propAccess := call.Expression.AsPropertyAccessExpression()
+		method := propAccess.Name().Text()
+		if !pureDateReaders[method] {
+			return nil
+		}
+		if c == nil {
+			return nil
+		}
+		tracing.CountBy("host.symbolAtLocation", 1)
+		tracing.CountBy("host.symbolInDefaultLib", 1)
+		if !c.SymbolInDefaultLib(c.GetSymbolAtLocation(propAccess.Name())) {
+			return nil
+		}
+		inner := TrackedPlaceOfWith(c, propAccess.Expression, isTracked)
+		if inner == nil {
+			return nil
+		}
+		return &TrackedPlace{
+			Binding: inner.Binding,
+			Path:    append(append([]string{}, inner.Path...), CallSegment(method)),
+		}
+	}
 	return nil
+}
+
+// pureDateReaders are the no-argument Date.prototype READERS: each
+// answers a function of the receiver's [[DateValue]] slot and the host
+// time zone, neither of which moves on its own. That is all a place
+// needs — two reads of the same spelling in one scope answer the same
+// number — so the LOCAL getters belong here beside the UTC ones, even
+// though LocalTime makes the local answer host-dependent: the checker
+// never needs to KNOW the zone, only that it is the same at both reads.
+//
+// Every `setX` mutator is absent, for the reason it must be: it moves
+// the slot. `getTimezoneOffset` is absent too — its own window is the
+// host-zone premise (date_models.go), and it is a reader this row
+// simply has no fixture asking to relate across a guard.
+var pureDateReaders = map[string]bool{
+	"getTime": true, "valueOf": true,
+	"getUTCFullYear": true, "getUTCMonth": true, "getUTCDate": true,
+	"getUTCDay": true, "getUTCHours": true, "getUTCMinutes": true,
+	"getUTCSeconds": true, "getUTCMilliseconds": true,
+	"getFullYear": true, "getMonth": true, "getDate": true,
+	"getDay": true, "getHours": true, "getMinutes": true,
+	"getSeconds": true, "getMilliseconds": true,
 }
 
 // elementSegmentOf spells the path segment an element-access argument

@@ -280,6 +280,97 @@ func TestF3_dead_DeadGuardFires(t *testing.T) {
 	}
 }
 
+// TestC1_escape_HoistedVarReadBeforeAssignmentStaysQuiet: the
+// C1.escape row's hoistedVarReadEarly shape — a nested function reads
+// a `var` before the ENCLOSING function's own assignment statement
+// for that var has run. `var hoisted` hoists its BINDING to function
+// entry but not its assignment, so `inner()` called at the read site
+// sees `hoisted` still undefined; `early === undefined` is therefore
+// true on every run, and the guard must never report the opposite
+// (analyze_function.go's HoistedVarNames seeding, walk/hoisted_var_names.go).
+// Confirmed against real node semantics before this fix: node prints
+// "early === undefined: TRUE" for the identical shape.
+func TestC1_escape_HoistedVarReadBeforeAssignmentStaysQuiet(t *testing.T) {
+	if !kernelbridge.KernelArtifactsPresent(kernelbridge.DylibPath) {
+		t.Skip("native kernel dylib not built")
+	}
+	source := "function hoistedVarReadEarly(): number {\n" +
+		"  function inner(): number | undefined {\n" +
+		"    return hoisted;\n" +
+		"  }\n" +
+		"  const early = inner();\n" +
+		"  var hoisted = 0;\n" +
+		"  if (early === undefined) {\n" +
+		"    return 0;\n" +
+		"  }\n" +
+		"  return 0;\n" +
+		"}\n" +
+		"void hoistedVarReadEarly;\n"
+	built, err := ProgramFromSource(source, testSurfaceDir)
+	if err != nil {
+		t.Fatalf("ProgramFromSource: %v", err)
+	}
+	defer built.Done()
+	result, err := CheckWithProgram(context.Background(), built.Program, "/main.ts", []string{SurfacePath})
+	if err != nil {
+		t.Fatalf("CheckWithProgram: %v", err)
+	}
+	for _, d := range result.Refinements {
+		if d.Code == 7001 && strings.Contains(d.MessageText, "provably false on every run") {
+			t.Fatalf("`early === undefined` is provably TRUE (early reads the var's pre-assignment undefined) — a provably-false claim here is backwards, got %+v", result.Refinements)
+		}
+	}
+}
+
+// TestA3_xfer_url_ParsedQueryComparedAgainstNullFires: the A3.xfer.url
+// row's claim — `new URL("https://x.example/?code=AB").searchParams
+// .get("code")` reads the exact word "AB" (url_models.go's
+// exactUrlObject/readExactSearchParamsGet, parsing a literal query
+// exactly), so `code === null` can never pass and its branch is dead.
+//
+// `URLSearchParams.get`'s declared signature is `string | null` — the
+// same shape Map.get's guard is exempted for
+// (absence_guard_is_declared.go's AbsenceGuardTheDeclarationDemands) —
+// but that exemption is for a host signature honest about EVERY call
+// site. Here the walk's OWN value for `code` already excludes null
+// outright (WalkKnowsTestedExpressionIsNeverAbsent reads the live
+// binding, not the declaration), so the guard must still fire: the
+// declared union is not wrong in general, but this call site's exact
+// parse refutes it, exactly the vacuous-guard defect the report exists
+// for.
+func TestA3_xfer_url_ParsedQueryComparedAgainstNullFires(t *testing.T) {
+	if !kernelbridge.KernelArtifactsPresent(kernelbridge.DylibPath) {
+		t.Skip("native kernel dylib not built")
+	}
+	source := "function parsedQueryParamInside(): string {\n" +
+		"  const url = new URL(\"https://x.example/?code=AB\");\n" +
+		"  const code = url.searchParams.get(\"code\");\n" +
+		"  if (code === null) {\n" +
+		"    return \"AA\";\n" +
+		"  }\n" +
+		"  return code;\n" +
+		"}\n" +
+		"void parsedQueryParamInside;\n"
+	built, err := ProgramFromSource(source, testSurfaceDir)
+	if err != nil {
+		t.Fatalf("ProgramFromSource: %v", err)
+	}
+	defer built.Done()
+	result, err := CheckWithProgram(context.Background(), built.Program, "/main.ts", []string{SurfacePath})
+	if err != nil {
+		t.Fatalf("CheckWithProgram: %v", err)
+	}
+	sawDeadGuard := false
+	for _, d := range result.Refinements {
+		if d.Code == 7001 && strings.Contains(d.MessageText, "provably false on every run") {
+			sawDeadGuard = true
+		}
+	}
+	if !sawDeadGuard {
+		t.Fatalf("expected a 7001 dead-guard fire on `code === null` (code is exactly \"AB\"), got %+v", result.Refinements)
+	}
+}
+
 // TestSurfacePathsOfDiscovery: discovery finds the virtual surface at
 // its exact FileName spelling. The entry must IMPORT the surface — a
 // file the program never reaches is not a program source file, and

@@ -8,6 +8,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // ambientConstructor is whether a constructor is a DEFAULT-LIBRARY
@@ -18,6 +19,8 @@ import (
 // runtime, and a class declared in this program has a body the walk
 // can read — neither earns the object claim here.
 func ambientConstructor(c *checker.Checker, callee *ast.Node) bool {
+	tracing.CountBy("host.symbolAtLocation", 1)
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	return c.SymbolEntirelyInDefaultLib(c.GetSymbolAtLocation(callee))
 }
 
@@ -43,7 +46,41 @@ func InstanceofLeaf(c *checker.Checker, e *ast.Node, isTracked func(name string)
 		Shape:    abstractdomain.KnownObject(nil, nil, false, abstractdomain.TrustSpec, false),
 		HasShape: true,
 	}
-	return BranchNarrowings{WhenTrue: []Narrowed{anObject}}, true
+	branches := BranchNarrowings{WhenTrue: []Narrowed{anObject}}
+	// the SYMMETRIC half: the test answering FALSE proves the
+	// constructor's prototype is nowhere on the value's prototype chain,
+	// so a kind union drops the arm that brand names. Only a constructor
+	// whose brand the domain spells as its own value kind can be
+	// refuted — the others answer nothing about the arms this walk
+	// holds, and their false arm states nothing rather than a claim the
+	// reading cannot carry.
+	if brand := refutableBrandOf(bin.Right); brand != "" {
+		branches.WhenFalse = []Narrowed{{
+			Binding:      tested.Binding,
+			Path:         append([]string{}, tested.Path...),
+			RefutedBrand: brand,
+		}}
+	}
+	return branches, true
+}
+
+// refutableBrandOf is the default-library constructor name whose kind
+// the abstract domain spells directly, or "" for every other
+// constructor. The caller has already established that the callee is
+// entirely default-library (ambientConstructor), which is what makes
+// step 3's %Symbol.hasInstance% lookup provably the inherited default
+// and the prototype-chain walk of sec-ordinaryhasinstance the whole
+// story; this narrows further to the five whose refutation the domain's
+// own kinds can act on.
+func refutableBrandOf(callee *ast.Node) string {
+	if !ast.IsIdentifier(callee) {
+		return ""
+	}
+	switch callee.Text() {
+	case "Map", "Set", "Array", "Date", "RegExp":
+		return callee.Text()
+	}
+	return ""
 }
 
 // InstanceofReason is instanceofReason in the TS source: decline

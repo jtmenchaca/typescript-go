@@ -145,6 +145,31 @@ func readSequenceCopyMethods(site MethodCallSite, argKnowns []abstractdomain.Abs
 		out := silence.Residue()
 		return &out
 	}
+	// `.at(i)` on a receiver the walk holds only as an ELEMENT claim —
+	// a repetition-shaped set (`number[]` seeded from its type), an
+	// object-star, a list. sec-array.prototype.at returns undefined
+	// when the absolute index falls outside [0, length) and otherwise
+	// `Get(obj, ToString(k))`, which for such a receiver is exactly the
+	// element it states at every position. So the read is the element
+	// beside absence, whatever the index is — no in-bounds proof is
+	// needed to answer it, because the out-of-range branch is the
+	// absence the wrapper already carries.
+	//
+	// Placed after the exact-tuple arm above, which pins the exact
+	// element when the receiver's own values are known.
+	if method == "at" && len(argKnowns) == 1 && !receiverStringy {
+		element := ElementOf(receiver)
+		if element.Kind != abstractdomain.KindUnknown {
+			// sec-array.prototype.at step 4 returns exactly *undefined*
+			// out of range — never null, so the wrapper's absent side is
+			// UndefOnly, and it is POSITIVELY derived from that step
+			// rather than standing in for an unread index.
+			out := abstractdomain.PossiblyAbsent(
+				element, abstractdomain.AbsentFlavorUndefOnly, abstractdomain.TrustSpec, true, true,
+			)
+			return &out
+		}
+	}
 	if method == "slice" || method == "toSorted" || method == "toReversed" {
 		// a string slice is unit-indexed and can split a surrogate pair,
 		// leaving the model's sets — sound only astral-free

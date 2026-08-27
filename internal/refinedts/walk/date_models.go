@@ -47,14 +47,20 @@ var isoDateShape = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.
 // the text (the TS runtime's Date.parse is more permissive in corners
 // this shape gate does not reach; those inputs read as NaN here, the
 // same terminal ofMillis(NaN) -> nil the TS source's own callers see).
+//
+// Only the forms whose time value is FIXED are read. sec-date.parse:
+// "When the UTC offset representation is absent, date-only forms are
+// interpreted as a UTC time and date-time forms are interpreted as a
+// local time." A date-time form with no offset therefore names a
+// different instant on every host zone, so no layout here reads one —
+// it falls through to (0, false) and the caller leaves it unread,
+// exactly as annotations/chain_root_constructor.go's parseSpecDate
+// already does. Date-only forms stay: the spec pins those to UTC.
 func jsDateParse(text string) (float64, bool) {
 	layouts := []string{
 		"2006-01-02T15:04:05.000Z07:00",
 		"2006-01-02T15:04:05Z07:00",
 		"2006-01-02T15:04Z07:00",
-		"2006-01-02T15:04:05.000",
-		"2006-01-02T15:04:05",
-		"2006-01-02T15:04",
 		"2006-01-02",
 	}
 	for _, layout := range layouts {
@@ -183,6 +189,15 @@ type dateGetterWindow struct {
 // msFromTime 0–999 (sec-msfromtime). The year window comes from the
 // time-value range ±8.64e15 (sec-time-values-and-time-range): years
 // -271821 through 275760. Local and UTC variants share each window.
+//
+// getTimezoneOffset is the one row whose bound is NOT read from a
+// clause: sec-date.prototype.gettimezoneoffset returns
+// (tv - LocalTime(tv)) / msPerMinute and states no range, so the
+// ±840-minute window (±14 hours, the widest zone offset any host
+// names) is the HOST-ZONE PREMISE this checker takes, not spec text.
+// It is a LOCAL-family getter — LocalTime reads the host zone, which
+// the checker never computes — so it answers the window on every
+// receiver, exact millis included.
 var dateGetterWindows = map[string]dateGetterWindow{
 	"getMonth": {0, 11}, "getUTCMonth": {0, 11},
 	"getDate": {1, 31}, "getUTCDate": {1, 31},
@@ -192,6 +207,7 @@ var dateGetterWindows = map[string]dateGetterWindow{
 	"getSeconds": {0, 59}, "getUTCSeconds": {0, 59},
 	"getMilliseconds": {0, 999}, "getUTCMilliseconds": {0, 999},
 	"getFullYear": {-271821, 275760}, "getUTCFullYear": {-271821, 275760},
+	"getTimezoneOffset": {-840, 840},
 }
 
 // readDateParse is Date.parse(string) (date.5): sec-date.parse's own
@@ -299,7 +315,27 @@ func dateGetterOf(t time.Time, method string) (float64, bool) {
 // reads: getTime/valueOf/toISOString and the calendar getters on a
 // built date, and the spec windows on an unknown receiver whose
 // static type is Date.
+//
+// Whatever the reader below answers, a guard that already tested THIS
+// SPELLING meets it: `if (d.getTime() < K)` records its narrowing under
+// the place `d.getTime()` (access_paths.go's call segment), and every
+// later read of the same spelling in the same flow is the same number,
+// so the two claims describe one value and meet. Without this the guard
+// narrowed a place nothing ever read back, and each occurrence of the
+// call answered the bare spec window again.
 func readDateMethods(site MethodCallSite) *abstractdomain.AbstractValue {
+	answer := readDateMethodsBare(site)
+	if answer == nil {
+		// this reader DECLINED — it recognized no Date read here, so the
+		// next recognizer in the chain gets its turn. A held entry alone
+		// never turns a decline into an answer: the entry says what a
+		// guard proved about the spelling, not that this reader read it.
+		return nil
+	}
+	return meetHeldPlaceEntry(site.Ctx, site.Env, site.E, answer)
+}
+
+func readDateMethodsBare(site MethodCallSite) *abstractdomain.AbstractValue {
 	ctx, env, e, receiverExpression, receiver, method := site.Ctx, site.Env, site.E, site.ReceiverExpression, site.Receiver, site.Method
 	collectionReceiver := receiver
 	if site.HasTrackedName {

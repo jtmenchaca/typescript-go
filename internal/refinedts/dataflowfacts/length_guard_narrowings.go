@@ -85,7 +85,21 @@ func LengthGuardNarrowings(
 		if side == nil || math.IsNaN(k) {
 			return
 		}
-		heldValue, ok := held(side.Binding)
+		// A CONJUNCTION states several bounds about the SAME length:
+		// `xs.length >= 2 && xs.length <= 4` is one window [2, 4], not
+		// two independent claims. Each leaf reaches guardRow separately,
+		// so a leaf must tighten what the previous leaf already proved
+		// about this binding — reading `held` every time would compute
+		// the ceiling row off the UN-narrowed value (floor 0), and the
+		// consumer, which applies the rows in order, would let that row
+		// overwrite the floor the min leaf had just raised. The band then
+		// read as [0, 4] and an `xs[0]` under it was no longer under the
+		// floor. Rows already emitted for this binding are the running
+		// state; `held` seeds only the first.
+		heldValue, ok := latestRowFor(rows, side.Binding)
+		if !ok {
+			heldValue, ok = held(side.Binding)
+		}
 		if !ok || heldValue.Kind != abstractdomain.KindSet {
 			return
 		}
@@ -138,6 +152,15 @@ func LengthGuardNarrowings(
 		// wider window proved present, the narrower one still counts.
 		if heldValue.SeqDenseKnown && heldValue.SeqDense {
 			tightenedKnown = abstractdomain.KnownSetDense(tightenedKnown)
+		}
+		// one row per binding, carrying every leaf tightened so far — the
+		// consumer applies rows in order, so a replaced row would
+		// otherwise be re-applied and undo this one
+		for i := range rows {
+			if rows[i].Binding == side.Binding {
+				rows[i].Known = tightenedKnown
+				return
+			}
 		}
 		rows = append(rows, LengthGuardNarrowing{
 			Binding: side.Binding,
@@ -249,6 +272,20 @@ func LengthGuardNarrowings(
 		readLeaf(leaf.Test, leaf.Negated)
 	}
 	return rows
+}
+
+// latestRowFor is the running tightened knowledge for a binding within
+// one LengthGuardNarrowings call: the row an earlier conjunctive leaf
+// already emitted, so the next leaf tightens THAT rather than
+// restarting from the entry value. ok=false before any leaf has spoken
+// for the binding.
+func latestRowFor(rows []LengthGuardNarrowing, binding string) (abstractdomain.AbstractValue, bool) {
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].Binding == binding {
+			return rows[i].Known, true
+		}
+	}
+	return abstractdomain.AbstractValue{}, false
 }
 
 // isFiniteNumber mirrors Number.isFinite.

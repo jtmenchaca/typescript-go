@@ -304,6 +304,7 @@ func ClassMethodWalkCall(
 	if calleeName == nil || !ast.IsIdentifier(calleeName) {
 		return abstractdomain.AbstractValue{}, false
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(calleeName)
 	if symbol == nil {
 		return abstractdomain.AbstractValue{}, false
@@ -426,6 +427,7 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 	if tracing.Recording(tracing.GrainStep) {
 		tracing.Count("inline."+calleeName.Text(), 0)
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(calleeName)
 	if symbol == nil {
 		return silence.Residue()
@@ -654,6 +656,14 @@ func InlineContractBody(ctx *FlowContext, env Env, call *ast.Node, contract *Fun
 		}
 		return true
 	})
+	// the inlined body's own `var`s hoist to ITS entry the same way a
+	// directly-walked function's do (analyze_function.go) — seeded
+	// before parameters bind, so a same-named parameter overwrites the
+	// seed and a read reaching an unassigned var answers absent rather
+	// than falling through to the declaration's inferred type
+	for name := range HoistedVarNames(body) {
+		callEnv.Set(name, abstractdomain.Undef)
+	}
 	callableParams := map[string]Callback{}
 	for i, parameter := range contract.Declaration.Parameters() {
 		name := parameter.AsParameterDeclaration().Name()

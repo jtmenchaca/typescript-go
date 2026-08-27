@@ -8,6 +8,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // instantiatedReferenceMembersOf resolves a type reference that CARRIES
@@ -73,6 +74,7 @@ func instantiatedReferenceMembersOf(ctx *FlowContext, holder string, typeNode *a
 		return nil, false
 	}
 	c := ctx.P.Checker
+	tracing.CountBy("host.typeFromTypeNode", 1)
 	t := c.GetTypeFromTypeNode(typeNode)
 	if t == nil || (t.Flags()&checker.TypeFlagsObject) == 0 {
 		return nil, false
@@ -80,9 +82,11 @@ func instantiatedReferenceMembersOf(ctx *FlowContext, holder string, typeNode *a
 	if symbol := t.Symbol(); symbol != nil && (symbol.Flags&ast.SymbolFlagsClass) != 0 {
 		return nil, false
 	}
+	tracing.CountBy("host.isArrayLikeType", 1)
 	if c.IsArrayLikeType(t) {
 		return nil, false
 	}
+	tracing.CountBy("host.propertiesOfType", 1)
 	properties := c.GetPropertiesOfType(t)
 	if len(properties) == 0 {
 		return nil, false
@@ -115,6 +119,7 @@ func instantiatedReferenceMembersOf(ctx *FlowContext, holder string, typeNode *a
 			site = typeNode
 		}
 		mayBeAbsent := (property.Flags & ast.SymbolFlagsOptional) != 0
+		tracing.CountBy("host.typeOfSymbolAtLocation", 1)
 		sort, tag := instantiatedMemberSort(c.GetTypeOfSymbolAtLocation(property, site), mayBeAbsent)
 		out = append(out, recordParamMember{
 			Key:         property.Name,

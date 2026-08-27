@@ -17,6 +17,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 var dependsWords = map[string]string{
@@ -462,6 +463,7 @@ func dependentParamPlace(ctx *FlowContext, fn *ast.Node, param string) *dataflow
 		if name == nil || !ast.IsIdentifier(name) || name.Text() != path[0] {
 			continue
 		}
+		tracing.CountBy("host.symbolAtLocation", 1)
 		symbol := ctx.P.Checker.GetSymbolAtLocation(name)
 		if symbol == nil {
 			return nil

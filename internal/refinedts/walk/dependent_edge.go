@@ -132,7 +132,25 @@ func JudgeDependentRelation(
 	if CheckDependentEdge(ctx, value, sibling, relation, node, what) {
 		return
 	}
-	ctx.Report(assignability.At(node, 7002, assignability.AlertText))
+	// THE DECLINE HELPER, adopted at this fallback — neither an exact
+	// sibling nor a windowed edge settled the dependent relation
+	// value REL sibling (no sibling knowledge, no window, or an edge
+	// the kernel could not answer), so the position stays
+	// undetermined. Without this call the outer checkAssignability
+	// root span (object_assignability.go's per-key dependent-bounds
+	// loop calls this with the whole object literal as node) stays
+	// answered with the declared target's spelling: nothing here
+	// ever declines it, so the trace and the printed sentence drift
+	// apart.
+	messageText := assignability.AlertText
+	if projected := DeclineSentence(
+		"the dependent bound '"+symbol+" "+relation.Param+"' could not be proved against "+relation.Param+"'s window",
+		node,
+		spellUnknownHeld(value),
+	); projected != "" {
+		messageText = projected
+	}
+	ctx.Report(assignability.At(node, 7002, messageText))
 }
 
 // CheckDependentEdge is checkDependentEdge in the TS source: the

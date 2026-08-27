@@ -101,6 +101,57 @@ type Narrowed struct {
 	// field.
 	WordSetExcluded    [][]float64
 	HasWordSetExcluded bool
+
+	// SequenceBrand: a held `Array.isArray(x)` proves x IS an Array
+	// exotic object (sec-array.isarray answers true for exactly those),
+	// so a kind union keeps only the arms an Array could be and drops
+	// the rest. It is a POSITIVE brand claim, unlike ExcludesKind's
+	// refuted test, and it is deliberately separate from the typeof
+	// channel: typeof an Array answers "object", the same word every
+	// other graph value answers, so a typeof narrowing cannot express
+	// what isArray proves.
+	//
+	// What survives is stated by what the tuple layer can and cannot
+	// tell apart. A set-shaped arm whose forms speak SEQUENCE (a
+	// repetition, a concatenation, a word) is kept: strings and arrays
+	// share that layer, so such an arm may be the Array — and a plain
+	// string arm is kept for the same reason, since nothing in the
+	// claim distinguishes it. The graph kinds an array value wears —
+	// KindList, KindObjectStar, KindArrayHoles, and the flat
+	// PrimitiveArray tuple — are kept outright. Every SCALAR arm
+	// (number, boolean, bigint, symbol) goes: none of those is an
+	// Object at all, so isArray answers false for them
+	// (sec-array.isarray step 1's IsArray on a non-Object).
+	//
+	// An arm the reading cannot classify keeps its place — the answer
+	// that discards no runtime value.
+	SequenceBrand bool
+
+	// RefutedBrand: the default-library constructor a REFUTED
+	// `instanceof` rules out — the symmetric half of the true arm's
+	// Shape row. `x instanceof Map` answering FALSE proves the Map
+	// prototype is nowhere on x's prototype chain
+	// (sec-instanceofoperator step 5 hands a default-library
+	// constructor to OrdinaryHasInstance, and sec-ordinaryhasinstance's
+	// Repeat walks [[GetPrototypeOf]] until null, returning false only
+	// when %Map.prototype% never appeared), so a kind union drops every
+	// arm whose kind IS that brand's.
+	//
+	// Only a DEFAULT-LIBRARY constructor is ever written here — the same
+	// gate the true arm keeps (ambientConstructor's own doc): a
+	// third-party class may install %Symbol.hasInstance% and answer
+	// anything at all, in which case step 3 returns before
+	// OrdinaryHasInstance ever runs and the prototype-chain reading says
+	// nothing. The brands the refutation can decide are the ones whose
+	// value kind the domain spells: "Map", "Set", "Array", "Date",
+	// "RegExp".
+	//
+	// A brand the refutation CANNOT decide about an arm leaves that arm
+	// standing — a Map exotic object and a plain object are distinct
+	// kinds here, but a set-shaped or unclassified arm says nothing
+	// about its prototype chain, so it keeps its place. "" means no
+	// refuted brand rides this narrowing.
+	RefutedBrand string // "" | "Map" | "Set" | "Array" | "Date" | "RegExp"
 }
 
 // BranchNarrowings is BranchNarrowings in the TS source.

@@ -175,6 +175,8 @@ func jsonStringifyOf(known abstractdomain.AbstractValue, noteGrade func(grade ab
 		return "", false
 	case abstractdomain.KindUndef:
 		return "", false // the marker conflates undefined (omitted) with null ("null") — not one exact text
+	case abstractdomain.KindNull:
+		return "null", true // sec-serializejsonproperty step 2: Type(null) is Object, and Quote/serialization writes the literal "null"
 	case abstractdomain.KindNaN:
 		return "null", true // sec-json.stringify: NaN and ±Infinity serialize as "null"
 	case abstractdomain.KindObject:
@@ -190,14 +192,19 @@ func jsonStringifyOf(known abstractdomain.AbstractValue, noteGrade func(grade ab
 			if symbolSlotKey(key.Name) {
 				continue
 			}
+			// undefined VALUES are OMITTED from an object's serialization
+			// (sec-serializejsonproperty step 8), not written as "null".
+			// This test comes BEFORE the recursive serialize: KindUndef's
+			// own arm answers ("", false) — it declines to name ONE exact
+			// text for a value that could serialize as either nothing or
+			// "null" depending on position — so recursing first threw the
+			// whole object away instead of dropping the one key.
+			if key.Value.Kind == abstractdomain.KindUndef {
+				continue
+			}
 			value, ok := jsonStringifyOf(key.Value, noteGrade)
 			if !ok {
 				return "", false
-			}
-			// undefined VALUES are OMITTED from an object's serialization
-			// (sec-serializejsonproperty step 8), not written as "null"
-			if key.Value.Kind == abstractdomain.KindUndef {
-				continue
 			}
 			if wroteAny {
 				b.WriteByte(',')
@@ -234,10 +241,25 @@ func jsonStringifyOf(known abstractdomain.AbstractValue, noteGrade func(grade ab
 		}
 		b.WriteByte(']')
 		return b.String(), true
+	case abstractdomain.KindCollection:
+		// a Map or Set serializes as exactly "{}", whatever it holds. Its
+		// entries live in [[MapData]]/[[SetData]], never as own
+		// properties, so SerializeJSONObject's key list —
+		// EnumerableOwnProperties(value, ~key~), sec-serializejsonobject
+		// step 8 — is empty, and step 12 writes "{}" for an empty
+		// partial. SerializeJSONProperty routes it there: a collection is
+		// an Object, not callable and not an Array, carries no
+		// [[NumberData]]/[[StringData]]/[[BooleanData]]/[[BigIntData]]
+		// slot, and neither Map.prototype nor Set.prototype declares
+		// toJSON (sec-serializejsonproperty steps 2 and 20). The
+		// COMPLETENESS of the record does not enter: an entry is not an
+		// own property either way, so an incomplete collection writes the
+		// same exact text a complete one does.
+		return "{}", true
 	default:
 		// set, variable, possiblyUndefined, possiblyNaN, kindUnion,
-		// objectStar, collection, promise, date, symbol, hostFunction,
-		// bigints, regex, unknown: none of them pin one exact value. The
+		// objectStar, promise, date, symbol, hostFunction, bigints,
+		// regex, unknown: none of them pin one exact value. The
 		// object-star in particular states no LENGTH, so there is not
 		// even a position count to write brackets around.
 		return "", false

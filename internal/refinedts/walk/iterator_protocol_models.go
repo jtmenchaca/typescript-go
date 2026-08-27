@@ -28,6 +28,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -67,6 +68,7 @@ func builtinIteratorElementOf(ctx *FlowContext, receiver *ast.Node) (*checker.Ty
 	if symbol == nil || !builtinIteratorClassNamed(symbol.Name) {
 		return nil, false
 	}
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	if !ctx.P.Checker.SymbolInDefaultLib(symbol) {
 		return nil, false
 	}
@@ -76,6 +78,7 @@ func builtinIteratorElementOf(ctx *FlowContext, receiver *ast.Node) (*checker.Ty
 	if (t.ObjectFlags() & checker.ObjectFlagsReference) == 0 {
 		return nil, false
 	}
+	tracing.CountBy("host.typeArguments", 1)
 	arguments := ctx.P.Checker.GetTypeArguments(t)
 	if len(arguments) == 0 {
 		return nil, false

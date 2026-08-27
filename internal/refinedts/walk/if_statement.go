@@ -93,8 +93,14 @@ func AnalyzeIfStatement(
 	// `isFunction(key)` on a for-in string key). Not under an assumed
 	// correlation gate, where a condition folds false by assumption in
 	// one of two walked passes rather than on every run.
+	// Nor on an ABSENCE test the tested name's own declaration demands:
+	// `value === undefined` on a name the host types `V | undefined`
+	// (Map.get's signature) is the only spelling that compiles, and the
+	// walk folding it false rests on knowledge past the declaration —
+	// the same reason CallSiteSeeded stays quiet just above.
 	if computedKnown && !computedValue && PerformsTest(ifStmt.Expression) &&
-		len(ctx.GateAssumptions) == 0 && !ctx.CallSiteSeeded {
+		len(ctx.GateAssumptions) == 0 && !ctx.CallSiteSeeded &&
+		!AbsenceGuardTheDeclarationDemands(ctx, env, ifStmt.Expression) {
 		ctx.Report(assignability.At(ifStmt.Expression, 7001, deadGuardText))
 	}
 	elseScope := ifStmt.ElseStatement

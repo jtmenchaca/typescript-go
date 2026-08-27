@@ -31,6 +31,15 @@ func EvaluateNewExpression(ctx *FlowContext, env Env, e *ast.Node) *abstractdoma
 	if typedArray := ReadTypedArrayConstruction(ctx, env, e); typedArray != nil {
 		return typedArray
 	}
+	// what `new ArrayBuffer(n)` and `new DataView(buffer)` BUILD — the
+	// zero-filled byte tuple, and the view over the whole of one
+	// (data_view_models.go)
+	if buffer := ReadArrayBufferConstruction(ctx, env, e); buffer != nil {
+		return buffer
+	}
+	if view := ReadDataViewConstruction(ctx, env, e); view != nil {
+		return view
+	}
 	if collection := ReadCollectionConstruction(ctx, env, e); collection != nil {
 		return collection
 	}

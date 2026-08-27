@@ -7,6 +7,42 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
 
+// TestTypeofNumberOnAnUnreadableOperandGroundsToThePoseableNumberSet
+// pins A7.seed.library.ts's own defect: `typeof first === "number"`
+// on an element read the walk could not resolve (JSON.parse's element
+// join over a kind union, unionElementOf's own decline) left `first`
+// held as an UNSPELLABLE PossiblyNaN(Unknown) wrapper — the ordinary
+// per-branch read that could not name a set — and meetShape fell
+// through every branch for a KindPossiblyNaN receiver, discarding the
+// typeof guard's own proved shape and handing the true arm back the
+// same unspellable wrapper it started with. The guard's answer must be
+// a POSEABLE possibly-NaN number ground (GroundOfTypeofWord("number")'s
+// own answer) so a checked position downstream can pose the subset
+// question and refute a window too narrow for it — never a formless
+// wrapper that starves the subset ask entirely.
+func TestTypeofNumberOnAnUnreadableOperandGroundsToThePoseableNumberSet(t *testing.T) {
+	unreadable := abstractdomain.PossiblyNaN(abstractdomain.Unknown)
+	shape, ok := GroundOfTypeofWord("number")
+	if !ok {
+		t.Fatalf("GroundOfTypeofWord(\"number\") declined its own word")
+	}
+	narrowed := ApplyNarrowed(unreadable, Narrowed{
+		Binding:  "first",
+		Shape:    shape,
+		HasShape: true,
+	})
+	if narrowed.Kind != abstractdomain.KindPossiblyNaN || narrowed.Inner == nil {
+		t.Fatalf("meetShape(possiblyNaN(unknown), numberGround) = %+v, want a possibly-NaN wrapper around the poseable number set", narrowed)
+	}
+	inner := *narrowed.Inner
+	if inner.Kind != abstractdomain.KindSet {
+		t.Fatalf("the possibly-NaN wrapper's inner claim = %+v, want a poseable KindSet — a formless or unknown inner starves the downstream subset ask exactly as the pre-fix defect did", inner)
+	}
+	if len(inner.Set.Forms) == 0 {
+		t.Fatalf("the number ground's set carries no forms — OnOneTupleLayer declines a formless RefinedSet, so no sink can even pose the subset question")
+	}
+}
+
 // TestARemovedClosedEndpointBumpsAnIntegerBound ports apply_narrowing.test.ts's
 // "a removed closed endpoint bumps an integer bound".
 func TestARemovedClosedEndpointBumpsAnIntegerBound(t *testing.T) {

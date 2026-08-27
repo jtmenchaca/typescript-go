@@ -11,6 +11,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // StringTestLeaf is stringTestLeaf in the TS source: a string-membership
@@ -34,6 +35,7 @@ func StringTestLeaf(c *checker.Checker, e *ast.Node, place dataflowfacts.Tracked
 		if tested == nil || !dataflowfacts.SameTrackedPlace(*tested, place) {
 			return false
 		}
+		tracing.CountBy("host.typeAtLocation.direct", 1)
 		t := c.GetTypeAtLocation(expr)
 		return (t.Flags() & checker.TypeFlagsStringLike) != 0
 	}
@@ -116,6 +118,7 @@ func IndexOfComparisonLeaf(
 	if tested == nil || !dataflowfacts.SameTrackedPlace(*tested, place) {
 		return kernelbridge.NarrowTree{}, false
 	}
+	tracing.CountBy("host.typeAtLocation.direct", 1)
 	if (c.GetTypeAtLocation(accessExpr.Expression).Flags() & checker.TypeFlagsStringLike) == 0 {
 		return kernelbridge.NarrowTree{}, false
 	}

@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // nativeAddonLoaderModules names the two established native-loader
@@ -85,6 +86,7 @@ func nativeModuleImportName(ctx *FlowContext, callee *ast.Node) (string, bool) {
 	if !ast.IsIdentifier(root) {
 		return "", false
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(root)
 	if symbol == nil || (symbol.Flags&ast.SymbolFlagsAlias) == 0 {
 		return "", false

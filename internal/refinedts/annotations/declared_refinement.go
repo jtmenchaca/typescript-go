@@ -117,6 +117,31 @@ type ObjectAnnotation struct {
 	// rides the statement: the parse checks MORE than the keys say,
 	// so an otherwise-proved position stays undetermined, honestly.
 	Unread bool
+	// WholeKeySet is true when Keys is EVERY key a value carrying this
+	// statement has — not merely every key the statement names.
+	//
+	// The two differ. `Keys` is what the compiler read; a value's own
+	// key set is what the runtime produced. They coincide only when
+	// the statement's producer is one that strips: zod's default
+	// `z.object()` builds its output as a fresh `{}` and writes only
+	// the shape's own keys into it (vendored core/schemas.ts:1955-1974
+	// — `payload.value = {}`, the loop over `value.keys`, and the
+	// no-catchall return before handleCatchall runs), and the installed
+	// surface states the same default as `$strip`, whose `out` is `{}`
+	// with no index signature (v4/core/schemas.d.cts:604).
+	//
+	// It is FALSE by default, and every route that loses a key must
+	// leave it false: a key the compiler dropped rather than compiled
+	// (CompileObject's library-adapter continue), and a statement read
+	// from a TYPE annotation, where extra properties are assignable and
+	// the runtime value may carry keys no reader ever saw.
+	//
+	// The reason this is a separate bit rather than "Keys is
+	// authoritative": the key list is used for what each NAMED key
+	// states, which is sound whether or not other keys exist. Only a
+	// COUNT of the keys — Object.keys(x).length — needs the stronger
+	// fact, and that is the one this bit licenses.
+	WholeKeySet bool
 }
 
 type ObjectRegistry = map[*ast.Symbol]*ObjectAnnotation
@@ -130,6 +155,7 @@ const (
 	DeclaredObjectArray       DeclaredRefinementKind = "objectArray"
 	DeclaredVariable          DeclaredRefinementKind = "variable"
 	DeclaredPossiblyUndefined DeclaredRefinementKind = "possiblyUndefined"
+	DeclaredTuple             DeclaredRefinementKind = "tuple"
 )
 
 // DeclaredRefinement is what a signature position states: a refined
@@ -200,6 +226,26 @@ type DeclaredRefinement struct {
 
 	// possiblyUndefined — the inner statement, or the absent value.
 	Inner *DeclaredRefinement
+
+	// tuple — one statement PER SLOT, at exactly this length. A tuple
+	// type node (`[Age, Wide]`, `[number, number, number]`) states two
+	// facts an array's star cannot: the length is exactly len(Slots),
+	// and slot i's own set may differ from slot j's. The star form
+	// throws both away — `[Age, Wide]` starred is the union's
+	// repetition at any length — so the tuple carries its slots
+	// instead.
+	//
+	// The mirror of the py adapter's `declared.positions`. Only the
+	// ALL-REQUIRED form ever fills this: an optional (`T?`), rest
+	// (`...T[]`), or named slot costs the exact position-to-length
+	// pairing the reading depends on, and such a tuple states nothing
+	// here rather than a length it does not have — the same gate
+	// typereading/type_node.go's own tuple arm keeps.
+	//
+	// A slot compiles exactly as an array ELEMENT does, through the
+	// same annotationOfType road, so a refined alias in a slot resolves
+	// to its set the way it resolves anywhere else.
+	Slots []*DeclaredRefinement
 }
 
 // AnnotationOfTypeResult is what reading a type node returns: a

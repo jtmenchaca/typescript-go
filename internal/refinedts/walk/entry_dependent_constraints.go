@@ -25,6 +25,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // EntryDependentConstraints is the rows a DEPENDENT signature vouches
@@ -43,6 +44,7 @@ func EntryDependentConstraints(
 		if !ast.IsIdentifier(pd.Name()) {
 			continue
 		}
+		tracing.CountBy("host.symbolAtLocation", 1)
 		symbol := c.GetSymbolAtLocation(pd.Name())
 		if symbol == nil {
 			continue

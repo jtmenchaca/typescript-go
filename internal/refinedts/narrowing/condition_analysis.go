@@ -29,6 +29,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
@@ -64,6 +65,36 @@ func Peeled(condition *ast.Node) *ast.Node {
 
 // Narrowings is narrowings in the TS source.
 func Narrowings(
+	c *checker.Checker,
+	condition *ast.Node,
+	isTracked func(name string) bool,
+	sideBounds SideBounds,
+	readElsewhere GuardReadElsewhere,
+) BranchNarrowings {
+	// THE NARROWING DISPATCH SEAM of the derivation trace: one span per
+	// guard read, carrying the CONDITION's own spelling and range. What
+	// the guard proved is the answer; a guard that proved nothing about
+	// any tracked place declines, and the gate names that. Off is one
+	// atomic load inside Active().
+	if derivation.Active() {
+		span := derivation.BeginNode("narrowings", condition)
+		defer func() {
+			span.End()
+		}()
+		branch := narrowingsRecorded(c, condition, isTracked, sideBounds, readElsewhere)
+		if len(branch.WhenTrue) == 0 && len(branch.WhenFalse) == 0 {
+			span.Decline("the guard proves no set for any tracked place", derivation.Range(condition), "no narrowing")
+		} else {
+			span.Answer(spellNarrowings(branch))
+		}
+		return branch
+	}
+	return narrowingsRecorded(c, condition, isTracked, sideBounds, readElsewhere)
+}
+
+// narrowingsRecorded is Narrowings' body once the derivation span is
+// handled — the existing timing-span path, unchanged.
+func narrowingsRecorded(
 	c *checker.Checker,
 	condition *ast.Node,
 	isTracked func(name string) bool,

@@ -16,6 +16,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // PinnedFunctionOf is pinnedFunctionOf in the TS source: resolve a
@@ -38,10 +39,12 @@ func PinnedFunctionOf(c *checker.Checker, e *ast.Node) *ast.Node {
 	if !ast.IsIdentifier(cursor) {
 		return nil
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := c.GetSymbolAtLocation(cursor)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
 		// an imported function reads the same — the alias followed to
 		// its declaration
+		tracing.CountBy("host.aliasedSymbol", 1)
 		aliased := func() (result *ast.Symbol) {
 			defer func() {
 				if recover() != nil {
@@ -217,6 +220,7 @@ func capturesUnthreadedState(c *checker.Checker, fn *ast.Node, factory *ast.Node
 			if ast.IsBindingElement(parent) && parent.AsBindingElement().PropertyName == node {
 				return false
 			}
+			tracing.CountBy("host.symbolAtLocation", 1)
 			symbol := c.GetSymbolAtLocation(node)
 			if symbol == nil {
 				return false

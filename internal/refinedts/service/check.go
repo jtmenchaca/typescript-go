@@ -283,6 +283,11 @@ func CheckFiles(entryPaths []string, surfacePath string) map[string]CheckResult 
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				// the derivation trace's Recorder belongs to the RUN, not to
+				// one goroutine: each worker adopts it so the spans it opens
+				// land in the same trace. A no-op with no -explain, where
+				// ExplainRecorder is nil.
+				defer ExplainRecorder.Adopt()()
 				for {
 					i := int(nextRow.Add(1)) - 1
 					if i >= len(rows) {

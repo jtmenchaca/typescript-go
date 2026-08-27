@@ -25,6 +25,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 /* ── the stable symbol slot ──────────────────────────────────────── */
@@ -67,10 +68,16 @@ func symbolKeyConstructionOf(c *checker.Checker, e *ast.Node) (symbolKeyConstruc
 	}
 	if ast.IsPropertyAccessExpression(call.Expression) {
 		access := call.Expression.AsPropertyAccessExpression()
-		if access.QuestionDotToken != nil ||
+		cheapConditionsFail := access.QuestionDotToken != nil ||
 			!ast.IsIdentifier(access.Expression) || access.Expression.Text() != "Symbol" ||
-			!ast.IsIdentifier(access.Name()) || access.Name().Text() != "for" ||
-			!c.SymbolInDefaultLib(c.GetSymbolAtLocation(access.Expression)) {
+			!ast.IsIdentifier(access.Name()) || access.Name().Text() != "for"
+		resolvesDefaultLib := false
+		if !cheapConditionsFail {
+			tracing.CountBy("host.symbolAtLocation", 1)
+			tracing.CountBy("host.symbolInDefaultLib", 1)
+			resolvesDefaultLib = c.SymbolInDefaultLib(c.GetSymbolAtLocation(access.Expression))
+		}
+		if cheapConditionsFail || !resolvesDefaultLib {
 			return symbolKeyConstruction{}, false
 		}
 		out := symbolKeyConstruction{Registry: true}
@@ -81,8 +88,13 @@ func symbolKeyConstructionOf(c *checker.Checker, e *ast.Node) (symbolKeyConstruc
 		}
 		return out, true
 	}
-	if ast.IsIdentifier(call.Expression) && call.Expression.Text() == "Symbol" &&
-		c.SymbolInDefaultLib(c.GetSymbolAtLocation(call.Expression)) {
+	resolvesDefaultLib := false
+	if ast.IsIdentifier(call.Expression) && call.Expression.Text() == "Symbol" {
+		tracing.CountBy("host.symbolAtLocation", 1)
+		tracing.CountBy("host.symbolInDefaultLib", 1)
+		resolvesDefaultLib = c.SymbolInDefaultLib(c.GetSymbolAtLocation(call.Expression))
+	}
+	if resolvesDefaultLib {
 		return symbolKeyConstruction{}, true
 	}
 	return symbolKeyConstruction{}, false

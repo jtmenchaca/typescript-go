@@ -155,6 +155,25 @@ func CheckKindUnion(
 		if known.ResidueReason != "" {
 			messageText = known.ResidueReason
 		}
+		// THE DECLINE HELPER, adopted here as everywhere else the judge's
+		// undetermined verdict prints — this is a second, independent
+		// report the union dispatch raises AFTER the arm-by-arm probe
+		// above already closed (it ran under `probe`, which never touched
+		// the derivation trace). Without this call the outer
+		// checkAssignability root span — opened once in CheckAssignability
+		// and still open around this whole dispatch — stays answered with
+		// the declared target's spelling, because nothing ever declines
+		// it: the projected sentence and the trace drift apart, exactly
+		// the one-carrier rule this helper exists to prevent.
+		gate := "an arm of the union could not be proved against the stated type"
+		if known.ResidueReason != "" {
+			gate = known.ResidueReason
+		} else if len(captured) > 0 && captured[0].MessageText != "" && captured[0].MessageText != assignability.AlertText {
+			gate = captured[0].MessageText
+		}
+		if projected := DeclineSentence(gate, node, spellUnknownHeld(known)); projected != "" {
+			messageText = projected
+		}
 		base := assignability.At(node, 7002, messageText)
 		if hasFix {
 			base.Fix = &assignability.RefinementFix{Title: fix.Title, NewText: fix.NewText, InsertAt: fix.InsertAt}

@@ -127,7 +127,9 @@ func CompileObject(p *program.CheckerProgram, expr *ast.Node, registry Annotatio
 				}
 			}
 		}
-		return compiledObject{Object: &ObjectAnnotation{Keys: keys, Unread: base.Object.Unread}}
+		// `.refine` adds a predicate over the same keys — it neither
+		// admits nor drops one, so the base's whole-key-set fact rides
+		return compiledObject{Object: &ObjectAnnotation{Keys: keys, Unread: base.Object.Unread, WholeKeySet: base.Object.WholeKeySet}}
 	}
 	if ast.IsCallExpression(expr) && ast.IsPropertyAccessExpression(expr.AsCallExpression().Expression) {
 		access := expr.AsCallExpression().Expression.AsPropertyAccessExpression()
@@ -162,7 +164,10 @@ func CompileObject(p *program.CheckerProgram, expr *ast.Node, registry Annotatio
 					}
 					kept = append(kept, *held)
 				}
-				return compiledObject{Object: &ObjectAnnotation{Keys: SanitizeDepends(kept), Unread: base.Unread}}
+				// `.pick` keeps exactly the masked keys, and the parse of
+				// the picked schema strips to those — so the result's key
+				// list is its whole key set whenever the base's was
+				return compiledObject{Object: &ObjectAnnotation{Keys: SanitizeDepends(kept), Unread: base.Unread, WholeKeySet: base.WholeKeySet}}
 			}
 			var incoming []ObjectKeySpec
 			for _, property := range argument.AsObjectLiteralExpression().Properties.Nodes {
@@ -198,7 +203,10 @@ func CompileObject(p *program.CheckerProgram, expr *ast.Node, registry Annotatio
 				}
 			}
 			keys = append(keys, incoming...)
-			return compiledObject{Object: &ObjectAnnotation{Keys: keys, Unread: base.Unread}}
+			// every incoming key either compiled or returned Unsupported
+			// above — this arm drops none — so the merged list is the
+			// whole key set exactly when the base's list was
+			return compiledObject{Object: &ObjectAnnotation{Keys: keys, Unread: base.Unread, WholeKeySet: base.WholeKeySet}}
 		}
 	}
 	if !rootsInObject(p, expr) || !ast.IsCallExpression(expr) {
@@ -209,6 +217,12 @@ func CompileObject(p *program.CheckerProgram, expr *ast.Node, registry Annotatio
 		return compiledObject{Unsupported: "z.object takes a literal {key: schema} record"}
 	}
 	var keys []ObjectKeySpec
+	// a key the compiler DROPS below (the library-adapter continue)
+	// leaves the key list short of the schema's own shape, so the
+	// whole-key-set fact is off for this statement — the count of the
+	// keys would be a count of what was read, not of what the parse
+	// produces
+	droppedAKey := false
 	for _, property := range args[0].AsObjectLiteralExpression().Properties.Nodes {
 		if !ast.IsPropertyAssignment(property) {
 			return compiledObject{Unsupported: "z.object keys are plain `name: schema` assignments"}
@@ -232,6 +246,7 @@ func CompileObject(p *program.CheckerProgram, expr *ast.Node, registry Annotatio
 			// still alerts loudly -- an authoring error there should
 			// not vanish.
 			if rootsInLibraryAdapter(p, assignment.Initializer) {
+				droppedAKey = true
 				continue
 			}
 			return compiledObject{Unsupported: unsup.Unsupported}
@@ -241,5 +256,14 @@ func CompileObject(p *program.CheckerProgram, expr *ast.Node, registry Annotatio
 			At: assignment.Initializer, Value: compiled.value,
 		})
 	}
-	return compiledObject{Object: &ObjectAnnotation{Keys: keys}}
+	// The two roots that reach this arm both leave the parsed value
+	// carrying exactly the shape's own keys. `z.object` STRIPS: its
+	// parse builds a fresh object and writes only the shape's keys
+	// into it (WholeKeySet's own doc cites the two readings).
+	// `z.strictObject` THROWS on an extra key, so a value that parsed
+	// carries no key outside the shape either. rootsInObject admits
+	// only those two — `z.looseObject`, and any `.catchall` /
+	// `.passthrough` chain, never compile to an object annotation at
+	// all, so no key-admitting statement reaches here.
+	return compiledObject{Object: &ObjectAnnotation{Keys: keys, WholeKeySet: !droppedAKey}}
 }

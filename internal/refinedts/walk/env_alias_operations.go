@@ -17,6 +17,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -26,6 +27,19 @@ func HavocEnv(aliases *dataflowfacts.AliasClasses, env Env, name string) {
 	for member := range aliases.ClassOf(name) {
 		if _, ok := env.Get(member); ok {
 			env.Set(member, silence.Residue())
+			// THE LAST-TOUCH LEDGER SEAM (DERIVATION-TRACE.md, last-touch).
+			// Every alias member this havoc residues is recorded as
+			// havocked, keyed by ITS OWN name — a read that later stops at
+			// this member's bare name can then say why: not "the walk holds
+			// nothing that pins this value" alone, but which mutation moved
+			// it. Recorded per member, not once for `name`, because a read
+			// of a DIFFERENT alias in the same class is what asks the
+			// question this ledger answers. Reads whatever construct/range
+			// the caller named through derivation.TouchSite; a caller that
+			// named none leaves the touch with empty construct/range.
+			if derivation.Active() {
+				derivation.RecordTouchFromSite(member, derivation.TouchHavocked)
+			}
 		}
 		ForgetPlaceEntriesEnv(env, member)
 	}
@@ -50,6 +64,14 @@ func ForgetPlaceEntriesEnv(env Env, root string) {
 	for _, key := range doomed {
 		env.Delete(key)
 	}
+	// THE LAST-TOUCH LEDGER SEAM. Recorded ONCE for the root, not once
+	// per dotted entry dropped — the root name is the place a bare-name
+	// read would stop at; the dotted entries are place-value memory, not
+	// bindings a plain identifier construct ever spells. Reads whatever
+	// site the caller named through derivation.TouchSite.
+	if derivation.Active() && root != "" {
+		derivation.RecordTouchFromSite(root, derivation.TouchForgotten)
+	}
 }
 
 // UpdateTrackedEnv is dataflowfacts.UpdateTracked over an Env: replace
@@ -69,6 +91,14 @@ func UpdateTrackedEnv(
 ) {
 	aliases.Invalidate(name)
 	ForgetPlaceEntriesEnv(env, name)
+	// THE LAST-TOUCH LEDGER SEAM. This write is a WRITTEN touch on
+	// `name`, overriding the "forgotten" ForgetPlaceEntriesEnv just
+	// recorded for the same place — the place-entry sweep is a step of
+	// this write, not itself the last thing that moved `name`. Reads
+	// whatever site the caller named through derivation.TouchSite.
+	if derivation.Active() {
+		derivation.RecordTouchFromSite(name, derivation.TouchWritten)
+	}
 	held, ok := env.Get(name)
 	if !ok {
 		held = silence.Residue()

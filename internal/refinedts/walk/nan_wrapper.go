@@ -121,7 +121,23 @@ func CheckPossiblyNaN(
 		}
 	}
 	fix, hasFix := GuardFix(node, target)
-	base := assignability.At(node, 7002, assignability.AlertText)
+	// THE DECLINE HELPER, adopted at this fallback alert — the possibly-
+	// NaN wrapper's own value could not be turned into a decidable
+	// subset question (no one-tuple-layer inner set, or an ungraded seed
+	// wrapper the subset check would misreport), so the position stays
+	// undetermined. Without this call the outer checkAssignability root
+	// span stays answered with the declared target's spelling: nothing
+	// here ever declined it, so the trace and the printed sentence
+	// drift apart.
+	messageText := assignability.AlertText
+	if projected := DeclineSentence(
+		"the value may be NaN and its real half could not be turned into a decidable subset question",
+		node,
+		spellUnknownHeld(known),
+	); projected != "" {
+		messageText = projected
+	}
+	base := assignability.At(node, 7002, messageText)
 	if hasFix {
 		base.Fix = &assignability.RefinementFix{Title: fix.Title, NewText: fix.NewText, InsertAt: fix.InsertAt}
 	}

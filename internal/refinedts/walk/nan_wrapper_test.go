@@ -17,6 +17,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 )
@@ -85,6 +86,54 @@ func TestCheckPossiblyNaN_SortGroundRealHalfDeclinesInsteadOfRefuting(t *testing
 	}
 	if reported[0].Code != 7002 {
 		t.Errorf("Code = %d, want 7002 (undetermined) — the un-narrowed sort ground carries no more information than KindUnknown, so it must decline the same way, not refute at %+v", reported[0].Code, reported[0])
+	}
+}
+
+// TestCheckPossiblyNaN_SortGroundFallthroughOpensADeclinedRootSpan pins
+// the trace-coverage fix: the same sort-ground fallthrough as
+// TestCheckPossiblyNaN_SortGroundRealHalfDeclinesInsteadOfRefuting
+// above, but driven through CheckAssignability (never CheckPossiblyNaN
+// directly) so the outer checkAssignability root span opens exactly as
+// it does in the real walk. Before the fix, CheckPossiblyNaN's 7002
+// fallthrough reported straight through ctx.Report with no call to the
+// Decline helper, so the root span opened by CheckAssignability
+// (check_assignability.go's root.Answer(spellDeclared(&target)), set
+// unconditionally when the span opens) never got flipped: a position
+// that reported RTS7002 traced as [answered] with no gate, the exact
+// shape packages/tests/e2e/state/C5.guard/C5.guard.ts:14 and its six
+// siblings hit. The fix threads the fallthrough through
+// DeclineSentence, so the root span now closes Declined with a
+// non-empty gate.
+func TestCheckPossiblyNaN_SortGroundFallthroughOpensADeclinedRootSpan(t *testing.T) {
+	node := nanWrapperTestNode(t)
+	recorder, closer := derivation.BeginRecording("ts", derivation.PositionOf(node), 0)
+	defer closer()
+
+	var reported []assignability.RefinementDiagnostic
+	ctx := &FlowContext{Report: func(d assignability.RefinementDiagnostic) { reported = append(reported, d) }}
+
+	known := abstractdomain.PossiblyNaN(
+		abstractdomain.KnownSet(refinementsets.Numbers, nil, abstractdomain.TrustProved, abstractdomain.SetKindTagNone),
+	)
+	CheckAssignability(ctx, known, ageTarget(), node, "an initialized value", nil)
+
+	if len(reported) != 1 || reported[0].Code != 7002 {
+		t.Fatalf("reported = %+v, want exactly one 7002", reported)
+	}
+
+	traces := recorder.Traces()
+	if len(traces) != 1 {
+		t.Fatalf("recorder.Traces() = %d traces, want exactly 1: %+v", len(traces), traces)
+	}
+	root := traces[0].Root
+	if root.Status != derivation.Declined {
+		t.Fatalf("root.Status = %q, want %q — a reported RTS7002 must never leave the root span answered", root.Status, derivation.Declined)
+	}
+	if root.Attributes[derivation.AttrGate] == "" {
+		t.Errorf("root.Attributes[refinery.gate] is empty — a declined span must name the premise that failed")
+	}
+	if _, stillAnswered := root.Attributes[derivation.AttrAnswer]; stillAnswered {
+		t.Errorf("root.Attributes[refinery.answer] = %q, want it cleared once the span declines", root.Attributes[derivation.AttrAnswer])
 	}
 }
 

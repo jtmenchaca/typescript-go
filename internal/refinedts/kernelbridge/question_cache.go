@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
@@ -410,8 +411,43 @@ func ClearQuestionCache() {
 // concurrent goroutines asking different questions still run their
 // kernel calls in parallel — only the shared cache bookkeeping
 // serializes.
-func AskCached(key string, compute func() (string, error)) (string, error) {
+func AskCached(key string, compute func() (string, error)) (answered string, failed error) {
 	loadQuestionStore()
+	// THE ONE KERNEL-ASK CHOKEPOINT for the derivation trace
+	// (DERIVATION-TRACE.md, "The attribute vocabulary"): every kernel
+	// question is a kernel.<op> child span of whichever reader asked,
+	// carrying the wire text both ways. Recorded here so question 3 —
+	// who was asked, and what did they answer — is never per-reader
+	// work. Off is one atomic load inside Active().
+	//
+	// IT SITS AT AskCached, NOT AT THE DYLIB CROSSING. The cache is
+	// disk-backed and salted by the kernel artifact, so an answer served
+	// from it is the same theorem the dylib would have returned. Recording
+	// only the crossings would make the trace depend on whether some
+	// earlier run had already asked — the same position tracing with a
+	// kernel span on a cold cache and without one on a warm cache. A
+	// derivation is a property of the program, not of the cache's history,
+	// and the spec's conformance diffs read traces byte for byte.
+	if derivation.Active() {
+		// no source position of its own — Begin inherits the asking
+		// reader's range, which is where the question came from
+		op := opOfCacheKey(key)
+		askSpan := derivation.Begin("kernel."+op, op, "")
+		wire := key
+		if at := strings.IndexByte(key, '\x00'); at != -1 {
+			wire = key[at+1:]
+		}
+		defer func() {
+			if failed == nil {
+				askSpan.Question(wire, answered)
+				askSpan.Answer(answered)
+			} else {
+				askSpan.Question(wire, "")
+				askSpan.Decline("the kernel declined the question", "", failed.Error())
+			}
+			askSpan.End()
+		}()
+	}
 	if held, ok := lookupQuestionCache(key); ok {
 		tracing.Count("kernel.cacheHit", 0)
 		TraceQuestionLine(fmt.Sprintf("kernel cachehit %s", firstLine(key)))

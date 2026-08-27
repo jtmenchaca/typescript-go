@@ -393,6 +393,38 @@ func readArrayReadMethods(site MethodCallSite, argKnowns []abstractdomain.Abstra
 			}
 		}
 	}
+	// `slice` over an exact LIST — the same window reading the flat
+	// tuple gets above, applied to a receiver whose items are not all
+	// exact scalars (`[a, b, c, d, e]` of guarded parameters builds a
+	// KindList, not a KindValues). sec-array.prototype.slice copies the
+	// elements in [k, final) after ToClampedIndex on each bound, so the
+	// result is exactly that run of items, and its `.length` is exactly
+	// their count — which is what the row this closes reads.
+	if !receiverStringy && receiver.Kind == abstractdomain.KindList && method == "slice" && len(argKnowns) <= 2 {
+		window := make([]float64, len(argKnowns))
+		every := true
+		for i, k := range argKnowns {
+			n, ok := exactInt(k)
+			if !ok {
+				every = false
+				break
+			}
+			window[i] = n
+		}
+		if every {
+			indexes := make([]float64, len(receiver.Items))
+			for i := range indexes {
+				indexes[i] = float64(i)
+			}
+			taken := sliceFloat64(indexes, window)
+			items := make([]abstractdomain.AbstractValue, len(taken))
+			for i, at := range taken {
+				items[i] = receiver.Items[int(at)]
+			}
+			out := abstractdomain.KnownList(items, abstractdomain.TrustLevelOf(receiver))
+			return &out
+		}
+	}
 	// `join` over an exact LIST: each item's own text reading joins
 	// through the one text model (sec-array.prototype.join step 7.c.ii
 	// reads ToString of each element); an undefined item contributes
@@ -484,7 +516,57 @@ func readArrayReadMethods(site MethodCallSite, argKnowns []abstractdomain.Abstra
 			}
 		}
 	}
+	// `xs.indexOf(x)` / `xs.lastIndexOf(x)` on a receiver whose ELEMENTS
+	// the walk does not hold exactly — a `number[]` parameter, a
+	// sequence read back through a summary. The exact-values arm above
+	// answers the position outright where it can; this one answers what
+	// the specification fixes for every other receiver.
+	//
+	// sec-array.prototype.indexof returns 𝔽(_k_) for an integer _k_ the
+	// loop advanced from ToClampedIndex up to but not including
+	// _length_, or *-1* when no element matched (and immediately when
+	// _length_ = 0). sec-array.prototype.lastindexof is the same set of
+	// outcomes walked downward. So the answer is an INTEGER, and it is
+	// at least −1, on every run and for every receiver — which is what
+	// makes `if (i >= 0) xs[i]` an in-bounds read: the guard supplies
+	// the nonnegative side, and this supplies the integrality the index
+	// window needs and could not otherwise prove of a plain `number`.
+	//
+	// No upper bound is stated here. It is genuinely `length − 1`, but
+	// the length is a place rather than a value at this point, and the
+	// relational ledger is the layer that carries place bounds — an
+	// index read then proves itself under the length through that
+	// ledger, exactly as every other relationally guarded index does.
+	if !receiverStringy && (method == "indexOf" || method == "lastIndexOf") && len(argKnowns) == 1 &&
+		receiverIsSequenceShaped(receiver) {
+		grade := abstractdomain.MinTrustLevel(abstractdomain.TrustSpec, abstractdomain.TrustLevelOf(receiver))
+		out := abstractdomain.KnownSet(
+			refinementsets.MakeRefinedSet(refinementsets.AtLeast(-1), refinementsets.Integer),
+			nil, grade, abstractdomain.SetKindTagNone,
+		)
+		return &out
+	}
 	return nil
+}
+
+// receiverIsSequenceShaped: is this receiver one of the shapes an
+// array read method applies to — an exact tuple, a walk-built list, a
+// hole-carrying array, or a repetition-shaped set (the reading a
+// `number[]` parameter arrives as)?
+func receiverIsSequenceShaped(receiver abstractdomain.AbstractValue) bool {
+	switch receiver.Kind {
+	case abstractdomain.KindList, abstractdomain.KindArrayHoles:
+		return true
+	case abstractdomain.KindValues:
+		return receiver.KindTag == abstractdomain.PrimitiveArray
+	case abstractdomain.KindSet:
+		if receiver.SetKindTag != abstractdomain.SetKindTagNone {
+			return false
+		}
+		_, isRepetition := refinementsets.AsRepetition(receiver.Set)
+		return isRepetition
+	}
+	return false
 }
 
 // jsNumericJoin joins an exact numeric tuple's elements through the
@@ -603,8 +685,26 @@ func readFreshArrayFill(site MethodCallSite) *abstractdomain.AbstractValue {
 // tracked class updates in place, no havoc, the new tuple is known.
 func readArrayWriteMethods(site MethodCallSite) *abstractdomain.AbstractValue {
 	ctx, env, e, receiver, method := site.Ctx, site.Env, site.E, site.Receiver, site.Method
-	if !(site.HasTrackedName && receiver.Kind == abstractdomain.KindValues && receiver.KindTag == abstractdomain.PrimitiveArray &&
+	if !(site.HasTrackedName &&
 		(method == "push" || method == "pop" || method == "shift" || method == "unshift" || method == "splice" || method == "fill")) {
+		return nil
+	}
+	// a LIST receiver — `[a, b, c]` of guarded parameters, whose items
+	// are set-shaped rather than exact scalars — takes the item-wise
+	// reader below. The flat-tuple path after it keeps the exact-value
+	// arithmetic it already does.
+	if receiver.Kind == abstractdomain.KindList {
+		return readListWriteMethods(site)
+	}
+	// a REPETITION-shaped receiver — a declared `Age[]` parameter, whose
+	// positions the walk never enumerated but whose ELEMENT it knows.
+	// push is the one writer whose effect on that shape is stateable
+	// without the positions (readRepetitionPush's own doc says why the
+	// others are not).
+	if receiver.Kind == abstractdomain.KindSet && method == "push" {
+		return readRepetitionPush(site)
+	}
+	if !(receiver.Kind == abstractdomain.KindValues && receiver.KindTag == abstractdomain.PrimitiveArray) {
 		return nil
 	}
 	trackedName := site.TrackedName

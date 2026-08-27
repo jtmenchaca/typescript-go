@@ -16,6 +16,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 	"github.com/microsoft/typescript-go/internal/refinedts/walk"
 )
@@ -62,6 +63,7 @@ var schemaTypeNamePattern = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
 // own TYPE NAME — "ZodUUID", "ZodEnum" — the cue that the value IS a
 // schema and the braces are what it STATES.
 func SchemaTypeName(p *program.CheckerProgram, name *ast.Node) string {
+	tracing.CountBy("host.typeAtLocation.direct", 1)
 	t := p.Checker.GetTypeAtLocation(name)
 	if t == nil {
 		return ""
@@ -159,8 +161,11 @@ func StatedAnswer(
 			}
 			return walk.Claim(words, abstractdomain.TrustProved, false)
 		}
-		if PlainTypeNode(p, typeNode, map[*ast.Node]bool{}) ||
-			!LiteralBearingType(p, p.Checker.GetTypeAtLocation(typeNode), 0, map[*checker.Type]bool{}, typeNode) {
+		if PlainTypeNode(p, typeNode, map[*ast.Node]bool{}) {
+			return answerNoRefinement()
+		}
+		tracing.CountBy("host.typeAtLocation.direct", 1)
+		if !LiteralBearingType(p, p.Checker.GetTypeAtLocation(typeNode), 0, map[*checker.Type]bool{}, typeNode) {
 			return answerNoRefinement()
 		}
 		return walk.No(walk.Unknown{Why: "annotation-not-read"})
@@ -219,6 +224,16 @@ func StatedAnswer(
 			return walk.Claim(words, abstractdomain.TrustProved, false)
 		}
 		return walk.No(walk.Unknown{Why: "annotation-not-read"})
+	case annotations.DeclaredTuple:
+		// the slots, spoken in order — the list the declaration seeds
+		// (walk.AbstractValueOfDeclared's tuple arm) already formats as
+		// `[a, b]`, so the hover says the same thing the walk holds
+		// rather than a second spelling of the same statement.
+		words, ok := abstractdomain.FormatAbstractValue(walk.AbstractValueOfDeclared(*stated))
+		if !ok {
+			return answerSaysNoMore()
+		}
+		return walk.Claim(words, abstractdomain.TrustProved, false)
 	case annotations.DeclaredSet:
 		var words string
 		wordsOk := false

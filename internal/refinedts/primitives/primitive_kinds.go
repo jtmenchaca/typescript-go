@@ -12,6 +12,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // Sort is the semantic sorts the word carrier distinguishes — the map from
@@ -48,6 +49,7 @@ func PrimitiveKindOf(c *checker.Checker, t *checker.Type) Sort {
 	if (t.Flags() & checker.TypeFlagsBooleanLike) != 0 {
 		return SortBool
 	}
+	tracing.CountBy("host.isArrayLikeType", 1)
 	if c.IsArrayLikeType(t) {
 		return SortArray
 	}
@@ -116,6 +118,7 @@ func SortOfPresent(c *checker.Checker, t *checker.Type) Sort {
 
 // IsStringKind is isStringKind in the TS source.
 func IsStringKind(c *checker.Checker, e *ast.Node) bool {
+	tracing.CountBy("host.typeAtLocation.direct", 1)
 	return (c.GetTypeAtLocation(e).Flags() & checker.TypeFlagsStringLike) != 0
 }
 
@@ -154,6 +157,7 @@ func StringLikeSide(c *checker.Checker, e *ast.Node) bool {
 		bin := e.AsBinaryExpression()
 		result = StringLikeSide(c, bin.Left) || StringLikeSide(c, bin.Right)
 	default:
+		tracing.CountBy("host.typeAtLocation.direct", 1)
 		result = (c.GetTypeAtLocation(e).Flags() & checker.TypeFlagsStringLike) != 0
 	}
 	stringLikeMemoMu.Lock()
@@ -209,6 +213,8 @@ func TypeofWordOf(c *checker.Checker, t *checker.Type) string {
 		// constructor interface) types classes, and typeof a class is
 		// "function"; asking only for call signatures called it "object"
 		// and folded a live union guard false
+		tracing.CountBy("host.callSignatures", 1)
+		tracing.CountBy("host.constructSignatures", 1)
 		if len(c.GetCallSignatures(t)) > 0 || len(c.GetConstructSignatures(t)) > 0 {
 			return "function"
 		}

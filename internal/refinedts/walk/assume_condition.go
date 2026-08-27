@@ -40,6 +40,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
@@ -235,6 +236,15 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 	applySide := func(into Env, ns []narrowing.Narrowed) {
 		for _, n := range ns {
 			into.Set(n.Binding, narrowing.ApplyNarrowed(envOrResidue(into, n.Binding), n))
+			// THE GUARD LEDGER of the derivation trace: this write is where
+			// the guard's fact lands on the place, so this is where the
+			// trace remembers WHICH guard proved what a later read carries.
+			// A guard sits outside the read's own range, so nothing but this
+			// ledger can put the two together — and without it the answered
+			// path would state a set and never name the guard behind it.
+			if derivation.Active() {
+				derivation.RecordGuard(n.Binding, derivation.LastNarrowingSpan())
+			}
 			if len(n.Path) > 0 {
 				// the PLACE-VALUE memory: a root whose own shape cannot
 				// absorb the path — an unknown behind Array.isArray, a
@@ -254,6 +264,16 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 				root := envOrResidue(into, n.Binding)
 				rootAbsorbs := root.Kind == abstractdomain.KindObject ||
 					(root.Kind == abstractdomain.KindPossiblyUndefined && root.Inner != nil && root.Inner.Kind == abstractdomain.KindObject)
+				// a CALL segment names no stored key — `d.getTime()` is a
+				// value the receiver COMPUTES, not a slot it holds — so no
+				// root can absorb it, however object-shaped the root is. The
+				// fact belongs under the dotted key, which is where the read
+				// side looks for it (HeldPlaceEntry).
+				if len(n.Path) > 0 {
+					if _, isCall := dataflowfacts.CallSegmentOf(n.Path[len(n.Path)-1]); isCall {
+						rootAbsorbs = false
+					}
+				}
 				if !rootAbsorbs && root.Kind == abstractdomain.KindList && len(n.Path) == 1 {
 					if slot, isIndex := dataflowfacts.IndexSegmentOf(n.Path[0]); isIndex && slot < len(root.Items) {
 						rootAbsorbs = true
@@ -268,14 +288,38 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 					pathless.Path = nil
 					into.Set(pathKey, narrowing.ApplyNarrowed(envOrResidue(into, pathKey), pathless))
 				}
-				for _, copy := range narrowing.CopyBindingsOf(ctx.P.Checker, site.At, dataflowfacts.TrackedPlace{Binding: n.Binding, Path: n.Path}) {
-					if _, ok := into.Get(copy); !ok {
+				// a copy of this place rides its narrowing — and a SHIFTED
+				// copy (`const off = d.getTime() - REF`) rides it displaced
+				// by the same constant, which is what lets a guard on the
+				// place reach a binding computed from it BEFORE the guard ran
+				for _, copy := range narrowing.CopyBindingsWithShiftOf(ctx.P.Checker, site.At, dataflowfacts.TrackedPlace{Binding: n.Binding, Path: n.Path}) {
+					if _, ok := into.Get(copy.Name); !ok {
+						continue
+					}
+					shift, known := copy.Shift, true
+					if copy.ShiftExpression != nil {
+						shift, known = shiftValueOf(ctx, env, copy.ShiftExpression, copy.ShiftNegated)
+					}
+					if !known {
 						continue
 					}
 					renamed := n
-					renamed.Binding = copy
+					renamed.Binding = copy.Name
 					renamed.Path = nil
-					into.Set(copy, narrowing.ApplyNarrowed(envOrResidue(into, copy), renamed))
+					shifted, exact := narrowing.ShiftedNarrowed(renamed, shift)
+					if !exact {
+						continue
+					}
+					into.Set(copy.Name, narrowing.ApplyNarrowed(envOrResidue(into, copy.Name), shifted))
+					// THE GUARD LEDGER: a SHIFTED COPY rides the guard too —
+					// `const off = d.getTime() - REF` carries what the guard on
+					// `d.getTime()` proved, displaced. The read of `off` is
+					// judged, so the ledger has to name the guard under the
+					// COPY's name, not the guarded place's, or the answered
+					// trace states the shifted window with nothing behind it.
+					if derivation.Active() {
+						derivation.RecordGuard(copy.Name, derivation.LastNarrowingSpan())
+					}
 				}
 			}
 			if len(n.Path) == 0 {
@@ -325,9 +369,40 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 			for _, n := range dataflowfacts.MapPresenceNarrowings(into.Get, condition, false) {
 				into.Set(n.Binding, n.Known)
 			}
+			// a held `m.has(k)` also records a KEY PRESENCE place — the
+			// fact a later `m.get(k)` consults to drop the absence its
+			// host signature states. Written under a dotted place key
+			// rooted at the map (and, for a symbolic key, at the key
+			// binding too), so every write to either name sweeps it away
+			// through ForgetPlaceEntriesEnv. Unlike the row above it, this
+			// needs no tracked collection: a plain `Map<K, V>` parameter
+			// carries the fact just as well.
+			for _, place := range dataflowfacts.KeyPresencePlacesHeld(condition, false) {
+				into.Set(place, keyPresenceEstablished)
+			}
+			// a held `!r.done` proves the iterator result holds an ELEMENT,
+			// so `r.value` reads its present half — written as the dotted
+			// place entry the property read already meets
+			for _, n := range IteratorDoneNarrowings(into.Get, condition, false) {
+				into.Set(n.Place, n.Known)
+			}
+			// a held `m === known` proves the two names denote ONE object
+			// (sec-isstrictlyequal's Object clause), so the tested binding
+			// takes on everything the walk holds about the other side
+			for _, n := range IdentityNarrowings(ctx, env, condition, false) {
+				into.Set(n.Binding, n.Known)
+			}
 			// a held zero-exclusion guard (`x !== 0`) retreats the tested
 			// place's own window/list endpoint at zero
 			for _, n := range dataflowfacts.ZeroExclusionNarrowings(into.Get, condition, false) {
+				into.Set(n.Binding, n.Known)
+			}
+			// a held universal guard (`xs.every(x => P(x))`) narrows what
+			// P's own lift proves — a repetition's ELEMENT set, or an
+			// exact list's every POSITION — leaving the count and order
+			// alone; read from the target state, which the test just
+			// passed, exactly as the length and presence guards above are
+			for _, n := range UniversalGuardNarrowings(ctx, into.Get, condition, false) {
 				into.Set(n.Binding, n.Known)
 			}
 		},
@@ -344,11 +419,37 @@ func ConditionEnvTransfersOf(ctx *FlowContext, env Env, expression *ast.Node, si
 			for _, n := range dataflowfacts.MapPresenceNarrowings(into.Get, condition, true) {
 				into.Set(n.Binding, n.Known)
 			}
+			// refuted, `!m.has(k)` records the SAME key presence place on
+			// the else arm: negating the source condition puts the `has`
+			// leaf back at held polarity, so this arm carries exactly the
+			// fact the inline guard's true arm carries — the row
+			// RefuteIntoContinuation already writes for the exit-guard
+			// shape, written here for the joined `if (!m.has(k)) { … }`
+			// shape whose else arm falls through instead of returning
+			for _, place := range dataflowfacts.KeyPresencePlacesHeld(condition, true) {
+				into.Set(place, keyPresenceEstablished)
+			}
+			// refuted, `m !== known` IS `m === known`: negating the source
+			// condition puts the equality leaf back at held polarity, so
+			// the else arm of an inequality carries exactly the fact the
+			// true arm of the equality spelling carries
+			for _, n := range IdentityNarrowings(ctx, env, condition, true) {
+				into.Set(n.Binding, n.Known)
+			}
 			// refuted, a zero-exclusion guard reads the leaf's OWN negated
 			// polarity: `!(x !== 0)` proves x could be 0, and excludes
 			// nothing — the exit-guard shape below is where the refuted
 			// `=== 0` form actually excludes
 			for _, n := range dataflowfacts.ZeroExclusionNarrowings(into.Get, condition, true) {
+				into.Set(n.Binding, n.Known)
+			}
+			// kept symmetric with the held side, and reads zero rows for
+			// a bare `.every` leaf: a REFUTED every() proves only that
+			// SOME element failed the predicate, never which, so
+			// UniversalGuardNarrowings emits no row for a negated leaf
+			// (its own doc). The channel is here so an OR-composed leaf
+			// reaches the same reader rather than a second one.
+			for _, n := range UniversalGuardNarrowings(ctx, into.Get, condition, true) {
 				into.Set(n.Binding, n.Known)
 			}
 		},
@@ -573,6 +674,24 @@ func assumeCondition(
 			for _, n := range dataflowfacts.MapPresenceNarrowings(env.Get, condition, true) {
 				continuation.Set(n.Binding, n.Known)
 			}
+			// refuted, `!m.has(k)` records the SAME key presence place past
+			// the exit: negating the source condition puts the `has` leaf
+			// back at held polarity, so the continuation carries exactly
+			// the fact the inline guard's true arm carries
+			for _, place := range dataflowfacts.KeyPresencePlacesHeld(condition, true) {
+				continuation.Set(place, keyPresenceEstablished)
+			}
+			// refuted, `if (r.done) return;` leaves the element behind the
+			// exit — the same row the inline `!r.done` arm writes
+			for _, n := range IteratorDoneNarrowings(env.Get, condition, true) {
+				continuation.Set(n.Place, n.Known)
+			}
+			// refuted, `if (m !== known) return;` leaves the identity
+			// standing past the exit — the same row the inline `===` arm
+			// writes
+			for _, n := range IdentityNarrowings(ctx, env, condition, true) {
+				continuation.Set(n.Binding, n.Known)
+			}
 			// refuted, a zero-exclusion guard retreats the SAME endpoint
 			// past the exit — `if (x === 0) return; …after: x !== 0`
 			for _, n := range dataflowfacts.ZeroExclusionNarrowings(env.Get, condition, true) {
@@ -580,6 +699,28 @@ func assumeCondition(
 			}
 		},
 	}
+}
+
+// shiftValueOf evaluates the constant side of a shifted copy — the
+// `REFERENCE` in `const off = d.getTime() - REFERENCE`, whose own
+// initializer (`new Date("…").getTime()`) names one number that the
+// syntactic const-chain reader cannot fold but this walk computes
+// exactly. Answers (0, false) for anything that is not ONE finite
+// number, and the caller then states nothing about the shifted copy.
+func shiftValueOf(ctx *FlowContext, env Env, expression *ast.Node, negated bool) (float64, bool) {
+	held := evaluateExpression(ctx, env, expression)
+	if held.Kind != abstractdomain.KindValues || held.KindTag != abstractdomain.PrimitiveNumber ||
+		len(held.Values) != 1 {
+		return 0, false
+	}
+	value := held.Values[0]
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, false
+	}
+	if negated {
+		value = -value
+	}
+	return value, true
 }
 
 func registerDifferenceConstraints(ctx *FlowContext, rows []dataflowfacts.DifferenceConstraint) {

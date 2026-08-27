@@ -22,6 +22,7 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 /* ── the memo stores ─────────────────────────────────────────────── */
@@ -399,6 +400,8 @@ func writtenNamesRootOf(target *ast.Node) *ast.Node {
 // makes it a direct checker call, written inline here the way the other
 // packages write theirs.
 func writtenNamesResolvesToDefaultLib(c *checker.Checker, node *ast.Node) bool {
+	tracing.CountBy("host.symbolAtLocation", 1)
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	return c.SymbolInDefaultLib(c.GetSymbolAtLocation(node))
 }
 

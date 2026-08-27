@@ -13,6 +13,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/kernelbridge"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 func reasonNoteWithinStatement(p *program.CheckerProgram, note assignability.ReasonNote, statement *ast.Node) bool {
@@ -55,6 +56,7 @@ func NoAnswer(p *program.CheckerProgram, token *ast.Node, declaration *ast.Node,
 			return No(Unknown{Why: "noted", Said: Sentence.Ambient, Unsupported: false})
 		}
 	}
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	if p.Checker.SymbolInDefaultLib(hostType.Symbol()) {
 		return No(Unknown{Why: "noted", Said: Sentence.HostClass, Unsupported: false})
 	}

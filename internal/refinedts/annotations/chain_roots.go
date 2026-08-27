@@ -21,6 +21,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/diagnose"
 	"github.com/microsoft/typescript-go/internal/refinedts/nameresolution"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // chainRoot is chainRoot in the TS source: the leftmost root
@@ -54,6 +55,7 @@ func resolvesToSurface(p *program.CheckerProgram, node *ast.Node) bool {
 	symbol := nameresolution.DeclarationSymbolOf(p.Checker.BoundProgram(), node)
 	road := "binder"
 	if symbol == nil {
+		tracing.CountBy("host.symbolAtLocation", 1)
 		symbol = p.Checker.GetSymbolAtLocation(node)
 		road = "checker"
 		if symbol == nil {
@@ -64,6 +66,7 @@ func resolvesToSurface(p *program.CheckerProgram, node *ast.Node) bool {
 			return false
 		}
 		if (symbol.Flags & ast.SymbolFlagsAlias) != 0 {
+			tracing.CountBy("host.aliasedSymbol", 1)
 			symbol = p.Checker.GetAliasedSymbol(symbol)
 		}
 	}
@@ -96,6 +99,7 @@ func libraryAdapterOfNode(p *program.CheckerProgram, node *ast.Node) *libraryada
 	symbol := nameresolution.DeclarationSymbolOf(p.Checker.BoundProgram(), node)
 	road := "binder"
 	if symbol == nil {
+		tracing.CountBy("host.symbolAtLocation", 1)
 		symbol = p.Checker.GetSymbolAtLocation(node)
 		road = "checker"
 		if symbol == nil {
@@ -106,6 +110,7 @@ func libraryAdapterOfNode(p *program.CheckerProgram, node *ast.Node) *libraryada
 			return nil
 		}
 		if (symbol.Flags & ast.SymbolFlagsAlias) != 0 {
+			tracing.CountBy("host.aliasedSymbol", 1)
 			symbol = p.Checker.GetAliasedSymbol(symbol)
 		}
 	}

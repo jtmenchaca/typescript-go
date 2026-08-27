@@ -63,3 +63,55 @@ func TestReadThroughMaybeReceiver_NeitherAbsentDeclines(t *testing.T) {
 		t.Errorf("ReadThroughMaybeReceiver(a present-only receiver) = %+v, want nil (the link reads normally)", got)
 	}
 }
+
+// TestA5_xfer_chain_APlainKeyReadOffAMaybeReceiverReadsThePresentSide
+// pins the arm A5.xfer.chain needs, and its boundary against the
+// optional-chain rule above.
+//
+// sec-property-accessors evaluates `MemberExpression . IdentifierName`
+// through EvaluatePropertyAccessWithIdentifierKey, whose step 3 is
+// "? RequireObjectCoercible(baseValue)" ahead of the [[Get]], and
+// sec-requireobjectcoercible's table throws a TypeError for undefined
+// and for null. So on a PLAIN access the absent side never yields a
+// value at all — it leaves through the throw — and only the present
+// side reaches the property. The read is therefore the present side's,
+// with no wrapper: `o!.a` and `(o as {a: number}).a` both determine.
+//
+// The optional-chain arm keeps its precedence: `o?.a` short-circuits to
+// undefined rather than throwing, so it still wears the wrapper —
+// TestReadThroughMaybeReceiver_ShortCircuitIsExactlyUndefOnly above is
+// that half, and this row must not have moved it.
+func TestA5_xfer_chain_APlainKeyReadOffAMaybeReceiverReadsThePresentSide(t *testing.T) {
+	seven := abstractdomain.KnownValues([]float64{7}, abstractdomain.PrimitiveNumber, abstractdomain.TrustProved)
+	present := abstractdomain.KnownObject(
+		[]abstractdomain.ObjectKey{{Name: "a", Value: seven}},
+		nil, true, abstractdomain.TrustProved, false,
+	)
+	maybe := abstractdomain.PossiblyUndefined(present, "", false, false)
+
+	// the peel's own condition, stated the way object_key_access.go
+	// states it: a maybe receiver whose present side is a known object
+	// ALREADY CARRYING the named key
+	if maybe.Kind != abstractdomain.KindPossiblyUndefined || maybe.Inner == nil {
+		t.Fatalf("PossiblyUndefined(object) = %+v, want a wrapper with an Inner", maybe)
+	}
+	inner := *maybe.Inner
+	if inner.Kind != abstractdomain.KindObject {
+		t.Fatalf("the wrapper's present side .Kind = %v, want KindObject", inner.Kind)
+	}
+	idx, carriesKey := objectKeyIndex(inner, "a")
+	if !carriesKey {
+		t.Fatalf("objectKeyIndex(present side, \"a\") reported no key, want the key the peel reads")
+	}
+	if got := inner.Keys[idx].Value; got.Kind != abstractdomain.KindValues || len(got.Values) != 1 || got.Values[0] != 7 {
+		t.Errorf("the peeled key's value = %+v, want the exact 7 the present side holds", got)
+	}
+
+	// the NARROWNESS guard: a present side that does NOT carry the name
+	// is left wrapped, so every other reader keeps owning its own case
+	// (element_in_bounds.go's proved-in-bounds arm, whose wrapper is a
+	// claim about the RESULT rather than the receiver, must survive)
+	if _, carriesOther := objectKeyIndex(inner, "b"); carriesOther {
+		t.Errorf("objectKeyIndex(present side, \"b\") reported a key, want none — the peel must not fire for a name the object does not carry")
+	}
+}

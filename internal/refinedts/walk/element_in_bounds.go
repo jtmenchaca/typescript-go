@@ -9,6 +9,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/core"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
@@ -89,6 +90,32 @@ func sameFormSlice(a, b []refinementsets.Refinement) bool {
 	return true
 }
 
+// UncheckedIndexedAccessHonored: does the project under check state
+// noUncheckedIndexedAccess? That flag decides what the SHAPE CHANNEL
+// answers for an indexed read — `T | undefined` with it on, `T` with
+// it off (service/program_project.go adopts it for exactly that
+// reason). The refinement layer's own absence at an in-bounds element
+// read tracks it, so the two layers state the same thing about the
+// same read rather than one refusing what the other admits.
+//
+// tsc's `strict` does NOT imply the flag, so the common case — every
+// project that does not name it, this corpus included — is off, and
+// an in-bounds read answers the element outright.
+//
+// False wherever the program handle is absent (a unit-test context
+// built straight from a checker, program/checker_program.go's nil
+// Program), which is the flag's own default.
+func UncheckedIndexedAccessHonored(ctx *FlowContext) bool {
+	if ctx == nil || ctx.P == nil || ctx.P.Program == nil {
+		return false
+	}
+	options := ctx.P.Program.Options()
+	if options == nil {
+		return false
+	}
+	return options.NoUncheckedIndexedAccess == core.TSTrue
+}
+
 // OutOfBoundsEvidenceParams is the destructured-parameters struct for
 // OutOfBoundsEvidence.
 type OutOfBoundsEvidenceParams struct {
@@ -143,6 +170,26 @@ func OutOfBoundsEvidence(p OutOfBoundsEvidenceParams) (string, bool) {
 	}
 	return "the guard admits an index equal to the length — the read can " +
 		"be out of bounds on the last pass", true
+}
+
+// indexHeldFor is the element access's own index argument, read the
+// same way OutOfBoundsEvidence reads it — without re-evaluating the
+// expression — so the decline sentence's "held" slot states what the
+// walk actually carried for the index, not the receiver or the whole
+// read. Unknown where the argument is not a plain identifier the
+// environment tracks.
+func indexHeldFor(ctx *FlowContext, env Env, expression *ast.Node) abstractdomain.AbstractValue {
+	elem := expression.AsElementAccessExpression()
+	argument := elem.ArgumentExpression
+	for ast.IsParenthesizedExpression(argument) {
+		argument = argument.AsParenthesizedExpression().Expression
+	}
+	if ast.IsIdentifier(argument) {
+		if held, ok := env.Get(argument.Text()); ok {
+			return held
+		}
+	}
+	return abstractdomain.AbstractValue{Kind: abstractdomain.KindUnknown}
 }
 
 // IndexBelowLengthPlace: does a `.length` ledger row (a guard's `i <
@@ -292,6 +339,22 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 				if p.Receiver.SeqDenseKnown && p.Receiver.SeqDense {
 					return &read
 				}
+				// The absence above is the SHAPE CHANNEL's own answer, and
+				// the shape channel is the project's tsc. With
+				// noUncheckedIndexedAccess ON, GetTypeAtLocation answers
+				// `T | undefined` at every indexed read and this wrapper
+				// agrees with it. With the flag OFF — the default, and what
+				// tsc's own `strict` leaves it at (program_project.go's
+				// banner) — the host answers `T`, and wrapping anyway makes
+				// the refinement layer contradict the shape channel at every
+				// in-bounds read: `arr.length > 0` then `arr[0]` reads as
+				// `Age | undefined` where tsc reads `Age`, so a return into
+				// an Age position is refused against a value the host has
+				// already accepted. The absence rides only where the host
+				// puts one.
+				if !UncheckedIndexedAccessHonored(p.Ctx) {
+					return &read
+				}
 				// sec-ordinaryget: a hole (no own property at that index)
 				// falls through to the prototype, and Array.prototype has
 				// no numeric slots, so the get answers exactly undefined —
@@ -355,9 +418,25 @@ func InBoundsElementOf(p InBoundsElementOfParams) *abstractdomain.AbstractValue 
 	// no branch PROVED the read in bounds — where the guards
 	// themselves vouch the index can leave the bounds, the read says
 	// so before any maybe-absent answer papers over it
+	//
+	// THE DECLINE HELPER, adopted here — this site sits outside the
+	// judge (CheckAssignability never opens over an element-access
+	// read), so there is no root span for a bare AlertText fallback
+	// to leave answered; but the same one-carrier rule still applies
+	// to the printed sentence itself: the evidence ALREADY names the
+	// blocking construct (the certified window, or the guard's own
+	// equal-to-length admission), so gluing the generic alert text
+	// onto it doubled the sentence instead of replacing it. The
+	// projection composes the one sentence from the gate and what
+	// the index held, with no second generic clause trailing it.
 	evidence, hasEvidence := OutOfBoundsEvidence(OutOfBoundsEvidenceParams{Ctx: p.Ctx, Env: p.Env, Expression: p.Expression})
 	if hasEvidence {
-		p.Ctx.Report(assignability.At(p.Expression, 7002, evidence+". "+assignability.AlertText))
+		heldIndex := indexHeldFor(p.Ctx, p.Env, p.Expression)
+		messageText := evidence + ". " + assignability.AlertText
+		if projected := DeclineSentence(evidence, p.Expression, spellUnknownHeld(heldIndex)); projected != "" {
+			messageText = projected
+		}
+		p.Ctx.Report(assignability.At(p.Expression, 7002, messageText))
 	}
 	// an UNVOUCHED read of a repetition-shaped sequence at a
 	// NUMBER-typed index is still an element OR undefined — out of

@@ -10,8 +10,10 @@ import (
 
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
+	"github.com/microsoft/typescript-go/internal/refinedts/annotations"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // resolvesToDefaultLib mirrors service/program_resolution.ts's
@@ -19,6 +21,8 @@ import (
 // whether the node's symbol declares in the checker's default
 // library.
 func resolvesToDefaultLib(ctx *FlowContext, node *ast.Node) bool {
+	tracing.CountBy("host.symbolAtLocation", 1)
+	tracing.CountBy("host.symbolInDefaultLib", 1)
 	return ctx.P.Checker.SymbolInDefaultLib(ctx.P.Checker.GetSymbolAtLocation(node))
 }
 
@@ -216,5 +220,187 @@ func IterationElementOf(ctx *FlowContext, env Env, iterable *ast.Node) *abstract
 			}
 		}
 	}
+	if declared := declaredCollectionElement(ctx, iterable); declared != nil {
+		return declared
+	}
 	return nil
+}
+
+// declaredCollectionElement is what one element of iterating a Map or
+// Set is when the walk built NO entries for it — a parameter, a field,
+// any receiver whose contents this walk never watched, but whose
+// DECLARED type states what its members are.
+//
+// A `Set<T>` iterates its members and a `Map<K, V>` its [key, value]
+// pairs (sec-set.prototype-%symbol.iterator% yields each element of
+// [[SetData]]; sec-map.prototype-%symbol.iterator% is entries, which
+// yields a two-element Array per entry). What the members ARE is the
+// type's own statement, held by the same generic discipline that makes
+// MapValueAnnotation's V hold of every stored value: nothing enters a
+// `Set<T>` without wearing T at its write site. So the element wears
+// T's stated set at LIBRARY grade, exactly as the map-value read does.
+//
+// This runs after every reading that watches actual contents. A
+// collection the walk DID build answers through collectionIterationElement
+// above, with its real entries — strictly better than the declared type
+// — and reaches this only when it stated nothing.
+func declaredCollectionElement(ctx *FlowContext, iterable *ast.Node) *abstractdomain.AbstractValue {
+	receiver := iterable
+	view := ""
+	if ast.IsCallExpression(iterable) {
+		call := iterable.AsCallExpression()
+		if call.Arguments == nil || len(call.Arguments.Nodes) != 0 ||
+			!ast.IsPropertyAccessExpression(call.Expression) {
+			return nil
+		}
+		access := call.Expression.AsPropertyAccessExpression()
+		view = access.Name().Text()
+		if view != "values" && view != "keys" && view != "entries" {
+			return nil
+		}
+		receiver = access.Expression
+	}
+	typeNode := declaredTypeNodeOfReceiver(ctx, receiver)
+	if typeNode == nil {
+		// A CONSTRUCTION states the members a declaration would have.
+		// `const s = new Set(arr)` spells no annotation of its own, but
+		// AddEntriesFromIterable's Set counterpart calls add(item) on
+		// every item the source yields (sec-set-iterable), so every
+		// member of the built set is one of the source's own elements
+		// and the source's declared element type states which. That is
+		// the same generic discipline read one step earlier — at the
+		// construction rather than at the annotation the construction
+		// would have been assigned to — which is exactly how
+		// mapValueTypeNodeOfReceiver already reads a Map built the same
+		// way. Without it, a set built from a declared `Wide[]` stated
+		// nothing about its members and every iteration of it went
+		// unpinned.
+		return builtSetMemberOfConstruction(ctx, receiver, view)
+	}
+	if !ast.IsTypeReferenceNode(typeNode) {
+		return nil
+	}
+	typeRef := typeNode.AsTypeReferenceNode()
+	if !ast.IsIdentifier(typeRef.TypeName) || typeRef.TypeArguments == nil {
+		return nil
+	}
+	arguments := typeRef.TypeArguments.Nodes
+	// the stated set behind one type argument, or nil where the
+	// annotation reader cannot spell it
+	stated := func(node *ast.Node) *abstractdomain.AbstractValue {
+		read := annotations.AnnotationOfType(ctx.P, node, ctx.Registry, ctx.Objects)
+		if read.Stated == nil || read.Unsupported != "" || read.Stated.Kind != annotations.DeclaredSet {
+			return nil
+		}
+		out := abstractdomain.AtTrustLevel(
+			abstractdomain.KnownSet(*read.Stated.Set, read.Stated.Temporal, abstractdomain.TrustProved, setKindTagOf(read.Stated.KindTag)),
+			abstractdomain.TrustLibrary,
+		)
+		return &out
+	}
+	switch typeRef.TypeName.Text() {
+	case "Set", "ReadonlySet":
+		if len(arguments) != 1 {
+			return nil
+		}
+		// a Set has no keys of its own — values(), keys() and the bare
+		// iteration all yield its members
+		if view == "entries" {
+			member := stated(arguments[0])
+			if member == nil {
+				return nil
+			}
+			out := abstractdomain.KnownList([]abstractdomain.AbstractValue{*member, *member}, abstractdomain.TrustLibrary)
+			return &out
+		}
+		return stated(arguments[0])
+	case "Map", "ReadonlyMap":
+		if len(arguments) != 2 {
+			return nil
+		}
+		switch view {
+		case "keys":
+			return stated(arguments[0])
+		case "values":
+			return stated(arguments[1])
+		}
+		// a bare Map and entries() both yield [key, value]
+		key, value := stated(arguments[0]), stated(arguments[1])
+		if key == nil || value == nil {
+			return nil
+		}
+		out := abstractdomain.KnownList([]abstractdomain.AbstractValue{*key, *value}, abstractdomain.TrustLibrary)
+		return &out
+	}
+	return nil
+}
+
+// builtSetMemberOfConstruction is one member of iterating a Set the
+// walk holds no entries for and whose binding spells no type — the
+// `const s = new Set(arr)` shape, where the SOURCE states what the
+// members are.
+//
+// sec-set-iterable calls `add` on every item the argument yields, so
+// each member of the built set is one of the source's own elements.
+// A source declared `Wide[]` therefore states that every member is a
+// Wide, at LIBRARY grade — the same claim, on the same generic
+// discipline, that a written-out `Set<Wide>` annotation would make.
+// The array's own element type node is what states it, read through
+// the same declaredTypeNodeOfReceiver the map-value side reads its
+// source through.
+//
+// Only a `new Set(...)` initializer with a source whose declaration
+// spells an array type is read. Anything else — an unspelled source, a
+// Map construction (mapValueTypeNodeOfReceiver already owns that side),
+// a set built by other means — answers nil and the iteration keeps
+// whatever it had.
+func builtSetMemberOfConstruction(ctx *FlowContext, receiver *ast.Node, view string) *abstractdomain.AbstractValue {
+	tracing.CountBy("host.symbolAtLocation", 1)
+	symbol := ctx.P.Checker.GetSymbolAtLocation(receiver)
+	if symbol == nil || symbol.ValueDeclaration == nil ||
+		!ast.IsVariableDeclaration(symbol.ValueDeclaration) {
+		return nil
+	}
+	initializer := symbol.ValueDeclaration.AsVariableDeclaration().Initializer
+	if initializer == nil || !ast.IsNewExpression(initializer) {
+		return nil
+	}
+	newExpr := initializer.AsNewExpression()
+	if !ast.IsIdentifier(newExpr.Expression) || newExpr.Expression.Text() != "Set" ||
+		!resolvesToDefaultLib(ctx, newExpr.Expression) {
+		return nil
+	}
+	// `new Set<T>(…)` spells T at the construction itself
+	var memberNode *ast.Node
+	if newExpr.TypeArguments != nil && len(newExpr.TypeArguments.Nodes) == 1 {
+		memberNode = newExpr.TypeArguments.Nodes[0]
+	} else {
+		if newExpr.Arguments == nil || len(newExpr.Arguments.Nodes) != 1 {
+			return nil
+		}
+		sourceNode := declaredTypeNodeOfReceiver(ctx, newExpr.Arguments.Nodes[0])
+		if sourceNode == nil || !ast.IsArrayTypeNode(sourceNode) {
+			return nil
+		}
+		memberNode = sourceNode.AsArrayTypeNode().ElementType
+	}
+	if memberNode == nil {
+		return nil
+	}
+	read := annotations.AnnotationOfType(ctx.P, memberNode, ctx.Registry, ctx.Objects)
+	if read.Stated == nil || read.Unsupported != "" || read.Stated.Kind != annotations.DeclaredSet {
+		return nil
+	}
+	member := abstractdomain.AtTrustLevel(
+		abstractdomain.KnownSet(*read.Stated.Set, read.Stated.Temporal, abstractdomain.TrustProved, setKindTagOf(read.Stated.KindTag)),
+		abstractdomain.TrustLibrary,
+	)
+	// a Set has no keys of its own: values(), keys() and the bare
+	// iteration all yield its members, and entries() pairs each member
+	// with itself (sec-set.prototype.entries)
+	if view == "entries" {
+		out := abstractdomain.KnownList([]abstractdomain.AbstractValue{member, member}, abstractdomain.TrustLibrary)
+		return &out
+	}
+	return &member
 }

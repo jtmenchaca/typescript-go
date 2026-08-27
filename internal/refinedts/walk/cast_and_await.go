@@ -14,6 +14,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/nameresolution"
 	"github.com/microsoft/typescript-go/internal/refinedts/primitives"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/typereading"
 )
 
@@ -35,8 +36,10 @@ func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
 	if s := nameresolution.DeclarationSymbolOf(c.BoundProgram(), node); s != nil {
 		return s
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := c.GetSymbolAtLocation(node)
 	if symbol != nil && (symbol.Flags&ast.SymbolFlagsAlias) != 0 {
+		tracing.CountBy("host.aliasedSymbol", 1)
 		symbol = c.GetAliasedSymbol(symbol)
 	}
 	return symbol
@@ -46,6 +49,18 @@ func symbolAt(c *checker.Checker, node *ast.Node) *ast.Symbol {
 func EvaluateAwait(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.AbstractValue {
 	await := e.AsAwaitExpression()
 	inner := await.Expression
+	// an await ENDS the current job (sec-await: the caller resumes only
+	// when the awaited promise settles, on a later job) — the
+	// run-to-completion guarantee the walk's other key-presence facts
+	// lean on (key_presence_facts.go's file comment) does not extend
+	// across it. Anything another job can reach may be mutated while
+	// this one is suspended, so a `m.has(k)` fact recorded before the
+	// await must not answer for a `m.get(k)` read after it. Dropped
+	// BEFORE the operand evaluates: the operand's own call/property
+	// reads (a handed receiver, an unmodeled callee) may themselves
+	// sweep some of these facts already, and the await's own
+	// suspension sweeps the rest regardless of what the operand does.
+	DropAllKeyPresenceFacts(env)
 	// `await Promise.resolve(x)`: the composition wears x exactly,
 	// for EVERY non-thenable x — not only a primitive one.
 	//
@@ -88,9 +103,14 @@ func EvaluateAwait(ctx *FlowContext, env Env, e *ast.Node) abstractdomain.Abstra
 		if call.Arguments != nil && len(call.Arguments.Nodes) == 1 &&
 			ast.IsPropertyAccessExpression(call.Expression) {
 			pa := call.Expression.AsPropertyAccessExpression()
+			resolvesPromiseDotResolve := false
 			if pa.Name().Text() == "resolve" && ast.IsIdentifier(pa.Expression) &&
-				pa.Expression.Text() == "Promise" &&
-				ctx.P.Checker.SymbolInDefaultLib(ctx.P.Checker.GetSymbolAtLocation(pa.Expression)) {
+				pa.Expression.Text() == "Promise" {
+				tracing.CountBy("host.symbolAtLocation", 1)
+				tracing.CountBy("host.symbolInDefaultLib", 1)
+				resolvesPromiseDotResolve = ctx.P.Checker.SymbolInDefaultLib(ctx.P.Checker.GetSymbolAtLocation(pa.Expression))
+			}
+			if resolvesPromiseDotResolve {
 				argument := evaluateExpression(ctx, env, call.Arguments.Nodes[0])
 				if CannotBeThenable(argument) {
 					return argument
@@ -219,9 +239,14 @@ func settledTypeOfOperand(ctx *FlowContext, operand *ast.Node) (abstractdomain.A
 		return abstractdomain.AbstractValue{}, false
 	}
 	symbol := t.Symbol()
-	if symbol == nil || symbol.Name != "Promise" || !ctx.P.Checker.SymbolInDefaultLib(symbol) {
+	if symbol == nil || symbol.Name != "Promise" {
 		return abstractdomain.AbstractValue{}, false
 	}
+	tracing.CountBy("host.symbolInDefaultLib", 1)
+	if !ctx.P.Checker.SymbolInDefaultLib(symbol) {
+		return abstractdomain.AbstractValue{}, false
+	}
+	tracing.CountBy("host.typeArguments", 1)
 	arguments := ctx.P.Checker.GetTypeArguments(t)
 	if len(arguments) != 1 {
 		return abstractdomain.AbstractValue{}, false
@@ -409,6 +434,7 @@ func castsToBareTypeParameter(ctx *FlowContext, e *ast.Node) bool {
 		if (part.Flags() & checker.TypeFlagsTypeParameter) == 0 {
 			return false
 		}
+		tracing.CountBy("host.constraintOfType", 1)
 		constrained := ctx.P.Checker.GetConstraintOfType(part)
 		if constrained != nil && constrained != part {
 			return false
@@ -452,8 +478,10 @@ func castExpressionOf(e *ast.Node) *ast.Node {
 func castTargetType(c *checker.Checker, e *ast.Node) *checker.Type {
 	switch {
 	case ast.IsAsExpression(e):
+		tracing.CountBy("host.typeFromTypeNode", 1)
 		return c.GetTypeFromTypeNode(e.AsAsExpression().Type)
 	case ast.IsTypeAssertion(e):
+		tracing.CountBy("host.typeFromTypeNode", 1)
 		return c.GetTypeFromTypeNode(e.AsTypeAssertion().Type)
 	default:
 		return typereading.TypeAtLocation(c, e)

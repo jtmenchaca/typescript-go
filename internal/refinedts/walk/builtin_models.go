@@ -43,6 +43,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/refinedts/abstractdomain"
 	"github.com/microsoft/typescript-go/internal/refinedts/assignability"
+	"github.com/microsoft/typescript-go/internal/refinedts/derivation"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
 )
 
@@ -94,7 +95,30 @@ func NoteUnmodeledCall(ctx *FlowContext, e *ast.Node) {
 }
 
 // ReadBuiltinCall is readBuiltinCall in the TS source.
-func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments func(args []*ast.Node) []abstractdomain.AbstractValue) *abstractdomain.AbstractValue {
+func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments func(args []*ast.Node) []abstractdomain.AbstractValue) (answered *abstractdomain.AbstractValue) {
+	// THE BUILTIN TRANSFER DISPATCH SEAM of the derivation trace: one
+	// span per modeled call, carrying the call's own spelling and range.
+	// A nil answer means no model recognized the callee at all — the span
+	// declines and names that, which is the first construct blocking any
+	// position downstream of it. Off is one atomic load inside Active().
+	if derivation.Active() {
+		span := derivation.BeginNode("builtinModels", e)
+		defer func() {
+			switch {
+			case answered == nil:
+				span.Decline("no builtin model recognizes this callee", derivation.Range(e.AsCallExpression().Expression), "no model")
+			case answered.Kind == abstractdomain.KindUnknown:
+				gate := answered.ResidueReason
+				if gate == "" {
+					gate = "the builtin model states no set for these arguments"
+				}
+				span.Decline(gate, derivation.Range(e), "no set")
+			default:
+				span.Answer(spellValue(*answered))
+			}
+			span.End()
+		}()
+	}
 	call := e.AsCallExpression()
 	// the built-ins' own argument contracts (builtin_contracts.ts) —
 	// judged first, whatever the result model below answers
@@ -121,6 +145,11 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 		return answered
 	}
 	if answered := readArrayFrom(ctx, env, e); answered != nil {
+		return answered
+	}
+	// `structuredClone(v)` hands back a deep copy whose contents equal
+	// v's — the entries, items, or keys ride, the identity does not
+	if answered := readStructuredClone(ctx, env, e); answered != nil {
 		return answered
 	}
 	// `Array(…)` called as a function builds the same array the
@@ -198,6 +227,20 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 		if answered := readArrayOf(site); answered != nil {
 			return answered
 		}
+		// a typed array's own VIEW over its storage — read before the
+		// generic sequence readers, which have no notion of the shared
+		// buffer subarray's own clause is about
+		if answered := readTypedArraySubarray(site); answered != nil {
+			return answered
+		}
+		// a DataView's byte-at-a-time write and its unsigned integer
+		// reads — beside the typed-array view reader for the same
+		// reason: the byte store is a tuple the generic sequence
+		// readers would index as if it were a plain array of elements
+		// rather than compose across widths (data_view_models.go)
+		if answered := readDataViewMethods(site); answered != nil {
+			return answered
+		}
 		if answered := readReadonlyMethods(site); answered != nil {
 			return answered
 		}
@@ -212,6 +255,19 @@ func ReadBuiltinCall(ctx *FlowContext, env Env, e *ast.Node, spreadArguments fun
 		if answered := readFreshArrayFill(site); answered != nil {
 			return answered
 		}
+		// a fresh (untracked) receiver's own `.sort(...)` — same gap as
+		// the fill above: readArraySortReverseMethods below requires
+		// site.HasTrackedName to have a binding to write the new order
+		// back to, so an inline `[a, b, c].sort(cmp)` never reaches it
+		if answered := readFreshArraySort(site); answered != nil {
+			return answered
+		}
+		// a LENGTH-CHANGING call on a class field declared a tuple —
+		// judged before the write readers below, which never see this
+		// call at all: they require a bare identifier receiver and
+		// `this.xs` is a property access. It reports and answers nil, so
+		// whichever reader below models the call's own VALUE still runs.
+		ReadTupleFieldGrowth(site)
 		if answered := readArrayWriteMethods(site); answered != nil {
 			return answered
 		}

@@ -262,6 +262,28 @@ func ExportedSymbolConst(c *checker.Checker, key *ast.Node) bool {
 	return false
 }
 
+// statedOrPlainParameterValue is a parameter's own value read STATED
+// first: annotations.AnnotationOfType on the parameter's declared type
+// node, through the file's own registry and object annotations — the
+// same road contract_file_facts.go's readSignature reads a top-level
+// function parameter through, and the one InitialStateOfPlainParameter
+// alone cannot take (typereading's syntax adapter never resolves a
+// z.infer<typeof X> alias; only the annotation compiler does). Falls
+// to InitialStateOfPlainParameter, unchanged, for a parameter whose
+// type states nothing this road recognizes — a plain `number`, an
+// unread schema — so an unstated parameter keeps exactly its previous
+// reading.
+func statedOrPlainParameterValue(ctx *FlowContext, parameter *ast.Node) abstractdomain.AbstractValue {
+	pd := parameter.AsParameterDeclaration()
+	if pd.Type != nil {
+		read := annotations.AnnotationOfType(ctx.P, pd.Type, ctx.Registry, ctx.Objects)
+		if read.Stated != nil {
+			return statedParameterSeed(ctx.P, parameter, *read.Stated)
+		}
+	}
+	return InitialStateOfPlainParameter(ctx.P, parameter)
+}
+
 // constructorUnconditionallyWritesField: does this class's own
 // constructor write `name` on EVERY construction path — a parameter
 // property declaring the field (the runtime's own unconditional
@@ -575,6 +597,68 @@ func computeFieldInvariants(ctx *FlowContext, declaration *ast.Node) map[string]
 			candidates[nameText] = value
 		}
 	}
+
+	// CONSTRUCTOR PARAMETER PROPERTIES — `constructor(public age: Age)`
+	// — declare a field with no PropertyDeclaration anywhere in the
+	// class body, so the loop above never sees them at all and they
+	// took NO invariant, ever: InitialThisStateOf's own key loop has
+	// the identical gap (its own doc), so a class whose only field
+	// spelling is a parameter property left `this.age` with no key at
+	// all, and a `this` object already bound in env (a narrowed
+	// receiver, or any method body's own entry) made readThisFieldInvariant
+	// defer to the general property read, which then found `age`
+	// outside an INCOMPLETE object's keys and reported "not proven
+	// complete" instead of Age's own window.
+	//
+	// The write is the runtime's own unconditional prelude
+	// (constructorUnconditionallyWritesField's first arm already names
+	// this write and answers true for it), so the candidate is seeded
+	// directly from the parameter's own declared type
+	// (statedOrPlainParameterValue — stated first, so a refined alias
+	// like Age carries through, exactly as contract_file_facts.go's
+	// own readSignature reads a top-level parameter) exactly as a
+	// PropertyDeclaration's own initializer seeds its candidate above
+	// — not through the sink/unconditionalConstructorWrite route,
+	// because the implicit field fill is not a `this.name = value`
+	// STATEMENT in the constructor's own Body: it is a compiler-
+	// synthesized prelude AnalyzeStatements' walk of Body.Statements
+	// never sees, so nothing would ever land in the collection sink
+	// for it. The join loop below then folds in whatever the
+	// constructor's OWN text writes afterward exactly as it does for
+	// any other candidate.
+	//
+	// A field a PropertyDeclaration already claimed keeps that
+	// candidate — TypeScript itself refuses a class declaring the same
+	// field both ways, but a name collision between the two spellings
+	// is not this reading's question to answer twice.
+	for _, member := range members {
+		if !ast.IsConstructorDeclaration(member) {
+			continue
+		}
+		for _, parameter := range member.Parameters() {
+			if !isParameterPropertyDeclaration(parameter) {
+				continue
+			}
+			pd := parameter.AsParameterDeclaration()
+			name := pd.Name()
+			if name == nil || !(ast.IsIdentifier(name) || ast.IsPrivateIdentifier(name)) {
+				continue
+			}
+			nameText := name.Text()
+			if _, alreadyDeclared := candidates[nameText]; alreadyDeclared {
+				continue
+			}
+			if _, isPoisoned := poisoned[nameText]; isPoisoned {
+				continue
+			}
+			candidateOrder = append(candidateOrder, nameText)
+			candidates[nameText] = statedOrPlainParameterValue(ctx, parameter)
+		}
+		// a class body holds at most one constructor with a body; an
+		// overload signature declares no parameter properties
+		break
+	}
+
 	if len(candidates) == 0 {
 		return getterInvariants(ctx, declaration, members, map[string]abstractdomain.AbstractValue{})
 	}
@@ -796,6 +880,42 @@ func InitialThisStateOf(ctx *FlowContext, site *ast.Node) *abstractdomain.Abstra
 		// rides the read (OPAQUE), exactly as it does for a property
 		// read through an opaque receiver
 		keys[nameText] = abstractdomain.Opaque
+	}
+	// CONSTRUCTOR PARAMETER PROPERTIES declare a field the loop above
+	// never sees (no PropertyDeclaration spells them) — the identical
+	// gap computeFieldInvariants' own candidate loop has (this file's
+	// header comment there), so a class whose only field spelling is a
+	// parameter property built a `this` object with NO key at all for
+	// it: readThisFieldInvariant defers to the general property read
+	// whenever `this` is already bound as an object (a narrowed
+	// receiver, or a method body's own entry), and that read then
+	// found the field outside an INCOMPLETE object's keys — "not
+	// proven complete" instead of the field's own declared window.
+	// Registering the key here (opaque until FieldInvariantsOf below
+	// fills it, exactly the PropertyDeclaration loop's own two-step)
+	// is what gives a guard on the key somewhere to narrow even before
+	// the invariant computation runs.
+	for _, member := range declaration.ClassLikeData().Members.Nodes {
+		if !ast.IsConstructorDeclaration(member) {
+			continue
+		}
+		for _, parameter := range member.Parameters() {
+			if !isParameterPropertyDeclaration(parameter) {
+				continue
+			}
+			name := parameter.AsParameterDeclaration().Name()
+			if name == nil || !(ast.IsIdentifier(name) || ast.IsPrivateIdentifier(name)) {
+				continue
+			}
+			nameText := name.Text()
+			if _, ok := keys[nameText]; !ok {
+				keyOrder = append(keyOrder, nameText)
+				keys[nameText] = abstractdomain.Opaque
+			}
+		}
+		// a class body holds at most one constructor with a body; an
+		// overload signature declares no parameter properties
+		break
 	}
 	invariants := FieldInvariantsOf(ctx, declaration)
 	if invariants != nil {

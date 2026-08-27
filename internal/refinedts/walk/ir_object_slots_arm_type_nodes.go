@@ -5,6 +5,7 @@ package walk
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // declaredTypeNodeOfExpression is the type node an EXPRESSION's own
@@ -27,6 +28,7 @@ func declaredTypeNodeOfExpression(ctx *FlowContext, e *ast.Node) *ast.Node {
 	if ast.IsCallExpression(e) {
 		return calleeReturnTypeNodeOf(ctx, e)
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := ctx.P.Checker.GetSymbolAtLocation(e)
 	if symbol == nil {
 		return nil
@@ -233,10 +235,12 @@ func inferredCalleeReturnDeclaredLeaves(ctx *FlowContext, holder string, call *a
 	if ctx == nil || ctx.P == nil || ctx.P.Checker == nil || call == nil {
 		return nil, false
 	}
+	tracing.CountBy("host.resolvedSignature", 1)
 	signature := ctx.P.Checker.GetResolvedSignature(call)
 	if signature == nil {
 		return nil, false
 	}
+	tracing.CountBy("host.returnTypeOfSignature", 1)
 	returnType := ctx.P.Checker.GetReturnTypeOfSignature(signature)
 	if returnType == nil {
 		return nil, false

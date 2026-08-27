@@ -23,6 +23,24 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 	if SameKnown(a, b) {
 		return AtTrustLevel(a, grade)
 	}
+	// THE WIDENING BOUND IS CHECKED FIRST, before any arm below can
+	// build a term out of these operands. It is a TERMINATION guard: a
+	// loop body that re-joins a derived string each round stacks another
+	// Concatenation/Star layer onto the candidate, and past the bound the
+	// join answers the string ground (C*, the sound "any string" claim
+	// every string value sits inside) rather than handing the kernel's
+	// deciders an ever-larger term to walk. Checked after SameKnown (an
+	// identity join builds nothing and keeps its operand exactly) and
+	// before everything else, because ANY arm that constructs — the
+	// repetition/list join, the union builders, the absorption arms —
+	// would grow the term past the point this guard exists to stop.
+	// Placing it late let joinRepetitionSetWithList answer first for a
+	// too-deep chain beside a string word, which is what this ordering
+	// fixes; sequence_concatenation_widen.go's file comment carries the
+	// bound's own history.
+	if widened, ok := widenPastConcatenationBound(a, b, grade); ok {
+		return widened
+	}
 	// null joined with undefined (either order): a branch that returns
 	// null and a branch that returns undefined join to "null, or
 	// undefined" — which is exactly the maybe wrapper around Null, so
@@ -289,6 +307,26 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 		}
 		return KnownList(items, grade)
 	}
+	// a REPETITION-shaped KindSet joined with an exact KindList: the
+	// runtime value came through one arm or the other, so every position
+	// of either arm holds a value the joined claim must cover. The
+	// list's own exact count does not survive as a repetition window on
+	// its own (the two arms disagree on how many positions there are),
+	// but the repetition's [lo, hi] widens to include the list's own
+	// length, and the element set widens to admit every list item too —
+	// this is what keeps a universal-guard narrowing (`xs.every(y => …)`
+	// forced on every arm of a branch, one arm via a literal reassignment
+	// like `xs = [0]`) alive across the join, rather than losing the
+	// element claim outright the way falling through to the scalar-only
+	// paths below would (SetOfKnown refuses KindList, so an untouched
+	// join would answer Unknown here and forget everything both arms
+	// prove).
+	if joined, ok := joinRepetitionSetWithList(a, b, grade); ok {
+		return joined
+	}
+	if joined, ok := joinRepetitionSetWithList(b, a, grade); ok {
+		return joined
+	}
 	// two array-holes of the SAME length: every slot is a hole on both
 	// arms, so the joined value states the same length and the same
 	// hole claim. A length mismatch loses the exactness — the walk's
@@ -446,14 +484,8 @@ func JoinKnown(a, b AbstractValue) AbstractValue {
 	// absorption arms below, on either operand independently, so this
 	// widening triggers before either arm's own Concatenation/Union
 	// construction would grow the term further.
-	if aSet, aIsSet := SetOfKnown(a); aIsSet && refinementsets.StatesSequence(aSet) &&
-		refinementsets.SequenceNestingDepth(aSet) > sequenceConcatenationWidenBound {
-		return KnownSet(refinementsets.Strings, nil, grade, SetKindTagNone)
-	}
-	if bSet, bIsSet := SetOfKnown(b); bIsSet && refinementsets.StatesSequence(bSet) &&
-		refinementsets.SequenceNestingDepth(bSet) > sequenceConcatenationWidenBound {
-		return KnownSet(refinementsets.Strings, nil, grade, SetKindTagNone)
-	}
+	// (the bound itself is checked at the top of JoinKnown, before any
+	// constructing arm — widenPastConcatenationBound)
 	// two STRING-SORTED sides join into the union of their tuples —
 	// but only when every member is at least two characters long, so
 	// every member is unambiguously sequence-shaped and no scalar
@@ -739,6 +771,63 @@ func joinObjectStarWithList(star, list AbstractValue, grade TrustLevel) Abstract
 	// the list held a non-graph item (a number, a set), so no ONE
 	// position claim covers both arms
 	return Unknown
+}
+
+// joinRepetitionSetWithList joins a REPETITION-shaped KindSet (`rep`
+// is not a plain scalar window — it is the {element, lo, hi} shape
+// Repetition builds, what a sequence-typed binding like `xs: number[]`
+// is held as) with an exact KindList (a literal reassignment like
+// `xs = [0]`): the runtime value came through one arm or the other, so
+// the joined element set has to admit whatever EITHER arm's positions
+// hold — the repetition's own element, unioned with the set each list
+// item denotes — and the counting window widens to cover both arms'
+// possible lengths (the list's own exact length folded into
+// [lo, hi]). (Unknown, false) where `rep` is not repetition-shaped, or
+// where a list item is not tuple-layer knowledge SetOfKnown can read
+// (an object item, for instance) — the same refusal
+// joinObjectStarWithList makes for a non-graph item.
+func joinRepetitionSetWithList(rep, list AbstractValue, grade TrustLevel) (AbstractValue, bool) {
+	if rep.Kind != KindSet || rep.SetKindTag != SetKindTagNone {
+		return AbstractValue{}, false
+	}
+	repeated, isRep := refinementsets.AsRepetition(rep.Set)
+	if !isRep {
+		return AbstractValue{}, false
+	}
+	// each list item joins into the element through JoinKnown itself,
+	// wrapped as a KindSet — not a raw refinementsets.Union — so the
+	// SAME scalar-collapse machinery this whole file already runs
+	// (integerRunOf's contiguous-run fold, the kernel Bounds hull) gets
+	// the chance to keep the "integer" mark where every member joined
+	// so far is one: `oneOf[0]` (an exact-list item) touching
+	// `[0,150] ∧ integer` (the repetition's own element) collapses to
+	// `[0,150] ∧ integer` through the same run-collapse a loop's
+	// repeated join already relies on, rather than a bare syntactic
+	// Union term that states only the weaker real-numbered claim.
+	element := KnownSet(repeated.Element, nil, TrustProved, SetKindTagNone)
+	for _, item := range list.Items {
+		itemSet, ok := SetOfKnown(item)
+		if !ok {
+			return AbstractValue{}, false
+		}
+		element = JoinKnown(element, KnownSet(itemSet, nil, TrustProved, SetKindTagNone))
+	}
+	elementSet, hasElementSet := SetOfKnown(element)
+	if !hasElementSet {
+		return AbstractValue{}, false
+	}
+	length := len(list.Items)
+	lo := repeated.Lo
+	if length < lo {
+		lo = length
+	}
+	hi := repeated.Hi
+	if hi != nil && length > *hi {
+		widened := length
+		hi = &widened
+	}
+	rebuilt := refinementsets.Repetition(elementSet, lo, hi)
+	return KnownSet(rebuilt, rep.Temporal, grade, SetKindTagNone), true
 }
 
 // sidesOf is the TS source's `a.variants ?? [a]` read at each join call

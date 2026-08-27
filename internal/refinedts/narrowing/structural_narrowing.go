@@ -11,6 +11,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/dataflowfacts"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
 	"github.com/microsoft/typescript-go/internal/refinedts/silence"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 )
 
 // AbsentLiteral is absentLiteral in the TS source: the absent value in
@@ -24,6 +25,7 @@ func AbsentLiteral(c *checker.Checker, e *ast.Node) bool {
 	if !ast.IsIdentifier(e) || e.Text() != "undefined" {
 		return false
 	}
+	tracing.CountBy("host.symbolAtLocation", 1)
 	symbol := c.GetSymbolAtLocation(e)
 	if symbol == nil {
 		return true
@@ -121,6 +123,7 @@ func StructuralLeaf(c *checker.Checker, test *ast.Node, isTracked func(name stri
 			// `x ?? d` where x's TYPE excludes absence is a dead fallback:
 			// the condition IS the bare test of x (the ?? never falls
 			// through), so x reads as it would alone
+			tracing.CountBy("host.typeAtLocation.direct", 1)
 			leftType := c.GetTypeAtLocation(bin.Left)
 			const absentFlags = checker.TypeFlagsUndefined | checker.TypeFlagsNull | checker.TypeFlagsVoid
 			var parts []*checker.Type

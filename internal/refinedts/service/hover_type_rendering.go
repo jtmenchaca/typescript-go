@@ -30,6 +30,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/refinedts/narrowing"
 	"github.com/microsoft/typescript-go/internal/refinedts/program"
 	"github.com/microsoft/typescript-go/internal/refinedts/refinementsets"
+	"github.com/microsoft/typescript-go/internal/refinedts/tracing"
 	"github.com/microsoft/typescript-go/internal/refinedts/walk"
 )
 
@@ -38,6 +39,7 @@ import (
 // the type is not one. The claim rests on tsc's own inference — the
 // same trust every symbol resolution carries.
 func LiteralUnionOfType(p *program.CheckerProgram, token *ast.Node) (walk.Answer, bool) {
+	tracing.CountBy("host.typeAtLocation.direct", 1)
 	t := p.Checker.GetTypeAtLocation(token)
 	if t == nil {
 		return walk.Answer{}, false
